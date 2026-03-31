@@ -7,7 +7,7 @@ use probe_protocol::session::{
     CacheSignal, SessionId, SessionMetadata, ToolPolicyDecision, TranscriptEvent,
     TranscriptItemKind,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::session_store::{FilesystemSessionStore, SessionStoreError};
 
@@ -101,33 +101,33 @@ struct ReplayDatasetRecord {
     transcript: Vec<TranscriptEvent>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct DecisionDatasetRecord {
-    session_id: String,
-    title: String,
-    cwd: String,
-    backend_profile: Option<String>,
-    harness_profile: Option<String>,
-    turn_count: usize,
-    first_tool_name: Option<String>,
-    tool_names: Vec<String>,
-    files_listed: Vec<String>,
-    files_searched: Vec<String>,
-    files_read: Vec<String>,
-    patch_attempts: usize,
-    successful_patch_attempts: usize,
-    failed_patch_attempts: usize,
-    verification_step_count: usize,
-    verification_caught_problem: bool,
-    too_many_turns: bool,
-    auto_allowed_tool_calls: usize,
-    approved_tool_calls: usize,
-    refused_tool_calls: usize,
-    paused_tool_calls: usize,
-    likely_warm_turns: usize,
-    cache_reuse_improved_latency: bool,
-    cache_reuse_improved_throughput: bool,
-    final_assistant_text: Option<String>,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DecisionSessionSummary {
+    pub session_id: String,
+    pub title: String,
+    pub cwd: String,
+    pub backend_profile: Option<String>,
+    pub harness_profile: Option<String>,
+    pub turn_count: usize,
+    pub first_tool_name: Option<String>,
+    pub tool_names: Vec<String>,
+    pub files_listed: Vec<String>,
+    pub files_searched: Vec<String>,
+    pub files_read: Vec<String>,
+    pub patch_attempts: usize,
+    pub successful_patch_attempts: usize,
+    pub failed_patch_attempts: usize,
+    pub verification_step_count: usize,
+    pub verification_caught_problem: bool,
+    pub too_many_turns: bool,
+    pub auto_allowed_tool_calls: usize,
+    pub approved_tool_calls: usize,
+    pub refused_tool_calls: usize,
+    pub paused_tool_calls: usize,
+    pub likely_warm_turns: usize,
+    pub cache_reuse_improved_latency: bool,
+    pub cache_reuse_improved_throughput: bool,
+    pub final_assistant_text: Option<String>,
 }
 
 pub fn export_dataset(
@@ -171,7 +171,7 @@ pub fn export_dataset(
                 serde_json::to_writer(&mut writer, &record)?;
             }
             DatasetKind::Decision => {
-                let record = build_decision_record(&metadata, transcript.as_slice());
+                let record = build_decision_summary(&metadata, transcript.as_slice());
                 serde_json::to_writer(&mut writer, &record)?;
             }
         }
@@ -193,7 +193,10 @@ fn should_export_session(
     config: &DatasetExportConfig,
 ) -> bool {
     if !config.session_ids.is_empty() {
-        return config.session_ids.iter().any(|session_id| session_id == &metadata.id);
+        return config
+            .session_ids
+            .iter()
+            .any(|session_id| session_id == &metadata.id);
     }
     if config.include_all_sessions {
         return true;
@@ -204,18 +207,21 @@ fn should_export_session(
         .as_ref()
         .map(|profile| profile.name.starts_with("coding_bootstrap"))
         .unwrap_or(false)
-        || transcript.iter().flat_map(|event| event.turn.items.iter()).any(|item| {
-            matches!(
-                item.name.as_deref(),
-                Some("read_file" | "list_files" | "code_search" | "shell" | "apply_patch")
-            )
-        })
+        || transcript
+            .iter()
+            .flat_map(|event| event.turn.items.iter())
+            .any(|item| {
+                matches!(
+                    item.name.as_deref(),
+                    Some("read_file" | "list_files" | "code_search" | "shell" | "apply_patch")
+                )
+            })
 }
 
-fn build_decision_record(
+pub fn build_decision_summary(
     metadata: &SessionMetadata,
     transcript: &[TranscriptEvent],
-) -> DecisionDatasetRecord {
+) -> DecisionSessionSummary {
     let mut first_tool_name = None;
     let mut tool_names = Vec::new();
     let mut files_listed = Vec::new();
@@ -343,7 +349,7 @@ fn build_decision_record(
         }
     }
 
-    DecisionDatasetRecord {
+    DecisionSessionSummary {
         session_id: metadata.id.as_str().to_string(),
         title: metadata.title.clone(),
         cwd: metadata.cwd.display().to_string(),

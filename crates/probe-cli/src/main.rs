@@ -9,7 +9,9 @@ use std::time::Duration;
 use acceptance::{AcceptanceHarnessConfig, default_report_path, run_acceptance_harness};
 use clap::{Parser, Subcommand};
 use probe_core::backend_profiles::{PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE, named_backend_profile};
-use probe_core::dataset_export::{DatasetExportConfig, DatasetKind, export_dataset};
+use probe_core::dataset_export::{
+    DatasetExportConfig, DatasetKind, DecisionSessionSummary, export_dataset,
+};
 use probe_core::harness::{render_harness_profile, resolve_harness_profile};
 use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, current_working_dir,
@@ -20,6 +22,10 @@ use probe_core::server_control::{
 };
 use probe_core::tools::{
     ExecutedToolCall, ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig,
+};
+use probe_decisions::{
+    HeuristicPatchReadinessModule, HeuristicToolRouteModule, evaluate_patch_readiness_module,
+    evaluate_tool_route_module,
 };
 use probe_protocol::session::{
     CacheSignal, SessionHarnessProfile, SessionId, SessionTurn, ToolPolicyDecision, ToolRiskClass,
@@ -40,6 +46,7 @@ enum Commands {
     Chat(ChatArgs),
     Accept(AcceptArgs),
     Export(ExportArgs),
+    ModuleEval(ModuleEvalArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -138,6 +145,12 @@ struct ExportArgs {
     probe_home: Option<PathBuf>,
 }
 
+#[derive(clap::Args, Debug)]
+struct ModuleEvalArgs {
+    #[arg(long)]
+    dataset: PathBuf,
+}
+
 #[derive(clap::Args, Debug, Clone)]
 struct ServerArgs {
     #[arg(long, default_value = "attach")]
@@ -177,6 +190,7 @@ fn run() -> Result<(), String> {
         Commands::Chat(args) => run_chat(args),
         Commands::Accept(args) => run_accept(args),
         Commands::Export(args) => run_export(args),
+        Commands::ModuleEval(args) => run_module_eval(args),
     }
 }
 
@@ -501,6 +515,32 @@ fn run_export(args: ExportArgs) -> Result<(), String> {
         report.output_path.display()
     );
     Ok(())
+}
+
+fn run_module_eval(args: ModuleEvalArgs) -> Result<(), String> {
+    let summaries = read_decision_dataset(args.dataset.as_path())?;
+    let tool_route = evaluate_tool_route_module(&summaries, &HeuristicToolRouteModule);
+    let patch_readiness =
+        evaluate_patch_readiness_module(&summaries, &HeuristicPatchReadinessModule);
+    eprintln!(
+        "module={} matched={} total={}",
+        tool_route.module_id, tool_route.matched_cases, tool_route.total_cases
+    );
+    eprintln!(
+        "module={} matched={} total={}",
+        patch_readiness.module_id, patch_readiness.matched_cases, patch_readiness.total_cases
+    );
+    Ok(())
+}
+
+fn read_decision_dataset(path: &Path) -> Result<Vec<DecisionSessionSummary>, String> {
+    let body = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<DecisionSessionSummary>(line).map_err(|error| error.to_string())
+        })
+        .collect()
 }
 
 fn named_profile(name: &str) -> Result<probe_protocol::backend::BackendProfile, String> {

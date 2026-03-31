@@ -697,6 +697,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "probe-core",
+ "probe-decisions",
  "probe-protocol",
  "serde",
  "serde_json",
@@ -714,6 +715,15 @@ dependencies = [
  "serde_json",
  "tempfile",
  "wait-timeout",
+]
+
+[[package]]
+name = "probe-decisions"
+version = "0.1.0"
+dependencies = [
+ "probe-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

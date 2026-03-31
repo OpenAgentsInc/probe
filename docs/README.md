@@ -47,3 +47,6 @@ This folder holds technical planning docs for the Probe runtime.
 - `15-replay-and-decision-dataset-export.md`
   - local-first JSONL export for replay and derived decision datasets from
     real Probe sessions
+- `16-decision-modules.md`
+  - narrow Rust-native decision-module boundary above the runtime, plus the
+    first offline-evaluable `ToolRoute` and `PatchReadiness` modules

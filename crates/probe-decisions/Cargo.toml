@@ -1,16 +1,10 @@
 [package]
-name = "probe-cli"
+name = "probe-decisions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-clap.workspace = true
 probe-core.workspace = true
-probe-decisions.workspace = true
-probe-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

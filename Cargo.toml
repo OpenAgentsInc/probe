@@ -2,6 +2,7 @@
 members = [
     "crates/probe-cli",
     "crates/probe-core",
+    "crates/probe-decisions",
     "crates/probe-protocol",
     "crates/probe-provider-openai",
 ]
@@ -15,6 +16,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
 probe-core = { path = "crates/probe-core" }
+probe-decisions = { path = "crates/probe-decisions" }
 probe-protocol = { path = "crates/probe-protocol" }
 probe-provider-openai = { path = "crates/probe-provider-openai" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

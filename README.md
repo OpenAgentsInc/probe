@@ -7,10 +7,11 @@ Rust-first controller with a CLI, durable local session state, a typed runtime
 protocol, bounded tool execution, and a clean seam to local or remote model
 backends.
 
-The repo currently contains four crates: `probe-protocol`, `probe-core`,
-`probe-provider-openai`, and `probe-cli`. The default local backend lane is
-`psionic-qwen35-2b-q8-registry`, targeting `http://127.0.0.1:8080/v1` with the
-model id `qwen3.5-2b-q8_0-registry.gguf`.
+The repo currently contains five crates: `probe-protocol`, `probe-core`,
+`probe-provider-openai`, `probe-decisions`, and `probe-cli`. The default local
+backend lane is `psionic-qwen35-2b-q8-registry`, targeting
+`http://127.0.0.1:8080/v1` with the model id
+`qwen3.5-2b-q8_0-registry.gguf`.
 
 ## Current State
 
@@ -47,6 +48,10 @@ The coding lane now also has explicit local approval classes. By default:
 Probe persists structured tool-result records for coding sessions, including
 risk class, policy decision, approval state, command metadata, truncation,
 bytes returned, and touched paths when known.
+
+Above that runtime lane, Probe now has a narrow Rust-native decision-module
+crate for offline module evaluation. The first module families are
+`ToolRoute` and `PatchReadiness`.
 
 Probe can either attach to an already-running local backend or launch
 `psionic-openai-server` as a supervised child process. It also records basic
@@ -143,6 +148,13 @@ cargo run -p probe-cli -- export \
 
 By default, export targets coding-lane sessions. Add `--all-sessions` to widen
 scope or `--session <id>` to export one specific session.
+
+Offline module evaluation:
+
+```bash
+cargo run -p probe-cli -- module-eval \
+  --dataset ~/.probe/reports/probe_decision.jsonl
+```
 
 Explicit attach mode:
 
