@@ -2,6 +2,7 @@ mod app;
 mod event;
 mod message;
 mod screens;
+mod transcript;
 mod widgets;
 mod worker;
 
@@ -12,3 +13,4 @@ pub use message::{
     AppleFmFailureSummary, AppleFmUsageSummary, BackgroundTaskRequest,
 };
 pub use screens::{ActiveTab, ScreenId, TaskPhase};
+pub use transcript::{ActiveTurn, RetainedTranscript, TranscriptEntry, TranscriptRole};

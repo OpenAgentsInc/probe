@@ -69,9 +69,10 @@ cargo run -p probe-cli -- exec \
 
 ## TUI
 
-`cargo probe` is the current top-level Probe UI entrypoint. On launch it checks
-the Apple FM bridge, then runs a short plain-text prove-out when the model is
-ready.
+`cargo probe` is the current top-level Probe UI entrypoint. The current shell
+uses a retained in-memory transcript widget with one explicit active-turn cell.
+On launch it checks the Apple FM bridge, then runs a short plain-text prove-out
+when the model is ready.
 
 Keys:
 
@@ -110,3 +111,4 @@ Start with:
 - [docs/25-apple-fm-tool-lane.md](docs/25-apple-fm-tool-lane.md)
 - [docs/31-probe-tui-background-task-and-app-message-bridge.md](docs/31-probe-tui-background-task-and-app-message-bridge.md)
 - [docs/32-apple-fm-setup-demo-screen.md](docs/32-apple-fm-setup-demo-screen.md)
+- [docs/35-probe-tui-retained-transcript-model.md](docs/35-probe-tui-retained-transcript-model.md)

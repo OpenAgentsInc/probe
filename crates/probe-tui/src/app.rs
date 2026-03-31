@@ -584,10 +584,10 @@ mod tests {
 
         assert_eq!(app.task_phase(), TaskPhase::Completed);
         assert_eq!(app.call_count(), 3);
-        let rendered = app.render_to_string(120, 32);
-        assert!(rendered.contains("Completed calls: 3"));
-        assert!(rendered.contains("3. Next Step"));
-        assert!(rendered.contains("last_response_id: resp-3"));
+        let rendered = app.render_to_string(120, 72);
+        assert!(rendered.contains("Next Step"));
+        assert!(rendered.contains("Setup Complete"));
+        assert!(rendered.contains("resp-3"));
         let requests = server.finish();
         assert_eq!(requests.len(), 4);
     }

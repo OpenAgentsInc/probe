@@ -7,21 +7,21 @@ expression: snapshot
 │  Overview │ Events                                                           │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌─ Current Detail ────────────────────────────┐ ┌─ Setup Status ───────────────┐
-│ Running call 1/3: Sanity Check              │ │ phase: running               │
-│                                             │ │ call: 1/3                    │
-│ Prompt                                      │ │ focus: setup screen          │
-│ Reply with exactly READY.                   │ │ stack_depth: 1               │
+┌─ Transcript ────────────────────────────────┐ ┌─ Setup Status ───────────────┐
+│ [system] Shell Ready                        │ │ phase: running               │
+│   Probe selected a retained transcript      │ │ call: 1/3                    │
+│ widget as the initial TUI model.            │ │ focus: setup screen          │
+│   Press r to start the Apple FM prove-out.  │ │ stack_depth: 1               │
 │                                             │ │ availability_ready: true     │
-│ Response                                    │ └──────────────────────────────┘
-│ [waiting for Apple FM reply]                │
-│                                             │ ┌─ Backend Facts ──────────────┐
-│                                             │ │ profile: psionic-apple-fm-br │
+│ [status] Availability Ready                 │ └──────────────────────────────┘
+│   platform: macOS                           │
+│   Apple FM admitted this machine for the    │ ┌─ Backend Facts ──────────────┐
+│ setup prove-out.                            │ │ profile: psionic-apple-fm-br │
 │                                             │ │ base_url: http://127.0.0.1:1 │
-│                                             │ │ model: apple-foundation-mode │
-│                                             │ │                              │
-│                                             │ │                              │
-│                                             │ └──────────────────────────────┘
+│ [active tool] Call 1/3: Sanity Check        │ │ model: apple-foundation-mode │
+│   Prompt                                    │ │                              │
+│   Reply with exactly READY.                 │ │                              │
+│   Response                                  │ └──────────────────────────────┘
 └─────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐

@@ -7,11 +7,11 @@ expression: snapshot
 │  Overview │ Events                                                           │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌─ Current Detail ────────────────────────────┐ ┌─ Setup Status ───────────────┐
-│ Probe TUI is ready.                         │ │ phase: idle                  │
-│                                             │ │ calls_done: 0                │
-│ Press r to start or rerun the Apple FM      │ │ focus: setup screen          │
-│ setup flow.                                 │ │ stack_depth: 1               │
+┌─ Transcript ────────────────────────────────┐ ┌─ Setup Status ───────────────┐
+│ [system] Shell Ready                        │ │ phase: idle                  │
+│   Probe selected a retained transcript      │ │ calls_done: 0                │
+│ widget as the initial TUI model.            │ │ focus: setup screen          │
+│   Press r to start the Apple FM prove-out.  │ │ stack_depth: 1               │
 │                                             │ │ availability_ready: idle     │
 │                                             │ └──────────────────────────────┘
 │                                             │

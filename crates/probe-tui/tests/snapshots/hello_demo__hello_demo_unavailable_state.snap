@@ -7,16 +7,16 @@ expression: snapshot
 │  Overview │ Events                                                           │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌─ Current Detail ────────────────────────────┐ ┌─ Setup Status ───────────────┐
-│ Apple FM is not ready on this machine right │ │ phase: unavailable           │
-│ now.                                        │ │ calls_done: 0                │
-│                                             │ │ focus: setup screen          │
-│ Foundation model is still preparing         │ │ stack_depth: 1               │
+┌─ Transcript ────────────────────────────────┐ ┌─ Setup Status ───────────────┐
+│ [system] Shell Ready                        │ │ phase: unavailable           │
+│   Probe selected a retained transcript      │ │ calls_done: 0                │
+│ widget as the initial TUI model.            │ │ focus: setup screen          │
+│   Press r to start the Apple FM prove-out.  │ │ stack_depth: 1               │
 │                                             │ │ availability_ready: false    │
-│ Press r to rerun the setup check after the  │ └──────────────────────────────┘
-│ machine is admitted.                        │
-│                                             │ ┌─ Backend Facts ──────────────┐
-│                                             │ │ profile: psionic-apple-fm-br │
+│ [status] Availability Unavailable           │ └──────────────────────────────┘
+│   reason: model_not_ready                   │
+│   Probe stopped before issuing any          │ ┌─ Backend Facts ──────────────┐
+│ inference call.                             │ │ profile: psionic-apple-fm-br │
 │                                             │ │ base_url: http://127.0.0.1:1 │
 │                                             │ │ model: apple-foundation-mode │
 │                                             │ │                              │

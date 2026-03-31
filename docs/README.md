@@ -98,3 +98,7 @@ This folder holds technical planning docs for the Probe runtime.
   - the first real Apple FM-backed Probe TUI screen, including availability
     gating, a retained startup prove-out flow, and snapshot/test coverage for
     unavailable, running, and completed states
+- `35-probe-tui-retained-transcript-model.md`
+  - the explicit first transcript rendering decision for the Probe TUI:
+    retained in-memory transcript widget plus one active-turn cell, before any
+    Codex-style scrollback manager or full chat/composer shell
