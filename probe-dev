@@ -12,7 +12,6 @@ Commands:
   test [cargo-test-args]   Prefer cargo nextest; fall back to cargo test.
   cli-regressions          Run the dedicated probe-cli regression and snapshot test binary.
   tui [args...]            Run the current Probe terminal UI.
-  tui-demo [args...]       Backward-compatible alias for tui.
   pr-fast                  Run the fast local merge-safe tier: fmt-check, check, and test.
   accept [args...]         Backward-compatible alias for accept-live.
   accept-live [args...]    Run the live acceptance harness against the configured backend.
@@ -60,7 +59,7 @@ case "$command_name" in
   cli-regressions)
     cargo test -p probe-cli --test cli_regressions "$@"
     ;;
-  tui|tui-demo)
+  tui)
     cargo run -p probe-cli -- tui "$@"
     ;;
   pr-fast)

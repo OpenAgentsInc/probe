@@ -82,10 +82,10 @@ before the transcript delta is rendered. Persisted tool activity renders as
 first-class transcript rows such as `[tool call]`, `[tool result]`, and
 `[approval pending]` rather than generic notes.
 
-Setup, help, approval, and request-input flows live in a typed overlay stack
-above or in place of the composer. A background Apple FM availability/setup
-prove-out still runs on launch, and the full setup detail can be opened on
-demand from the overlay.
+Setup, help, and approval flows live in a typed overlay stack above or in
+place of the composer. A background Apple FM availability/setup check still
+runs on launch, and the full setup detail can be opened on demand from the
+overlay.
 
 Views:
 
@@ -102,7 +102,6 @@ Keys:
 - `Ctrl+R`: rerun setup
 - `Ctrl+S`: open setup overlay
 - `Ctrl+A`: open approval overlay
-- `Ctrl+P`: open request-input overlay
 - `Ctrl+T`: toggle operator notes vs live detail
 - `F1`: help
 - `Esc`: dismiss modal
@@ -143,7 +142,7 @@ Start with:
 - [docs/24-apple-fm-backend-lane.md](docs/24-apple-fm-backend-lane.md)
 - [docs/25-apple-fm-tool-lane.md](docs/25-apple-fm-tool-lane.md)
 - [docs/31-probe-tui-background-task-and-app-message-bridge.md](docs/31-probe-tui-background-task-and-app-message-bridge.md)
-- [docs/32-apple-fm-setup-demo-screen.md](docs/32-apple-fm-setup-demo-screen.md)
+- [docs/32-apple-fm-setup-screen.md](docs/32-apple-fm-setup-screen.md)
 - [docs/35-probe-tui-retained-transcript-model.md](docs/35-probe-tui-retained-transcript-model.md)
 - [docs/36-chat-screen-primary-shell-and-setup-secondary.md](docs/36-chat-screen-primary-shell-and-setup-secondary.md)
 - [docs/37-probe-tui-bottom-pane-and-minimal-composer.md](docs/37-probe-tui-bottom-pane-and-minimal-composer.md)

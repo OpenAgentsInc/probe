@@ -11,7 +11,7 @@ use serde_json::json;
 fn initial_frame_snapshot_is_stable() {
     let app = AppShell::new_for_tests();
     let snapshot = app.render_to_string(80, 24);
-    assert_snapshot!("hello_demo_initial", snapshot);
+    assert_snapshot!("probe_tui_initial", snapshot);
 }
 
 #[test]
@@ -19,7 +19,7 @@ fn help_modal_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
     app.dispatch(UiEvent::OpenHelp);
     let snapshot = app.render_to_string(80, 24);
-    assert_snapshot!("hello_demo_help_modal", snapshot);
+    assert_snapshot!("probe_tui_help_modal", snapshot);
 }
 
 #[test]
@@ -27,22 +27,22 @@ fn setup_overlay_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
     app.dispatch(UiEvent::OpenSetupOverlay);
     let snapshot = app.render_to_string(80, 24);
-    assert_snapshot!("hello_demo_setup_overlay", snapshot);
+    assert_snapshot!("probe_tui_setup_overlay", snapshot);
 }
 
 #[test]
 fn approval_overlay_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
     app.apply_message(AppMessage::ProbeRuntimeSessionReady {
-        session_id: String::from("sess_demo_pending"),
+        session_id: String::from("sess_tui_pending"),
         profile_name: String::from("psionic-qwen35-2b-q8-registry"),
         model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
         cwd: String::from("/tmp/probe-workspace"),
     });
     app.apply_message(AppMessage::PendingToolApprovalsUpdated {
-        session_id: String::from("sess_demo_pending"),
+        session_id: String::from("sess_tui_pending"),
         approvals: vec![PendingToolApproval {
-            session_id: probe_protocol::session::SessionId::new("sess_demo_pending"),
+            session_id: probe_protocol::session::SessionId::new("sess_tui_pending"),
             tool_call_id: String::from("call_patch_1"),
             tool_name: String::from("apply_patch"),
             arguments: json!({
@@ -62,14 +62,14 @@ fn approval_overlay_snapshot_is_stable() {
         }],
     });
     let snapshot = app.render_to_string(80, 24);
-    assert_snapshot!("hello_demo_approval_overlay", snapshot);
+    assert_snapshot!("probe_tui_approval_overlay", snapshot);
 }
 
 #[test]
 fn transcript_running_turn_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
     app.apply_message(AppMessage::ProbeRuntimeSessionReady {
-        session_id: String::from("sess_demo_running"),
+        session_id: String::from("sess_tui_running"),
         profile_name: String::from("psionic-qwen35-2b-q8-registry"),
         model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
         cwd: String::from("/tmp/probe-workspace"),
@@ -83,7 +83,7 @@ fn transcript_running_turn_snapshot_is_stable() {
     });
     app.apply_message(AppMessage::ProbeRuntimeEvent {
         event: RuntimeEvent::ToolCallRequested {
-            session_id: probe_protocol::session::SessionId::new("sess_demo_running"),
+            session_id: probe_protocol::session::SessionId::new("sess_tui_running"),
             round_trip: 1,
             call_id: String::from("call_readme_1"),
             tool_name: String::from("read_file"),
@@ -92,14 +92,14 @@ fn transcript_running_turn_snapshot_is_stable() {
     });
 
     let snapshot = app.render_to_string(80, 24);
-    assert_snapshot!("hello_demo_transcript_running_turn", snapshot);
+    assert_snapshot!("probe_tui_transcript_running_turn", snapshot);
 }
 
 #[test]
 fn transcript_committed_turn_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
     app.apply_message(AppMessage::ProbeRuntimeSessionReady {
-        session_id: String::from("sess_demo_committed"),
+        session_id: String::from("sess_tui_committed"),
         profile_name: String::from("psionic-qwen35-2b-q8-registry"),
         model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
         cwd: String::from("/tmp/probe-workspace"),
@@ -146,7 +146,7 @@ fn transcript_committed_turn_snapshot_is_stable() {
     });
 
     let snapshot = app.render_to_string(80, 24);
-    assert_snapshot!("hello_demo_transcript_committed_turn", snapshot);
+    assert_snapshot!("probe_tui_transcript_committed_turn", snapshot);
 }
 
 #[test]
@@ -170,7 +170,7 @@ fn unavailable_state_snapshot_is_stable() {
         },
     });
     let snapshot = app.render_to_string(80, 24);
-    assert_snapshot!("hello_demo_unavailable_state", snapshot);
+    assert_snapshot!("probe_tui_unavailable_state", snapshot);
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn running_state_snapshot_is_stable() {
         prompt: String::from("Reply with exactly READY."),
     });
     let snapshot = app.render_to_string(80, 24);
-    assert_snapshot!("hello_demo_running_state", snapshot);
+    assert_snapshot!("probe_tui_running_state", snapshot);
 }
 
 #[test]
@@ -338,5 +338,5 @@ fn completed_state_snapshot_is_stable() {
         total_calls: 3,
     });
     let snapshot = app.render_to_string(80, 24);
-    assert_snapshot!("hello_demo_completed_state", snapshot);
+    assert_snapshot!("probe_tui_completed_state", snapshot);
 }

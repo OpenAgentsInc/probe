@@ -1,6 +1,5 @@
 ---
-source: crates/probe-tui/tests/hello_demo.rs
-assertion_line: 19
+source: crates/probe-tui/tests/probe_tui.rs
 expression: snapshot
 ---
 
@@ -14,14 +13,14 @@ expression: snapshot
            │ Up / Down           draft history recall               │
            │ Ctrl+O              add attachment placeholder         │
            │ Ctrl+R / Ctrl+S     rerun setup / open setup           │
-           │ Ctrl+A / Ctrl+P     approval / request-input           │
+           │ Ctrl+A              approval                           │
            └────────────────────────────────────────────────────────┘
 
 
 
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: opened help modal | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 | Ctrl+C     │
+│ status: opened help modal | Tab | Ctrl+R/S/A/O | Up/Down | F1 | Ctrl+C       │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer (disabled) ────────────────────────────────────────────────────────┐

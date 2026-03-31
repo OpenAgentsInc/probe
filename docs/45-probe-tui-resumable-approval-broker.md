@@ -65,7 +65,7 @@ On resume, Probe now replays the resolved result, not the stale paused one.
 
 ### Real approval overlay
 
-The approval overlay no longer renders demo copy. It now opens from real
+The approval overlay no longer renders placeholder copy. It now opens from real
 pending-runtime state and shows:
 
 - tool name

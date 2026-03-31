@@ -10,7 +10,7 @@ The shell now defaults to:
 - `Setup`
 - `Events`
 
-instead of opening directly into the Apple FM setup prove-out.
+instead of opening directly into the Apple FM setup surface.
 
 ## What Changed
 
@@ -39,7 +39,7 @@ Probe needs a home shell that can eventually host:
 - live tool/runtime turns
 
 Moving setup into a secondary tab makes that future architecture possible
-without losing the current prove-out screen.
+without losing the current setup inspection screen.
 
 ## Current Layout
 
@@ -49,7 +49,7 @@ The current tab roles are:
   - primary home surface
   - retained transcript widget plus shell-side status and setup entry summary
 - `Setup`
-  - Apple FM prove-out details
+  - Apple FM setup details
   - backend facts and availability detail
 - `Events`
   - app-shell and worker event logs

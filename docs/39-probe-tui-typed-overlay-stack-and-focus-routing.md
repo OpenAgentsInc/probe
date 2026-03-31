@@ -9,7 +9,6 @@ Probe now has explicit overlay homes for:
 - help
 - setup
 - approvals
-- request-user-input style prompts
 
 The home shell no longer needs a dedicated `Setup` tab to expose those
 surfaces. `Chat` stays primary, `Events` remains secondary, and overlays take
@@ -42,7 +41,7 @@ Focus routing is now:
 In the current implementation:
 
 - help and setup disable the composer while staying above the shell
-- approval and request-input replace the composer entirely
+- approval replaces the composer entirely
 
 ### Setup left the tab row
 
@@ -50,24 +49,23 @@ The old `Setup` tab is gone. Setup now lives in a dedicated overlay opened by
 `Ctrl+S`, and `Ctrl+R` reruns setup while opening that overlay.
 
 This keeps the chat shell structurally stable while still giving the Apple FM
-prove-out a real focused home.
+setup view a real focused home.
 
-### First approval and request-input flows
+### First approval flow
 
 This issue established the overlay shell shape:
 
 - approval overlay with approve/reject selection
-- request-input overlay with a short option picker
 
-Issue `#45` later replaces the demo approval behavior with a real runtime-backed
-pending-approval flow while keeping the same focus and overlay structure.
+Issue `#45` later replaces the placeholder approval behavior with a real
+runtime-backed pending-approval flow while keeping the same focus and overlay
+structure.
 
 ## Control Model
 
 - `Tab` / `Shift+Tab`: switch `Chat` / `Events`
 - `Ctrl+S`: open setup overlay
 - `Ctrl+A`: open approval overlay
-- `Ctrl+P`: open request-input overlay
 - `F1`: open help overlay
 - `Esc`: dismiss the top overlay
 
@@ -76,7 +74,7 @@ pending-approval flow while keeping the same focus and overlay structure.
 Coverage now includes:
 
 - focus and dismissal behavior for help and typed overlays
-- transcript commits driven by approval and request-input overlays
+- real approval overlay behavior driven by pending runtime state
 - snapshot coverage for help, setup overlay, and approval overlay surfaces
 
 Validation commands:

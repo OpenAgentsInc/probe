@@ -64,5 +64,5 @@ Retained coverage now includes:
 ## Follow-on
 
 Issue `#32` uses this seam to replace the retained fake task with a real
-Apple Foundation Models setup/demo screen that checks availability up front and
+Apple Foundation Models setup screen that checks availability up front and
 then renders a short series of live inference calls.

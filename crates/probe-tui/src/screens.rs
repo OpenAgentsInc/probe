@@ -24,7 +24,6 @@ pub enum ScreenId {
     Help,
     SetupOverlay,
     ApprovalOverlay,
-    RequestInputOverlay,
 }
 
 impl ScreenId {
@@ -34,7 +33,6 @@ impl ScreenId {
             Self::Help => "help modal",
             Self::SetupOverlay => "setup overlay",
             Self::ApprovalOverlay => "approval overlay",
-            Self::RequestInputOverlay => "request-input overlay",
         }
     }
 }
@@ -97,7 +95,6 @@ pub enum ScreenAction {
     OpenHelp,
     OpenSetupOverlay,
     OpenApprovalOverlay,
-    OpenRequestInputOverlay,
     CloseModal,
 }
 
@@ -160,14 +157,6 @@ impl ScreenOutcome {
         }
     }
 
-    fn with_entry(action: ScreenAction, status: String, transcript_entry: TranscriptEntry) -> Self {
-        Self {
-            action,
-            status: Some(status),
-            command: None,
-            transcript_entry: Some(transcript_entry),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,7 +165,6 @@ pub enum ScreenState {
     Help(HelpScreen),
     Setup(SetupOverlay),
     Approval(ApprovalOverlay),
-    RequestInput(RequestInputOverlay),
 }
 
 impl ScreenState {
@@ -186,7 +174,6 @@ impl ScreenState {
             Self::Help(_) => ScreenId::Help,
             Self::Setup(_) => ScreenId::SetupOverlay,
             Self::Approval(_) => ScreenId::ApprovalOverlay,
-            Self::RequestInput(_) => ScreenId::RequestInputOverlay,
         }
     }
 
@@ -195,7 +182,7 @@ impl ScreenState {
     }
 
     pub const fn replaces_composer(&self) -> bool {
-        matches!(self, Self::Approval(_) | Self::RequestInput(_))
+        matches!(self, Self::Approval(_))
     }
 
     pub fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
@@ -204,7 +191,6 @@ impl ScreenState {
             Self::Help(screen) => screen.handle_event(event),
             Self::Setup(screen) => screen.handle_event(event),
             Self::Approval(screen) => screen.handle_event(event),
-            Self::RequestInput(screen) => screen.handle_event(event),
         }
     }
 
@@ -220,21 +206,20 @@ impl ScreenState {
             Self::Help(screen) => screen.render(frame, area, stack_depth),
             Self::Setup(screen) => screen.render(frame, area, stack_depth, base_screen),
             Self::Approval(screen) => screen.render(frame, area, stack_depth),
-            Self::RequestInput(screen) => screen.render(frame, area, stack_depth),
         }
     }
 
     pub fn chat_mut(&mut self) -> Option<&mut ChatScreen> {
         match self {
             Self::Chat(screen) => Some(screen),
-            Self::Help(_) | Self::Setup(_) | Self::Approval(_) | Self::RequestInput(_) => None,
+            Self::Help(_) | Self::Setup(_) | Self::Approval(_) => None,
         }
     }
 
     pub fn chat(&self) -> Option<&ChatScreen> {
         match self {
             Self::Chat(screen) => Some(screen),
-            Self::Help(_) | Self::Setup(_) | Self::Approval(_) | Self::RequestInput(_) => None,
+            Self::Help(_) | Self::Setup(_) | Self::Approval(_) => None,
         }
     }
 }
@@ -707,7 +692,7 @@ impl ChatScreen {
                     "Availability Ready",
                     vec![
                         format!("platform: {platform}"),
-                        String::from("Apple FM admitted this machine for the setup prove-out."),
+                        String::from("Apple FM admitted this machine for the setup check."),
                     ],
                 ));
                 self.record_worker_event(format!("Apple FM availability ready on {platform}"));
@@ -883,10 +868,6 @@ impl ChatScreen {
             UiEvent::OpenApprovalOverlay => ScreenOutcome::with_status(
                 ScreenAction::OpenApprovalOverlay,
                 String::from("opened approval overlay"),
-            ),
-            UiEvent::OpenRequestInputOverlay => ScreenOutcome::with_status(
-                ScreenAction::OpenRequestInputOverlay,
-                String::from("opened request-input overlay"),
             ),
             UiEvent::OpenHelp => ScreenOutcome::with_status(
                 ScreenAction::OpenHelp,
@@ -1149,9 +1130,7 @@ impl ChatScreen {
                 Line::from("Apple FM setup is now a secondary Probe surface."),
                 Line::from(""),
                 Line::from("The primary home screen is the chat shell."),
-                Line::from(
-                    "This tab remains the honest setup prove-out and backend admission view.",
-                ),
+                Line::from("This tab remains the honest backend admission and setup view."),
             ]);
         }
 
@@ -1253,7 +1232,7 @@ impl ChatScreen {
                 Line::from("Apple FM setup completed successfully."),
                 Line::from(""),
                 Line::from("The transcript shell remains the primary home screen."),
-                Line::from("This tab keeps the backend prove-out details reachable."),
+                Line::from("This tab keeps backend setup details reachable."),
             ]),
             TaskPhase::Idle | TaskPhase::Running | TaskPhase::Failed => Text::from(vec![
                 Line::from("Probe setup surface is ready."),
@@ -1396,7 +1375,7 @@ impl HelpScreen {
             Line::from("Up / Down           draft history recall"),
             Line::from("Ctrl+O              add attachment placeholder"),
             Line::from("Ctrl+R / Ctrl+S     rerun setup / open setup"),
-            Line::from("Ctrl+A / Ctrl+P     approval / request-input"),
+            Line::from("Ctrl+A              approval"),
             Line::from("Ctrl+T              toggle operator notes"),
             Line::from("F1 / Esc            toggle or dismiss help"),
             Line::from("Ctrl+C              quit"),
@@ -1578,99 +1557,6 @@ impl ApprovalOverlay {
         ]);
         let content = Paragraph::new(Text::from(lines));
         ModalCard::new("Approval", content).render(frame, area);
-    }
-}
-
-const REQUEST_INPUT_OPTIONS: [&str; 3] = [
-    "Commit this later",
-    "Keep iterating in chat",
-    "Return to the shell",
-];
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RequestInputOverlay {
-    selected: usize,
-}
-
-impl RequestInputOverlay {
-    pub fn new() -> Self {
-        Self { selected: 0 }
-    }
-
-    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
-        match event {
-            UiEvent::NextView => {
-                self.selected = (self.selected + 1) % REQUEST_INPUT_OPTIONS.len();
-                ScreenOutcome::with_status(
-                    ScreenAction::None,
-                    format!(
-                        "selected request-input option: {}",
-                        REQUEST_INPUT_OPTIONS[self.selected]
-                    ),
-                )
-            }
-            UiEvent::PreviousView => {
-                self.selected = if self.selected == 0 {
-                    REQUEST_INPUT_OPTIONS.len() - 1
-                } else {
-                    self.selected - 1
-                };
-                ScreenOutcome::with_status(
-                    ScreenAction::None,
-                    format!(
-                        "selected request-input option: {}",
-                        REQUEST_INPUT_OPTIONS[self.selected]
-                    ),
-                )
-            }
-            UiEvent::ComposerSubmit => ScreenOutcome::with_entry(
-                ScreenAction::CloseModal,
-                format!(
-                    "recorded request-input response: {}",
-                    REQUEST_INPUT_OPTIONS[self.selected]
-                ),
-                TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Request Input Demo",
-                    vec![
-                        format!("selected: {}", REQUEST_INPUT_OPTIONS[self.selected]),
-                        String::from(
-                            "Typed overlays now provide a credible home for future request-user-input prompts.",
-                        ),
-                    ],
-                ),
-            ),
-            UiEvent::Dismiss | UiEvent::OpenRequestInputOverlay => ScreenOutcome::with_status(
-                ScreenAction::CloseModal,
-                String::from("dismissed request-input overlay"),
-            ),
-            UiEvent::OpenHelp => ScreenOutcome::with_status(
-                ScreenAction::OpenHelp,
-                String::from("opened help modal"),
-            ),
-            _ => ScreenOutcome::idle(),
-        }
-    }
-
-    fn render(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
-        let mut lines = vec![
-            Line::from("Request Input Demo"),
-            Line::from(""),
-            Line::from("The runtime is asking a focused follow-up question."),
-            Line::from(""),
-        ];
-        for (index, option) in REQUEST_INPUT_OPTIONS.iter().enumerate() {
-            let marker = if index == self.selected { ">" } else { " " };
-            lines.push(Line::from(format!("{marker} {option}")));
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from(
-            "Tab/Shift+Tab changes selection. Enter commits. Esc dismisses.",
-        ));
-        lines.push(Line::from(format!("Current stack depth: {stack_depth}")));
-
-        let content = Paragraph::new(Text::from(lines));
-        ModalCard::new("Request Input", content).render(frame, area);
     }
 }
 

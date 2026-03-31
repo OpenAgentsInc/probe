@@ -1,5 +1,5 @@
 ---
-source: crates/probe-tui/tests/hello_demo.rs
+source: crates/probe-tui/tests/probe_tui.rs
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -7,19 +7,19 @@ expression: snapshot
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Transcript ───────────────────────────────────────────────┐ ┌─ Shell ───────┐
-│ [user] You                                                 │ │ focus: chat   │
-│   Summarize what Probe owns.                               │ │ stack: 1      │
-│                                                            │ │ turns: 1      │
-│ [active tool] Tool Requested: read_file                    │ │ active: tool  │
-│   round_trip: 1                                            │ │ session: sess │
-│   call_id: call_readme_1                                   │ │ runtime: psio │
-│   arguments                                                │ │ model: qwen3. │
-│   {                                                        │ │ phase: tool_r │
-│     "path": "README.md"                                    │ └───────────────┘
+│ [status] Availability Ready                                │ │ focus: chat   │
+│   platform: macOS                                          │ │ stack: 1      │
+│   Apple FM admitted this machine for the setup check.      │ │ turns: 5      │
+│                                                            │ │ active: none  │
+│ [tool] Call 1/3: Sanity Check                              │ │ session: pend │
+│   Prompt                                                   │ │ runtime: pend │
+│   Reply with exactly READY.                                │ │ model: pendin │
+│   Response                                                 │ │ phase: pendin │
+│   READY                                                    │ └───────────────┘
 └────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: tool call requested: read_file | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 │
+│ status: Apple FM setup completed | Tab | Ctrl+R/S/A/O | Up/Down | F1 |       │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer ───────────────────────────────────────────────────────────────────┐

@@ -427,19 +427,6 @@ impl ProbeToolChoice {
 
 impl ToolLoopConfig {
     #[must_use]
-    pub fn weather_demo(tool_choice: ProbeToolChoice, parallel_tool_calls: bool) -> Self {
-        Self {
-            registry: ToolRegistry::weather_demo(),
-            tool_choice,
-            parallel_tool_calls,
-            max_model_round_trips: 4,
-            approval: ToolApprovalConfig::allow_all(),
-            oracle: None,
-            long_context: None,
-        }
-    }
-
-    #[must_use]
     pub fn coding_bootstrap(tool_choice: ProbeToolChoice, parallel_tool_calls: bool) -> Self {
         Self {
             registry: ToolRegistry::coding_bootstrap(false, false),
@@ -481,31 +468,6 @@ impl ToolRegistry {
             name: name.into(),
             tools: BTreeMap::new(),
         }
-    }
-
-    #[must_use]
-    pub fn weather_demo() -> Self {
-        let parameters = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "city": {
-                    "type": "string",
-                    "description": "The city to look up"
-                }
-            },
-            "required": ["city"],
-            "additionalProperties": false
-        });
-
-        Self::new("weather").register(
-            String::from("lookup_weather"),
-            Some(String::from(
-                "Look up the retained demo weather for a city.",
-            )),
-            Some(parameters),
-            RegisteredToolRisk::Fixed(ToolRiskClass::ReadOnly),
-            lookup_weather,
-        )
     }
 
     #[must_use]
@@ -903,29 +865,6 @@ impl ToolExecutionSession {
             },
         }
     }
-}
-
-fn lookup_weather(
-    _context: &ToolExecutionContext,
-    arguments: &serde_json::Value,
-) -> Result<ToolInvocationOutcome, ToolInvocationError> {
-    let city = expect_string(arguments, "city", "lookup_weather")?;
-    let payload = match city {
-        "Paris" => serde_json::json!({
-            "city": "Paris",
-            "conditions": "sunny",
-            "temperature_c": 18
-        }),
-        "Tokyo" => serde_json::json!({
-            "city": "Tokyo",
-            "conditions": "rainy",
-            "temperature_c": 12
-        }),
-        other => serde_json::json!({
-            "error": format!("unsupported city: {other}")
-        }),
-    };
-    Ok(ToolInvocationOutcome::new(payload))
 }
 
 fn read_file(
@@ -2151,37 +2090,6 @@ mod tests {
     };
 
     #[test]
-    fn weather_demo_registry_declares_lookup_weather() {
-        let registry = ToolRegistry::weather_demo();
-        let tools = registry.declared_tools();
-        assert_eq!(registry.name(), "weather");
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].function.name, "lookup_weather");
-    }
-
-    #[test]
-    fn weather_demo_executes_lookup_weather() {
-        let registry = ToolRegistry::weather_demo();
-        let context = ToolExecutionContext::new(".");
-        let results = registry.execute_batch(
-            &context,
-            &[ChatToolCall {
-                id: String::from("call_1"),
-                kind: String::from("function"),
-                function: ChatToolCallFunction {
-                    name: String::from("lookup_weather"),
-                    arguments: String::from("{\"city\":\"Paris\"}"),
-                },
-            }],
-            &ToolApprovalConfig::allow_all(),
-        );
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].name, "lookup_weather");
-        assert_eq!(results[0].output["conditions"], "sunny");
-    }
-
-    #[test]
     fn coding_bootstrap_registry_declares_all_tools() {
         let registry = ToolRegistry::coding_bootstrap(false, false);
         let tools = registry
@@ -2726,9 +2634,9 @@ mod tests {
 
     #[test]
     fn probe_tool_choice_parses_named_mode() {
-        let choice = ProbeToolChoice::parse("named:lookup_weather").expect("named choice");
-        let config = ToolLoopConfig::weather_demo(choice.clone(), true);
-        assert_eq!(config.registry.name(), "weather");
-        assert!(matches!(choice, ProbeToolChoice::Named(name) if name == "lookup_weather"));
+        let choice = ProbeToolChoice::parse("named:read_file").expect("named choice");
+        let config = ToolLoopConfig::coding_bootstrap(choice.clone(), true);
+        assert_eq!(config.registry.name(), "coding_bootstrap");
+        assert!(matches!(choice, ProbeToolChoice::Named(name) if name == "read_file"));
     }
 }

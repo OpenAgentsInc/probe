@@ -2,7 +2,7 @@
 
 ## Summary
 
-Issue `#42` replaces the Probe TUI demo reply worker with the real
+Issue `#42` replaces the Probe TUI temporary reply worker with the real
 `probe-core` runtime.
 
 `cargo probe` now keeps one live Probe session in the TUI:
@@ -89,7 +89,7 @@ assistant commit.
 
 Coverage now proves:
 
-- composer submission queues a real Probe runtime turn instead of the old demo
+- composer submission queues a real Probe runtime turn instead of the old temporary
   worker label
 - a TUI submit can drive a tool-backed runtime turn against a fake OpenAI
   backend and commit the resulting transcript rows

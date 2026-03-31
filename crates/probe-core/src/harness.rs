@@ -22,11 +22,6 @@ pub fn resolve_harness_profile(
                 "unknown harness profile for coding_bootstrap: {profile}"
             ));
         }
-        (Some("weather"), Some(profile)) => {
-            return Err(format!(
-                "harness profile `{profile}` is not available for the `weather` tool set"
-            ));
-        }
         (Some(other), Some(profile)) => {
             return Err(format!(
                 "harness profile `{profile}` is not available for tool set `{other}`"

@@ -6,14 +6,14 @@ Probe now has a bounded local tool runtime.
 
 The current implementation is intentionally small and deterministic:
 
-- local built-in tool sets
+- one built-in coding tool set
 - one bounded controller loop
 - append-only transcript storage for tool calls and tool results
 - replay into later model turns through the normal `chat.completions` surface
 
 ## Built-In Tool Set
 
-Probe currently ships two built-in tool sets.
+Probe currently ships one built-in tool set.
 
 ### `coding_bootstrap`
 
@@ -40,28 +40,10 @@ It declares:
 
 This is the first honest coding-tool bundle for Probe.
 
-### `weather`
-
-The retained demo tool set is:
-
-- `weather`
-  - declares one tool: `lookup_weather`
-  - accepts one argument: `city`
-  - returns retained demo weather for:
-    - `Paris`
-    - `Tokyo`
-
-This is enough to prove:
-
-- required single-tool turns
-- replay of tool results into a later model turn
-- same-turn two-call batches when parallel tool calls are enabled
-
 ## CLI Surface
 
 Both `probe exec` and `probe chat` now accept:
 
-- `--tool-set weather`
 - `--tool-set coding_bootstrap`
 - `--tool-choice <none|auto|required|named:<tool>>`
 - `--parallel-tool-calls`

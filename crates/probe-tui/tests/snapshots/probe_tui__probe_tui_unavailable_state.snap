@@ -1,5 +1,5 @@
 ---
-source: crates/probe-tui/tests/hello_demo.rs
+source: crates/probe-tui/tests/probe_tui.rs
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -7,11 +7,11 @@ expression: snapshot
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Transcript ───────────────────────────────────────────────┐ ┌─ Shell ───────┐
-│ Transcript is empty.                                       │ │ focus: chat   │
-│                                                            │ │ stack: 1      │
-│ Type in the composer to start a real chat turn.            │ │ turns: 0      │
-│ Committed turns stay in app state while one explicit       │ │ active: none  │
-│ active turn renders live work.                             │ │ session: pend │
+│ [status] Availability Unavailable                          │ │ focus: chat   │
+│   reason: model_not_ready                                  │ │ stack: 1      │
+│   Probe stopped before issuing any inference call.         │ │ turns: 1      │
+│                                                            │ │ active: none  │
+│                                                            │ │ session: pend │
 │                                                            │ │ runtime: pend │
 │                                                            │ │ model: pendin │
 │                                                            │ │ phase: pendin │
@@ -19,7 +19,7 @@ expression: snapshot
 └────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: probe tui launched | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 | Ctrl+C    │
+│ status: Apple FM unavailable | Tab | Ctrl+R/S/A/O | Up/Down | F1 | Ctrl+C    │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer ───────────────────────────────────────────────────────────────────┐

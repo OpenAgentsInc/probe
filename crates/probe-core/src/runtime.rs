@@ -2961,9 +2961,10 @@ mod tests {
                     assert!(request_body.contains("\"parallel_tool_calls\":false"));
                 } else {
                     assert!(request_body.contains("\"tool_calls\""));
-                    assert!(request_body.contains("\"lookup_weather\""));
-                    assert!(request_body.contains("Paris"));
-                    assert!(request_body.contains("temperature_c"));
+                    assert!(request_body.contains("\"call_readme_1\""));
+                    assert!(request_body.contains("\"read_file\""));
+                    assert!(request_body.contains("README.md"));
+                    assert!(request_body.contains("\"content\""));
                 }
                 let body = if step == 0 {
                     serde_json::json!({
@@ -2976,11 +2977,11 @@ mod tests {
                                     "role": "assistant",
                                     "tool_calls": [
                                         {
-                                            "id": "call_weather_1",
+                                            "id": "call_readme_1",
                                             "type": "function",
                                             "function": {
-                                                "name": "lookup_weather",
-                                                "arguments": "{\"city\":\"Paris\"}"
+                                                "name": "read_file",
+                                                "arguments": "{\"path\":\"README.md\",\"start_line\":1,\"max_lines\":8}"
                                             }
                                         }
                                     ]
@@ -2998,7 +2999,7 @@ mod tests {
                                 "index": 0,
                                 "message": {
                                     "role": "assistant",
-                                    "content": "Paris is sunny at 18C."
+                                    "content": "README inspected."
                                 },
                                 "finish_reason": "stop"
                             }
@@ -3023,6 +3024,8 @@ mod tests {
         });
 
         let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join("README.md"), "# Probe\n\nA coding-agent runtime.\n")
+            .expect("write readme");
         let runtime = ProbeRuntime::new(temp.path().join(".probe"));
         let mut profile = psionic_qwen35_2b_q8_registry();
         profile.base_url = format!("http://{address}/v1");
@@ -3030,21 +3033,23 @@ mod tests {
         let outcome = runtime
             .exec_plain_text(PlainTextExecRequest {
                 profile,
-                prompt: String::from("what is the weather in Paris?"),
+                prompt: String::from("Read README.md and summarize it."),
                 title: Some(String::from("Tool Test")),
                 cwd: temp.path().to_path_buf(),
                 system_prompt: None,
                 harness_profile: None,
-                tool_loop: Some(ToolLoopConfig::weather_demo(
+                tool_loop: Some(ToolLoopConfig::coding_bootstrap(
                     ProbeToolChoice::Required,
                     false,
                 )),
             })
             .expect("tool loop should succeed");
 
-        assert_eq!(outcome.assistant_text, "Paris is sunny at 18C.");
+        assert_eq!(outcome.assistant_text, "README inspected.");
         assert_eq!(outcome.executed_tool_calls, 1);
         assert_eq!(outcome.tool_results.len(), 1);
+        assert_eq!(outcome.tool_results[0].name, "read_file");
+        assert_eq!(outcome.tool_results[0].output["path"], "README.md");
         assert_eq!(
             outcome.tool_results[0].tool_execution.policy_decision,
             ToolPolicyDecision::AutoAllow
@@ -3074,7 +3079,7 @@ mod tests {
                 .approval_state,
             ToolApprovalState::NotRequired
         );
-        assert_eq!(transcript[2].turn.items[0].text, "Paris is sunny at 18C.");
+        assert_eq!(transcript[2].turn.items[0].text, "README inspected.");
 
         handle.join().expect("server thread should exit cleanly");
     }
@@ -3624,9 +3629,8 @@ mod tests {
                 if step == 0 {
                     assert!(request_body.contains("\"parallel_tool_calls\":true"));
                 } else {
-                    assert!(request_body.contains("\"call_weather_paris\""));
-                    assert!(request_body.contains("\"call_weather_tokyo\""));
-                    assert!(request_body.contains("Tokyo"));
+                    assert!(request_body.contains("\"call_list_root\""));
+                    assert!(request_body.contains("\"call_readme_1\""));
                 }
                 let body = if step == 0 {
                     serde_json::json!({
@@ -3639,19 +3643,19 @@ mod tests {
                                     "role": "assistant",
                                     "tool_calls": [
                                         {
-                                            "id": "call_weather_paris",
+                                            "id": "call_list_root",
                                             "type": "function",
                                             "function": {
-                                                "name": "lookup_weather",
-                                                "arguments": "{\"city\":\"Paris\"}"
+                                                "name": "list_files",
+                                                "arguments": "{\"path\":\".\",\"max_depth\":2,\"max_entries\":10}"
                                             }
                                         },
                                         {
-                                            "id": "call_weather_tokyo",
+                                            "id": "call_readme_1",
                                             "type": "function",
                                             "function": {
-                                                "name": "lookup_weather",
-                                                "arguments": "{\"city\":\"Tokyo\"}"
+                                                "name": "read_file",
+                                                "arguments": "{\"path\":\"README.md\",\"start_line\":1,\"max_lines\":8}"
                                             }
                                         }
                                     ]
@@ -3669,7 +3673,7 @@ mod tests {
                                 "index": 0,
                                 "message": {
                                     "role": "assistant",
-                                    "content": "Paris is sunny at 18C. Tokyo is rainy at 12C."
+                                    "content": "Root files listed and README inspected."
                                 },
                                 "finish_reason": "stop"
                             }
@@ -3689,6 +3693,10 @@ mod tests {
         });
 
         let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(temp.path().join("src")).expect("create src");
+        std::fs::write(temp.path().join("README.md"), "# Probe\n\nA coding-agent runtime.\n")
+            .expect("write readme");
+        std::fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").expect("write main");
         let runtime = ProbeRuntime::new(temp.path().join(".probe"));
         let mut profile = psionic_qwen35_2b_q8_registry();
         profile.base_url = format!("http://{address}/v1");
@@ -3696,12 +3704,12 @@ mod tests {
         let outcome = runtime
             .exec_plain_text(PlainTextExecRequest {
                 profile,
-                prompt: String::from("check Paris and Tokyo"),
+                prompt: String::from("List the repo and inspect README.md"),
                 title: Some(String::from("Parallel Tool Test")),
                 cwd: temp.path().to_path_buf(),
                 system_prompt: None,
                 harness_profile: None,
-                tool_loop: Some(ToolLoopConfig::weather_demo(
+                tool_loop: Some(ToolLoopConfig::coding_bootstrap(
                     ProbeToolChoice::Required,
                     true,
                 )),
@@ -3709,10 +3717,7 @@ mod tests {
             .expect("parallel tool loop should succeed");
 
         assert_eq!(outcome.executed_tool_calls, 2);
-        assert_eq!(
-            outcome.assistant_text,
-            "Paris is sunny at 18C. Tokyo is rainy at 12C."
-        );
+        assert_eq!(outcome.assistant_text, "Root files listed and README inspected.");
 
         let transcript = runtime
             .session_store()

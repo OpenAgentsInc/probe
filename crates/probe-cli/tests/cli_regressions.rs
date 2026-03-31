@@ -71,32 +71,6 @@ fn exec_process_renders_stable_stderr_and_persists_selected_transcript_event() {
 }
 
 #[test]
-fn exec_rejects_incompatible_harness_and_tool_set() {
-    let environment = ProbeTestEnvironment::new();
-    let server = FakeOpenAiServer::from_json_responses(vec![models_response()]);
-    write_attach_server_config(&environment, &server, TEST_MODEL);
-
-    probe_command()
-        .arg("exec")
-        .arg("--probe-home")
-        .arg(environment.probe_home())
-        .arg("--tool-set")
-        .arg("weather")
-        .arg("--harness-profile")
-        .arg("coding_bootstrap_default")
-        .arg("Hello")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "harness profile `coding_bootstrap_default` is not available for the `weather` tool set",
-        ));
-
-    let requests = server.finish();
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].contains("/v1/models"));
-}
-
-#[test]
 fn chat_resume_rejects_prompt_overrides() {
     probe_command()
         .args(["chat", "--resume", "sess_fake", "--title", "Nope"])
@@ -111,15 +85,6 @@ fn chat_resume_rejects_prompt_overrides() {
 fn tui_help_is_available() {
     probe_command()
         .args(["tui", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Launch the current Probe terminal UI"));
-}
-
-#[test]
-fn tui_hello_alias_help_is_available() {
-    probe_command()
-        .args(["tui", "hello", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Launch the current Probe terminal UI"));

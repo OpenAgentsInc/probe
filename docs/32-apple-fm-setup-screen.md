@@ -1,12 +1,12 @@
-# Apple FM Setup Demo Screen
+# Apple FM Setup Screen
 
 GitHub issue:
 `https://github.com/OpenAgentsInc/probe/issues/32`
 
 ## Summary
 
-`probe tui` now boots into a real Apple Foundation Models prove-out screen
-instead of a static hello-world demo.
+`probe tui` now boots into a real Apple Foundation Models setup screen instead
+of a static bootstrap-only shell.
 
 On launch, Probe queues the canonical Apple FM setup request in the TUI worker
 lane. The screen checks availability first and only issues inference calls if
@@ -28,11 +28,11 @@ What was missing was the visible retained UI path above that runtime truth.
 
 The first TUI shell proved app/screen/widget structure and the later worker
 issue proved non-blocking message flow, but the default `cargo probe` path was
-still only a demo lane.
+still only a placeholder lane.
 
 ## What changed
 
-The TUI now ships a dedicated Apple FM setup prove-out flow:
+The TUI now ships a dedicated Apple FM setup flow:
 
 - `AppShell::new()` auto-queues the Apple FM setup task
 - the worker checks `system_model_availability()` before any inference request
@@ -81,7 +81,7 @@ cargo probe
 
 Expected posture:
 
-- if Apple FM is ready, the screen shows the three-call setup prove-out
+- if Apple FM is ready, the screen shows the three-call setup check
 - if Apple FM is unavailable, still downloading, or not admitted, the screen
   shows the typed failure or availability truth and does not fake a successful
   run

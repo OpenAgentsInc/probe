@@ -261,7 +261,7 @@ mod tests {
         transcript.push_entry(TranscriptEntry::new(
             TranscriptRole::System,
             "Shell Ready",
-            vec![String::from("Press r to start the Apple FM prove-out.")],
+            vec![String::from("Press Ctrl+R to start the Apple FM setup check.")],
         ));
         transcript.set_active_turn(ActiveTurn::new(
             TranscriptRole::Tool,

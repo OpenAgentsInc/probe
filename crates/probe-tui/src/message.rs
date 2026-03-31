@@ -64,7 +64,7 @@ impl BackgroundTaskRequest {
     #[must_use]
     pub const fn title(&self) -> &'static str {
         match self {
-            Self::AppleFmSetup { .. } => "Apple FM setup demo",
+            Self::AppleFmSetup { .. } => "Apple FM setup check",
             Self::ProbeRuntimeTurn { .. } => "Probe runtime turn",
             Self::ResolvePendingToolApproval { .. } => "pending approval decision",
         }

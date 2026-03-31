@@ -1,5 +1,5 @@
 ---
-source: crates/probe-tui/tests/hello_demo.rs
+source: crates/probe-tui/tests/probe_tui.rs
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -9,17 +9,17 @@ expression: snapshot
 ┌─ Transcript ───────────────────────────────────────────────┐ ┌─ Shell ───────┐
 │ [user] You                                                 │ │ focus: chat   │
 │   Summarize what Probe owns.                               │ │ stack: 1      │
-│                                                            │ │ turns: 4      │
-│ [tool call] read_file                                      │ │ active: none  │
-│   call: call_readme_1                                      │ │ session: sess │
-│   args: {"path":"README.md"}                               │ │ runtime: psio │
-│   turn: 1                                                  │ │ model: qwen3. │
-│                                                            │ │ phase: pendin │
-│ [tool result] read_file                                    │ └───────────────┘
+│                                                            │ │ turns: 1      │
+│ [active tool] Tool Requested: read_file                    │ │ active: tool  │
+│   round_trip: 1                                            │ │ session: sess │
+│   call_id: call_readme_1                                   │ │ runtime: psio │
+│   arguments                                                │ │ model: qwen3. │
+│   {                                                        │ │ phase: tool_r │
+│     "path": "README.md"                                    │ └───────────────┘
 └────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: committed assistant row | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 |      │
+│ status: tool call requested: read_file | Tab | Ctrl+R/S/A/O | Up/Down | F1 | │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer ───────────────────────────────────────────────────────────────────┐

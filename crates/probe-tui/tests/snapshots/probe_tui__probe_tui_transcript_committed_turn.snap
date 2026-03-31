@@ -1,5 +1,5 @@
 ---
-source: crates/probe-tui/tests/hello_demo.rs
+source: crates/probe-tui/tests/probe_tui.rs
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -7,22 +7,22 @@ expression: snapshot
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Transcript ───────────────────────────────────────────────┐ ┌─ Shell ───────┐
-│ [status] Availability Ready                                │ │ focus: chat   │
-│   platform: macOS                                          │ │ stack: 1      │
-│   Apple FM admitted this machine for the setup prove-out.  │ │ turns: 1      │
-│                                                            │ │ active: tool  │
-│ [active tool] Call 1/3: Sanity Check                       │ │ session: pend │
-│   Prompt                                                   │ │ runtime: pend │
-│   Reply with exactly READY.                                │ │ model: pendin │
-│   Response                                                 │ │ phase: pendin │
-│   [waiting for Apple FM reply]                             │ └───────────────┘
+│ [user] You                                                 │ │ focus: chat   │
+│   Summarize what Probe owns.                               │ │ stack: 1      │
+│                                                            │ │ turns: 4      │
+│ [tool call] read_file                                      │ │ active: none  │
+│   call: call_readme_1                                      │ │ session: sess │
+│   args: {"path":"README.md"}                               │ │ runtime: psio │
+│   turn: 1                                                  │ │ model: qwen3. │
+│                                                            │ │ phase: pendin │
+│ [tool result] read_file                                    │ └───────────────┘
 └────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: running Apple FM call 1/3 | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 |    │
+│ status: committed assistant row | Tab | Ctrl+R/S/A/O | Up/Down | F1 | Ctrl+C │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌─ Composer (busy) ────────────────────────────────────────────────────────────┐
+┌─ Composer ───────────────────────────────────────────────────────────────────┐
 │ cmd: plain                                                                   │
 │ Type a Probe message. Enter submits. Ctrl+J inserts a newline.               │
 └──────────────────────────────────────────────────────────────────────────────┘

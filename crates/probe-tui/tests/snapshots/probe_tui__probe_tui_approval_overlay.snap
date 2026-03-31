@@ -1,6 +1,5 @@
 ---
-source: crates/probe-tui/tests/hello_demo.rs
-assertion_line: 65
+source: crates/probe-tui/tests/probe_tui.rs
 expression: snapshot
 ---
 

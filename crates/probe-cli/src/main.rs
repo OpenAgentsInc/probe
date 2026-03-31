@@ -71,16 +71,7 @@ enum Commands {
 }
 
 #[derive(clap::Args, Debug)]
-struct TuiArgs {
-    #[command(subcommand)]
-    command: Option<TuiCommands>,
-}
-
-#[derive(Subcommand, Debug)]
-enum TuiCommands {
-    #[command(about = "Launch the current Probe terminal UI")]
-    Hello,
-}
+struct TuiArgs {}
 
 #[derive(clap::Args, Debug)]
 struct ExecArgs {
@@ -295,10 +286,8 @@ fn run() -> Result<(), String> {
     }
 }
 
-fn run_tui(args: TuiArgs) -> Result<(), String> {
-    match args.command.unwrap_or(TuiCommands::Hello) {
-        TuiCommands::Hello => run_probe_tui().map_err(|error| error.to_string()),
-    }
+fn run_tui(_args: TuiArgs) -> Result<(), String> {
+    run_probe_tui().map_err(|error| error.to_string())
 }
 
 fn run_exec(args: ExecArgs) -> Result<(), String> {
@@ -1023,22 +1012,6 @@ fn resolve_tool_loop(
         || approve_destructive_shell
         || pause_for_approval;
     match tool_set {
-        Some("weather") => {
-            if approve_write_tools
-                || approve_network_shell
-                || approve_destructive_shell
-                || pause_for_approval
-            {
-                return Err(String::from(
-                    "approval flags are only available for the `coding_bootstrap` tool set",
-                ));
-            }
-            let tool_choice = ProbeToolChoice::parse(tool_choice)?;
-            Ok(Some(ToolLoopConfig::weather_demo(
-                tool_choice,
-                parallel_tool_calls,
-            )))
-        }
         Some("coding_bootstrap") => {
             let tool_choice = ProbeToolChoice::parse(tool_choice)?;
             let mut config = ToolLoopConfig::coding_bootstrap(tool_choice, parallel_tool_calls);
@@ -1047,7 +1020,7 @@ fn resolve_tool_loop(
         }
         Some(other) => Err(format!("unknown tool set: {other}")),
         None if has_non_default_tool_flags => Err(String::from(
-            "tool flags require --tool-set; supported values are `weather` and `coding_bootstrap`",
+            "tool flags require --tool-set; supported value is `coding_bootstrap`",
         )),
         None => Ok(None),
     }

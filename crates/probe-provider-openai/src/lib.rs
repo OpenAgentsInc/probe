@@ -428,8 +428,8 @@ mod tests {
                                 "id": "call_1",
                                 "type": "function",
                                 "function": {
-                                    "name": "lookup_weather",
-                                    "arguments": "{\"city\":\"Paris\"}"
+                                    "name": "read_file",
+                                    "arguments": "{\"path\":\"README.md\"}"
                                 }
                             }
                         ]
@@ -448,16 +448,16 @@ mod tests {
         };
         let client = OpenAiProviderClient::new(config).expect("client");
         let response = client
-            .chat_completion(vec![ChatMessage::user("weather in Paris")])
+            .chat_completion(vec![ChatMessage::user("inspect README.md")])
             .expect("tool call response");
 
         let tool_calls = response.first_tool_calls().expect("tool calls");
         assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].function.name, "lookup_weather");
-        assert_eq!(tool_calls[0].function.arguments, "{\"city\":\"Paris\"}");
+        assert_eq!(tool_calls[0].function.name, "read_file");
+        assert_eq!(tool_calls[0].function.arguments, "{\"path\":\"README.md\"}");
         let requests = server.finish();
         assert_eq!(requests.len(), 1);
-        assert!(requests[0].contains("weather in Paris"));
+        assert!(requests[0].contains("inspect README.md"));
     }
 
     #[test]
@@ -466,8 +466,8 @@ mod tests {
             id: String::from("call_1"),
             kind: String::from("function"),
             function: ChatToolCallFunction {
-                name: String::from("lookup_weather"),
-                arguments: String::from("{\"city\":\"Tokyo\"}"),
+                name: String::from("read_file"),
+                arguments: String::from("{\"path\":\"README.md\"}"),
             },
         }]);
 
@@ -477,7 +477,7 @@ mod tests {
             message.tool_calls.as_ref().expect("tool calls")[0]
                 .function
                 .name,
-            "lookup_weather"
+            "read_file"
         );
     }
 

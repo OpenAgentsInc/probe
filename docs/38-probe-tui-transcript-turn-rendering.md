@@ -14,7 +14,7 @@ The shell now renders:
 Composer submission now produces a visible user turn immediately, then drives a
 worker-owned active turn before committing the assistant response.
 
-Issue `#42` later replaced the original demo worker behind this shell shape
+Issue `#42` later replaced the original placeholder worker behind this shell shape
 with a real persisted Probe runtime session loop.
 
 ## What Changed
@@ -64,7 +64,7 @@ FM setup messages:
 - `TranscriptActiveTurnSet`
 
 That gives the TUI a reusable path for future real controller-turn rendering
-without coupling turn presentation to the Apple FM setup prove-out.
+without coupling turn presentation to the Apple FM setup check.
 
 ## Tests
 

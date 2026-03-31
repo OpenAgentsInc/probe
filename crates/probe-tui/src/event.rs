@@ -9,7 +9,6 @@ pub enum UiEvent {
     OpenHelp,
     OpenSetupOverlay,
     OpenApprovalOverlay,
-    OpenRequestInputOverlay,
     Dismiss,
     Quit,
     ComposerInsert(char),
@@ -57,9 +56,6 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => Some(UiEvent::Quit),
         KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::ComposerAddAttachment)
-        }
-        KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiEvent::OpenRequestInputOverlay)
         }
         KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::RunBackgroundTask)

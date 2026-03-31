@@ -21,8 +21,8 @@ use crate::bottom_pane::{BottomPane, BottomPaneState};
 use crate::event::{UiEvent, event_from_key};
 use crate::message::{AppMessage, BackgroundTaskRequest, ProbeRuntimeTurnConfig};
 use crate::screens::{
-    ActiveTab, ApprovalOverlay, ChatScreen, HelpScreen, RequestInputOverlay, ScreenAction,
-    ScreenCommand, ScreenId, ScreenState, SetupOverlay, TaskPhase,
+    ActiveTab, ApprovalOverlay, ChatScreen, HelpScreen, ScreenAction, ScreenCommand, ScreenId,
+    ScreenState, SetupOverlay, TaskPhase,
 };
 use crate::worker::BackgroundWorker;
 
@@ -231,14 +231,6 @@ impl AppShell {
                                 .push(ScreenState::Approval(ApprovalOverlay::new(approval)));
                         }
                     }
-                    ScreenAction::OpenRequestInputOverlay => {
-                        self.base_screen_mut()
-                            .record_event("request-input overlay took focus");
-                        if self.active_screen_id() != ScreenId::RequestInputOverlay {
-                            self.screens
-                                .push(ScreenState::RequestInput(RequestInputOverlay::new()));
-                        }
-                    }
                     ScreenAction::CloseModal => {
                         if self.screens.len() > 1 {
                             let released = self.active_screen_id().title().to_string();
@@ -398,7 +390,7 @@ impl AppShell {
                     "Composer disabled while setup owns focus. Esc returns to chat.",
                 ));
             }
-            ScreenId::ApprovalOverlay | ScreenId::RequestInputOverlay => {
+            ScreenId::ApprovalOverlay => {
                 return BottomPaneState::Disabled(String::from(
                     "Composer replaced by the active overlay.",
                 ));
@@ -494,10 +486,6 @@ pub fn run_probe_tui() -> io::Result<()> {
     let cleanup_result = restore_terminal(&mut terminal);
 
     result.and(cleanup_result)
-}
-
-pub fn run_hello_demo() -> io::Result<()> {
-    run_probe_tui()
 }
 
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
@@ -957,22 +945,12 @@ mod tests {
     }
 
     #[test]
-    fn approval_overlay_requires_real_pending_tools_and_request_input_still_commits() {
+    fn approval_overlay_requires_real_pending_tools() {
         let mut app = AppShell::new_for_tests();
 
         app.dispatch(UiEvent::OpenApprovalOverlay);
         assert_eq!(app.active_screen_id(), ScreenId::Chat);
         assert_eq!(app.last_status(), "no pending approvals");
-
-        app.dispatch(UiEvent::OpenRequestInputOverlay);
-        assert_eq!(app.active_screen_id(), ScreenId::RequestInputOverlay);
-        app.dispatch(UiEvent::NextView);
-        app.dispatch(UiEvent::ComposerSubmit);
-        assert_eq!(app.active_screen_id(), ScreenId::Chat);
-        assert!(
-            app.render_to_string(120, 32)
-                .contains("Request Input Demo")
-        );
     }
 
     #[test]

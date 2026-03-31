@@ -26,7 +26,7 @@ This folder holds technical planning docs for the Probe runtime.
 - `08-interactive-cli-and-resume.md`
   - the first interactive session loop and transcript-backed resume flow
 - `09-tool-loop-and-local-tools.md`
-  - the first bounded local tool runtime, batch execution path, and replay
+  - the bounded local coding tool runtime, batch execution path, and replay
     contract
 - `10-acceptance-harness.md`
   - the retained local acceptance runner for plain and tool-backed controller
@@ -94,17 +94,17 @@ This folder holds technical planning docs for the Probe runtime.
   - narrow retained worker thread and typed app-message seam for the Probe TUI,
     so screens can request bounded background work without freezing the render
     loop
-- `32-apple-fm-setup-demo-screen.md`
-  - the first real Apple FM-backed Probe TUI screen, including availability
-    gating, a retained startup prove-out flow, and snapshot/test coverage for
-    unavailable, running, and completed states
+- `32-apple-fm-setup-screen.md`
+  - the first real Apple FM-backed Probe TUI setup surface, including
+    availability gating, a retained startup setup check, and snapshot/test
+    coverage for unavailable, running, and completed states
 - `35-probe-tui-retained-transcript-model.md`
   - the explicit first transcript rendering decision for the Probe TUI:
     retained in-memory transcript widget plus one active-turn cell, before any
     Codex-style scrollback manager or full chat/composer shell
 - `36-chat-screen-primary-shell-and-setup-secondary.md`
   - the TUI restructuring that makes `Chat` the primary Probe home surface and
-    demotes the Apple FM prove-out into the secondary `Setup` tab
+    demotes Apple FM setup inspection into the secondary `Setup` tab
 - `37-probe-tui-bottom-pane-and-minimal-composer.md`
   - the first real bottom-pane seam for Probe TUI input: a cursor-bearing
     composer, modifier-based global shell commands, explicit disabled/busy
@@ -115,14 +115,14 @@ This folder holds technical planning docs for the Probe runtime.
     transcript-dominant shell layout
 - `39-probe-tui-typed-overlay-stack-and-focus-routing.md`
   - the first typed overlay stack for Probe TUI, moving setup/help/approval
-    and request-input flows out of the home layout and into explicit focused
-    overlays that can disable or replace the composer
+    flows out of the home layout and into explicit focused overlays that can
+    disable or replace the composer
 - `40-probe-tui-composer-history-commands-mentions-attachments-and-paste.md`
   - the first richer Probe draft model with shell-style history recall,
     slash-command and typed-mention semantics, attachment placeholders, and
     explicit paste-aware input handling
 - `42-probe-tui-real-runtime-session-worker.md`
-  - the first real `probe-core`-backed TUI turn loop, replacing the demo
+  - the first real `probe-core`-backed TUI turn loop, replacing the temporary
     worker with persisted runtime sessions, transcript hydration from the
     session store, and honest error recovery
 - `43-probe-runtime-event-stream-and-live-tui-lifecycle.md`

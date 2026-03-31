@@ -49,7 +49,7 @@ Concrete work:
   already TUI-backed
 - wire terminal lifecycle in a way that leaves the terminal clean on exit and
   failure
-- render one hello-world style screen that shows obvious visible structure, at
+- render one bootstrap screen that shows obvious visible structure, at
   minimum:
   - a header/title row
   - a main content region
@@ -60,10 +60,10 @@ Concrete work:
   - open and dismiss a basic modal/help screen
 - keep the implementation shaped for future growth into richer screens rather
   than one giant render function
-- document how to run the demo locally
+- document how to run the TUI locally
 - add at least minimal test coverage for the TUI state/update path, and if
   practical add a narrow snapshot or process-level regression test for the
-  hello screen
+  bootstrap screen
 
 ## Non-Goals
 
@@ -100,7 +100,7 @@ A good first target would be something roughly like:
 - `AppShell` or equivalent top-level controller for terminal lifecycle and
   dispatch
 - `Screen` trait/type for one active screen at a time
-- at least one hello/demo screen plus one secondary modal/help screen or
+- at least one bootstrap screen plus one secondary modal/help screen or
   alternate view
 - a tiny UI event enum for key-driven state changes
 
@@ -110,8 +110,8 @@ The point is to establish the same kind of seam in Rust.
 
 ## Done When
 
-- a dedicated Probe TUI demo command launches successfully from the repo
-- the demo renders a stable structured screen with visible header/body/footer
+- a dedicated Probe TUI command launches successfully from the repo
+- the shell renders a stable structured screen with visible header/body/footer
   regions
 - at least a couple of key presses visibly update on-screen state
 - there is at least one additional focused surface or view transition beyond a
@@ -119,7 +119,7 @@ The point is to establish the same kind of seam in Rust.
 - quitting restores the terminal cleanly
 - the code shape makes future screens/widgets easier to add than the usual
   one-file monolith
-- repo docs explain how to run the TUI demo and what architectural boundary it
+- repo docs explain how to run the TUI and what architectural boundary it
   is intended to establish
 
 ## References
