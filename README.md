@@ -44,3 +44,5 @@ This repository is in bootstrap stage.
 The near-term objective is to establish the repo, define the runtime boundary,
 and build the first end-to-end session loop on a clean protocol and persistence
 foundation.
+
+Technical planning docs live under `docs/`.
