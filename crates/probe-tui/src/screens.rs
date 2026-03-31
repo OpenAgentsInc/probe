@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use probe_core::runtime::RuntimeEvent;
+use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_protocol::session::{PendingToolApproval, ToolApprovalResolution};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Text};
@@ -85,10 +85,48 @@ struct ProbeRuntimeState {
     profile_name: Option<String>,
     model_id: Option<String>,
     cwd: Option<String>,
+    backend_kind: Option<String>,
     phase: Option<String>,
     round_trip: Option<usize>,
     active_tool: Option<String>,
     pending_approvals: Vec<PendingToolApproval>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssistantStreamMode {
+    Delta,
+    Snapshot,
+}
+
+impl AssistantStreamMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Delta => "delta",
+            Self::Snapshot => "snapshot",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct StreamToolCallState {
+    tool_index: usize,
+    call_id: Option<String>,
+    tool_name: Option<String>,
+    arguments: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AssistantStreamState {
+    round_trip: usize,
+    response_id: String,
+    response_model: String,
+    mode: AssistantStreamMode,
+    backend_kind: Option<String>,
+    first_chunk_ms: Option<u64>,
+    assistant_text: String,
+    tool_calls: Vec<StreamToolCallState>,
+    finish_reason: Option<String>,
+    failure: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,6 +305,7 @@ pub struct ChatScreen {
     transcript_scroll_from_bottom: u16,
     events_scroll: u16,
     runtime: ProbeRuntimeState,
+    stream: Option<AssistantStreamState>,
     setup: AppleFmSetupState,
 }
 
@@ -281,6 +320,7 @@ impl Default for ChatScreen {
             transcript_scroll_from_bottom: 0,
             events_scroll: 0,
             runtime: ProbeRuntimeState::default(),
+            stream: None,
             setup: AppleFmSetupState::default(),
         };
         screen.record_event("probe tui ready");
@@ -410,6 +450,258 @@ impl ChatScreen {
         ));
     }
 
+    pub fn compact_runtime_status(&self) -> String {
+        let backend = self
+            .runtime
+            .profile_name
+            .as_deref()
+            .or(self.runtime.backend_kind.as_deref())
+            .unwrap_or("pending");
+        let phase = self.runtime.phase.as_deref().unwrap_or("idle");
+
+        if let Some(stream) = &self.stream {
+            let mode = stream.mode.label();
+            let chars = stream.assistant_text.chars().count();
+            let tool_calls = stream.tool_calls.len();
+            let mut parts = vec![
+                format!("backend: {backend}"),
+                format!("phase: {phase}"),
+                format!("round: {}", stream.round_trip),
+                format!("stream: {mode}"),
+                format!("chars: {chars}"),
+            ];
+            if tool_calls > 0 {
+                parts.push(format!("tool_deltas: {tool_calls}"));
+            }
+            if let Some(ms) = stream.first_chunk_ms {
+                parts.push(format!("ttft_ms: {ms}"));
+            }
+            if let Some(finish_reason) = stream.finish_reason.as_deref() {
+                parts.push(format!("finish: {finish_reason}"));
+            }
+            if stream.failure.is_some() {
+                parts.push(String::from("state: failed"));
+            }
+            return parts.join(" | ");
+        }
+
+        let mut parts = vec![format!("backend: {backend}"), format!("phase: {phase}")];
+        if let Some(round_trip) = self.runtime.round_trip {
+            parts.push(format!("round: {round_trip}"));
+        }
+        if let Some(tool) = self.runtime.active_tool.as_deref() {
+            parts.push(format!("tool: {tool}"));
+        }
+        parts.join(" | ")
+    }
+
+    fn clear_stream(&mut self) {
+        self.stream = None;
+    }
+
+    fn start_stream(
+        &mut self,
+        session_id: &str,
+        round_trip: usize,
+        response_id: String,
+        response_model: String,
+        mode: AssistantStreamMode,
+    ) {
+        self.runtime.session_id = Some(session_id.to_string());
+        self.runtime.phase = Some(match mode {
+            AssistantStreamMode::Delta => String::from("assistant_streaming"),
+            AssistantStreamMode::Snapshot => String::from("assistant_snapshot_streaming"),
+        });
+        self.runtime.round_trip = Some(round_trip);
+        self.runtime.active_tool = None;
+        self.stream = Some(AssistantStreamState {
+            round_trip,
+            response_id,
+            response_model,
+            mode,
+            backend_kind: self.runtime.backend_kind.clone(),
+            first_chunk_ms: None,
+            assistant_text: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: None,
+            failure: None,
+        });
+        self.sync_stream_active_turn();
+    }
+
+    fn note_first_stream_chunk(&mut self, session_id: &str, round_trip: usize, milliseconds: u64) {
+        self.runtime.session_id = Some(session_id.to_string());
+        self.runtime.phase = Some(String::from("assistant_streaming"));
+        self.runtime.round_trip = Some(round_trip);
+        if let Some(stream) = self.stream.as_mut() {
+            stream.first_chunk_ms = Some(milliseconds);
+            stream.failure = None;
+        }
+        self.sync_stream_active_turn();
+    }
+
+    fn append_stream_delta(&mut self, session_id: &str, round_trip: usize, delta: &str) {
+        self.runtime.session_id = Some(session_id.to_string());
+        self.runtime.phase = Some(String::from("assistant_streaming"));
+        self.runtime.round_trip = Some(round_trip);
+        let stream = self
+            .stream
+            .get_or_insert_with(|| AssistantStreamState {
+                round_trip,
+                response_id: String::from("pending"),
+                response_model: String::from("pending"),
+                mode: AssistantStreamMode::Delta,
+                backend_kind: self.runtime.backend_kind.clone(),
+                first_chunk_ms: None,
+                assistant_text: String::new(),
+                tool_calls: Vec::new(),
+                finish_reason: None,
+                failure: None,
+            });
+        stream.mode = AssistantStreamMode::Delta;
+        stream.assistant_text.push_str(delta);
+        stream.failure = None;
+        self.sync_stream_active_turn();
+    }
+
+    fn update_stream_snapshot(&mut self, session_id: &str, round_trip: usize, snapshot: &str) {
+        self.runtime.session_id = Some(session_id.to_string());
+        self.runtime.phase = Some(String::from("assistant_snapshot"));
+        self.runtime.round_trip = Some(round_trip);
+        let stream = self
+            .stream
+            .get_or_insert_with(|| AssistantStreamState {
+                round_trip,
+                response_id: String::from("pending"),
+                response_model: String::from("pending"),
+                mode: AssistantStreamMode::Snapshot,
+                backend_kind: self.runtime.backend_kind.clone(),
+                first_chunk_ms: None,
+                assistant_text: String::new(),
+                tool_calls: Vec::new(),
+                finish_reason: None,
+                failure: None,
+            });
+        stream.mode = AssistantStreamMode::Snapshot;
+        stream.assistant_text = snapshot.to_string();
+        stream.failure = None;
+        self.sync_stream_active_turn();
+    }
+
+    fn update_stream_tool_calls(
+        &mut self,
+        session_id: &str,
+        round_trip: usize,
+        deltas: &[StreamedToolCallDelta],
+    ) {
+        self.runtime.session_id = Some(session_id.to_string());
+        self.runtime.phase = Some(String::from("tool_call_streaming"));
+        self.runtime.round_trip = Some(round_trip);
+        let stream = self
+            .stream
+            .get_or_insert_with(|| AssistantStreamState {
+                round_trip,
+                response_id: String::from("pending"),
+                response_model: String::from("pending"),
+                mode: AssistantStreamMode::Delta,
+                backend_kind: self.runtime.backend_kind.clone(),
+                first_chunk_ms: None,
+                assistant_text: String::new(),
+                tool_calls: Vec::new(),
+                finish_reason: None,
+                failure: None,
+            });
+        for delta in deltas {
+            if let Some(existing) = stream
+                .tool_calls
+                .iter_mut()
+                .find(|tool| tool.tool_index == delta.tool_index)
+            {
+                if let Some(call_id) = delta.call_id.as_ref() {
+                    existing.call_id = Some(call_id.clone());
+                }
+                if let Some(tool_name) = delta.tool_name.as_ref() {
+                    existing.tool_name = Some(tool_name.clone());
+                }
+                if let Some(arguments_delta) = delta.arguments_delta.as_ref() {
+                    existing.arguments.push_str(arguments_delta);
+                }
+            } else {
+                stream.tool_calls.push(StreamToolCallState {
+                    tool_index: delta.tool_index,
+                    call_id: delta.call_id.clone(),
+                    tool_name: delta.tool_name.clone(),
+                    arguments: delta.arguments_delta.clone().unwrap_or_default(),
+                });
+                stream.tool_calls.sort_by_key(|tool| tool.tool_index);
+            }
+        }
+        stream.failure = None;
+        self.sync_stream_active_turn();
+    }
+
+    fn finish_stream(
+        &mut self,
+        session_id: &str,
+        round_trip: usize,
+        response_id: String,
+        response_model: String,
+        finish_reason: Option<String>,
+    ) {
+        self.runtime.session_id = Some(session_id.to_string());
+        self.runtime.phase = Some(String::from("assistant_stream_finished"));
+        self.runtime.round_trip = Some(round_trip);
+        self.runtime.active_tool = None;
+        if let Some(stream) = self.stream.as_mut() {
+            stream.round_trip = round_trip;
+            stream.response_id = response_id;
+            stream.response_model = response_model;
+            stream.finish_reason = finish_reason;
+            stream.failure = None;
+        }
+        self.sync_stream_active_turn();
+    }
+
+    fn fail_stream(
+        &mut self,
+        session_id: &str,
+        round_trip: usize,
+        backend_kind: &str,
+        error: &str,
+    ) {
+        self.runtime.session_id = Some(session_id.to_string());
+        self.runtime.phase = Some(String::from("model_request_failed"));
+        self.runtime.round_trip = Some(round_trip);
+        self.runtime.active_tool = None;
+        self.runtime.backend_kind = Some(backend_kind.to_string());
+        let stream = self
+            .stream
+            .get_or_insert_with(|| AssistantStreamState {
+                round_trip,
+                response_id: String::from("failed"),
+                response_model: String::from("failed"),
+                mode: AssistantStreamMode::Delta,
+                backend_kind: Some(backend_kind.to_string()),
+                first_chunk_ms: None,
+                assistant_text: String::new(),
+                tool_calls: Vec::new(),
+                finish_reason: None,
+                failure: None,
+            });
+        stream.backend_kind = Some(backend_kind.to_string());
+        stream.failure = Some(error.to_string());
+        self.sync_stream_active_turn();
+    }
+
+    fn sync_stream_active_turn(&mut self) {
+        let Some(stream) = self.stream.as_ref() else {
+            return;
+        };
+        self.transcript
+            .set_active_turn(render_stream_active_turn(stream));
+        self.snap_transcript_to_latest();
+    }
+
     fn apply_runtime_event(&mut self, event: RuntimeEvent) -> String {
         match event {
             RuntimeEvent::TurnStarted {
@@ -418,8 +710,10 @@ impl ChatScreen {
                 prompt,
                 tool_loop_enabled,
             } => {
+                self.clear_stream();
                 self.runtime.session_id = Some(session_id.as_str().to_string());
                 self.runtime.profile_name = Some(profile_name.clone());
+                self.runtime.backend_kind = None;
                 self.runtime.phase = Some(String::from("turn_started"));
                 self.runtime.round_trip = None;
                 self.runtime.active_tool = None;
@@ -442,16 +736,19 @@ impl ChatScreen {
                 round_trip,
                 backend_kind,
             } => {
+                self.clear_stream();
                 self.runtime.session_id = Some(session_id.as_str().to_string());
+                self.runtime.backend_kind = Some(format!("{backend_kind:?}"));
                 self.runtime.phase = Some(String::from("model_request"));
                 self.runtime.round_trip = Some(round_trip);
                 self.runtime.active_tool = None;
                 self.transcript.set_active_turn(ActiveTurn::new(
                     TranscriptRole::Assistant,
-                    "Model Request",
+                    "Waiting for Reply",
                     vec![
                         format!("backend: {:?}", backend_kind),
                         format!("round_trip: {round_trip}"),
+                        String::from("stream_state: awaiting first backend event"),
                         format!("session: {}", short_session_id(session_id.as_str())),
                     ],
                 ));
@@ -465,20 +762,13 @@ impl ChatScreen {
                 response_id,
                 response_model,
             } => {
-                self.runtime.session_id = Some(session_id.as_str().to_string());
-                self.runtime.phase = Some(String::from("assistant_stream_started"));
-                self.runtime.round_trip = Some(round_trip);
-                self.runtime.active_tool = None;
-                self.transcript.set_active_turn(ActiveTurn::new(
-                    TranscriptRole::Assistant,
-                    "Assistant Stream",
-                    vec![
-                        format!("round_trip: {round_trip}"),
-                        format!("response_id: {response_id}"),
-                        format!("model: {}", preview(response_model.as_str(), 48)),
-                    ],
-                ));
-                self.snap_transcript_to_latest();
+                self.start_stream(
+                    session_id.as_str(),
+                    round_trip,
+                    response_id,
+                    response_model,
+                    AssistantStreamMode::Delta,
+                );
                 self.record_worker_event(format!("assistant stream started: round {round_trip}"));
                 format!("assistant stream started for round {round_trip}")
             }
@@ -487,9 +777,7 @@ impl ChatScreen {
                 round_trip,
                 milliseconds,
             } => {
-                self.runtime.session_id = Some(session_id.as_str().to_string());
-                self.runtime.phase = Some(String::from("assistant_streaming"));
-                self.runtime.round_trip = Some(round_trip);
+                self.note_first_stream_chunk(session_id.as_str(), round_trip, milliseconds);
                 self.record_worker_event(format!(
                     "first streamed chunk observed after {milliseconds}ms"
                 ));
@@ -500,77 +788,31 @@ impl ChatScreen {
                 round_trip,
                 delta,
             } => {
-                self.runtime.session_id = Some(session_id.as_str().to_string());
-                self.runtime.phase = Some(String::from("assistant_streaming"));
-                self.runtime.round_trip = Some(round_trip);
-                self.transcript.set_active_turn(ActiveTurn::new(
-                    TranscriptRole::Assistant,
-                    "Assistant Stream",
-                    vec![
-                        format!("round_trip: {round_trip}"),
-                        preview(delta.as_str(), 96),
-                    ],
-                ));
-                self.snap_transcript_to_latest();
+                self.append_stream_delta(session_id.as_str(), round_trip, delta.as_str());
                 self.record_worker_event(format!(
-                    "assistant delta received: {}",
-                    preview(delta.as_str(), 32)
+                    "assistant delta appended (+{} chars)",
+                    delta.chars().count()
                 ));
-                String::from("assistant delta received")
+                format!("assistant delta appended for round {round_trip}")
             }
             RuntimeEvent::AssistantSnapshot {
                 session_id,
                 round_trip,
                 snapshot,
             } => {
-                self.runtime.session_id = Some(session_id.as_str().to_string());
-                self.runtime.phase = Some(String::from("assistant_snapshot"));
-                self.runtime.round_trip = Some(round_trip);
-                self.transcript.set_active_turn(ActiveTurn::new(
-                    TranscriptRole::Assistant,
-                    "Assistant Snapshot",
-                    vec![
-                        format!("round_trip: {round_trip}"),
-                        preview(snapshot.as_str(), 96),
-                    ],
-                ));
-                self.snap_transcript_to_latest();
+                self.update_stream_snapshot(session_id.as_str(), round_trip, snapshot.as_str());
                 self.record_worker_event(format!(
-                    "assistant snapshot received: {}",
-                    preview(snapshot.as_str(), 32)
+                    "assistant snapshot updated ({} chars)",
+                    snapshot.chars().count()
                 ));
-                String::from("assistant snapshot received")
+                format!("assistant snapshot updated for round {round_trip}")
             }
             RuntimeEvent::ToolCallDelta {
                 session_id,
                 round_trip,
                 deltas,
             } => {
-                self.runtime.session_id = Some(session_id.as_str().to_string());
-                self.runtime.phase = Some(String::from("tool_call_streaming"));
-                self.runtime.round_trip = Some(round_trip);
-                let mut body = vec![format!("round_trip: {round_trip}")];
-                for delta in &deltas {
-                    body.push(format!(
-                        "tool[{}]: {} {}",
-                        delta.tool_index,
-                        delta
-                            .tool_name
-                            .as_deref()
-                            .unwrap_or("unknown"),
-                        delta
-                            .arguments_delta
-                            .as_deref()
-                            .map(|value| preview(value, 48))
-                            .unwrap_or_default()
-                    ));
-                }
-                self.transcript.set_active_turn(ActiveTurn::new(
-                    TranscriptRole::Tool,
-                    "Streaming Tool Call",
-                    body,
-                ));
-                self.snap_transcript_to_latest();
+                self.update_stream_tool_calls(session_id.as_str(), round_trip, &deltas);
                 self.record_worker_event(format!(
                     "streamed {} tool call delta(s)",
                     deltas.len()
@@ -584,6 +826,7 @@ impl ChatScreen {
                 tool_name,
                 arguments,
             } => {
+                self.clear_stream();
                 self.runtime.session_id = Some(session_id.as_str().to_string());
                 self.runtime.phase = Some(String::from("tool_requested"));
                 self.runtime.round_trip = Some(round_trip);
@@ -610,6 +853,7 @@ impl ChatScreen {
                 tool_name,
                 risk_class,
             } => {
+                self.clear_stream();
                 self.runtime.session_id = Some(session_id.as_str().to_string());
                 self.runtime.phase = Some(String::from("tool_running"));
                 self.runtime.round_trip = Some(round_trip);
@@ -632,6 +876,7 @@ impl ChatScreen {
                 round_trip,
                 tool,
             } => {
+                self.clear_stream();
                 self.runtime.session_id = Some(session_id.as_str().to_string());
                 self.runtime.phase = Some(String::from("tool_completed"));
                 self.runtime.round_trip = Some(round_trip);
@@ -650,6 +895,7 @@ impl ChatScreen {
                 round_trip,
                 tool,
             } => {
+                self.clear_stream();
                 self.runtime.session_id = Some(session_id.as_str().to_string());
                 self.runtime.phase = Some(String::from("tool_refused"));
                 self.runtime.round_trip = Some(round_trip);
@@ -668,6 +914,7 @@ impl ChatScreen {
                 round_trip,
                 tool,
             } => {
+                self.clear_stream();
                 self.runtime.session_id = Some(session_id.as_str().to_string());
                 self.runtime.phase = Some(String::from("tool_paused"));
                 self.runtime.round_trip = Some(round_trip);
@@ -688,23 +935,13 @@ impl ChatScreen {
                 response_model,
                 finish_reason,
             } => {
-                self.runtime.session_id = Some(session_id.as_str().to_string());
-                self.runtime.phase = Some(String::from("assistant_stream_finished"));
-                self.runtime.round_trip = Some(round_trip);
-                self.runtime.active_tool = None;
-                self.transcript.set_active_turn(ActiveTurn::new(
-                    TranscriptRole::Assistant,
-                    "Assistant Stream Complete",
-                    vec![
-                        format!("response_id: {response_id}"),
-                        format!("model: {}", preview(response_model.as_str(), 48)),
-                        format!(
-                            "finish_reason: {}",
-                            finish_reason.unwrap_or_else(|| String::from("unknown"))
-                        ),
-                    ],
-                ));
-                self.snap_transcript_to_latest();
+                self.finish_stream(
+                    session_id.as_str(),
+                    round_trip,
+                    response_id,
+                    response_model,
+                    finish_reason,
+                );
                 self.record_worker_event(String::from("assistant stream finished"));
                 String::from("assistant stream finished")
             }
@@ -714,20 +951,13 @@ impl ChatScreen {
                 backend_kind,
                 error,
             } => {
-                self.runtime.session_id = Some(session_id.as_str().to_string());
-                self.runtime.phase = Some(String::from("model_request_failed"));
-                self.runtime.round_trip = Some(round_trip);
-                self.runtime.active_tool = None;
-                self.transcript.set_active_turn(ActiveTurn::new(
-                    TranscriptRole::Status,
-                    "Model Request Failed",
-                    vec![
-                        format!("backend: {:?}", backend_kind),
-                        format!("round_trip: {round_trip}"),
-                        preview(error.as_str(), 120),
-                    ],
-                ));
-                self.snap_transcript_to_latest();
+                let backend_kind = format!("{backend_kind:?}");
+                self.fail_stream(
+                    session_id.as_str(),
+                    round_trip,
+                    backend_kind.as_str(),
+                    error.as_str(),
+                );
                 self.record_worker_event(String::from("model request failed"));
                 String::from("model request failed")
             }
@@ -737,17 +967,20 @@ impl ChatScreen {
                 response_model,
                 assistant_text,
             } => {
+                self.clear_stream();
                 self.runtime.session_id = Some(session_id.as_str().to_string());
                 self.runtime.phase = Some(String::from("assistant_committed"));
                 self.runtime.active_tool = None;
+                let mut body = vec![
+                    format!("response_id: {response_id}"),
+                    format!("model: {}", preview(response_model.as_str(), 48)),
+                    String::from("response"),
+                ];
+                body.extend(split_text_lines(assistant_text.as_str()));
                 self.transcript.set_active_turn(ActiveTurn::new(
                     TranscriptRole::Assistant,
                     "Probe",
-                    vec![
-                        format!("response_id: {response_id}"),
-                        format!("model: {}", preview(response_model.as_str(), 48)),
-                        preview(assistant_text.as_str(), 96),
-                    ],
+                    body,
                 ));
                 self.snap_transcript_to_latest();
                 self.record_worker_event(String::from("assistant turn committed"));
@@ -758,6 +991,102 @@ impl ChatScreen {
 
     pub fn apply_message(&mut self, message: AppMessage) -> String {
         match message {
+            AppMessage::AssistantStreamStarted {
+                session_id,
+                round_trip,
+                response_id,
+                response_model,
+            } => {
+                self.start_stream(
+                    session_id.as_str(),
+                    round_trip,
+                    response_id,
+                    response_model,
+                    AssistantStreamMode::Delta,
+                );
+                self.record_worker_event(format!("assistant stream started: round {round_trip}"));
+                format!("assistant stream started for round {round_trip}")
+            }
+            AppMessage::AssistantFirstChunkObserved {
+                session_id,
+                round_trip,
+                milliseconds,
+            } => {
+                self.note_first_stream_chunk(session_id.as_str(), round_trip, milliseconds);
+                self.record_worker_event(format!(
+                    "first streamed chunk observed after {milliseconds}ms"
+                ));
+                format!("time to first token observed for round {round_trip}")
+            }
+            AppMessage::AssistantDeltaAppended {
+                session_id,
+                round_trip,
+                delta,
+            } => {
+                self.append_stream_delta(session_id.as_str(), round_trip, delta.as_str());
+                self.record_worker_event(format!(
+                    "assistant delta appended (+{} chars)",
+                    delta.chars().count()
+                ));
+                format!("assistant delta appended for round {round_trip}")
+            }
+            AppMessage::AssistantSnapshotUpdated {
+                session_id,
+                round_trip,
+                snapshot,
+            } => {
+                self.update_stream_snapshot(session_id.as_str(), round_trip, snapshot.as_str());
+                self.record_worker_event(format!(
+                    "assistant snapshot updated ({} chars)",
+                    snapshot.chars().count()
+                ));
+                format!("assistant snapshot updated for round {round_trip}")
+            }
+            AppMessage::AssistantToolCallDeltaUpdated {
+                session_id,
+                round_trip,
+                deltas,
+            } => {
+                self.update_stream_tool_calls(session_id.as_str(), round_trip, deltas.as_slice());
+                self.record_worker_event(format!(
+                    "streamed {} tool call delta(s)",
+                    deltas.len()
+                ));
+                format!("tool call delta updated for round {round_trip}")
+            }
+            AppMessage::AssistantStreamFinished {
+                session_id,
+                round_trip,
+                response_id,
+                response_model,
+                finish_reason,
+            } => {
+                self.finish_stream(
+                    session_id.as_str(),
+                    round_trip,
+                    response_id,
+                    response_model,
+                    finish_reason,
+                );
+                self.record_worker_event(String::from("assistant stream finished"));
+                String::from("assistant stream finished")
+            }
+            AppMessage::AssistantStreamFailed {
+                session_id,
+                round_trip,
+                backend_kind,
+                error,
+            } => {
+                let backend_kind = format!("{backend_kind:?}");
+                self.fail_stream(
+                    session_id.as_str(),
+                    round_trip,
+                    backend_kind.as_str(),
+                    error.as_str(),
+                );
+                self.record_worker_event(String::from("model request failed"));
+                String::from("model request failed")
+            }
             AppMessage::TranscriptActiveTurnSet { turn } => {
                 let role = turn.role().label().to_string();
                 let title = turn.title().to_string();
@@ -768,6 +1097,7 @@ impl ChatScreen {
             }
             AppMessage::TranscriptEntriesCommitted { entries } => {
                 let entry_count = entries.len();
+                self.clear_stream();
                 self.transcript.clear_active_turn();
                 for entry in entries {
                     let label = entry.label().to_string();
@@ -781,6 +1111,7 @@ impl ChatScreen {
             AppMessage::TranscriptEntryCommitted { entry } => {
                 let label = entry.label().to_string();
                 let title = entry.title().to_string();
+                self.clear_stream();
                 self.transcript.clear_active_turn();
                 self.transcript.push_entry(entry);
                 self.snap_transcript_to_latest();
@@ -798,6 +1129,7 @@ impl ChatScreen {
                     profile_name: Some(profile_name.clone()),
                     model_id: Some(model_id.clone()),
                     cwd: Some(cwd),
+                    backend_kind: self.runtime.backend_kind.clone(),
                     phase: self.runtime.phase.clone(),
                     round_trip: self.runtime.round_trip,
                     active_tool: self.runtime.active_tool.clone(),
@@ -1625,6 +1957,72 @@ impl ApprovalOverlay {
     }
 }
 
+fn render_stream_active_turn(stream: &AssistantStreamState) -> ActiveTurn {
+    let mut body = vec![
+        format!("round_trip: {}", stream.round_trip),
+        format!("response_id: {}", preview(stream.response_id.as_str(), 48)),
+        format!("model: {}", preview(stream.response_model.as_str(), 48)),
+        format!("mode: {}", stream.mode.label()),
+    ];
+    if let Some(backend_kind) = stream.backend_kind.as_deref() {
+        body.push(format!("backend: {backend_kind}"));
+    }
+    if let Some(milliseconds) = stream.first_chunk_ms {
+        body.push(format!("ttft_ms: {milliseconds}"));
+    }
+    if let Some(finish_reason) = stream.finish_reason.as_deref() {
+        body.push(format!("finish_reason: {finish_reason}"));
+    }
+    if let Some(error) = stream.failure.as_deref() {
+        body.push(format!("failure: {}", preview(error, 120)));
+    }
+
+    if !stream.tool_calls.is_empty() {
+        body.push(String::from("tool_calls"));
+        for tool in &stream.tool_calls {
+            body.push(format!(
+                "tool[{}]: {}",
+                tool.tool_index,
+                tool.tool_name.as_deref().unwrap_or("unknown")
+            ));
+            if let Some(call_id) = tool.call_id.as_deref() {
+                body.push(format!("call_id: {}", preview(call_id, 48)));
+            }
+            if !tool.arguments.is_empty() {
+                body.push(String::from("arguments"));
+                body.extend(split_text_lines(tool.arguments.as_str()));
+            }
+        }
+    }
+
+    if !stream.assistant_text.is_empty() {
+        body.push(String::from("response"));
+        body.extend(split_text_lines(stream.assistant_text.as_str()));
+    } else if stream.failure.is_none() {
+        body.push(String::from("[waiting for backend reply]"));
+    }
+
+    let role = if stream.assistant_text.is_empty() && !stream.tool_calls.is_empty() {
+        TranscriptRole::Tool
+    } else if stream.failure.is_some() {
+        TranscriptRole::Status
+    } else {
+        TranscriptRole::Assistant
+    };
+    let title = if stream.failure.is_some() {
+        "Assistant Stream Failed"
+    } else if stream.finish_reason.is_some() {
+        "Assistant Stream Complete"
+    } else if matches!(stream.mode, AssistantStreamMode::Snapshot) {
+        "Assistant Snapshot"
+    } else if stream.assistant_text.is_empty() && !stream.tool_calls.is_empty() {
+        "Streaming Tool Call"
+    } else {
+        "Assistant Stream"
+    };
+    ActiveTurn::new(role, title, body)
+}
+
 impl AppleFmUsageSummary {
     fn render_lines(&self) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
@@ -1720,6 +2118,13 @@ fn render_usage_value(value: Option<u64>, truth: Option<&str>) -> String {
         (Some(value), None) => value.to_string(),
         (None, _) => String::from("n/a"),
     }
+}
+
+fn split_text_lines(value: &str) -> Vec<String> {
+    if value.is_empty() {
+        return Vec::new();
+    }
+    value.split('\n').map(ToOwned::to_owned).collect()
 }
 
 fn short_session_id(value: &str) -> String {

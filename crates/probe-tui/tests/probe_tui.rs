@@ -94,6 +94,80 @@ fn transcript_running_turn_snapshot_is_stable() {
 }
 
 #[test]
+fn transcript_streaming_delta_turn_snapshot_is_stable() {
+    let mut app = AppShell::new_for_tests();
+    app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+        session_id: String::from("sess_tui_stream_delta"),
+        profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+        model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+        cwd: String::from("/tmp/probe-workspace"),
+    });
+    app.apply_message(AppMessage::TranscriptEntryCommitted {
+        entry: TranscriptEntry::new(
+            TranscriptRole::User,
+            "You",
+            vec![String::from("Inspect README and summarize Probe.")],
+        ),
+    });
+    app.apply_message(AppMessage::AssistantStreamStarted {
+        session_id: String::from("sess_tui_stream_delta"),
+        round_trip: 1,
+        response_id: String::from("chatcmpl_stream_delta_1"),
+        response_model: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+    });
+    app.apply_message(AppMessage::AssistantFirstChunkObserved {
+        session_id: String::from("sess_tui_stream_delta"),
+        round_trip: 1,
+        milliseconds: 73,
+    });
+    app.apply_message(AppMessage::AssistantDeltaAppended {
+        session_id: String::from("sess_tui_stream_delta"),
+        round_trip: 1,
+        delta: String::from("Probe owns the coding-agent runtime"),
+    });
+    app.apply_message(AppMessage::AssistantDeltaAppended {
+        session_id: String::from("sess_tui_stream_delta"),
+        round_trip: 1,
+        delta: String::from(", including sessions, tools, approvals, and transcripts."),
+    });
+
+    let snapshot = app.render_to_string(100, 28);
+    assert_snapshot!("probe_tui_transcript_streaming_delta_turn", snapshot);
+}
+
+#[test]
+fn transcript_streaming_snapshot_turn_snapshot_is_stable() {
+    let mut app = AppShell::new_for_tests();
+    app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+        session_id: String::from("sess_tui_stream_snapshot"),
+        profile_name: String::from("psionic-apple-fm-bridge"),
+        model_id: String::from("apple-foundation-model"),
+        cwd: String::from("/tmp/probe-workspace"),
+    });
+    app.apply_message(AppMessage::TranscriptEntryCommitted {
+        entry: TranscriptEntry::new(
+            TranscriptRole::User,
+            "You",
+            vec![String::from("Reply with the next honest proof target.")],
+        ),
+    });
+    app.apply_message(AppMessage::AssistantStreamStarted {
+        session_id: String::from("sess_tui_stream_snapshot"),
+        round_trip: 1,
+        response_id: String::from("sess_tui_stream_snapshot"),
+        response_model: String::from("apple-foundation-model"),
+    });
+    app.apply_message(AppMessage::AssistantSnapshotUpdated {
+        session_id: String::from("sess_tui_stream_snapshot"),
+        round_trip: 1,
+        snapshot: String::from("Stream remote Qwen tokens into the retained transcript."),
+    });
+
+    let snapshot = app.render_to_string(100, 28);
+    assert_snapshot!("probe_tui_transcript_streaming_snapshot_turn", snapshot);
+}
+
+#[test]
 fn transcript_committed_turn_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
     app.apply_message(AppMessage::ProbeRuntimeSessionReady {
@@ -145,6 +219,105 @@ fn transcript_committed_turn_snapshot_is_stable() {
 
     let snapshot = app.render_to_string(80, 24);
     assert_snapshot!("probe_tui_transcript_committed_turn", snapshot);
+}
+
+#[test]
+fn stream_failure_keeps_partial_output_visible() {
+    let mut app = AppShell::new_for_tests();
+    app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+        session_id: String::from("sess_tui_failed_stream"),
+        profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+        model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+        cwd: String::from("/tmp/probe-workspace"),
+    });
+    app.apply_message(AppMessage::AssistantStreamStarted {
+        session_id: String::from("sess_tui_failed_stream"),
+        round_trip: 1,
+        response_id: String::from("chatcmpl_failed_stream"),
+        response_model: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+    });
+    app.apply_message(AppMessage::AssistantDeltaAppended {
+        session_id: String::from("sess_tui_failed_stream"),
+        round_trip: 1,
+        delta: String::from("Probe had started answering before "),
+    });
+    app.apply_message(AppMessage::AssistantStreamFailed {
+        session_id: String::from("sess_tui_failed_stream"),
+        round_trip: 1,
+        backend_kind: probe_protocol::backend::BackendKind::OpenAiChatCompletions,
+        error: String::from("transport connection dropped"),
+    });
+
+    let rendered = app.render_to_string(120, 30);
+    assert!(rendered.contains("Assistant Stream Failed"));
+    assert!(rendered.contains("Probe had started answering before"));
+    assert!(rendered.contains("transport connection dropped"));
+}
+
+#[test]
+fn streamed_tool_call_deltas_render_before_authoritative_tool_row() {
+    let mut app = AppShell::new_for_tests();
+    app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+        session_id: String::from("sess_tui_stream_tool"),
+        profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+        model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+        cwd: String::from("/tmp/probe-workspace"),
+    });
+    app.apply_message(AppMessage::AssistantStreamStarted {
+        session_id: String::from("sess_tui_stream_tool"),
+        round_trip: 1,
+        response_id: String::from("chatcmpl_stream_tool"),
+        response_model: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+    });
+    app.apply_message(AppMessage::AssistantToolCallDeltaUpdated {
+        session_id: String::from("sess_tui_stream_tool"),
+        round_trip: 1,
+        deltas: vec![probe_core::runtime::StreamedToolCallDelta {
+            tool_index: 0,
+            call_id: Some(String::from("call_readme_1")),
+            tool_name: Some(String::from("read_file")),
+            arguments_delta: Some(String::from("{\"path\":\"README.md\"}")),
+        }],
+    });
+
+    let rendered = app.render_to_string(120, 30);
+    assert!(rendered.contains("Streaming Tool Call"));
+    assert!(rendered.contains("read_file"));
+    assert!(rendered.contains("README.md"));
+}
+
+#[test]
+fn committed_transcript_replaces_live_stream_cell() {
+    let mut app = AppShell::new_for_tests();
+    app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+        session_id: String::from("sess_tui_stream_commit"),
+        profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+        model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+        cwd: String::from("/tmp/probe-workspace"),
+    });
+    app.apply_message(AppMessage::AssistantStreamStarted {
+        session_id: String::from("sess_tui_stream_commit"),
+        round_trip: 1,
+        response_id: String::from("chatcmpl_stream_commit"),
+        response_model: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+    });
+    app.apply_message(AppMessage::AssistantDeltaAppended {
+        session_id: String::from("sess_tui_stream_commit"),
+        round_trip: 1,
+        delta: String::from("Probe owns the runtime."),
+    });
+    app.apply_message(AppMessage::TranscriptEntryCommitted {
+        entry: TranscriptEntry::new(
+            TranscriptRole::Assistant,
+            "Probe",
+            vec![String::from("Probe owns the runtime.")],
+        ),
+    });
+
+    let rendered = app.render_to_string(120, 30);
+    assert!(rendered.contains("[assistant] Probe"));
+    assert!(rendered.contains("Probe owns the runtime."));
+    assert!(!rendered.contains("[active assistant] Assistant Stream"));
 }
 
 #[test]

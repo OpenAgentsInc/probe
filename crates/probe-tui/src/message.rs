@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use probe_core::runtime::RuntimeEvent;
+use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_core::tools::ToolLoopConfig;
-use probe_protocol::backend::BackendProfile;
+use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_protocol::session::{
     PendingToolApproval, SessionHarnessProfile, ToolApprovalResolution,
 };
@@ -142,6 +142,45 @@ pub struct AppleFmFailureSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppMessage {
+    AssistantStreamStarted {
+        session_id: String,
+        round_trip: usize,
+        response_id: String,
+        response_model: String,
+    },
+    AssistantFirstChunkObserved {
+        session_id: String,
+        round_trip: usize,
+        milliseconds: u64,
+    },
+    AssistantDeltaAppended {
+        session_id: String,
+        round_trip: usize,
+        delta: String,
+    },
+    AssistantSnapshotUpdated {
+        session_id: String,
+        round_trip: usize,
+        snapshot: String,
+    },
+    AssistantToolCallDeltaUpdated {
+        session_id: String,
+        round_trip: usize,
+        deltas: Vec<StreamedToolCallDelta>,
+    },
+    AssistantStreamFinished {
+        session_id: String,
+        round_trip: usize,
+        response_id: String,
+        response_model: String,
+        finish_reason: Option<String>,
+    },
+    AssistantStreamFailed {
+        session_id: String,
+        round_trip: usize,
+        backend_kind: BackendKind,
+        error: String,
+    },
     TranscriptActiveTurnSet {
         turn: ActiveTurn,
     },

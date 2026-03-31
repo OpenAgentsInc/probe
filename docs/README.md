@@ -146,3 +146,8 @@ This folder holds technical planning docs for the Probe runtime.
   - Apple FM session-response streaming in `probe-provider-apple-fm`, explicit
     snapshot semantics instead of fake token deltas, and runtime snapshot
     events that preserve the local Probe tool and approval contract
+- `49-probe-tui-streamed-output-rendering.md`
+  - real incremental TUI rendering for streamed OpenAI deltas and Apple FM
+    snapshots, streamed tool-call assembly in the active cell, compact backend
+    and stream state in the bottom status bar, and authoritative replacement by
+    committed transcript rows

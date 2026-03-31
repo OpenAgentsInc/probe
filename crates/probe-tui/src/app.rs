@@ -367,7 +367,7 @@ impl AppShell {
         }
 
         self.bottom_pane
-            .render(frame, sections[1], self.last_status.as_str(), &pane_state);
+            .render(frame, sections[1], self.bottom_status_line().as_str(), &pane_state);
         if self.active_screen_id() == ScreenId::Chat
             && let Some(cursor) = self.bottom_pane.cursor_position(sections[1], &pane_state)
         {
@@ -396,6 +396,15 @@ impl AppShell {
             .first_mut()
             .and_then(ScreenState::chat_mut)
             .expect("base screen is always chat")
+    }
+
+    fn bottom_status_line(&self) -> String {
+        let runtime = self.base_screen().compact_runtime_status();
+        if runtime.is_empty() {
+            self.last_status.clone()
+        } else {
+            format!("{} | {}", self.last_status, runtime)
+        }
     }
 
     fn bottom_pane_state(&self) -> BottomPaneState {

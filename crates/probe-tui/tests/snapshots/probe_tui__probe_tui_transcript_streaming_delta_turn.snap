@@ -1,0 +1,32 @@
+---
+source: crates/probe-tui/tests/probe_tui.rs
+expression: snapshot
+---
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  Chat │ Events                                                                                   │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ Transcript ─────────────────────────────────────────────────────────────────────────────────────┐
+│ [user] You                                                                                       │
+│   Inspect README and summarize Probe.                                                            │
+│                                                                                                  │
+│ [active assistant] Assistant Stream                                                              │
+│   round_trip: 1                                                                                  │
+│   response_id: chatcmpl_stream_delta_1                                                           │
+│   model: qwen3.5-2b-q8_0-registry.gguf                                                           │
+│   mode: delta                                                                                    │
+│   ttft_ms: 73                                                                                    │
+│   response                                                                                       │
+│   Probe owns the coding-agent runtime, including sessions, tools, approvals, and transcripts.    │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ status: assistant delta appended for round 1 | backend: psionic-qwen35-2b-q8-registry | phase:   │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ Composer ───────────────────────────────────────────────────────────────────────────────────────┐
+│ cmd: plain                                                                                       │
+│ Type a Probe message. Enter submits. Ctrl+J inserts a newline.                                   │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘

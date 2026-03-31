@@ -85,7 +85,12 @@ notes.
 
 At the runtime layer, Probe now distinguishes backend streaming truth
 explicitly: OpenAI-compatible backends stream assistant deltas, while Apple FM
-streams full session snapshots rather than fake token deltas.
+streams full session snapshots rather than fake token deltas. The chat surface
+now renders those streams honestly in place: one retained active cell grows
+with streamed deltas or snapshot replacement until the authoritative
+transcript rows land, streamed tool-call assembly stays visible before final
+tool rows commit, and the bottom status bar carries a compact backend and
+stream summary.
 
 Setup, help, and approval flows live in a typed overlay stack above or in
 place of the composer. A background Apple FM availability/setup check still
@@ -160,3 +165,4 @@ Start with:
 - [docs/45-probe-tui-resumable-approval-broker.md](docs/45-probe-tui-resumable-approval-broker.md)
 - [docs/47-openai-streaming-runtime-delta-events.md](docs/47-openai-streaming-runtime-delta-events.md)
 - [docs/48-apple-fm-streaming-and-snapshot-events.md](docs/48-apple-fm-streaming-and-snapshot-events.md)
+- [docs/49-probe-tui-streamed-output-rendering.md](docs/49-probe-tui-streamed-output-rendering.md)

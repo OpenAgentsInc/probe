@@ -8,7 +8,7 @@ use probe_core::provider::{
 };
 use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, ResolvePendingToolApprovalOutcome,
-    ResolvePendingToolApprovalRequest, RuntimeError, RuntimeEventSink,
+    ResolvePendingToolApprovalRequest, RuntimeError, RuntimeEvent, RuntimeEventSink,
 };
 use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError};
 use probe_protocol::session::{
@@ -181,7 +181,7 @@ fn run_probe_runtime_turn(
     let result = if let Some(session) = state.runtime_session.as_ref() {
         let event_tx = message_tx.clone();
         let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
-            let _ = event_tx.send(AppMessage::ProbeRuntimeEvent { event });
+            forward_runtime_event(&event_tx, event);
         });
         runtime.continue_plain_text_session_with_events(PlainTextResumeRequest {
             session_id: session.session_id.clone(),
@@ -192,7 +192,7 @@ fn run_probe_runtime_turn(
     } else {
         let event_tx = message_tx.clone();
         let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
-            let _ = event_tx.send(AppMessage::ProbeRuntimeEvent { event });
+            forward_runtime_event(&event_tx, event);
         });
         runtime.exec_plain_text_with_events(PlainTextExecRequest {
             profile: config.profile.clone(),
@@ -359,7 +359,7 @@ fn run_pending_tool_approval_resolution(
         .map_or(0, |session| session.rendered_turns);
     let event_tx = message_tx.clone();
     let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
-        let _ = event_tx.send(AppMessage::ProbeRuntimeEvent { event });
+        forward_runtime_event(&event_tx, event);
     });
     let result = runtime.resolve_pending_tool_approval_with_events(
         ResolvePendingToolApprovalRequest {
@@ -496,6 +496,84 @@ fn emit_pending_tool_approvals(
             approvals,
         })
         .map_err(|_| ())
+}
+
+fn forward_runtime_event(message_tx: &Sender<AppMessage>, event: RuntimeEvent) {
+    let message = match event {
+        RuntimeEvent::AssistantStreamStarted {
+            session_id,
+            round_trip,
+            response_id,
+            response_model,
+        } => AppMessage::AssistantStreamStarted {
+            session_id: session_id.as_str().to_string(),
+            round_trip,
+            response_id,
+            response_model,
+        },
+        RuntimeEvent::TimeToFirstTokenObserved {
+            session_id,
+            round_trip,
+            milliseconds,
+        } => AppMessage::AssistantFirstChunkObserved {
+            session_id: session_id.as_str().to_string(),
+            round_trip,
+            milliseconds,
+        },
+        RuntimeEvent::AssistantDelta {
+            session_id,
+            round_trip,
+            delta,
+        } => AppMessage::AssistantDeltaAppended {
+            session_id: session_id.as_str().to_string(),
+            round_trip,
+            delta,
+        },
+        RuntimeEvent::AssistantSnapshot {
+            session_id,
+            round_trip,
+            snapshot,
+        } => AppMessage::AssistantSnapshotUpdated {
+            session_id: session_id.as_str().to_string(),
+            round_trip,
+            snapshot,
+        },
+        RuntimeEvent::ToolCallDelta {
+            session_id,
+            round_trip,
+            deltas,
+        } => AppMessage::AssistantToolCallDeltaUpdated {
+            session_id: session_id.as_str().to_string(),
+            round_trip,
+            deltas,
+        },
+        RuntimeEvent::AssistantStreamFinished {
+            session_id,
+            round_trip,
+            response_id,
+            response_model,
+            finish_reason,
+        } => AppMessage::AssistantStreamFinished {
+            session_id: session_id.as_str().to_string(),
+            round_trip,
+            response_id,
+            response_model,
+            finish_reason,
+        },
+        RuntimeEvent::ModelRequestFailed {
+            session_id,
+            round_trip,
+            backend_kind,
+            error,
+        } => AppMessage::AssistantStreamFailed {
+            session_id: session_id.as_str().to_string(),
+            round_trip,
+            backend_kind,
+            error,
+        },
+        event => AppMessage::ProbeRuntimeEvent { event },
+    };
+    let _ = message_tx.send(message);
 }
 
 fn emit_transcript_delta(
