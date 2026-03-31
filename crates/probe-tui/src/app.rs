@@ -122,6 +122,10 @@ impl AppShell {
             | UiEvent::ComposerDelete
             | UiEvent::ComposerMoveLeft
             | UiEvent::ComposerMoveRight
+            | UiEvent::ComposerHistoryPrevious
+            | UiEvent::ComposerHistoryNext
+            | UiEvent::ComposerAddAttachment
+            | UiEvent::ComposerPaste(_)
             | UiEvent::ComposerMoveHome
             | UiEvent::ComposerMoveEnd
             | UiEvent::ComposerNewline
@@ -130,15 +134,17 @@ impl AppShell {
             {
                 let pane_state = self.bottom_pane_state();
                 if let Some(submitted) = self.bottom_pane.handle_event(event, &pane_state) {
-                    self.base_screen_mut().submit_user_turn(submitted.as_str());
+                    self.base_screen_mut().submit_user_turn(&submitted);
                     self.base_screen_mut().record_event(format!(
                         "queued assistant demo reply: {}",
-                        preview(submitted.as_str(), 48)
+                        submission_preview(&submitted, 48)
                     ));
-                    self.last_status =
-                        format!("submitted chat turn ({} chars)", submitted.chars().count());
+                    self.last_status = format!(
+                        "submitted chat turn ({} chars)",
+                        submitted.text.chars().count()
+                    );
                     if let Err(error) = self.submit_background_task(
-                        BackgroundTaskRequest::transcript_demo_reply(submitted),
+                        BackgroundTaskRequest::transcript_demo_reply(submitted.text.clone()),
                     ) {
                         self.last_status = error;
                     }
@@ -268,7 +274,7 @@ impl AppShell {
 
         let sections = Layout::vertical([
             Constraint::Min(0),
-            Constraint::Length(self.bottom_pane.desired_height()),
+            Constraint::Length(self.bottom_pane.desired_height(&pane_state)),
         ])
         .spacing(1)
         .split(area);
@@ -362,6 +368,19 @@ fn preview(value: &str, max_chars: usize) -> String {
     }
 }
 
+fn submission_preview(
+    submission: &crate::bottom_pane::ComposerSubmission,
+    max_chars: usize,
+) -> String {
+    if !submission.text.is_empty() {
+        return preview(submission.text.as_str(), max_chars);
+    }
+    if let Some(attachment) = submission.attachments.first() {
+        return format!("attachment-only ({})", attachment.label);
+    }
+    String::from("[empty]")
+}
+
 pub fn run_probe_tui() -> io::Result<()> {
     let mut stdout = io::stdout();
     enable_raw_mode()?;
@@ -388,10 +407,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()>
         app.poll_background_messages();
         terminal.draw(|frame| app.render(frame))?;
         if event::poll(TICK_RATE)? {
-            if let CrosstermEvent::Key(key) = event::read()?
-                && let Some(event) = event_from_key(key)
-            {
-                app.dispatch(event);
+            match event::read()? {
+                CrosstermEvent::Key(key) => {
+                    if let Some(event) = event_from_key(key) {
+                        app.dispatch(event);
+                    }
+                }
+                CrosstermEvent::Paste(text) => app.dispatch(UiEvent::ComposerPaste(text)),
+                _ => {}
             }
         } else {
             app.dispatch(UiEvent::Tick);

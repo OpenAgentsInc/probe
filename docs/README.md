@@ -117,3 +117,7 @@ This folder holds technical planning docs for the Probe runtime.
   - the first typed overlay stack for Probe TUI, moving setup/help/approval
     and request-input flows out of the home layout and into explicit focused
     overlays that can disable or replace the composer
+- `40-probe-tui-composer-history-commands-mentions-attachments-and-paste.md`
+  - the first richer Probe draft model with shell-style history recall,
+    slash-command and typed-mention semantics, attachment placeholders, and
+    explicit paste-aware input handling

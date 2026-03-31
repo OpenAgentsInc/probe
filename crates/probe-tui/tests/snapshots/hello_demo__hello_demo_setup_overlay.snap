@@ -21,7 +21,7 @@ expression: snapshot
 
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: opened setup overlay | Tab/Shift+Tab | Ctrl+R | F1 | Ctrl+C          │
+│ status: opened setup overlay | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 | Ctrl+C  │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer (disabled) ────────────────────────────────────────────────────────┐

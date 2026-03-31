@@ -5,6 +5,7 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Padding, Paragraph};
 use ratatui::Frame;
 
+use crate::bottom_pane::ComposerSubmission;
 use crate::event::UiEvent;
 use crate::message::{
     AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
@@ -304,18 +305,52 @@ impl ChatScreen {
         }
     }
 
-    pub fn submit_user_turn(&mut self, submitted: &str) {
+    pub fn submit_user_turn(&mut self, submission: &ComposerSubmission) {
+        let mut body = if submission.text.is_empty() {
+            vec![String::from("[attachment-only draft]")]
+        } else {
+            submission
+                .text
+                .split('\n')
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        };
+        if let Some(command) = &submission.slash_command {
+            body.push(format!("slash_command: /{command}"));
+        }
+        if !submission.mentions.is_empty() {
+            body.push(format!(
+                "mentions: {}",
+                submission
+                    .mentions
+                    .iter()
+                    .map(|mention| format!("{}:{}", mention.kind.label(), mention.value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !submission.attachments.is_empty() {
+            body.push(format!(
+                "attachments: {}",
+                submission
+                    .attachments
+                    .iter()
+                    .map(|attachment| attachment.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if submission.pasted_multiline {
+            body.push(String::from("paste_mode: multiline"));
+        }
         self.transcript.push_entry(TranscriptEntry::new(
             TranscriptRole::User,
             "You",
-            submitted
-                .split('\n')
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>(),
+            body,
         ));
         self.record_event(format!(
             "submitted chat turn ({} chars)",
-            submitted.chars().count()
+            submission.text.chars().count()
         ));
     }
 
@@ -585,6 +620,10 @@ impl ChatScreen {
             | UiEvent::ComposerDelete
             | UiEvent::ComposerMoveLeft
             | UiEvent::ComposerMoveRight
+            | UiEvent::ComposerHistoryPrevious
+            | UiEvent::ComposerHistoryNext
+            | UiEvent::ComposerAddAttachment
+            | UiEvent::ComposerPaste(_)
             | UiEvent::ComposerMoveHome
             | UiEvent::ComposerMoveEnd
             | UiEvent::ComposerNewline
@@ -1029,12 +1068,14 @@ impl HelpScreen {
             Line::from(""),
             Line::from("Tab / Shift+Tab     switch Chat / Events"),
             Line::from("Enter / Ctrl+J      submit / newline"),
+            Line::from("Up / Down           draft history recall"),
+            Line::from("Ctrl+O              add attachment placeholder"),
             Line::from("Ctrl+R / Ctrl+S     rerun setup / open setup"),
             Line::from("Ctrl+A / Ctrl+P     approval / request-input"),
             Line::from("Ctrl+T              toggle operator notes"),
             Line::from("F1 / Esc            toggle or dismiss help"),
             Line::from("Ctrl+C              quit"),
-            Line::from("Overlays take focus and may disable or replace the composer."),
+            Line::from("Slash commands, typed mentions, attachments, and paste state live in the draft model."),
             Line::from(format!("Current stack depth: {stack_depth}")),
         ]));
         ModalCard::new("Help", content).render(frame, area);

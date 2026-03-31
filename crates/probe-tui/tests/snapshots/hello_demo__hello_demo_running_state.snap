@@ -17,13 +17,13 @@ expression: snapshot
 │   Reply with exactly READY.                                │ └───────────────┘
 │   Response                                                 │
 │   [waiting for Apple FM reply]                             │ ┌─ Apple FM ────┐
-│                                                            │ │ state: runnin │
 └────────────────────────────────────────────────────────────┘ └───────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: running Apple FM call 1/3 | Tab/Shift+Tab | Ctrl+R | F1 | Ctrl+C     │
+│ status: running Apple FM call 1/3 | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 |    │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer (busy) ────────────────────────────────────────────────────────────┐
-│ Apple FM setup is running in the background. Composer stays live.            │
+│ cmd: plain                                                                   │
+│ Type a Probe message. Enter submits. Ctrl+J inserts a newline.               │
 └──────────────────────────────────────────────────────────────────────────────┘

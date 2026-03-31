@@ -88,6 +88,8 @@ Keys:
 - `Tab`, `Shift+Tab`: switch `Chat` / `Events`
 - `Enter`: submit the composer
 - `Ctrl+J`: insert a newline
+- `Up`, `Down`: recall draft history
+- `Ctrl+O`: add an attachment placeholder to the draft
 - `Ctrl+R`: rerun setup
 - `Ctrl+S`: open setup overlay
 - `Ctrl+A`: open approval overlay
@@ -98,7 +100,9 @@ Keys:
 - `Ctrl+C`: quit
 
 The composer is active on `Chat` and explicitly disabled while help or other
-tabs own focus.
+tabs own focus. The draft model now tracks slash commands, typed mentions such
+as `@skill:rust` or `@app:github`, attachment placeholders, submission
+history, and multiline paste state.
 
 ## Dev Helpers
 
@@ -133,3 +137,4 @@ Start with:
 - [docs/37-probe-tui-bottom-pane-and-minimal-composer.md](docs/37-probe-tui-bottom-pane-and-minimal-composer.md)
 - [docs/38-probe-tui-transcript-turn-rendering.md](docs/38-probe-tui-transcript-turn-rendering.md)
 - [docs/39-probe-tui-typed-overlay-stack-and-focus-routing.md](docs/39-probe-tui-typed-overlay-stack-and-focus-routing.md)
+- [docs/40-probe-tui-composer-history-commands-mentions-attachments-and-paste.md](docs/40-probe-tui-composer-history-commands-mentions-attachments-and-paste.md)

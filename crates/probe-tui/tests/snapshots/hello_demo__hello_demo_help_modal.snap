@@ -11,17 +11,17 @@ expression: snapshot
            │                                                        │
            │ Tab / Shift+Tab     switch Chat / Events               │
            │ Enter / Ctrl+J      submit / newline                   │
+           │ Up / Down           draft history recall               │
+           │ Ctrl+O              add attachment placeholder         │
            │ Ctrl+R / Ctrl+S     rerun setup / open setup           │
            │ Ctrl+A / Ctrl+P     approval / request-input           │
-           │ Ctrl+T              toggle operator notes              │
-           │ F1 / Esc            toggle or dismiss help             │
            └────────────────────────────────────────────────────────┘
 
 
 
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: opened help modal | Tab/Shift+Tab | Ctrl+R | F1 | Ctrl+C             │
+│ status: opened help modal | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 | Ctrl+C     │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer (disabled) ────────────────────────────────────────────────────────┐

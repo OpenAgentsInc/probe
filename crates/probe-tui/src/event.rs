@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiEvent {
     NextView,
     PreviousView,
@@ -17,6 +17,10 @@ pub enum UiEvent {
     ComposerDelete,
     ComposerMoveLeft,
     ComposerMoveRight,
+    ComposerHistoryPrevious,
+    ComposerHistoryNext,
+    ComposerAddAttachment,
+    ComposerPaste(String),
     ComposerMoveHome,
     ComposerMoveEnd,
     ComposerNewline,
@@ -43,12 +47,17 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
         KeyCode::Delete => Some(UiEvent::ComposerDelete),
         KeyCode::Left => Some(UiEvent::ComposerMoveLeft),
         KeyCode::Right => Some(UiEvent::ComposerMoveRight),
+        KeyCode::Up => Some(UiEvent::ComposerHistoryPrevious),
+        KeyCode::Down => Some(UiEvent::ComposerHistoryNext),
         KeyCode::Home => Some(UiEvent::ComposerMoveHome),
         KeyCode::End => Some(UiEvent::ComposerMoveEnd),
         KeyCode::Char('a') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::OpenApprovalOverlay)
         }
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => Some(UiEvent::Quit),
+        KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiEvent::ComposerAddAttachment)
+        }
         KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::OpenRequestInputOverlay)
         }

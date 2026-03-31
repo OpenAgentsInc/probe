@@ -17,13 +17,13 @@ expression: snapshot
 │                                                            │ └───────────────┘
 │ [assistant] Probe                                          │
 │   Probe owns the coding-agent runtime: sessions,           │ ┌─ Apple FM ────┐
-│ transcripts, tools, approvals, and CLI/TUI surfaces.       │ │ state: idle   │
 └────────────────────────────────────────────────────────────┘ └───────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: committed assistant turn | Tab/Shift+Tab | Ctrl+R | F1 | Ctrl+C      │
+│ status: committed assistant turn | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 |     │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer ───────────────────────────────────────────────────────────────────┐
+│ cmd: plain                                                                   │
 │ Type a Probe message. Enter submits. Ctrl+J inserts a newline.               │
 └──────────────────────────────────────────────────────────────────────────────┘

@@ -17,13 +17,13 @@ expression: snapshot
 │   Reply with exactly READY.                                │ └───────────────┘
 │   Response                                                 │
 │   READY                                                    │ ┌─ Apple FM ────┐
-│   response_id: resp-1                                      │ │ state: comple │
 └────────────────────────────────────────────────────────────┘ └───────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: Apple FM setup completed | Tab/Shift+Tab | Ctrl+R | F1 | Ctrl+C      │
+│ status: Apple FM setup completed | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 |     │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer ───────────────────────────────────────────────────────────────────┐
+│ cmd: plain                                                                   │
 │ Type a Probe message. Enter submits. Ctrl+J inserts a newline.               │
 └──────────────────────────────────────────────────────────────────────────────┘

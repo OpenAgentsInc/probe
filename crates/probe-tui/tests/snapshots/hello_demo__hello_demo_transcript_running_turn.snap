@@ -17,13 +17,13 @@ expression: snapshot
 │                                                            │ └───────────────┘
 │ [active assistant] Probe                                   │
 │   Drafting a reply through the background worker seam.     │ ┌─ Apple FM ────┐
-│   This is the live active-turn cell.                       │ │ state: idle   │
 └────────────────────────────────────────────────────────────┘ └───────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: updated active assistant turn | Tab/Shift+Tab | Ctrl+R | F1 | Ctrl+C │
+│ status: updated active assistant turn | Tab | Ctrl+R/S/A/P/O | Up/Down | F1  │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer ───────────────────────────────────────────────────────────────────┐
+│ cmd: plain                                                                   │
 │ Type a Probe message. Enter submits. Ctrl+J inserts a newline.               │
 └──────────────────────────────────────────────────────────────────────────────┘
