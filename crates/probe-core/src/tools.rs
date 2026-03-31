@@ -650,6 +650,20 @@ impl ToolRegistry {
             .map(|tool_call| session.execute_openai_tool_call(tool_call))
             .collect()
     }
+
+    pub(crate) fn execute_batch_with_observer(
+        &self,
+        context: &ToolExecutionContext,
+        tool_calls: &[ChatToolCall],
+        approval: &ToolApprovalConfig,
+        observer: &mut impl FnMut(&str, &str, &serde_json::Value, ToolRiskClass),
+    ) -> Vec<ExecutedToolCall> {
+        let mut session = self.execution_session(context, approval);
+        tool_calls
+            .iter()
+            .map(|tool_call| session.execute_openai_tool_call_with_observer(tool_call, observer))
+            .collect()
+    }
 }
 
 impl ToolExecutionSession {
@@ -682,6 +696,16 @@ impl ToolExecutionSession {
 
     #[must_use]
     pub fn execute_openai_tool_call(&mut self, tool_call: &ChatToolCall) -> ExecutedToolCall {
+        let mut observer = |_: &str, _: &str, _: &serde_json::Value, _: ToolRiskClass| {};
+        self.execute_openai_tool_call_with_observer(tool_call, &mut observer)
+    }
+
+    #[must_use]
+    pub(crate) fn execute_openai_tool_call_with_observer(
+        &mut self,
+        tool_call: &ChatToolCall,
+        observer: &mut impl FnMut(&str, &str, &serde_json::Value, ToolRiskClass),
+    ) -> ExecutedToolCall {
         let parsed_arguments =
             serde_json::from_str::<serde_json::Value>(tool_call.function.arguments.as_str())
                 .unwrap_or_else(|error| {
@@ -689,10 +713,11 @@ impl ToolExecutionSession {
                         "error": format!("invalid tool arguments json: {error}")
                     })
                 });
-        self.execute_named_call(
+        self.execute_named_call_with_observer(
             tool_call.id.clone(),
             tool_call.function.name.clone(),
             parsed_arguments,
+            observer,
         )
     }
 
@@ -702,6 +727,18 @@ impl ToolExecutionSession {
         call_id: impl Into<String>,
         name: impl Into<String>,
         arguments: serde_json::Value,
+    ) -> ExecutedToolCall {
+        let mut observer = |_: &str, _: &str, _: &serde_json::Value, _: ToolRiskClass| {};
+        self.execute_named_call_with_observer(call_id, name, arguments, &mut observer)
+    }
+
+    #[must_use]
+    pub(crate) fn execute_named_call_with_observer(
+        &mut self,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+        observer: &mut impl FnMut(&str, &str, &serde_json::Value, ToolRiskClass),
     ) -> ExecutedToolCall {
         let call_id = call_id.into();
         let name = name.into();
@@ -757,6 +794,7 @@ impl ToolExecutionSession {
             policy_decision,
             ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved
         ) {
+            observer(call_id.as_str(), name.as_str(), &arguments, risk_class);
             (tool.handler)(&self.context, &arguments).unwrap_or_else(|error| {
                 ToolInvocationOutcome::new(serde_json::json!({ "error": error.to_string() }))
             })

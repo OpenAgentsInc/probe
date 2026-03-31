@@ -1,8 +1,10 @@
 use insta::assert_snapshot;
+use probe_core::runtime::RuntimeEvent;
 use probe_tui::{
-    ActiveTurn, AppMessage, AppShell, AppleFmAvailabilitySummary, AppleFmBackendSummary,
-    AppleFmCallRecord, AppleFmUsageSummary, TranscriptEntry, TranscriptRole, UiEvent,
+    AppMessage, AppShell, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
+    AppleFmUsageSummary, TranscriptEntry, TranscriptRole, UiEvent,
 };
+use serde_json::json;
 
 #[test]
 fn initial_frame_snapshot_is_stable() {
@@ -51,16 +53,14 @@ fn transcript_running_turn_snapshot_is_stable() {
             vec![String::from("Summarize what Probe owns.")],
         ),
     });
-    app.apply_message(AppMessage::TranscriptActiveTurnSet {
-        turn: ActiveTurn::new(
-            TranscriptRole::Assistant,
-            "Probe Runtime",
-            vec![
-                String::from("Dispatching the submitted prompt through the real Probe runtime."),
-                String::from("prompt_preview: Summarize what Probe owns."),
-                String::from("session: sess_demo_running"),
-            ],
-        ),
+    app.apply_message(AppMessage::ProbeRuntimeEvent {
+        event: RuntimeEvent::ToolCallRequested {
+            session_id: probe_protocol::session::SessionId::new("sess_demo_running"),
+            round_trip: 1,
+            call_id: String::from("call_readme_1"),
+            tool_name: String::from("read_file"),
+            arguments: json!({"path":"README.md"}),
+        },
     });
 
     let snapshot = app.render_to_string(80, 24);

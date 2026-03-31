@@ -10,16 +10,16 @@ expression: snapshot
 │ [user] You                                                 │ │ focus: chat   │
 │   Summarize what Probe owns.                               │ │ stack: 1      │
 │                                                            │ │ turns: 1      │
-│ [active assistant] Probe Runtime                           │ │ active: assis │
-│   Dispatching the submitted prompt through the real Probe  │ │ session: sess │
-│ runtime.                                                   │ │ runtime: psio │
-│   prompt_preview: Summarize what Probe owns.               │ └───────────────┘
-│   session: sess_demo_running                               │
-│                                                            │ ┌─ Apple FM ────┐
-└────────────────────────────────────────────────────────────┘ └───────────────┘
+│ [active tool] Tool Requested: read_file                    │ │ active: tool  │
+│   round_trip: 1                                            │ │ session: sess │
+│   call_id: call_readme_1                                   │ │ runtime: psio │
+│   arguments                                                │ │ model: qwen3. │
+│   {                                                        │ │ phase: tool_r │
+│     "path": "README.md"                                    │ └───────────────┘
+└────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: updated active assistant turn | Tab | Ctrl+R/S/A/P/O | Up/Down | F1  │
+│ status: tool call requested: read_file | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer ───────────────────────────────────────────────────────────────────┐

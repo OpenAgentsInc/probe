@@ -13,10 +13,10 @@ expression: snapshot
 │ Committed turns stay in app state while one explicit       │ │ active: none  │
 │ active turn renders live work.                             │ │ session: pend │
 │                                                            │ │ runtime: pend │
+│                                                            │ │ model: pendin │
+│                                                            │ │ phase: pendin │
 │                                                            │ └───────────────┘
-│                                                            │
-│                                                            │ ┌─ Apple FM ────┐
-└────────────────────────────────────────────────────────────┘ └───────────────┘
+└────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ status: probe tui launched | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 | Ctrl+C    │

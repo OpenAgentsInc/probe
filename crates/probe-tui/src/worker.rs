@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
@@ -6,7 +7,7 @@ use probe_core::provider::{
     ProviderUsageTruth,
 };
 use probe_core::runtime::{
-    PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, RuntimeError,
+    PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, RuntimeError, RuntimeEventSink,
 };
 use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError};
 use probe_protocol::session::{
@@ -164,14 +165,22 @@ fn run_probe_runtime_turn(
     };
 
     let result = if let Some(session) = state.runtime_session.as_ref() {
-        runtime.continue_plain_text_session(PlainTextResumeRequest {
+        let event_tx = message_tx.clone();
+        let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
+            let _ = event_tx.send(AppMessage::ProbeRuntimeEvent { event });
+        });
+        runtime.continue_plain_text_session_with_events(PlainTextResumeRequest {
             session_id: session.session_id.clone(),
             profile: config.profile.clone(),
             prompt,
             tool_loop: config.tool_loop.clone(),
-        })
+        }, event_sink)
     } else {
-        runtime.exec_plain_text(PlainTextExecRequest {
+        let event_tx = message_tx.clone();
+        let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
+            let _ = event_tx.send(AppMessage::ProbeRuntimeEvent { event });
+        });
+        runtime.exec_plain_text_with_events(PlainTextExecRequest {
             profile: config.profile.clone(),
             prompt,
             title: Some(String::from("Probe TUI Session")),
@@ -179,7 +188,7 @@ fn run_probe_runtime_turn(
             system_prompt: config.system_prompt.clone(),
             harness_profile: config.harness_profile.clone(),
             tool_loop: config.tool_loop.clone(),
-        })
+        }, event_sink)
     };
 
     match result {

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use probe_core::runtime::RuntimeEvent;
 use probe_core::tools::ToolLoopConfig;
 use probe_protocol::backend::BackendProfile;
 use probe_protocol::session::SessionHarnessProfile;
@@ -131,6 +132,9 @@ pub enum AppMessage {
         profile_name: String,
         model_id: String,
         cwd: String,
+    },
+    ProbeRuntimeEvent {
+        event: RuntimeEvent,
     },
     AppleFmSetupStarted {
         backend: AppleFmBackendSummary,

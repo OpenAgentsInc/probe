@@ -125,3 +125,7 @@ This folder holds technical planning docs for the Probe runtime.
   - the first real `probe-core`-backed TUI turn loop, replacing the demo
     worker with persisted runtime sessions, transcript hydration from the
     session store, and honest error recovery
+- `43-probe-runtime-event-stream-and-live-tui-lifecycle.md`
+  - typed per-turn runtime events in `probe-core`, plus the first live Probe
+    TUI lifecycle rendering for model requests, tool activity, refusal/pause,
+    and assistant commit

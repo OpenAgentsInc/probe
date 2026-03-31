@@ -8,13 +8,14 @@ use std::time::Instant;
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_protocol::session::{
     BackendTurnReceipt, CacheSignal, SessionBackendTarget, SessionHarnessProfile, SessionId,
-    SessionMetadata, SessionTurn, TranscriptItemKind, TurnObservability,
+    SessionMetadata, SessionTurn, ToolRiskClass, TranscriptItemKind, TurnObservability,
 };
 use probe_provider_openai::{ChatMessage, ChatToolCall};
 use psionic_apple_fm::{
     APPLE_FM_TRANSCRIPT_TYPE, APPLE_FM_TRANSCRIPT_VERSION, AppleFmToolCallError, AppleFmTranscript,
     AppleFmTranscriptContent, AppleFmTranscriptEntry, AppleFmTranscriptPayload,
 };
+use serde_json::Value;
 
 use crate::dataset_export::build_decision_summary;
 use crate::provider::{
@@ -43,13 +44,14 @@ enum AppleFmToolLoopInterruption {
     },
 }
 
-#[derive(Clone, Debug)]
 struct AppleFmToolLoopRecorder {
+    session_id: SessionId,
     execution_session: ToolExecutionSession,
     records: Vec<ExecutedToolCall>,
     next_call_index: usize,
     max_callback_calls: usize,
     interruption: Option<AppleFmToolLoopInterruption>,
+    event_sink: Option<Arc<dyn RuntimeEventSink>>,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +83,69 @@ pub struct PlainTextExecOutcome {
     pub usage: Option<ProviderUsage>,
     pub executed_tool_calls: usize,
     pub tool_results: Vec<ExecutedToolCall>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeEvent {
+    TurnStarted {
+        session_id: SessionId,
+        profile_name: String,
+        prompt: String,
+        tool_loop_enabled: bool,
+    },
+    ModelRequestStarted {
+        session_id: SessionId,
+        round_trip: usize,
+        backend_kind: BackendKind,
+    },
+    ToolCallRequested {
+        session_id: SessionId,
+        round_trip: usize,
+        call_id: String,
+        tool_name: String,
+        arguments: Value,
+    },
+    ToolExecutionStarted {
+        session_id: SessionId,
+        round_trip: usize,
+        call_id: String,
+        tool_name: String,
+        risk_class: ToolRiskClass,
+    },
+    ToolExecutionCompleted {
+        session_id: SessionId,
+        round_trip: usize,
+        tool: ExecutedToolCall,
+    },
+    ToolRefused {
+        session_id: SessionId,
+        round_trip: usize,
+        tool: ExecutedToolCall,
+    },
+    ToolPaused {
+        session_id: SessionId,
+        round_trip: usize,
+        tool: ExecutedToolCall,
+    },
+    AssistantTurnCommitted {
+        session_id: SessionId,
+        response_id: String,
+        response_model: String,
+        assistant_text: String,
+    },
+}
+
+pub trait RuntimeEventSink: Send + Sync {
+    fn emit(&self, event: RuntimeEvent);
+}
+
+impl<F> RuntimeEventSink for F
+where
+    F: Fn(RuntimeEvent) + Send + Sync,
+{
+    fn emit(&self, event: RuntimeEvent) {
+        self(event);
+    }
 }
 
 #[derive(Debug)]
@@ -226,6 +291,22 @@ impl ProbeRuntime {
         &self,
         request: PlainTextExecRequest,
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
+        self.exec_plain_text_internal(request, None)
+    }
+
+    pub fn exec_plain_text_with_events(
+        &self,
+        request: PlainTextExecRequest,
+        event_sink: Arc<dyn RuntimeEventSink>,
+    ) -> Result<PlainTextExecOutcome, RuntimeError> {
+        self.exec_plain_text_internal(request, Some(event_sink))
+    }
+
+    fn exec_plain_text_internal(
+        &self,
+        request: PlainTextExecRequest,
+        event_sink: Option<Arc<dyn RuntimeEventSink>>,
+    ) -> Result<PlainTextExecOutcome, RuntimeError> {
         let session = self.session_store.create_session_with(
             NewSession::new(
                 request
@@ -243,16 +324,83 @@ impl ProbeRuntime {
             }),
         )?;
 
-        self.run_plain_text_turn(session, request.profile, request.prompt, request.tool_loop)
+        self.run_plain_text_turn(
+            session,
+            request.profile,
+            request.prompt,
+            request.tool_loop,
+            event_sink,
+        )
     }
 
     pub fn continue_plain_text_session(
         &self,
         request: PlainTextResumeRequest,
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
-        let session = self.session_store.read_metadata(&request.session_id)?;
-        self.run_plain_text_turn(session, request.profile, request.prompt, request.tool_loop)
+        self.continue_plain_text_session_internal(request, None)
     }
+
+    pub fn continue_plain_text_session_with_events(
+        &self,
+        request: PlainTextResumeRequest,
+        event_sink: Arc<dyn RuntimeEventSink>,
+    ) -> Result<PlainTextExecOutcome, RuntimeError> {
+        self.continue_plain_text_session_internal(request, Some(event_sink))
+    }
+
+    fn continue_plain_text_session_internal(
+        &self,
+        request: PlainTextResumeRequest,
+        event_sink: Option<Arc<dyn RuntimeEventSink>>,
+    ) -> Result<PlainTextExecOutcome, RuntimeError> {
+        let session = self.session_store.read_metadata(&request.session_id)?;
+        self.run_plain_text_turn(
+            session,
+            request.profile,
+            request.prompt,
+            request.tool_loop,
+            event_sink,
+        )
+    }
+}
+
+fn emit_runtime_event(event_sink: Option<&Arc<dyn RuntimeEventSink>>, event: RuntimeEvent) {
+    if let Some(event_sink) = event_sink {
+        event_sink.emit(event);
+    }
+}
+
+fn parsed_openai_tool_arguments(tool_call: &ChatToolCall) -> Value {
+    serde_json::from_str(tool_call.function.arguments.as_str())
+        .unwrap_or_else(|_| Value::String(tool_call.function.arguments.clone()))
+}
+
+fn emit_tool_result_event(
+    event_sink: Option<&Arc<dyn RuntimeEventSink>>,
+    session_id: &SessionId,
+    round_trip: usize,
+    tool: &ExecutedToolCall,
+) {
+    let event = if tool.was_executed() {
+        RuntimeEvent::ToolExecutionCompleted {
+            session_id: session_id.clone(),
+            round_trip,
+            tool: tool.clone(),
+        }
+    } else if tool.was_paused() {
+        RuntimeEvent::ToolPaused {
+            session_id: session_id.clone(),
+            round_trip,
+            tool: tool.clone(),
+        }
+    } else {
+        RuntimeEvent::ToolRefused {
+            session_id: session_id.clone(),
+            round_trip,
+            tool: tool.clone(),
+        }
+    };
+    emit_runtime_event(event_sink, event);
 }
 
 pub fn default_probe_home() -> Result<PathBuf, RuntimeError> {
@@ -291,10 +439,20 @@ impl ProbeRuntime {
         profile: BackendProfile,
         prompt: String,
         tool_loop: Option<ToolLoopConfig>,
+        event_sink: Option<Arc<dyn RuntimeEventSink>>,
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
         let tool_loop = tool_loop.filter(|config| !config.registry.is_empty());
+        emit_runtime_event(
+            event_sink.as_ref(),
+            RuntimeEvent::TurnStarted {
+                session_id: session.id.clone(),
+                profile_name: profile.name.clone(),
+                prompt: prompt.clone(),
+                tool_loop_enabled: tool_loop.is_some(),
+            },
+        );
         if tool_loop.is_none() {
-            return self.run_plain_completion_turn(session, profile, prompt);
+            return self.run_plain_completion_turn(session, profile, prompt, event_sink);
         }
         match profile.kind {
             BackendKind::OpenAiChatCompletions => self.run_openai_tool_loop_turn(
@@ -302,12 +460,14 @@ impl ProbeRuntime {
                 profile,
                 prompt,
                 tool_loop.expect("filtered"),
+                event_sink,
             ),
             BackendKind::AppleFmBridge => self.run_apple_fm_tool_loop_turn(
                 session,
                 profile,
                 prompt,
                 tool_loop.expect("filtered"),
+                event_sink,
             ),
         }
     }
@@ -318,6 +478,7 @@ impl ProbeRuntime {
         profile: BackendProfile,
         prompt: String,
         tool_loop: ToolLoopConfig,
+        event_sink: Option<Arc<dyn RuntimeEventSink>>,
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
         let mut messages = self.replay_messages(&session)?;
         let mut pending_user_prompt = Some(prompt);
@@ -325,12 +486,20 @@ impl ProbeRuntime {
         let mut tool_results = Vec::new();
         let max_round_trips = tool_loop.max_model_round_trips;
 
-        for _ in 0..max_round_trips {
+        for round_trip in 1..=max_round_trips {
             let next_user_prompt = pending_user_prompt.as_ref().cloned();
             if let Some(user_prompt) = next_user_prompt.as_ref() {
                 messages.push(ChatMessage::user(user_prompt));
             }
 
+            emit_runtime_event(
+                event_sink.as_ref(),
+                RuntimeEvent::ModelRequestStarted {
+                    session_id: session.id.clone(),
+                    round_trip,
+                    backend_kind: profile.kind,
+                },
+            );
             let request_started = Instant::now();
             let response = openai_tool_loop_response(
                 &profile,
@@ -369,6 +538,18 @@ impl ProbeRuntime {
                 && !tool_calls.is_empty()
             {
                 let tool_calls = tool_calls.clone();
+                for tool_call in &tool_calls {
+                    emit_runtime_event(
+                        event_sink.as_ref(),
+                        RuntimeEvent::ToolCallRequested {
+                            session_id: session.id.clone(),
+                            round_trip,
+                            call_id: tool_call.id.clone(),
+                            tool_name: tool_call.function.name.clone(),
+                            arguments: parsed_openai_tool_arguments(tool_call),
+                        },
+                    );
+                }
                 let _ = self.append_tool_call_turn(
                     &session.id,
                     pending_user_prompt.take(),
@@ -382,11 +563,33 @@ impl ProbeRuntime {
                     &tool_loop,
                     next_user_prompt.as_deref(),
                 )?;
-                let executed = tool_loop.registry.execute_batch(
+                let session_id = session.id.clone();
+                let event_sink_for_tools = event_sink.clone();
+                let executed = tool_loop.registry.execute_batch_with_observer(
                     &execution_context,
                     tool_calls.as_slice(),
                     &tool_loop.approval,
+                    &mut |call_id, tool_name, _arguments, risk_class| {
+                        emit_runtime_event(
+                            event_sink_for_tools.as_ref(),
+                            RuntimeEvent::ToolExecutionStarted {
+                                session_id: session_id.clone(),
+                                round_trip,
+                                call_id: call_id.to_string(),
+                                tool_name: tool_name.to_string(),
+                                risk_class,
+                            },
+                        );
+                    },
                 );
+                for tool in &executed {
+                    emit_tool_result_event(
+                        event_sink.as_ref(),
+                        &session.id,
+                        round_trip,
+                        tool,
+                    );
+                }
                 executed_tool_calls += executed.iter().filter(|tool| tool.was_executed()).count();
                 tool_results.extend(executed.clone());
                 let _ = self.append_tool_result_turn(&session.id, &executed)?;
@@ -425,6 +628,15 @@ impl ProbeRuntime {
                 Some(observability),
                 response.backend_receipt,
             )?;
+            emit_runtime_event(
+                event_sink.as_ref(),
+                RuntimeEvent::AssistantTurnCommitted {
+                    session_id: session.id.clone(),
+                    response_id: response.response_id.clone(),
+                    response_model: response.response_model.clone(),
+                    assistant_text: assistant_text.clone(),
+                },
+            );
             let session = self.session_store.read_metadata(&session.id)?;
             return Ok(PlainTextExecOutcome {
                 session,
@@ -460,15 +672,18 @@ impl ProbeRuntime {
         profile: BackendProfile,
         prompt: String,
         tool_loop: ToolLoopConfig,
+        event_sink: Option<Arc<dyn RuntimeEventSink>>,
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
         let transcript = self.replay_apple_fm_transcript(&session)?;
         let execution_context =
             self.build_tool_execution_context(&session, &tool_loop, Some(prompt.as_str()))?;
         let recorder = Arc::new(Mutex::new(AppleFmToolLoopRecorder::new(
+            session.id.clone(),
             tool_loop
                 .registry
                 .execution_session(&execution_context, &tool_loop.approval),
             tool_loop.max_model_round_trips,
+            event_sink.clone(),
         )));
         let callback_recorder = Arc::clone(&recorder);
         let tool_definitions = tool_loop
@@ -484,6 +699,14 @@ impl ProbeRuntime {
             )
             .collect::<Vec<_>>();
 
+        emit_runtime_event(
+            event_sink.as_ref(),
+            RuntimeEvent::ModelRequestStarted {
+                session_id: session.id.clone(),
+                round_trip: 1,
+                backend_kind: profile.kind,
+            },
+        );
         let request_started = Instant::now();
         let response = apple_fm_tool_loop_response(
             &profile,
@@ -607,6 +830,15 @@ impl ProbeRuntime {
                 Some(observability),
                 response.backend_receipt,
             )?;
+            emit_runtime_event(
+                event_sink.as_ref(),
+                RuntimeEvent::AssistantTurnCommitted {
+                    session_id: session.id.clone(),
+                    response_id: response.response_id.clone(),
+                    response_model: response.response_model.clone(),
+                    assistant_text: response.assistant_text.clone().unwrap_or_default(),
+                },
+            );
             let session = self.session_store.read_metadata(&session.id)?;
             return Ok(PlainTextExecOutcome {
                 session,
@@ -633,6 +865,15 @@ impl ProbeRuntime {
             Some(observability),
             response.backend_receipt,
         )?;
+        emit_runtime_event(
+            event_sink.as_ref(),
+            RuntimeEvent::AssistantTurnCommitted {
+                session_id: session.id.clone(),
+                response_id: response.response_id.clone(),
+                response_model: response.response_model.clone(),
+                assistant_text: assistant_text.clone(),
+            },
+        );
         let session = self.session_store.read_metadata(&session.id)?;
         Ok(PlainTextExecOutcome {
             session,
@@ -651,10 +892,19 @@ impl ProbeRuntime {
         session: SessionMetadata,
         profile: BackendProfile,
         prompt: String,
+        event_sink: Option<Arc<dyn RuntimeEventSink>>,
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
         let mut messages = self.replay_plain_text_messages(&session)?;
         messages.push(PlainTextMessage::user(prompt.clone()));
 
+        emit_runtime_event(
+            event_sink.as_ref(),
+            RuntimeEvent::ModelRequestStarted {
+                session_id: session.id.clone(),
+                round_trip: 1,
+                backend_kind: profile.kind,
+            },
+        );
         let request_started = Instant::now();
         let response = complete_plain_text(&profile, messages).map_err(|source| {
             RuntimeError::ProviderRequest {
@@ -695,6 +945,15 @@ impl ProbeRuntime {
             Some(observability),
             response.backend_receipt,
         )?;
+        emit_runtime_event(
+            event_sink.as_ref(),
+            RuntimeEvent::AssistantTurnCommitted {
+                session_id: session.id.clone(),
+                response_id: response.response_id.clone(),
+                response_model: response.response_model.clone(),
+                assistant_text: assistant_text.clone(),
+            },
+        );
         let session = self.session_store.read_metadata(&session.id)?;
         Ok(PlainTextExecOutcome {
             session,
@@ -1126,13 +1385,20 @@ impl ProbeRuntime {
 }
 
 impl AppleFmToolLoopRecorder {
-    fn new(execution_session: ToolExecutionSession, max_callback_calls: usize) -> Self {
+    fn new(
+        session_id: SessionId,
+        execution_session: ToolExecutionSession,
+        max_callback_calls: usize,
+        event_sink: Option<Arc<dyn RuntimeEventSink>>,
+    ) -> Self {
         Self {
+            session_id,
             execution_session,
             records: Vec::new(),
             next_call_index: 0,
             max_callback_calls,
             interruption: None,
+            event_sink,
         }
     }
 
@@ -1155,11 +1421,36 @@ impl AppleFmToolLoopRecorder {
 
         self.next_call_index += 1;
         let call_id = format!("apple_fm_call_{}", self.next_call_index);
-        let executed = self.execution_session.execute_named_call(
+        emit_runtime_event(
+            self.event_sink.as_ref(),
+            RuntimeEvent::ToolCallRequested {
+                session_id: self.session_id.clone(),
+                round_trip: 1,
+                call_id: call_id.clone(),
+                tool_name: tool_call.name.clone(),
+                arguments: tool_call.arguments.clone(),
+            },
+        );
+        let session_id = self.session_id.clone();
+        let event_sink = self.event_sink.clone();
+        let executed = self.execution_session.execute_named_call_with_observer(
             call_id.clone(),
             tool_call.name.clone(),
             tool_call.arguments,
+            &mut |call_id, tool_name, _arguments, risk_class| {
+                emit_runtime_event(
+                    event_sink.as_ref(),
+                    RuntimeEvent::ToolExecutionStarted {
+                        session_id: session_id.clone(),
+                        round_trip: 1,
+                        call_id: call_id.to_string(),
+                        tool_name: tool_name.to_string(),
+                        risk_class,
+                    },
+                );
+            },
         );
+        emit_tool_result_event(self.event_sink.as_ref(), &self.session_id, 1, &executed);
         let output = serde_json::to_string(&executed.output)
             .unwrap_or_else(|_| String::from("{\"error\":\"tool output encode failed\"}"));
         if executed.was_paused() {
@@ -1286,7 +1577,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, default_session_title,
+        PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, RuntimeEvent,
+        RuntimeError, RuntimeEventSink, default_session_title,
     };
 
     #[derive(Default)]
@@ -1300,6 +1592,29 @@ mod tests {
     struct ToolCallbackResponse {
         status_code: u16,
         body: String,
+    }
+
+    #[derive(Default)]
+    struct TestRuntimeEventCollector {
+        events: Mutex<Vec<RuntimeEvent>>,
+    }
+
+    impl RuntimeEventSink for TestRuntimeEventCollector {
+        fn emit(&self, event: RuntimeEvent) {
+            self.events
+                .lock()
+                .expect("runtime event collector lock")
+                .push(event);
+        }
+    }
+
+    impl TestRuntimeEventCollector {
+        fn snapshot(&self) -> Vec<RuntimeEvent> {
+            self.events
+                .lock()
+                .expect("runtime event collector lock")
+                .clone()
+        }
     }
 
     fn record_apple_session_create(
@@ -2439,6 +2754,122 @@ mod tests {
     }
 
     #[test]
+    fn eventful_tool_loop_emits_ordered_events_for_successful_turn() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let server = FakeOpenAiServer::from_json_responses(vec![
+            json!({
+                "id": "chatcmpl_events_tool_1",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call_readme_1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\":\"README.md\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            json!({
+                "id": "chatcmpl_events_tool_final",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "README inspected."
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "completion_tokens": 4,
+                    "total_tokens": 22
+                }
+            }),
+        ]);
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = server.base_url().to_string();
+        let collector = Arc::new(TestRuntimeEventCollector::default());
+
+        let outcome = runtime
+            .exec_plain_text_with_events(
+                PlainTextExecRequest {
+                    profile,
+                    prompt: String::from("Inspect README.md"),
+                    title: Some(String::from("Eventful Success")),
+                    cwd: environment.workspace().to_path_buf(),
+                    system_prompt: None,
+                    harness_profile: None,
+                    tool_loop: Some(ToolLoopConfig::coding_bootstrap(
+                        ProbeToolChoice::Required,
+                        false,
+                    )),
+                },
+                collector.clone(),
+            )
+            .expect("eventful tool loop should succeed");
+
+        assert_eq!(outcome.assistant_text, "README inspected.");
+        let events = collector.snapshot();
+        let session_id = outcome.session.id.clone();
+        assert_eq!(
+            events,
+            vec![
+                RuntimeEvent::TurnStarted {
+                    session_id: session_id.clone(),
+                    profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+                    prompt: String::from("Inspect README.md"),
+                    tool_loop_enabled: true,
+                },
+                RuntimeEvent::ModelRequestStarted {
+                    session_id: session_id.clone(),
+                    round_trip: 1,
+                    backend_kind: probe_protocol::backend::BackendKind::OpenAiChatCompletions,
+                },
+                RuntimeEvent::ToolCallRequested {
+                    session_id: session_id.clone(),
+                    round_trip: 1,
+                    call_id: String::from("call_readme_1"),
+                    tool_name: String::from("read_file"),
+                    arguments: json!({"path":"README.md"}),
+                },
+                RuntimeEvent::ToolExecutionStarted {
+                    session_id: session_id.clone(),
+                    round_trip: 1,
+                    call_id: String::from("call_readme_1"),
+                    tool_name: String::from("read_file"),
+                    risk_class: probe_protocol::session::ToolRiskClass::ReadOnly,
+                },
+                RuntimeEvent::ToolExecutionCompleted {
+                    session_id: session_id.clone(),
+                    round_trip: 1,
+                    tool: outcome.tool_results[0].clone(),
+                },
+                RuntimeEvent::ModelRequestStarted {
+                    session_id: session_id.clone(),
+                    round_trip: 2,
+                    backend_kind: probe_protocol::backend::BackendKind::OpenAiChatCompletions,
+                },
+                RuntimeEvent::AssistantTurnCommitted {
+                    session_id,
+                    response_id: String::from("chatcmpl_events_tool_final"),
+                    response_model: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+                    assistant_text: String::from("README inspected."),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn tool_loop_can_pause_for_approval() {
         let server = FakeOpenAiServer::from_json_responses(vec![serde_json::json!({
             "id": "chatcmpl_pause_test",
@@ -2515,6 +2946,127 @@ mod tests {
         let requests = server.finish();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].contains("\"tool_choice\":\"required\""));
+    }
+
+    #[test]
+    fn eventful_tool_loop_emits_pause_event_before_returning_error() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let server = FakeOpenAiServer::from_json_responses(vec![json!({
+            "id": "chatcmpl_pause_events",
+            "model": "qwen3.5-2b-q8_0-registry.gguf",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_patch_1",
+                        "type": "function",
+                        "function": {
+                            "name": "apply_patch",
+                            "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        })]);
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = server.base_url().to_string();
+        let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Required, false);
+        tool_loop.approval = ToolApprovalConfig {
+            allow_write_tools: false,
+            allow_network_shell: false,
+            allow_destructive_shell: false,
+            denied_action: ToolDeniedAction::Pause,
+        };
+        let collector = Arc::new(TestRuntimeEventCollector::default());
+
+        let error = runtime
+            .exec_plain_text_with_events(
+                PlainTextExecRequest {
+                    profile,
+                    prompt: String::from("patch hello.txt"),
+                    title: Some(String::from("Eventful Pause")),
+                    cwd: environment.workspace().to_path_buf(),
+                    system_prompt: None,
+                    harness_profile: None,
+                    tool_loop: Some(tool_loop),
+                },
+                collector.clone(),
+            )
+            .expect_err("tool loop should pause");
+
+        let RuntimeError::ToolApprovalPending { session_id, .. } = error else {
+            panic!("expected tool approval pending error");
+        };
+        let events = collector.snapshot();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            &events[0],
+            RuntimeEvent::TurnStarted {
+                session_id: event_session,
+                profile_name,
+                prompt,
+                tool_loop_enabled: true,
+            } if event_session == &session_id
+                && profile_name == "psionic-qwen35-2b-q8-registry"
+                && prompt == "patch hello.txt"
+        ));
+        assert!(matches!(
+            &events[1],
+            RuntimeEvent::ModelRequestStarted {
+                session_id: event_session,
+                round_trip: 1,
+                backend_kind: probe_protocol::backend::BackendKind::OpenAiChatCompletions,
+            } if event_session == &session_id
+        ));
+        assert!(matches!(
+            &events[2],
+            RuntimeEvent::ToolCallRequested {
+                session_id: event_session,
+                round_trip: 1,
+                call_id,
+                tool_name,
+                arguments,
+            } if event_session == &session_id
+                && call_id == "call_patch_1"
+                && tool_name == "apply_patch"
+                && arguments == &json!({
+                    "path":"hello.txt",
+                    "old_text":"world",
+                    "new_text":"probe"
+                })
+        ));
+        match &events[3] {
+            RuntimeEvent::ToolPaused {
+                session_id: event_session,
+                round_trip: 1,
+                tool,
+            } => {
+                assert_eq!(event_session, &session_id);
+                assert_eq!(tool.call_id, "call_patch_1");
+                assert_eq!(tool.name, "apply_patch");
+                assert_eq!(
+                    tool.arguments,
+                    json!({
+                        "path":"hello.txt",
+                        "old_text":"world",
+                        "new_text":"probe"
+                    })
+                );
+                assert_eq!(tool.tool_execution.risk_class, probe_protocol::session::ToolRiskClass::Write);
+                assert_eq!(tool.tool_execution.policy_decision, ToolPolicyDecision::Paused);
+                assert_eq!(tool.tool_execution.approval_state, ToolApprovalState::Pending);
+                assert_eq!(
+                    tool.tool_execution.reason.as_deref(),
+                    Some("tool `apply_patch` requires write approval under the active local policy")
+                );
+                assert_eq!(tool.output["error"], "tool execution blocked by local approval policy");
+            }
+            other => panic!("expected ToolPaused event, got {other:?}"),
+        }
     }
 
     #[test]

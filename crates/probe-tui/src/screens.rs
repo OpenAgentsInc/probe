@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use probe_core::runtime::RuntimeEvent;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Padding, Paragraph};
@@ -14,7 +15,7 @@ use crate::message::{
 use crate::transcript::{ActiveTurn, RetainedTranscript, TranscriptEntry, TranscriptRole};
 use crate::widgets::{padded_title, InfoPanel, ModalCard, SidebarPanel, TabStrip};
 
-const MAX_EVENT_LOG: usize = 8;
+const MAX_EVENT_LOG: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenId {
@@ -83,6 +84,9 @@ struct ProbeRuntimeState {
     profile_name: Option<String>,
     model_id: Option<String>,
     cwd: Option<String>,
+    phase: Option<String>,
+    round_trip: Option<usize>,
+    active_tool: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,10 +309,6 @@ impl ChatScreen {
         self.runtime.session_id.as_deref()
     }
 
-    pub fn runtime_session_label(&self) -> &str {
-        self.runtime_session_id().unwrap_or("new session")
-    }
-
     pub fn record_event(&mut self, message: impl Into<String>) {
         self.recent_events.push_front(message.into());
         while self.recent_events.len() > MAX_EVENT_LOG {
@@ -395,6 +395,176 @@ impl ChatScreen {
         ));
     }
 
+    fn apply_runtime_event(&mut self, event: RuntimeEvent) -> String {
+        match event {
+            RuntimeEvent::TurnStarted {
+                session_id,
+                profile_name,
+                prompt,
+                tool_loop_enabled,
+            } => {
+                self.runtime.session_id = Some(session_id.as_str().to_string());
+                self.runtime.profile_name = Some(profile_name.clone());
+                self.runtime.phase = Some(String::from("turn_started"));
+                self.runtime.round_trip = None;
+                self.runtime.active_tool = None;
+                self.transcript.set_active_turn(ActiveTurn::new(
+                    TranscriptRole::Assistant,
+                    "Probe Runtime",
+                    vec![
+                        format!("profile: {profile_name}"),
+                        format!("tool_loop: {}", if tool_loop_enabled { "enabled" } else { "disabled" }),
+                        format!("prompt_preview: {}", preview(prompt.as_str(), 72)),
+                        format!("session: {}", short_session_id(session_id.as_str())),
+                    ],
+                ));
+                self.record_worker_event(String::from("runtime turn started"));
+                String::from("runtime turn started")
+            }
+            RuntimeEvent::ModelRequestStarted {
+                session_id,
+                round_trip,
+                backend_kind,
+            } => {
+                self.runtime.session_id = Some(session_id.as_str().to_string());
+                self.runtime.phase = Some(String::from("model_request"));
+                self.runtime.round_trip = Some(round_trip);
+                self.runtime.active_tool = None;
+                self.transcript.set_active_turn(ActiveTurn::new(
+                    TranscriptRole::Assistant,
+                    "Model Request",
+                    vec![
+                        format!("backend: {:?}", backend_kind),
+                        format!("round_trip: {round_trip}"),
+                        format!("session: {}", short_session_id(session_id.as_str())),
+                    ],
+                ));
+                self.record_worker_event(format!("model request started: round {round_trip}"));
+                format!("model request started for round {round_trip}")
+            }
+            RuntimeEvent::ToolCallRequested {
+                session_id,
+                round_trip,
+                call_id,
+                tool_name,
+                arguments,
+            } => {
+                self.runtime.session_id = Some(session_id.as_str().to_string());
+                self.runtime.phase = Some(String::from("tool_requested"));
+                self.runtime.round_trip = Some(round_trip);
+                self.runtime.active_tool = Some(tool_name.clone());
+                let mut body = vec![
+                    format!("round_trip: {round_trip}"),
+                    format!("call_id: {call_id}"),
+                    String::from("arguments"),
+                ];
+                body.extend(compact_json_lines(&arguments, 5));
+                self.transcript.set_active_turn(ActiveTurn::new(
+                    TranscriptRole::Tool,
+                    format!("Tool Requested: {tool_name}"),
+                    body,
+                ));
+                self.record_worker_event(format!("tool call requested: {tool_name}"));
+                format!("tool call requested: {tool_name}")
+            }
+            RuntimeEvent::ToolExecutionStarted {
+                session_id,
+                round_trip,
+                call_id,
+                tool_name,
+                risk_class,
+            } => {
+                self.runtime.session_id = Some(session_id.as_str().to_string());
+                self.runtime.phase = Some(String::from("tool_running"));
+                self.runtime.round_trip = Some(round_trip);
+                self.runtime.active_tool = Some(tool_name.clone());
+                self.transcript.set_active_turn(ActiveTurn::new(
+                    TranscriptRole::Tool,
+                    format!("Running Tool: {tool_name}"),
+                    vec![
+                        format!("round_trip: {round_trip}"),
+                        format!("call_id: {call_id}"),
+                        format!("risk_class: {}", render_runtime_risk_class(risk_class)),
+                    ],
+                ));
+                self.record_worker_event(format!("tool execution started: {tool_name}"));
+                format!("tool execution started: {tool_name}")
+            }
+            RuntimeEvent::ToolExecutionCompleted {
+                session_id,
+                round_trip,
+                tool,
+            } => {
+                self.runtime.session_id = Some(session_id.as_str().to_string());
+                self.runtime.phase = Some(String::from("tool_completed"));
+                self.runtime.round_trip = Some(round_trip);
+                self.runtime.active_tool = Some(tool.name.clone());
+                self.transcript.set_active_turn(ActiveTurn::new(
+                    TranscriptRole::Tool,
+                    format!("Completed Tool: {}", tool.name),
+                    runtime_tool_body_lines(round_trip, &tool),
+                ));
+                self.record_worker_event(format!("tool execution completed: {}", tool.name));
+                format!("tool execution completed: {}", tool.name)
+            }
+            RuntimeEvent::ToolRefused {
+                session_id,
+                round_trip,
+                tool,
+            } => {
+                self.runtime.session_id = Some(session_id.as_str().to_string());
+                self.runtime.phase = Some(String::from("tool_refused"));
+                self.runtime.round_trip = Some(round_trip);
+                self.runtime.active_tool = Some(tool.name.clone());
+                self.transcript.set_active_turn(ActiveTurn::new(
+                    TranscriptRole::Status,
+                    format!("Tool Refused: {}", tool.name),
+                    runtime_tool_body_lines(round_trip, &tool),
+                ));
+                self.record_worker_event(format!("tool refused: {}", tool.name));
+                format!("tool refused: {}", tool.name)
+            }
+            RuntimeEvent::ToolPaused {
+                session_id,
+                round_trip,
+                tool,
+            } => {
+                self.runtime.session_id = Some(session_id.as_str().to_string());
+                self.runtime.phase = Some(String::from("tool_paused"));
+                self.runtime.round_trip = Some(round_trip);
+                self.runtime.active_tool = Some(tool.name.clone());
+                self.transcript.set_active_turn(ActiveTurn::new(
+                    TranscriptRole::Status,
+                    format!("Approval Pending: {}", tool.name),
+                    runtime_tool_body_lines(round_trip, &tool),
+                ));
+                self.record_worker_event(format!("tool paused for approval: {}", tool.name));
+                format!("tool paused for approval: {}", tool.name)
+            }
+            RuntimeEvent::AssistantTurnCommitted {
+                session_id,
+                response_id,
+                response_model,
+                assistant_text,
+            } => {
+                self.runtime.session_id = Some(session_id.as_str().to_string());
+                self.runtime.phase = Some(String::from("assistant_committed"));
+                self.runtime.active_tool = None;
+                self.transcript.set_active_turn(ActiveTurn::new(
+                    TranscriptRole::Assistant,
+                    "Probe",
+                    vec![
+                        format!("response_id: {response_id}"),
+                        format!("model: {}", preview(response_model.as_str(), 48)),
+                        preview(assistant_text.as_str(), 96),
+                    ],
+                ));
+                self.record_worker_event(String::from("assistant turn committed"));
+                String::from("assistant turn committed")
+            }
+        }
+    }
+
     pub fn apply_message(&mut self, message: AppMessage) -> String {
         match message {
             AppMessage::TranscriptActiveTurnSet { turn } => {
@@ -434,6 +604,9 @@ impl ChatScreen {
                     profile_name: Some(profile_name.clone()),
                     model_id: Some(model_id.clone()),
                     cwd: Some(cwd),
+                    phase: self.runtime.phase.clone(),
+                    round_trip: self.runtime.round_trip,
+                    active_tool: self.runtime.active_tool.clone(),
                 };
                 self.record_worker_event(format!(
                     "runtime session ready: {} via {}",
@@ -445,6 +618,7 @@ impl ChatScreen {
                     short_session_id(session_id.as_str())
                 )
             }
+            AppMessage::ProbeRuntimeEvent { event } => self.apply_runtime_event(event),
             AppMessage::AppleFmSetupStarted { backend } => {
                 self.setup.backend = Some(backend.clone());
                 self.setup.phase = TaskPhase::CheckingAvailability;
@@ -705,7 +879,7 @@ impl ChatScreen {
         };
         InfoPanel::new("Transcript", self.render_primary_body()).render(frame, columns[0]);
 
-        let sidebar = Layout::vertical([Constraint::Length(8), Constraint::Min(0)])
+        let sidebar = Layout::vertical([Constraint::Length(10), Constraint::Min(0)])
             .spacing(1)
             .split(columns[1]);
         SidebarPanel::new(
@@ -838,6 +1012,22 @@ impl ChatScreen {
             .as_deref()
             .map(|value| preview(value, 18))
             .unwrap_or_else(|| String::from("pending"));
+        let phase = self
+            .runtime
+            .phase
+            .clone()
+            .unwrap_or_else(|| String::from("pending"));
+        let round_trip = self
+            .runtime
+            .round_trip
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| String::from("pending"));
+        let active_tool = self
+            .runtime
+            .active_tool
+            .as_deref()
+            .map(|value| preview(value, 18))
+            .unwrap_or_else(|| String::from("none"));
         let cwd = self
             .runtime
             .cwd
@@ -859,6 +1049,9 @@ impl ChatScreen {
             format!("session: {session}"),
             format!("runtime: {profile}"),
             format!("model: {model}"),
+            format!("phase: {phase}"),
+            format!("round: {round_trip}"),
+            format!("tool: {active_tool}"),
             format!("cwd: {cwd}"),
         ]
     }
@@ -1416,6 +1609,55 @@ impl AppleFmUsageSummary {
             )));
         }
         lines
+    }
+}
+
+fn runtime_tool_body_lines(
+    round_trip: usize,
+    tool: &probe_core::tools::ExecutedToolCall,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!("round_trip: {round_trip}"),
+        format!("call_id: {}", tool.call_id),
+        format!(
+            "risk_class: {}",
+            render_runtime_risk_class(tool.tool_execution.risk_class)
+        ),
+    ];
+    if let Some(reason) = tool.tool_execution.reason.as_ref() {
+        lines.push(format!("reason: {reason}"));
+    }
+    if !tool.tool_execution.files_touched.is_empty() {
+        lines.push(format!(
+            "files_touched: {}",
+            tool.tool_execution.files_touched.join(", ")
+        ));
+    }
+    lines.push(String::from("output"));
+    lines.extend(compact_json_lines(&tool.output, 5));
+    lines
+}
+
+fn compact_json_lines(value: &serde_json::Value, max_lines: usize) -> Vec<String> {
+    let mut lines = serde_json::to_string_pretty(value)
+        .unwrap_or_else(|_| value.to_string())
+        .lines()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        lines.push(String::from("..."));
+    }
+    lines
+}
+
+fn render_runtime_risk_class(value: probe_protocol::session::ToolRiskClass) -> &'static str {
+    match value {
+        probe_protocol::session::ToolRiskClass::ReadOnly => "read_only",
+        probe_protocol::session::ToolRiskClass::ShellReadOnly => "shell_read_only",
+        probe_protocol::session::ToolRiskClass::Write => "write",
+        probe_protocol::session::ToolRiskClass::Network => "network",
+        probe_protocol::session::ToolRiskClass::Destructive => "destructive",
     }
 }
 

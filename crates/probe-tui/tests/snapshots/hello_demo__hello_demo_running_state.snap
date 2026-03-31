@@ -13,10 +13,10 @@ expression: snapshot
 │                                                            │ │ active: tool  │
 │ [active tool] Call 1/3: Sanity Check                       │ │ session: pend │
 │   Prompt                                                   │ │ runtime: pend │
-│   Reply with exactly READY.                                │ └───────────────┘
-│   Response                                                 │
-│   [waiting for Apple FM reply]                             │ ┌─ Apple FM ────┐
-└────────────────────────────────────────────────────────────┘ └───────────────┘
+│   Reply with exactly READY.                                │ │ model: pendin │
+│   Response                                                 │ │ phase: pendin │
+│   [waiting for Apple FM reply]                             │ └───────────────┘
+└────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ status: running Apple FM call 1/3 | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 |    │

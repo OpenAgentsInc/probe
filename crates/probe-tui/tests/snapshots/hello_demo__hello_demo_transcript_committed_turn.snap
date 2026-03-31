@@ -13,10 +13,10 @@ expression: snapshot
 │ [tool] Tool Call: read_file                                │ │ active: none  │
 │   turn: 1                                                  │ │ session: sess │
 │   call_id: call_readme_1                                   │ │ runtime: psio │
-│   arguments                                                │ └───────────────┘
-│   {                                                        │
-│     "path": "README.md"                                    │ ┌─ Apple FM ────┐
-└────────────────────────────────────────────────────────────┘ └───────────────┘
+│   arguments                                                │ │ model: qwen3. │
+│   {                                                        │ │ phase: pendin │
+│     "path": "README.md"                                    │ └───────────────┘
+└────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ status: committed assistant turn | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 |     │

@@ -24,7 +24,6 @@ use crate::screens::{
     ActiveTab, ApprovalOverlay, ChatScreen, HelpScreen, RequestInputOverlay, ScreenAction,
     ScreenCommand, ScreenId, ScreenState, SetupOverlay, TaskPhase,
 };
-use crate::transcript::{ActiveTurn, TranscriptRole};
 use crate::worker::BackgroundWorker;
 
 const TICK_RATE: Duration = Duration::from_millis(250);
@@ -166,23 +165,9 @@ impl AppShell {
                 let pane_state = self.bottom_pane_state();
                 if let Some(submitted) = self.bottom_pane.handle_event(event, &pane_state) {
                     let preview = submission_preview(&submitted, 48);
-                    let session_label = self.base_screen().runtime_session_label().to_string();
                     self.base_screen_mut().submit_user_turn(&submitted);
                     self.base_screen_mut()
                         .record_event(format!("queued Probe runtime turn: {preview}"));
-                    self.apply_message(AppMessage::TranscriptActiveTurnSet {
-                        turn: ActiveTurn::new(
-                            TranscriptRole::Assistant,
-                            "Probe Runtime",
-                            vec![
-                                String::from(
-                                    "Dispatching the submitted prompt through the real Probe runtime.",
-                                ),
-                                format!("prompt_preview: {preview}"),
-                                format!("session: {session_label}"),
-                            ],
-                        ),
-                    });
                     self.last_status = format!(
                         "submitted chat turn ({} chars)",
                         submitted.text.chars().count()
@@ -680,11 +665,26 @@ mod tests {
         let mut saw_active_turn = false;
         wait_for_app_condition(&mut app, Duration::from_secs(2), |app| {
             let rendered = app.render_to_string(120, 32);
-            if rendered.contains("[active assistant] Probe Runtime") {
+            if rendered.contains("[active assistant]")
+                || rendered.contains("[active tool]")
+                || rendered.contains("[active status]")
+            {
                 saw_active_turn = true;
             }
             app.worker_events()
                 .iter()
+                .any(|entry| entry.contains("tool call requested: read_file"))
+                && app
+                    .worker_events()
+                    .iter()
+                    .any(|entry| entry.contains("tool execution started: read_file"))
+                && app
+                    .worker_events()
+                    .iter()
+                    .any(|entry| entry.contains("tool execution completed: read_file"))
+                && app
+                    .worker_events()
+                    .iter()
                 .any(|entry| entry.contains("committed tool turn: Tool Call: read_file"))
                 && app
                     .worker_events()
