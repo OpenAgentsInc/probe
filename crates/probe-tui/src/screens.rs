@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, Padding, Paragraph};
 
 use crate::event::UiEvent;
 use crate::message::{
@@ -403,12 +403,7 @@ impl HelloScreen {
         let sections = Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
             .spacing(1)
             .split(area);
-        TabStrip::new(
-            "Apple FM Setup",
-            "Probe-owned Apple Foundation Models prove-out with availability gating and live plain-text calls.",
-            self.active_tab,
-        )
-        .render(frame, sections[0]);
+        TabStrip::new(self.active_tab).render(frame, sections[0]);
 
         match self.active_tab {
             ActiveTab::Overview => self.render_overview(frame, sections[1], stack_depth),
@@ -468,7 +463,12 @@ impl HelloScreen {
             .collect::<Vec<_>>();
         frame.render_widget(
             List::new(ui_items)
-                .block(ratatui::widgets::Block::bordered().title(padded_title("UI Event Log"))),
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .padding(Padding::horizontal(1))
+                        .title(padded_title("UI Event Log")),
+                ),
             columns[0],
         );
 
@@ -481,7 +481,10 @@ impl HelloScreen {
         frame.render_widget(
             List::new(worker_items)
                 .block(
-                    ratatui::widgets::Block::bordered().title(padded_title("Apple FM Timeline")),
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .padding(Padding::horizontal(1))
+                        .title(padded_title("Apple FM Timeline")),
                 ),
             columns[1],
         );

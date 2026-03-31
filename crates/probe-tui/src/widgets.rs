@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph, Tabs, Wrap};
 
 use crate::screens::ActiveTab;
 
@@ -21,31 +21,8 @@ pub(crate) fn padded_title(title: &str) -> String {
     format!("─ {title} ")
 }
 
-pub struct HeaderBar<'a> {
-    title: &'a str,
-    subtitle: &'a str,
-    focus: &'a str,
-}
-
-impl<'a> HeaderBar<'a> {
-    pub const fn new(title: &'a str, subtitle: &'a str, focus: &'a str) -> Self {
-        Self {
-            title,
-            subtitle,
-            focus,
-        }
-    }
-
-    pub fn render(self, frame: &mut Frame<'_>, area: Rect) {
-        let block = Block::default().borders(Borders::ALL).style(shell_border());
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let lines = vec![
-            Line::styled(self.title, shell_accent()),
-            Line::from(format!("{} | focus={}", self.subtitle, self.focus)),
-        ];
-        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Left), inner);
-    }
+fn panel_padding() -> Padding {
+    Padding::horizontal(1)
 }
 
 pub struct FooterBar<'a> {
@@ -58,7 +35,10 @@ impl<'a> FooterBar<'a> {
     }
 
     pub fn render(self, frame: &mut Frame<'_>, area: Rect) {
-        let block = Block::default().borders(Borders::ALL).style(shell_border());
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .padding(panel_padding())
+            .style(shell_border());
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let lines = vec![
@@ -72,40 +52,30 @@ impl<'a> FooterBar<'a> {
     }
 }
 
-pub struct TabStrip<'a> {
-    title: &'a str,
-    subtitle: &'a str,
+pub struct TabStrip {
     active_tab: ActiveTab,
 }
 
-impl<'a> TabStrip<'a> {
-    pub const fn new(title: &'a str, subtitle: &'a str, active_tab: ActiveTab) -> Self {
-        Self {
-            title,
-            subtitle,
-            active_tab,
-        }
+impl TabStrip {
+    pub const fn new(active_tab: ActiveTab) -> Self {
+        Self { active_tab }
     }
 
     pub fn render(self, frame: &mut Frame<'_>, area: Rect) {
-        let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(2)]).split(area);
-        frame.render_widget(
-            Paragraph::new(self.subtitle).style(Style::default().fg(Color::Rgb(0xa7, 0xc9, 0xe8))),
-            rows[0],
-        );
         let tabs = Tabs::new(vec!["Overview", "Events"])
             .select(match self.active_tab {
                 ActiveTab::Overview => 0,
                 ActiveTab::Events => 1,
             })
+            .padding(" ", " ")
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(padded_title(self.title))
+                    .padding(panel_padding())
                     .style(shell_border()),
             )
             .highlight_style(shell_accent());
-        frame.render_widget(tabs, rows[1]);
+        frame.render_widget(tabs, area);
     }
 }
 
@@ -125,6 +95,7 @@ impl<'a> InfoPanel<'a> {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
+                        .padding(panel_padding())
                         .title(padded_title(self.title))
                         .style(shell_border()),
                 )
@@ -154,6 +125,7 @@ impl SidebarPanel {
             List::new(items).block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .padding(panel_padding())
                     .title(padded_title(self.title))
                     .style(shell_border()),
             ),
@@ -187,6 +159,7 @@ impl<'a> ModalCard<'a> {
         let modal_area = horizontal[0];
         let block = Block::default()
             .borders(Borders::ALL)
+            .padding(panel_padding())
             .title(padded_title(self.title))
             .style(
                 Style::default()

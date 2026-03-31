@@ -4,26 +4,26 @@ assertion_line: 211
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│Probe Apple FM Setup                                                          │
-└──────────────────────────────────────────────────────────────────────────────┘
-
-Probe-owned Apple Foundation Models prove-out with availability gating and live
-┌─ Apple FM Setup ─────────────────────────────────────────────────────────────┐
+│  Overview │ Events                                                           │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Current Detail ────────────────────────────┐ ┌─ Setup Status ───────────────┐
-│Completed calls: 3                           │ │phase: completed              │
-│ 1. Sanity Check                             │ │calls_done: 3                 │
-│    READY                                    │ │focus: setup screen           │
-│ 2. Runtime Boundary                         │ └──────────────────────────────┘
-│    Probe owns the coding-agent runtime.     │
-│ 3. Next Step                                │ ┌─ Backend Facts ──────────────┐
-│    The TUI should now prove live Apple FM   │ │profile: psionic-apple-fm-brid│
-│setup...                                     │ │base_url: http://127.0.0.1:114│
-│                                             │ │model: apple-foundation-model │
-│last_response_id: resp-3                     │ └──────────────────────────────┘
+│ Completed calls: 3                          │ │ phase: completed             │
+│  1. Sanity Check                            │ │ calls_done: 3                │
+│     READY                                   │ │ focus: setup screen          │
+│  2. Runtime Boundary                        │ │ stack_depth: 1               │
+│     Probe owns the coding-agent runtime.    │ │ availability_ready: true     │
+│  3. Next Step                               │ └──────────────────────────────┘
+│     The TUI should now prove live Apple FM  │
+│ setup...                                    │ ┌─ Backend Facts ──────────────┐
+│                                             │ │ profile: psionic-apple-fm-br │
+│ last_response_id: resp-3                    │ │ base_url: http://127.0.0.1:1 │
+│ model: apple-foundation-model               │ │ model: apple-foundation-mode │
+│ usage_total: 34 (exact)                     │ │                              │
+│                                             │ │                              │
+│                                             │ └──────────────────────────────┘
 └─────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│Tab/Arrow switch view | r rerun setup | t toggle detail | ? help | q quit     │
+│ Tab/Arrow switch view | r rerun setup | t toggle detail | ? help | q quit    │
 └──────────────────────────────────────────────────────────────────────────────┘

@@ -3,27 +3,27 @@ source: crates/probe-tui/tests/hello_demo.rs
 assertion_line: 19
 expression: snapshot
 ---
-┌──────────────────────────────────────────────────────────────────────────────┐
-│Probe Apple FM Setup                                                          │
-└──────────────────────────────────────────────────────────────────────────────┘
 
 
 
 
            ┌─ Help ─────────────────────────────────────────────────┐
-           │Probe Apple FM Setup Keys                               │
+           │ Probe Apple FM Setup Keys                              │
            │                                                        │
-           │Tab / Left / Right  switch views                        │
-           │r                   rerun Apple FM setup                │
-           │t                   toggle operator notes / live detail │
-           │? or F1             open or dismiss this modal          │
-           │Esc                 dismiss this modal                  │
-           │q or Ctrl+C         quit                                │
+           │ Tab / Left / Right  switch views                       │
+           │ r                   rerun Apple FM setup               │
+           │ t                   toggle operator notes / live       │
+           │ detail                                                 │
+           │ ? or F1             open or dismiss this modal         │
+           │ Esc                 dismiss this modal                 │
+           │ q or Ctrl+C         quit                               │
+           │                                                        │
+           │ Current stack depth: 2                                 │
            └────────────────────────────────────────────────────────┘
 
 
 
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│Tab/Arrow switch view | r rerun setup | t toggle detail | ? help | q quit     │
+│ Tab/Arrow switch view | r rerun setup | t toggle detail | ? help | q quit    │
 └──────────────────────────────────────────────────────────────────────────────┘

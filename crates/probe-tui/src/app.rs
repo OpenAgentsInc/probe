@@ -18,7 +18,7 @@ use crate::screens::{
     ActiveTab, HelloScreen, HelpScreen, ScreenAction, ScreenCommand, ScreenId, ScreenState,
     TaskPhase,
 };
-use crate::widgets::{FooterBar, HeaderBar};
+use crate::widgets::FooterBar;
 use crate::worker::BackgroundWorker;
 
 const TICK_RATE: Duration = Duration::from_millis(250);
@@ -188,32 +188,18 @@ impl AppShell {
 
     pub fn render(&self, frame: &mut Frame<'_>) {
         let area = frame.area();
-        let sections = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Min(0),
-            Constraint::Length(3),
-        ])
-        .spacing(1)
-        .split(area);
-        let focus = match self.active_screen_id() {
-            ScreenId::Hello => "setup screen",
-            ScreenId::Help => "help modal",
-        };
-        HeaderBar::new(
-            "Probe Apple FM Setup",
-            "Probe-owned Apple Foundation Models prove-out with retained UI state",
-            focus,
-        )
-        .render(frame, sections[0]);
+        let sections = Layout::vertical([Constraint::Min(0), Constraint::Length(3)])
+            .spacing(1)
+            .split(area);
 
-        self.screens[0].render(frame, sections[1], self.screens.len());
+        self.screens[0].render(frame, sections[0], self.screens.len());
         for overlay in self.screens.iter().skip(1) {
             if overlay.is_modal() {
-                overlay.render(frame, sections[1], self.screens.len());
+                overlay.render(frame, sections[0], self.screens.len());
             }
         }
 
-        FooterBar::new(self.last_status.as_str()).render(frame, sections[2]);
+        FooterBar::new(self.last_status.as_str()).render(frame, sections[1]);
     }
 
     pub fn render_to_string(&self, width: u16, height: u16) -> String {
