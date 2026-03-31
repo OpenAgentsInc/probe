@@ -71,12 +71,19 @@ cargo run -p probe-cli -- exec \
 
 `cargo probe` is the current top-level Probe UI entrypoint. The current shell
 uses a retained in-memory transcript widget with one explicit active-turn cell.
-On launch it checks the Apple FM bridge, then runs a short plain-text prove-out
-when the model is ready.
+`Chat` is now the home tab, while Apple FM setup lives in the secondary
+`Setup` tab. On launch Probe checks the Apple FM bridge, then runs a short
+plain-text prove-out when the model is ready.
+
+Tabs:
+
+- `Chat`: transcript-first home shell
+- `Setup`: Apple FM prove-out details
+- `Events`: shell and worker event logs
 
 Keys:
 
-- `Tab`, `Left`, `Right`: switch views
+- `Tab`, `Left`, `Right`: switch `Chat` / `Setup` / `Events`
 - `r`: rerun setup
 - `t`: toggle operator notes vs live detail
 - `?` or `F1`: help
@@ -112,3 +119,4 @@ Start with:
 - [docs/31-probe-tui-background-task-and-app-message-bridge.md](docs/31-probe-tui-background-task-and-app-message-bridge.md)
 - [docs/32-apple-fm-setup-demo-screen.md](docs/32-apple-fm-setup-demo-screen.md)
 - [docs/35-probe-tui-retained-transcript-model.md](docs/35-probe-tui-retained-transcript-model.md)
+- [docs/36-chat-screen-primary-shell-and-setup-secondary.md](docs/36-chat-screen-primary-shell-and-setup-secondary.md)

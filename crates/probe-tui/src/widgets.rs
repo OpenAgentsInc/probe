@@ -62,10 +62,11 @@ impl TabStrip {
     }
 
     pub fn render(self, frame: &mut Frame<'_>, area: Rect) {
-        let tabs = Tabs::new(vec!["Overview", "Events"])
+        let tabs = Tabs::new(vec!["Chat", "Setup", "Events"])
             .select(match self.active_tab {
-                ActiveTab::Overview => 0,
-                ActiveTab::Events => 1,
+                ActiveTab::Chat => 0,
+                ActiveTab::Setup => 1,
+                ActiveTab::Events => 2,
             })
             .padding(" ", " ")
             .block(

@@ -17,33 +17,40 @@ const MAX_EVENT_LOG: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenId {
-    Hello,
+    Chat,
     Help,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTab {
-    Overview,
+    Chat,
+    Setup,
     Events,
 }
 
 impl ActiveTab {
     fn title(self) -> &'static str {
         match self {
-            Self::Overview => "Overview",
+            Self::Chat => "Chat",
+            Self::Setup => "Setup",
             Self::Events => "Events",
         }
     }
 
     fn next(self) -> Self {
         match self {
-            Self::Overview => Self::Events,
-            Self::Events => Self::Overview,
+            Self::Chat => Self::Setup,
+            Self::Setup => Self::Events,
+            Self::Events => Self::Chat,
         }
     }
 
     fn previous(self) -> Self {
-        self.next()
+        match self {
+            Self::Chat => Self::Events,
+            Self::Setup => Self::Chat,
+            Self::Events => Self::Setup,
+        }
     }
 }
 
@@ -105,14 +112,14 @@ impl ScreenOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScreenState {
-    Hello(HelloScreen),
+    Chat(ChatScreen),
     Help(HelpScreen),
 }
 
 impl ScreenState {
     pub const fn id(&self) -> ScreenId {
         match self {
-            Self::Hello(_) => ScreenId::Hello,
+            Self::Chat(_) => ScreenId::Chat,
             Self::Help(_) => ScreenId::Help,
         }
     }
@@ -123,28 +130,28 @@ impl ScreenState {
 
     pub fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
         match self {
-            Self::Hello(screen) => screen.handle_event(event),
+            Self::Chat(screen) => screen.handle_event(event),
             Self::Help(screen) => screen.handle_event(event),
         }
     }
 
     pub fn render(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
         match self {
-            Self::Hello(screen) => screen.render(frame, area, stack_depth),
+            Self::Chat(screen) => screen.render(frame, area, stack_depth),
             Self::Help(screen) => screen.render(frame, area, stack_depth),
         }
     }
 
-    pub fn hello_mut(&mut self) -> Option<&mut HelloScreen> {
+    pub fn chat_mut(&mut self) -> Option<&mut ChatScreen> {
         match self {
-            Self::Hello(screen) => Some(screen),
+            Self::Chat(screen) => Some(screen),
             Self::Help(_) => None,
         }
     }
 
-    pub fn hello(&self) -> Option<&HelloScreen> {
+    pub fn chat(&self) -> Option<&ChatScreen> {
         match self {
-            Self::Hello(screen) => Some(screen),
+            Self::Chat(screen) => Some(screen),
             Self::Help(_) => None,
         }
     }
@@ -182,7 +189,7 @@ impl Default for AppleFmSetupState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HelloScreen {
+pub struct ChatScreen {
     active_tab: ActiveTab,
     emphasized_copy: bool,
     recent_events: VecDeque<String>,
@@ -191,10 +198,10 @@ pub struct HelloScreen {
     setup: AppleFmSetupState,
 }
 
-impl Default for HelloScreen {
+impl Default for ChatScreen {
     fn default() -> Self {
         let mut screen = Self {
-            active_tab: ActiveTab::Overview,
+            active_tab: ActiveTab::Chat,
             emphasized_copy: false,
             recent_events: VecDeque::new(),
             task_events: VecDeque::new(),
@@ -217,7 +224,7 @@ impl Default for HelloScreen {
     }
 }
 
-impl HelloScreen {
+impl ChatScreen {
     pub fn active_tab(&self) -> ActiveTab {
         self.active_tab
     }
@@ -493,32 +500,52 @@ impl HelloScreen {
         TabStrip::new(self.active_tab).render(frame, sections[0]);
 
         match self.active_tab {
-            ActiveTab::Overview => self.render_overview(frame, sections[1], stack_depth),
+            ActiveTab::Chat => self.render_chat_shell(frame, sections[1], stack_depth),
+            ActiveTab::Setup => self.render_setup(frame, sections[1], stack_depth),
             ActiveTab::Events => self.render_events(frame, sections[1], stack_depth),
         }
     }
 
-    fn render_overview(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
+    fn render_chat_shell(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
+        let columns = Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)])
+            .spacing(1)
+            .split(area);
+        let focus_name = if stack_depth > 1 {
+            "help modal"
+        } else {
+            "chat shell"
+        };
+        InfoPanel::new("Transcript", self.render_primary_body())
+            .render(frame, columns[0]);
+
+        let sidebar = Layout::vertical([Constraint::Length(7), Constraint::Length(6), Constraint::Min(0)])
+            .spacing(1)
+            .split(columns[1]);
+        SidebarPanel::new(
+            "Shell Status",
+            self.render_status_lines(focus_name, stack_depth),
+        )
+        .render(frame, sidebar[0]);
+        SidebarPanel::new("Bridge", self.render_backend_lines()).render(frame, sidebar[1]);
+        SidebarPanel::new("Setup Entry", self.render_chat_setup_lines()).render(frame, sidebar[2]);
+    }
+
+    fn render_setup(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
         let columns = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
             .spacing(1)
             .split(area);
         let focus_name = if stack_depth > 1 {
             "help modal"
         } else {
-            "setup screen"
+            "setup tab"
         };
-        InfoPanel::new("Transcript", self.render_primary_body())
-            .render(frame, columns[0]);
+        InfoPanel::new("Setup Detail", self.render_setup_body()).render(frame, columns[0]);
 
-        let sidebar =
-            Layout::vertical([Constraint::Length(7), Constraint::Length(8), Constraint::Min(0)])
-                .spacing(1)
-                .split(columns[1]);
-        SidebarPanel::new(
-            "Setup Status",
-            self.render_status_lines(focus_name, stack_depth),
-        )
-        .render(frame, sidebar[0]);
+        let sidebar = Layout::vertical([Constraint::Length(7), Constraint::Length(8), Constraint::Min(0)])
+            .spacing(1)
+            .split(columns[1]);
+        SidebarPanel::new("Setup Status", self.render_status_lines(focus_name, stack_depth))
+            .render(frame, sidebar[0]);
         SidebarPanel::new("Backend Facts", self.render_backend_lines()).render(frame, sidebar[1]);
         SidebarPanel::new("Availability", self.render_availability_lines()).render(frame, sidebar[2]);
     }
@@ -589,6 +616,139 @@ impl HelloScreen {
             ]);
         }
         self.transcript.as_text()
+    }
+
+    fn render_chat_setup_lines(&self) -> Vec<String> {
+        let phase = match self.setup.phase {
+            TaskPhase::Idle => "idle",
+            TaskPhase::Queued => "queued",
+            TaskPhase::CheckingAvailability => "checking",
+            TaskPhase::Unavailable => "unavailable",
+            TaskPhase::Running => "running",
+            TaskPhase::Completed => "completed",
+            TaskPhase::Failed => "failed",
+        };
+        vec![
+            format!("setup_phase: {phase}"),
+            String::from("Tab to Setup for the full Apple FM prove-out surface."),
+            String::from("The chat shell is now the primary home screen."),
+        ]
+    }
+
+    fn render_setup_body(&self) -> Text<'static> {
+        if self.emphasized_copy {
+            return Text::from(vec![
+                Line::from("Apple FM setup is now a secondary Probe surface."),
+                Line::from(""),
+                Line::from("The primary home screen is the chat shell."),
+                Line::from("This tab remains the honest setup prove-out and backend admission view."),
+            ]);
+        }
+
+        if let Some(failure) = &self.setup.failure {
+            return Text::from(vec![
+                Line::from(format!("Stage: {}", failure.stage)),
+                Line::from(""),
+                Line::from(failure.detail.clone()),
+                Line::from(format!(
+                    "reason_code: {}",
+                    failure
+                        .reason_code
+                        .clone()
+                        .unwrap_or_else(|| String::from("none"))
+                )),
+                Line::from(format!(
+                    "retryable: {}",
+                    failure
+                        .retryable
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| String::from("unknown"))
+                )),
+                Line::from(format!(
+                    "failure_reason: {}",
+                    failure
+                        .failure_reason
+                        .clone()
+                        .unwrap_or_else(|| String::from("none"))
+                )),
+                Line::from(format!(
+                    "recovery_suggestion: {}",
+                    failure
+                        .recovery_suggestion
+                        .clone()
+                        .unwrap_or_else(|| String::from("none"))
+                )),
+            ]);
+        }
+
+        if let Some(active_call) = &self.setup.active_call {
+            return Text::from(vec![
+                Line::from(format!(
+                    "Running call {}/{}: {}",
+                    active_call.index, active_call.total_calls, active_call.title
+                )),
+                Line::from(""),
+                Line::from("Prompt"),
+                Line::from(active_call.prompt.clone()),
+                Line::from(""),
+                Line::from("Response"),
+                Line::from("[waiting for Apple FM reply]"),
+            ]);
+        }
+
+        if let Some(last_call) = self.setup.calls.last() {
+            let mut lines = vec![
+                Line::from(format!("Last completed call: {}", last_call.title)),
+                Line::from(""),
+                Line::from("Response"),
+                Line::from(last_call.response_text.clone()),
+                Line::from(""),
+                Line::from(format!("response_id: {}", last_call.response_id)),
+                Line::from(format!("model: {}", last_call.response_model)),
+            ];
+            lines.extend(last_call.usage.render_lines());
+            return Text::from(lines);
+        }
+
+        match self.setup.phase {
+            TaskPhase::Queued => Text::from(vec![
+                Line::from("Apple FM setup has been queued."),
+                Line::from(""),
+                Line::from("Probe will check availability before issuing any inference."),
+                Line::from("Use r to rerun the setup flow manually."),
+            ]),
+            TaskPhase::CheckingAvailability => Text::from(vec![
+                Line::from("Checking whether Apple FM is available on this machine."),
+                Line::from(""),
+                Line::from("No inference requests will be issued until the availability gate passes."),
+            ]),
+            TaskPhase::Unavailable => Text::from(vec![
+                Line::from("Apple FM is not ready on this machine right now."),
+                Line::from(""),
+                Line::from(
+                    self.setup
+                        .availability
+                        .as_ref()
+                        .and_then(|availability| availability.availability_message.clone())
+                        .unwrap_or_else(|| {
+                            String::from("The bridge did not provide extra availability detail.")
+                        }),
+                ),
+                Line::from(""),
+                Line::from("Press r to rerun the setup check after the machine is admitted."),
+            ]),
+            TaskPhase::Completed => Text::from(vec![
+                Line::from("Apple FM setup completed successfully."),
+                Line::from(""),
+                Line::from("The transcript shell remains the primary home screen."),
+                Line::from("This tab keeps the backend prove-out details reachable."),
+            ]),
+            TaskPhase::Idle | TaskPhase::Running | TaskPhase::Failed => Text::from(vec![
+                Line::from("Probe setup surface is ready."),
+                Line::from(""),
+                Line::from("Press r to start or rerun the Apple FM setup flow."),
+            ]),
+        }
     }
 
     fn render_status_lines(&self, focus_name: &str, stack_depth: usize) -> Vec<String> {
@@ -715,9 +875,9 @@ impl HelpScreen {
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
         let content = Paragraph::new(Text::from(vec![
-            Line::from("Probe Apple FM Setup Keys"),
+            Line::from("Probe Chat Shell Keys"),
             Line::from(""),
-            Line::from("Tab / Left / Right  switch views"),
+            Line::from("Tab / Left / Right  switch Chat / Setup / Events"),
             Line::from("r                   rerun Apple FM setup"),
             Line::from("t                   toggle operator notes / live detail"),
             Line::from("? or F1             open or dismiss this modal"),

@@ -15,7 +15,7 @@ use ratatui::{Frame, Terminal};
 use crate::event::{UiEvent, event_from_key};
 use crate::message::{AppMessage, BackgroundTaskRequest};
 use crate::screens::{
-    ActiveTab, HelloScreen, HelpScreen, ScreenAction, ScreenCommand, ScreenId, ScreenState,
+    ActiveTab, ChatScreen, HelpScreen, ScreenAction, ScreenCommand, ScreenId, ScreenState,
     TaskPhase,
 };
 use crate::widgets::FooterBar;
@@ -48,7 +48,7 @@ impl AppShell {
 
     fn with_autostart(autostart_setup: bool) -> Self {
         let mut app = Self {
-            screens: vec![ScreenState::Hello(HelloScreen::default())],
+            screens: vec![ScreenState::Chat(ChatScreen::default())],
             last_status: String::from("probe tui launched"),
             should_quit: false,
             worker: BackgroundWorker::new(),
@@ -211,18 +211,18 @@ impl AppShell {
         buffer_to_string(terminal.backend().buffer())
     }
 
-    fn base_screen(&self) -> &HelloScreen {
+    fn base_screen(&self) -> &ChatScreen {
         self.screens
             .first()
-            .and_then(ScreenState::hello)
-            .expect("base screen is always hello")
+            .and_then(ScreenState::chat)
+            .expect("base screen is always chat")
     }
 
-    fn base_screen_mut(&mut self) -> &mut HelloScreen {
+    fn base_screen_mut(&mut self) -> &mut ChatScreen {
         self.screens
             .first_mut()
-            .and_then(ScreenState::hello_mut)
-            .expect("base screen is always hello")
+            .and_then(ScreenState::chat_mut)
+            .expect("base screen is always chat")
     }
 }
 
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn help_modal_takes_focus_and_dismisses_cleanly() {
         let mut app = AppShell::new_for_tests();
-        assert_eq!(app.active_screen_id(), ScreenId::Hello);
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
         assert_eq!(app.screen_depth(), 1);
 
         app.dispatch(UiEvent::OpenHelp);
@@ -319,24 +319,24 @@ mod tests {
         assert_eq!(app.active_tab(), active_tab);
 
         app.dispatch(UiEvent::Dismiss);
-        assert_eq!(app.active_screen_id(), ScreenId::Hello);
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
         assert_eq!(app.screen_depth(), 1);
     }
 
     #[test]
     fn setup_screen_switches_views_and_toggles_copy() {
         let mut app = AppShell::new_for_tests();
-        assert_eq!(app.active_tab(), ActiveTab::Overview);
+        assert_eq!(app.active_tab(), ActiveTab::Chat);
         assert!(!app.emphasized_copy());
 
         app.dispatch(UiEvent::NextView);
-        assert_eq!(app.active_tab(), ActiveTab::Events);
+        assert_eq!(app.active_tab(), ActiveTab::Setup);
 
         app.dispatch(UiEvent::ToggleBody);
         assert!(app.emphasized_copy());
 
         app.dispatch(UiEvent::PreviousView);
-        assert_eq!(app.active_tab(), ActiveTab::Overview);
+        assert_eq!(app.active_tab(), ActiveTab::Chat);
     }
 
     #[test]
@@ -426,6 +426,9 @@ mod tests {
         }
 
         assert_eq!(app.task_phase(), TaskPhase::Unavailable);
+        assert_eq!(app.active_tab(), ActiveTab::Chat);
+        app.dispatch(UiEvent::NextView);
+        assert_eq!(app.active_tab(), ActiveTab::Setup);
         assert!(
             app.render_to_string(120, 32)
                 .contains("Foundation model is still preparing")
@@ -478,6 +481,9 @@ mod tests {
         }
 
         assert_eq!(app.task_phase(), TaskPhase::Failed);
+        assert_eq!(app.active_tab(), ActiveTab::Chat);
+        app.dispatch(UiEvent::NextView);
+        assert_eq!(app.active_tab(), ActiveTab::Setup);
         let rendered = app.render_to_string(120, 32);
         assert!(rendered.contains("assets_unavailable"));
         assert!(rendered.contains("Enable Apple Intelligence and retry"));

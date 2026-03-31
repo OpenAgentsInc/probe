@@ -8,9 +8,9 @@ expression: snapshot
 
 
            ┌─ Help ─────────────────────────────────────────────────┐
-           │ Probe Apple FM Setup Keys                              │
+           │ Probe Chat Shell Keys                                  │
            │                                                        │
-           │ Tab / Left / Right  switch views                       │
+           │ Tab / Left / Right  switch Chat / Setup / Events       │
            │ r                   rerun Apple FM setup               │
            │ t                   toggle operator notes / live       │
            │ detail                                                 │

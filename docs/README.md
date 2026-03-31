@@ -102,3 +102,6 @@ This folder holds technical planning docs for the Probe runtime.
   - the explicit first transcript rendering decision for the Probe TUI:
     retained in-memory transcript widget plus one active-turn cell, before any
     Codex-style scrollback manager or full chat/composer shell
+- `36-chat-screen-primary-shell-and-setup-secondary.md`
+  - the TUI restructuring that makes `Chat` the primary Probe home surface and
+    demotes the Apple FM prove-out into the secondary `Setup` tab
