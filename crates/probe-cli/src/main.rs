@@ -434,9 +434,14 @@ fn run_accept(args: AcceptArgs) -> Result<(), String> {
     );
     for result in &report.results {
         eprintln!(
-            "case={} passed={} tool_calls={} session={} error={}",
+            "case={} passed={} repeats={} median_wallclock_ms={} tool_calls={} session={} error={}",
             result.case_name,
             result.passed,
+            result.repeat_runs,
+            result
+                .median_wallclock_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| String::from("-")),
             result.executed_tool_calls,
             result.session_id.as_deref().unwrap_or("-"),
             result.error.as_deref().unwrap_or("-")

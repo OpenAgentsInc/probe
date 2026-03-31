@@ -2,10 +2,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use probe_core::runtime::{PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime};
-use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
+use probe_core::harness::resolve_harness_profile;
+use probe_core::runtime::{PlainTextExecOutcome, PlainTextExecRequest, ProbeRuntime};
+use probe_core::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig};
 use probe_protocol::backend::BackendProfile;
+use probe_protocol::session::{
+    CacheSignal, SessionMetadata, ToolPolicyDecision, TranscriptEvent, TranscriptItemKind,
+    TurnObservability,
+};
 use serde::Serialize;
+
+const ACCEPTANCE_REPEAT_RUNS: usize = 2;
 
 #[derive(Clone, Debug)]
 pub struct AcceptanceHarnessConfig {
@@ -21,6 +28,7 @@ pub struct AcceptanceRunReport {
     pub base_url: String,
     pub model: String,
     pub overall_pass: bool,
+    pub repeat_runs_per_case: usize,
     pub results: Vec<AcceptanceCaseReport>,
 }
 
@@ -28,9 +36,32 @@ pub struct AcceptanceRunReport {
 pub struct AcceptanceCaseReport {
     pub case_name: String,
     pub passed: bool,
+    pub repeat_runs: usize,
+    pub median_wallclock_ms: Option<u64>,
     pub session_id: Option<String>,
     pub assistant_text: Option<String>,
     pub executed_tool_calls: usize,
+    pub error: Option<String>,
+    pub attempts: Vec<AcceptanceAttemptReport>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AcceptanceAttemptReport {
+    pub attempt_index: usize,
+    pub passed: bool,
+    pub session_id: Option<String>,
+    pub assistant_text: Option<String>,
+    pub executed_tool_calls: usize,
+    pub tool_names: Vec<String>,
+    pub auto_allowed_tool_calls: usize,
+    pub approved_tool_calls: usize,
+    pub refused_tool_calls: usize,
+    pub paused_tool_calls: usize,
+    pub final_wallclock_ms: Option<u64>,
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+    pub total_tokens: Option<u32>,
+    pub cache_signal: Option<String>,
     pub error: Option<String>,
 }
 
@@ -44,18 +75,18 @@ pub fn run_acceptance_harness(
     }
 
     let runtime = ProbeRuntime::new(config.probe_home.clone());
-    let mut results = Vec::new();
-
-    results.push(run_case_plain_answer(&runtime, &config.base_profile));
-    results.push(run_case_required_single_tool(
-        &runtime,
-        &config.base_profile,
-    ));
-    results.push(run_case_multi_turn_tool_continuation(
-        &runtime,
-        &config.base_profile,
-    ));
-    results.push(run_case_parallel_tool_batch(&runtime, &config.base_profile));
+    let results = vec![
+        run_case_read_file_answer(&runtime, &config.base_profile, config.probe_home.as_path()),
+        run_case_list_then_read(&runtime, &config.base_profile, config.probe_home.as_path()),
+        run_case_search_then_read(&runtime, &config.base_profile, config.probe_home.as_path()),
+        run_case_shell_then_summarize(&runtime, &config.base_profile, config.probe_home.as_path()),
+        run_case_patch_then_verify(&runtime, &config.base_profile, config.probe_home.as_path()),
+        run_case_approval_pause_or_refusal(
+            &runtime,
+            &config.base_profile,
+            config.probe_home.as_path(),
+        ),
+    ];
 
     let report = AcceptanceRunReport {
         started_at_ms,
@@ -63,6 +94,7 @@ pub fn run_acceptance_harness(
         base_url: config.base_profile.base_url.clone(),
         model: config.base_profile.model.clone(),
         overall_pass: results.iter().all(|result| result.passed),
+        repeat_runs_per_case: ACCEPTANCE_REPEAT_RUNS,
         results,
     };
 
@@ -78,160 +110,473 @@ pub fn default_report_path(probe_home: &Path) -> PathBuf {
         .join(format!("probe_acceptance_{}.json", now_ms()))
 }
 
-fn run_case_plain_answer(
+fn run_case_read_file_answer(
     runtime: &ProbeRuntime,
     base_profile: &BackendProfile,
+    probe_home: &Path,
 ) -> AcceptanceCaseReport {
-    let outcome = runtime.exec_plain_text(PlainTextExecRequest {
-        profile: base_profile.clone(),
-        prompt: String::from("Reply with exactly PLAIN_OK and do not use tools."),
-        title: Some(String::from("acceptance-plain")),
-        cwd: PathBuf::from("."),
-        system_prompt: None,
-        harness_profile: None,
-        tool_loop: None,
-    });
-
-    match outcome {
-        Ok(outcome) => AcceptanceCaseReport {
-            case_name: String::from("no_tool_plain_answer"),
-            passed: outcome.assistant_text.contains("PLAIN_OK") && outcome.executed_tool_calls == 0,
-            session_id: Some(outcome.session.id.as_str().to_string()),
-            assistant_text: Some(outcome.assistant_text),
-            executed_tool_calls: outcome.executed_tool_calls,
-            error: None,
+    run_repeated_case(
+        runtime,
+        base_profile,
+        probe_home,
+        "read_file_answer",
+        |runtime, profile, workspace, title| {
+            execute_coding_case(
+                runtime,
+                profile,
+                workspace,
+                title,
+                "Use read_file on README.md and answer with exactly READ_FILE_OK once you confirm the first line says Probe acceptance fixture.",
+                coding_tool_loop(false, false, false, ToolDeniedAction::Refuse),
+            )
         },
-        Err(error) => failed_case("no_tool_plain_answer", error.to_string()),
-    }
+        |attempt, _workspace| {
+            attempt.assistant_text.as_deref() == Some("READ_FILE_OK")
+                && attempt.executed_tool_calls >= 1
+                && attempt.tool_names.iter().any(|name| name == "read_file")
+        },
+    )
 }
 
-fn run_case_required_single_tool(
+fn run_case_list_then_read(
     runtime: &ProbeRuntime,
     base_profile: &BackendProfile,
+    probe_home: &Path,
 ) -> AcceptanceCaseReport {
-    let outcome = runtime.exec_plain_text(PlainTextExecRequest {
-        profile: base_profile.clone(),
-        prompt: String::from(
-            "Use the `lookup_weather` tool and answer: what is the weather in Paris?",
-        ),
-        title: Some(String::from("acceptance-required-tool")),
-        cwd: PathBuf::from("."),
-        system_prompt: None,
-        harness_profile: None,
-        tool_loop: Some(ToolLoopConfig::weather_demo(
-            ProbeToolChoice::Required,
-            false,
-        )),
-    });
-
-    match outcome {
-        Ok(outcome) => AcceptanceCaseReport {
-            case_name: String::from("required_single_tool_turn"),
-            passed: outcome.executed_tool_calls == 1
-                && outcome.assistant_text.contains("Paris")
-                && outcome.assistant_text.contains("18"),
-            session_id: Some(outcome.session.id.as_str().to_string()),
-            assistant_text: Some(outcome.assistant_text),
-            executed_tool_calls: outcome.executed_tool_calls,
-            error: None,
+    run_repeated_case(
+        runtime,
+        base_profile,
+        probe_home,
+        "list_then_read",
+        |runtime, profile, workspace, title| {
+            execute_coding_case(
+                runtime,
+                profile,
+                workspace,
+                title,
+                "Use list_files on src, then read src/main.rs, then answer with exactly LIST_READ_OK if the file prints PROBE_FIXTURE_MAIN.",
+                coding_tool_loop(false, false, false, ToolDeniedAction::Refuse),
+            )
         },
-        Err(error) => failed_case("required_single_tool_turn", error.to_string()),
-    }
+        |attempt, _workspace| {
+            attempt.assistant_text.as_deref() == Some("LIST_READ_OK")
+                && attempt.tool_names.iter().any(|name| name == "list_files")
+                && attempt.tool_names.iter().any(|name| name == "read_file")
+        },
+    )
 }
 
-fn run_case_multi_turn_tool_continuation(
+fn run_case_search_then_read(
     runtime: &ProbeRuntime,
     base_profile: &BackendProfile,
+    probe_home: &Path,
 ) -> AcceptanceCaseReport {
-    let first = runtime.exec_plain_text(PlainTextExecRequest {
-        profile: base_profile.clone(),
-        prompt: String::from(
-            "Use the `lookup_weather` tool and answer: what is the weather in Paris?",
-        ),
-        title: Some(String::from("acceptance-multi-turn")),
-        cwd: PathBuf::from("."),
-        system_prompt: None,
-        harness_profile: None,
-        tool_loop: Some(ToolLoopConfig::weather_demo(
-            ProbeToolChoice::Required,
-            false,
-        )),
-    });
+    run_repeated_case(
+        runtime,
+        base_profile,
+        probe_home,
+        "search_then_read",
+        |runtime, profile, workspace, title| {
+            execute_coding_case(
+                runtime,
+                profile,
+                workspace,
+                title,
+                "Use code_search for beta_function, then read the matching file, then answer with exactly SEARCH_READ_OK if beta_function exists.",
+                coding_tool_loop(false, false, false, ToolDeniedAction::Refuse),
+            )
+        },
+        |attempt, _workspace| {
+            attempt.assistant_text.as_deref() == Some("SEARCH_READ_OK")
+                && attempt.tool_names.iter().any(|name| name == "code_search")
+                && attempt.tool_names.iter().any(|name| name == "read_file")
+        },
+    )
+}
 
-    let first = match first {
-        Ok(first) => first,
-        Err(error) => return failed_case("multi_turn_tool_continuation", error.to_string()),
+fn run_case_shell_then_summarize(
+    runtime: &ProbeRuntime,
+    base_profile: &BackendProfile,
+    probe_home: &Path,
+) -> AcceptanceCaseReport {
+    run_repeated_case(
+        runtime,
+        base_profile,
+        probe_home,
+        "shell_then_summarize",
+        |runtime, profile, workspace, title| {
+            execute_coding_case(
+                runtime,
+                profile,
+                workspace,
+                title,
+                "Use a read-only shell command to print the current working directory, then answer with exactly SHELL_OK.",
+                coding_tool_loop(false, false, false, ToolDeniedAction::Refuse),
+            )
+        },
+        |attempt, _workspace| {
+            attempt.assistant_text.as_deref() == Some("SHELL_OK")
+                && attempt.tool_names.iter().any(|name| name == "shell")
+                && attempt.auto_allowed_tool_calls >= 1
+        },
+    )
+}
+
+fn run_case_patch_then_verify(
+    runtime: &ProbeRuntime,
+    base_profile: &BackendProfile,
+    probe_home: &Path,
+) -> AcceptanceCaseReport {
+    run_repeated_case(
+        runtime,
+        base_profile,
+        probe_home,
+        "patch_then_verify",
+        |runtime, profile, workspace, title| {
+            execute_coding_case(
+                runtime,
+                profile,
+                workspace,
+                title,
+                "Use apply_patch to replace world with probe in hello.txt, then read hello.txt, then answer with exactly PATCH_OK.",
+                coding_tool_loop(true, false, false, ToolDeniedAction::Refuse),
+            )
+        },
+        |attempt, workspace| {
+            attempt.assistant_text.as_deref() == Some("PATCH_OK")
+                && attempt.tool_names.iter().any(|name| name == "apply_patch")
+                && attempt.tool_names.iter().any(|name| name == "read_file")
+                && attempt.approved_tool_calls >= 1
+                && fs::read_to_string(workspace.join("hello.txt"))
+                    .map(|content| content == "hello probe\n")
+                    .unwrap_or(false)
+        },
+    )
+}
+
+fn run_case_approval_pause_or_refusal(
+    runtime: &ProbeRuntime,
+    base_profile: &BackendProfile,
+    probe_home: &Path,
+) -> AcceptanceCaseReport {
+    run_repeated_case(
+        runtime,
+        base_profile,
+        probe_home,
+        "approval_pause_or_refusal",
+        |runtime, profile, workspace, title| {
+            execute_coding_case(
+                runtime,
+                profile,
+                workspace,
+                title,
+                "Use apply_patch to replace world with blocked in hello.txt.",
+                coding_tool_loop(false, false, false, ToolDeniedAction::Pause),
+            )
+        },
+        |attempt, workspace| {
+            attempt.paused_tool_calls >= 1
+                && attempt.tool_names.iter().any(|name| name == "apply_patch")
+                && attempt
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("paused for approval")
+                && fs::read_to_string(workspace.join("hello.txt"))
+                    .map(|content| content == "hello world\n")
+                    .unwrap_or(false)
+        },
+    )
+}
+
+fn run_repeated_case<F, G>(
+    runtime: &ProbeRuntime,
+    base_profile: &BackendProfile,
+    probe_home: &Path,
+    case_name: &str,
+    mut runner: F,
+    mut validator: G,
+) -> AcceptanceCaseReport
+where
+    F: FnMut(&ProbeRuntime, &BackendProfile, &Path, &str) -> Result<PlainTextExecOutcome, String>,
+    G: FnMut(&AcceptanceAttemptReport, &Path) -> bool,
+{
+    let mut attempts = Vec::new();
+    for attempt_index in 0..ACCEPTANCE_REPEAT_RUNS {
+        let title = format!("acceptance-{case_name}-{}", attempt_index + 1);
+        let workspace = prepare_acceptance_workspace(probe_home, case_name, attempt_index)
+            .unwrap_or_else(|error| {
+                panic!("failed to prepare acceptance workspace for {case_name}: {error}")
+            });
+        let outcome = runner(runtime, base_profile, workspace.as_path(), title.as_str());
+        let mut attempt = capture_attempt_report(runtime, title.as_str(), attempt_index, outcome);
+        attempt.passed = validator(&attempt, workspace.as_path());
+        attempts.push(attempt);
+    }
+
+    build_case_report(case_name, attempts)
+}
+
+fn execute_coding_case(
+    runtime: &ProbeRuntime,
+    base_profile: &BackendProfile,
+    workspace: &Path,
+    title: &str,
+    prompt: &str,
+    tool_loop: ToolLoopConfig,
+) -> Result<PlainTextExecOutcome, String> {
+    let resolved = resolve_harness_profile(
+        Some("coding_bootstrap"),
+        Some("coding_bootstrap_default"),
+        workspace,
+        None,
+    )?
+    .ok_or_else(|| String::from("missing coding bootstrap harness profile"))?;
+
+    runtime
+        .exec_plain_text(PlainTextExecRequest {
+            profile: base_profile.clone(),
+            prompt: String::from(prompt),
+            title: Some(String::from(title)),
+            cwd: workspace.to_path_buf(),
+            system_prompt: Some(resolved.system_prompt),
+            harness_profile: Some(resolved.profile),
+            tool_loop: Some(tool_loop),
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn coding_tool_loop(
+    allow_write_tools: bool,
+    allow_network_shell: bool,
+    allow_destructive_shell: bool,
+    denied_action: ToolDeniedAction,
+) -> ToolLoopConfig {
+    let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Required, false);
+    tool_loop.approval = ToolApprovalConfig {
+        allow_write_tools,
+        allow_network_shell,
+        allow_destructive_shell,
+        denied_action,
+    };
+    tool_loop
+}
+
+fn capture_attempt_report(
+    runtime: &ProbeRuntime,
+    title: &str,
+    attempt_index: usize,
+    outcome: Result<PlainTextExecOutcome, String>,
+) -> AcceptanceAttemptReport {
+    let session_metadata = match &outcome {
+        Ok(outcome) => Some(outcome.session.clone()),
+        Err(_) => find_session_by_title(runtime, title),
+    };
+    let transcript = session_metadata.as_ref().and_then(|metadata| {
+        runtime
+            .session_store()
+            .read_transcript(&metadata.id)
+            .ok()
+            .map(|events| (metadata.clone(), events))
+    });
+    let transcript_summary = transcript
+        .as_ref()
+        .map(|(_, events)| summarize_transcript(events.as_slice()));
+
+    let (assistant_text, executed_tool_calls, error) = match outcome {
+        Ok(outcome) => (
+            Some(outcome.assistant_text),
+            outcome.executed_tool_calls,
+            None,
+        ),
+        Err(error) => {
+            let executed = transcript_summary
+                .as_ref()
+                .map(|summary| summary.auto_allowed_tool_calls + summary.approved_tool_calls)
+                .unwrap_or(0);
+            (None, executed, Some(error))
+        }
     };
 
-    let second = runtime.continue_plain_text_session(PlainTextResumeRequest {
-        session_id: first.session.id.clone(),
-        profile: base_profile.clone(),
-        prompt: String::from(
-            "Now use the `lookup_weather` tool and answer: what is the weather in Tokyo?",
-        ),
-        tool_loop: Some(ToolLoopConfig::weather_demo(
-            ProbeToolChoice::Required,
-            false,
-        )),
-    });
-
-    match second {
-        Ok(outcome) => AcceptanceCaseReport {
-            case_name: String::from("multi_turn_tool_continuation"),
-            passed: outcome.executed_tool_calls == 1
-                && outcome.assistant_text.contains("Tokyo")
-                && outcome.assistant_text.contains("12"),
-            session_id: Some(outcome.session.id.as_str().to_string()),
-            assistant_text: Some(outcome.assistant_text),
-            executed_tool_calls: outcome.executed_tool_calls,
-            error: None,
-        },
-        Err(error) => failed_case("multi_turn_tool_continuation", error.to_string()),
+    AcceptanceAttemptReport {
+        attempt_index,
+        passed: false,
+        session_id: session_metadata
+            .as_ref()
+            .map(|metadata| metadata.id.as_str().to_string()),
+        assistant_text,
+        executed_tool_calls,
+        tool_names: transcript_summary
+            .as_ref()
+            .map(|summary| summary.tool_names.clone())
+            .unwrap_or_default(),
+        auto_allowed_tool_calls: transcript_summary
+            .as_ref()
+            .map(|summary| summary.auto_allowed_tool_calls)
+            .unwrap_or(0),
+        approved_tool_calls: transcript_summary
+            .as_ref()
+            .map(|summary| summary.approved_tool_calls)
+            .unwrap_or(0),
+        refused_tool_calls: transcript_summary
+            .as_ref()
+            .map(|summary| summary.refused_tool_calls)
+            .unwrap_or(0),
+        paused_tool_calls: transcript_summary
+            .as_ref()
+            .map(|summary| summary.paused_tool_calls)
+            .unwrap_or(0),
+        final_wallclock_ms: transcript_summary
+            .as_ref()
+            .and_then(|summary| summary.final_observability.as_ref())
+            .map(|observability| observability.wallclock_ms),
+        prompt_tokens: transcript_summary
+            .as_ref()
+            .and_then(|summary| summary.final_observability.as_ref())
+            .and_then(|observability| observability.prompt_tokens),
+        completion_tokens: transcript_summary
+            .as_ref()
+            .and_then(|summary| summary.final_observability.as_ref())
+            .and_then(|observability| observability.completion_tokens),
+        total_tokens: transcript_summary
+            .as_ref()
+            .and_then(|summary| summary.final_observability.as_ref())
+            .and_then(|observability| observability.total_tokens),
+        cache_signal: transcript_summary
+            .as_ref()
+            .and_then(|summary| summary.final_observability.as_ref())
+            .map(|observability| render_cache_signal(observability.cache_signal).to_string()),
+        error,
     }
 }
 
-fn run_case_parallel_tool_batch(
-    runtime: &ProbeRuntime,
-    base_profile: &BackendProfile,
+fn build_case_report(
+    case_name: &str,
+    attempts: Vec<AcceptanceAttemptReport>,
 ) -> AcceptanceCaseReport {
-    let outcome = runtime.exec_plain_text(PlainTextExecRequest {
-        profile: base_profile.clone(),
-        prompt: String::from(
-            "Use the `lookup_weather` tool for Paris and Tokyo in the same turn, then answer with both results.",
-        ),
-        title: Some(String::from("acceptance-parallel-tools")),
-        cwd: PathBuf::from("."),
-        system_prompt: None,
-        harness_profile: None,
-        tool_loop: Some(ToolLoopConfig::weather_demo(
-            ProbeToolChoice::Required,
-            true,
-        )),
-    });
+    let passed = attempts.iter().all(|attempt| attempt.passed);
+    let median_wallclock_ms = median(
+        attempts
+            .iter()
+            .filter_map(|attempt| attempt.final_wallclock_ms)
+            .collect(),
+    );
+    let summary_attempt = attempts.last();
 
-    match outcome {
-        Ok(outcome) => AcceptanceCaseReport {
-            case_name: String::from("same_turn_two_tool_batch"),
-            passed: outcome.executed_tool_calls == 2
-                && outcome.assistant_text.contains("Paris")
-                && outcome.assistant_text.contains("Tokyo"),
-            session_id: Some(outcome.session.id.as_str().to_string()),
-            assistant_text: Some(outcome.assistant_text),
-            executed_tool_calls: outcome.executed_tool_calls,
-            error: None,
-        },
-        Err(error) => failed_case("same_turn_two_tool_batch", error.to_string()),
-    }
-}
-
-fn failed_case(case_name: &str, error: String) -> AcceptanceCaseReport {
     AcceptanceCaseReport {
         case_name: String::from(case_name),
-        passed: false,
-        session_id: None,
-        assistant_text: None,
-        executed_tool_calls: 0,
-        error: Some(error),
+        passed,
+        repeat_runs: attempts.len(),
+        median_wallclock_ms,
+        session_id: summary_attempt.and_then(|attempt| attempt.session_id.clone()),
+        assistant_text: summary_attempt.and_then(|attempt| attempt.assistant_text.clone()),
+        executed_tool_calls: summary_attempt
+            .map(|attempt| attempt.executed_tool_calls)
+            .unwrap_or(0),
+        error: attempts.iter().find_map(|attempt| attempt.error.clone()),
+        attempts,
+    }
+}
+
+fn prepare_acceptance_workspace(
+    probe_home: &Path,
+    case_name: &str,
+    attempt_index: usize,
+) -> Result<PathBuf, String> {
+    let workspace = probe_home
+        .join("acceptance_workspaces")
+        .join(case_name)
+        .join(format!("attempt_{}", attempt_index + 1));
+    if workspace.exists() {
+        fs::remove_dir_all(&workspace).map_err(|error| error.to_string())?;
+    }
+    fs::create_dir_all(workspace.join("src")).map_err(|error| error.to_string())?;
+    fs::create_dir_all(workspace.join("notes")).map_err(|error| error.to_string())?;
+
+    fs::write(
+        workspace.join("README.md"),
+        "Probe acceptance fixture\nThis workspace exists for coding-lane acceptance.\n",
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        workspace.join("src/main.rs"),
+        "fn main() {\n    println!(\"PROBE_FIXTURE_MAIN\");\n}\n",
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        workspace.join("src/lib.rs"),
+        "pub fn alpha_function() {}\npub fn beta_function() {}\n",
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(workspace.join("hello.txt"), "hello world\n").map_err(|error| error.to_string())?;
+    fs::write(
+        workspace.join("notes/summary.txt"),
+        "acceptance harness fixture\n",
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(workspace)
+}
+
+fn find_session_by_title(runtime: &ProbeRuntime, title: &str) -> Option<SessionMetadata> {
+    runtime
+        .session_store()
+        .list_sessions()
+        .ok()?
+        .into_iter()
+        .find(|metadata| metadata.title == title)
+}
+
+#[derive(Clone, Debug, Default)]
+struct TranscriptSummary {
+    tool_names: Vec<String>,
+    auto_allowed_tool_calls: usize,
+    approved_tool_calls: usize,
+    refused_tool_calls: usize,
+    paused_tool_calls: usize,
+    final_observability: Option<TurnObservability>,
+}
+
+fn summarize_transcript(events: &[TranscriptEvent]) -> TranscriptSummary {
+    let mut summary = TranscriptSummary::default();
+    for event in events {
+        if let Some(observability) = event.turn.observability.clone() {
+            summary.final_observability = Some(observability);
+        }
+        for item in &event.turn.items {
+            if item.kind != TranscriptItemKind::ToolResult {
+                continue;
+            }
+            if let Some(name) = item.name.as_ref() {
+                summary.tool_names.push(name.clone());
+            }
+            if let Some(tool_execution) = item.tool_execution.as_ref() {
+                match tool_execution.policy_decision {
+                    ToolPolicyDecision::AutoAllow => summary.auto_allowed_tool_calls += 1,
+                    ToolPolicyDecision::Approved => summary.approved_tool_calls += 1,
+                    ToolPolicyDecision::Refused => summary.refused_tool_calls += 1,
+                    ToolPolicyDecision::Paused => summary.paused_tool_calls += 1,
+                }
+            }
+        }
+    }
+    summary
+}
+
+fn median(mut values: Vec<u64>) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    Some(values[values.len() / 2])
+}
+
+fn render_cache_signal(signal: CacheSignal) -> &'static str {
+    match signal {
+        CacheSignal::Unknown => "unknown",
+        CacheSignal::ColdStart => "cold_start",
+        CacheSignal::LikelyWarm => "likely_warm",
+        CacheSignal::NoClearSignal => "no_clear_signal",
     }
 }
 
@@ -257,56 +602,96 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let address = listener.local_addr().expect("listener addr");
         let handle = thread::spawn(move || {
-            let responses = vec![
-                serde_json::json!({
-                    "id": "plain",
+            let mut responses = Vec::new();
+
+            for attempt in 0..2 {
+                let call_id = format!("call_readme_{}", attempt + 1);
+                responses.push(serde_json::json!({
+                    "id": format!("read_file_tool_{}", attempt + 1),
                     "model": "qwen3.5-2b-q8_0-registry.gguf",
-                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "PLAIN_OK"}, "finish_reason": "stop"}]
-                }),
-                serde_json::json!({
-                    "id": "required_tool_turn",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": call_id, "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"README.md\"}"}}]}, "finish_reason": "tool_calls"}]
+                }));
+                responses.push(serde_json::json!({
+                    "id": format!("read_file_final_{}", attempt + 1),
                     "model": "qwen3.5-2b-q8_0-registry.gguf",
-                    "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": "call_paris", "type": "function", "function": {"name": "lookup_weather", "arguments": "{\"city\":\"Paris\"}"}}]}, "finish_reason": "tool_calls"}]
-                }),
-                serde_json::json!({
-                    "id": "required_tool_final",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "READ_FILE_OK"}, "finish_reason": "stop"}]
+                }));
+            }
+
+            for attempt in 0..2 {
+                responses.push(serde_json::json!({
+                    "id": format!("list_then_read_list_{}", attempt + 1),
                     "model": "qwen3.5-2b-q8_0-registry.gguf",
-                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "Paris is sunny at 18C."}, "finish_reason": "stop"}]
-                }),
-                serde_json::json!({
-                    "id": "multi_turn_first_tool",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": format!("call_list_{}", attempt + 1), "type": "function", "function": {"name": "list_files", "arguments": "{\"path\":\"src\"}"}}]}, "finish_reason": "tool_calls"}]
+                }));
+                responses.push(serde_json::json!({
+                    "id": format!("list_then_read_read_{}", attempt + 1),
                     "model": "qwen3.5-2b-q8_0-registry.gguf",
-                    "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": "call_paris_2", "type": "function", "function": {"name": "lookup_weather", "arguments": "{\"city\":\"Paris\"}"}}]}, "finish_reason": "tool_calls"}]
-                }),
-                serde_json::json!({
-                    "id": "multi_turn_first_final",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": format!("call_read_main_{}", attempt + 1), "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"src/main.rs\"}"}}]}, "finish_reason": "tool_calls"}]
+                }));
+                responses.push(serde_json::json!({
+                    "id": format!("list_then_read_final_{}", attempt + 1),
                     "model": "qwen3.5-2b-q8_0-registry.gguf",
-                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "Paris is sunny at 18C."}, "finish_reason": "stop"}]
-                }),
-                serde_json::json!({
-                    "id": "multi_turn_second_tool",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "LIST_READ_OK"}, "finish_reason": "stop"}]
+                }));
+            }
+
+            for attempt in 0..2 {
+                responses.push(serde_json::json!({
+                    "id": format!("search_then_read_search_{}", attempt + 1),
                     "model": "qwen3.5-2b-q8_0-registry.gguf",
-                    "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": "call_tokyo", "type": "function", "function": {"name": "lookup_weather", "arguments": "{\"city\":\"Tokyo\"}"}}]}, "finish_reason": "tool_calls"}]
-                }),
-                serde_json::json!({
-                    "id": "multi_turn_second_final",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": format!("call_search_{}", attempt + 1), "type": "function", "function": {"name": "code_search", "arguments": "{\"pattern\":\"beta_function\",\"path\":\"src\"}"}}]}, "finish_reason": "tool_calls"}]
+                }));
+                responses.push(serde_json::json!({
+                    "id": format!("search_then_read_read_{}", attempt + 1),
                     "model": "qwen3.5-2b-q8_0-registry.gguf",
-                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "Tokyo is rainy at 12C."}, "finish_reason": "stop"}]
-                }),
-                serde_json::json!({
-                    "id": "parallel_tool_turn",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": format!("call_read_lib_{}", attempt + 1), "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"src/lib.rs\"}"}}]}, "finish_reason": "tool_calls"}]
+                }));
+                responses.push(serde_json::json!({
+                    "id": format!("search_then_read_final_{}", attempt + 1),
                     "model": "qwen3.5-2b-q8_0-registry.gguf",
-                    "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [
-                        {"id": "call_weather_paris", "type": "function", "function": {"name": "lookup_weather", "arguments": "{\"city\":\"Paris\"}"}},
-                        {"id": "call_weather_tokyo", "type": "function", "function": {"name": "lookup_weather", "arguments": "{\"city\":\"Tokyo\"}"}}
-                    ]}, "finish_reason": "tool_calls"}]
-                }),
-                serde_json::json!({
-                    "id": "parallel_tool_final",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "SEARCH_READ_OK"}, "finish_reason": "stop"}]
+                }));
+            }
+
+            for attempt in 0..2 {
+                responses.push(serde_json::json!({
+                    "id": format!("shell_then_summarize_tool_{}", attempt + 1),
                     "model": "qwen3.5-2b-q8_0-registry.gguf",
-                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "Paris is sunny at 18C. Tokyo is rainy at 12C."}, "finish_reason": "stop"}]
-                }),
-            ];
+                    "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": format!("call_shell_{}", attempt + 1), "type": "function", "function": {"name": "shell", "arguments": "{\"command\":\"pwd\",\"timeout_secs\":2}"}}]}, "finish_reason": "tool_calls"}]
+                }));
+                responses.push(serde_json::json!({
+                    "id": format!("shell_then_summarize_final_{}", attempt + 1),
+                    "model": "qwen3.5-2b-q8_0-registry.gguf",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "SHELL_OK"}, "finish_reason": "stop"}]
+                }));
+            }
+
+            for attempt in 0..2 {
+                responses.push(serde_json::json!({
+                    "id": format!("patch_then_verify_patch_{}", attempt + 1),
+                    "model": "qwen3.5-2b-q8_0-registry.gguf",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": format!("call_patch_{}", attempt + 1), "type": "function", "function": {"name": "apply_patch", "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"}}]}, "finish_reason": "tool_calls"}]
+                }));
+                responses.push(serde_json::json!({
+                    "id": format!("patch_then_verify_read_{}", attempt + 1),
+                    "model": "qwen3.5-2b-q8_0-registry.gguf",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": format!("call_verify_{}", attempt + 1), "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"hello.txt\"}"}}]}, "finish_reason": "tool_calls"}]
+                }));
+                responses.push(serde_json::json!({
+                    "id": format!("patch_then_verify_final_{}", attempt + 1),
+                    "model": "qwen3.5-2b-q8_0-registry.gguf",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "PATCH_OK"}, "finish_reason": "stop"}]
+                }));
+            }
+
+            for attempt in 0..2 {
+                responses.push(serde_json::json!({
+                    "id": format!("approval_pause_{}", attempt + 1),
+                    "model": "qwen3.5-2b-q8_0-registry.gguf",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": format!("call_blocked_patch_{}", attempt + 1), "type": "function", "function": {"name": "apply_patch", "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"blocked\"}"}}]}, "finish_reason": "tool_calls"}]
+                }));
+            }
 
             for body in responses {
                 let (mut stream, _) = listener.accept().expect("accept connection");
@@ -338,7 +723,8 @@ mod tests {
         .expect("acceptance harness should succeed");
 
         assert!(report.overall_pass);
-        assert_eq!(report.results.len(), 4);
+        assert_eq!(report.results.len(), 6);
+        assert_eq!(report.repeat_runs_per_case, 2);
         assert!(report_path.exists());
 
         handle.join().expect("server thread should exit cleanly");

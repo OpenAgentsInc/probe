@@ -128,6 +128,11 @@ Acceptance harness:
 cargo run -p probe-cli -- accept
 ```
 
+The acceptance runner now targets retained `coding_bootstrap` cases instead of
+only the old weather demo. Its JSON report includes repeat-run receipts,
+median wallclock, per-attempt tool-policy counts, and final-turn
+observability fields.
+
 Explicit attach mode:
 
 ```bash
