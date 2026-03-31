@@ -124,14 +124,14 @@ fn accept_process_emits_stable_report_shape() {
         .arg(TEST_MODEL)
         .assert()
         .success()
-        .stderr(predicate::str::contains("acceptance overall_pass=true"));
+        .stderr(predicate::str::contains("overall_pass=true"));
 
     let requests = server.finish();
     assert_eq!(requests.len(), 29);
     assert!(requests[0].contains("GET /v1/models HTTP/1.1"));
     assert!(requests[1].contains("POST /v1/chat/completions HTTP/1.1"));
 
-    let report = normalized_acceptance_report(report_path.as_path());
+    let report = normalized_acceptance_report(report_path.as_path(), &environment);
     assert_json_snapshot!("accept_report", report);
 }
 
@@ -277,36 +277,71 @@ fn selected_transcript_event(probe_home: &Path) -> Value {
     })
 }
 
-fn normalized_acceptance_report(report_path: &Path) -> Value {
+fn normalized_acceptance_report(report_path: &Path, environment: &ProbeTestEnvironment) -> Value {
     let mut value: Value =
         serde_json::from_str(&fs::read_to_string(report_path).expect("read acceptance report"))
             .expect("decode acceptance report");
-    value["started_at_ms"] = json!("<ms>");
-    value["finished_at_ms"] = json!("<ms>");
-    value["base_url"] = json!("<base-url>");
-    for result in value["results"].as_array_mut().expect("results array") {
-        if result["median_wallclock_ms"].is_number() {
-            result["median_wallclock_ms"] = json!("<ms>");
-        }
-        if result["session_id"].is_string() {
-            result["session_id"] = json!("<session-id>");
-        }
-        if let Some(error) = result["error"].as_str() {
-            result["error"] = json!(normalize_session_words(error));
-        }
-        for attempt in result["attempts"].as_array_mut().expect("attempts array") {
-            if attempt["session_id"].is_string() {
-                attempt["session_id"] = json!("<session-id>");
-            }
-            if attempt["final_wallclock_ms"].is_number() {
-                attempt["final_wallclock_ms"] = json!("<ms>");
-            }
-            if let Some(error) = attempt["error"].as_str() {
-                attempt["error"] = json!(normalize_session_words(error));
-            }
-        }
-    }
+    normalize_acceptance_value(&mut value, environment);
     value
+}
+
+fn normalize_acceptance_value(value: &mut Value, environment: &ProbeTestEnvironment) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                match key.as_str() {
+                    "run_id" => *child = json!("<run-id>"),
+                    "git_commit_sha" => {
+                        if child.is_string() {
+                            *child = json!("<git-sha>");
+                        }
+                    }
+                    "git_dirty" => {
+                        if child.is_boolean() {
+                            *child = json!("<git-dirty>");
+                        }
+                    }
+                    "base_url" => *child = json!("<base-url>"),
+                    "session_id" | "latest_session_id" => {
+                        if child.is_string() {
+                            *child = json!("<session-id>");
+                        }
+                    }
+                    "transcript_path" | "latest_transcript_path" => {
+                        if let Some(path) = child.as_str() {
+                            *child = json!(normalize_test_paths(path, environment));
+                        }
+                    }
+                    "error" => {
+                        if let Some(error) = child.as_str() {
+                            let normalized = normalize_session_words(
+                                normalize_test_paths(error, environment).as_str(),
+                            );
+                            *child = json!(normalized);
+                        }
+                    }
+                    "started_at_ms" | "finished_at_ms" | "duration_ms" | "median_elapsed_ms"
+                    | "wallclock_ms" | "model_output_ms" => {
+                        if child.is_number() {
+                            *child = json!("<ms>");
+                        }
+                    }
+                    "completion_tokens_per_second_x1000" => {
+                        if child.is_number() {
+                            *child = json!("<tps>");
+                        }
+                    }
+                    _ => normalize_acceptance_value(child, environment),
+                }
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                normalize_acceptance_value(child, environment);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn normalize_session_path_segments(value: &str) -> String {

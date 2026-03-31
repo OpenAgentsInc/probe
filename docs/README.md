@@ -64,3 +64,6 @@ This folder holds technical planning docs for the Probe runtime.
 - `21-cli-regression-and-snapshots.md`
   - process-level binary tests, narrow snapshot coverage, and the normalized
     receipt boundary for the CLI surface
+- `22-acceptance-report-schema.md`
+  - run identity, backend and harness metadata, failure categories, counts,
+    and transcript references for the richer `probe accept` report

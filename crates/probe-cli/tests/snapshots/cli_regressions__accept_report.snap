@@ -3,330 +3,519 @@ source: crates/probe-cli/tests/cli_regressions.rs
 expression: report
 ---
 {
-  "base_url": "<base-url>",
+  "backend": {
+    "base_url": "<base-url>",
+    "model": "tiny-qwen35",
+    "profile_name": "psionic-qwen35-2b-q8-registry"
+  },
+  "counts": {
+    "failed_attempts": 0,
+    "failed_cases": 0,
+    "passed_attempts": 12,
+    "passed_cases": 6,
+    "total_attempts": 12,
+    "total_cases": 6
+  },
+  "duration_ms": "<ms>",
   "finished_at_ms": "<ms>",
-  "model": "tiny-qwen35",
+  "harness": {
+    "profile_name": "coding_bootstrap_default",
+    "profile_version": "v1",
+    "repeat_runs_per_case": 2,
+    "tool_set": "coding_bootstrap"
+  },
   "overall_pass": true,
-  "repeat_runs_per_case": 2,
   "results": [
     {
-      "assistant_text": "READ_FILE_OK",
       "attempts": [
         {
-          "approved_tool_calls": 0,
           "assistant_text": "READ_FILE_OK",
           "attempt_index": 0,
-          "auto_allowed_tool_calls": 1,
-          "cache_signal": "unknown",
-          "completion_tokens": null,
           "error": null,
           "executed_tool_calls": 1,
-          "final_wallclock_ms": "<ms>",
+          "failure_category": null,
+          "observability": {
+            "cache_signal": "unknown",
+            "model_output_ms": "<ms>",
+            "wallclock_ms": "<ms>"
+          },
           "passed": true,
-          "paused_tool_calls": 0,
-          "prompt_tokens": null,
-          "refused_tool_calls": 0,
+          "policy_counts": {
+            "approved_tool_calls": 0,
+            "auto_allowed_tool_calls": 1,
+            "paused_tool_calls": 0,
+            "refused_tool_calls": 0
+          },
           "session_id": "<session-id>",
           "tool_names": [
             "read_file"
           ],
-          "total_tokens": null
+          "transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl"
         },
         {
-          "approved_tool_calls": 0,
           "assistant_text": "READ_FILE_OK",
           "attempt_index": 1,
-          "auto_allowed_tool_calls": 1,
-          "cache_signal": "unknown",
-          "completion_tokens": null,
           "error": null,
           "executed_tool_calls": 1,
-          "final_wallclock_ms": "<ms>",
+          "failure_category": null,
+          "observability": {
+            "cache_signal": "unknown",
+            "model_output_ms": "<ms>",
+            "wallclock_ms": "<ms>"
+          },
           "passed": true,
-          "paused_tool_calls": 0,
-          "prompt_tokens": null,
-          "refused_tool_calls": 0,
+          "policy_counts": {
+            "approved_tool_calls": 0,
+            "auto_allowed_tool_calls": 1,
+            "paused_tool_calls": 0,
+            "refused_tool_calls": 0
+          },
           "session_id": "<session-id>",
           "tool_names": [
             "read_file"
           ],
-          "total_tokens": null
+          "transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl"
         }
       ],
+      "case_index": 0,
       "case_name": "read_file_answer",
       "error": null,
-      "executed_tool_calls": 1,
-      "median_wallclock_ms": "<ms>",
+      "failed_attempts": 0,
+      "failure_category": null,
+      "latest_assistant_text": "READ_FILE_OK",
+      "latest_executed_tool_calls": 1,
+      "latest_observability": {
+        "cache_signal": "unknown",
+        "model_output_ms": "<ms>",
+        "wallclock_ms": "<ms>"
+      },
+      "latest_policy_counts": {
+        "approved_tool_calls": 0,
+        "auto_allowed_tool_calls": 1,
+        "paused_tool_calls": 0,
+        "refused_tool_calls": 0
+      },
+      "latest_session_id": "<session-id>",
+      "latest_tool_names": [
+        "read_file"
+      ],
+      "latest_transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl",
+      "median_elapsed_ms": "<ms>",
       "passed": true,
-      "repeat_runs": 2,
-      "session_id": "<session-id>"
+      "passed_attempts": 2,
+      "repeat_runs": 2
     },
     {
-      "assistant_text": "LIST_READ_OK",
       "attempts": [
         {
-          "approved_tool_calls": 0,
           "assistant_text": "LIST_READ_OK",
           "attempt_index": 0,
-          "auto_allowed_tool_calls": 2,
-          "cache_signal": "unknown",
-          "completion_tokens": null,
           "error": null,
           "executed_tool_calls": 2,
-          "final_wallclock_ms": "<ms>",
+          "failure_category": null,
+          "observability": {
+            "cache_signal": "unknown",
+            "model_output_ms": "<ms>",
+            "wallclock_ms": "<ms>"
+          },
           "passed": true,
-          "paused_tool_calls": 0,
-          "prompt_tokens": null,
-          "refused_tool_calls": 0,
+          "policy_counts": {
+            "approved_tool_calls": 0,
+            "auto_allowed_tool_calls": 2,
+            "paused_tool_calls": 0,
+            "refused_tool_calls": 0
+          },
           "session_id": "<session-id>",
           "tool_names": [
             "list_files",
             "read_file"
           ],
-          "total_tokens": null
+          "transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl"
         },
         {
-          "approved_tool_calls": 0,
           "assistant_text": "LIST_READ_OK",
           "attempt_index": 1,
-          "auto_allowed_tool_calls": 2,
-          "cache_signal": "unknown",
-          "completion_tokens": null,
           "error": null,
           "executed_tool_calls": 2,
-          "final_wallclock_ms": "<ms>",
+          "failure_category": null,
+          "observability": {
+            "cache_signal": "unknown",
+            "model_output_ms": "<ms>",
+            "wallclock_ms": "<ms>"
+          },
           "passed": true,
-          "paused_tool_calls": 0,
-          "prompt_tokens": null,
-          "refused_tool_calls": 0,
+          "policy_counts": {
+            "approved_tool_calls": 0,
+            "auto_allowed_tool_calls": 2,
+            "paused_tool_calls": 0,
+            "refused_tool_calls": 0
+          },
           "session_id": "<session-id>",
           "tool_names": [
             "list_files",
             "read_file"
           ],
-          "total_tokens": null
+          "transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl"
         }
       ],
+      "case_index": 1,
       "case_name": "list_then_read",
       "error": null,
-      "executed_tool_calls": 2,
-      "median_wallclock_ms": "<ms>",
+      "failed_attempts": 0,
+      "failure_category": null,
+      "latest_assistant_text": "LIST_READ_OK",
+      "latest_executed_tool_calls": 2,
+      "latest_observability": {
+        "cache_signal": "unknown",
+        "model_output_ms": "<ms>",
+        "wallclock_ms": "<ms>"
+      },
+      "latest_policy_counts": {
+        "approved_tool_calls": 0,
+        "auto_allowed_tool_calls": 2,
+        "paused_tool_calls": 0,
+        "refused_tool_calls": 0
+      },
+      "latest_session_id": "<session-id>",
+      "latest_tool_names": [
+        "list_files",
+        "read_file"
+      ],
+      "latest_transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl",
+      "median_elapsed_ms": "<ms>",
       "passed": true,
-      "repeat_runs": 2,
-      "session_id": "<session-id>"
+      "passed_attempts": 2,
+      "repeat_runs": 2
     },
     {
-      "assistant_text": "SEARCH_READ_OK",
       "attempts": [
         {
-          "approved_tool_calls": 0,
           "assistant_text": "SEARCH_READ_OK",
           "attempt_index": 0,
-          "auto_allowed_tool_calls": 2,
-          "cache_signal": "unknown",
-          "completion_tokens": null,
           "error": null,
           "executed_tool_calls": 2,
-          "final_wallclock_ms": "<ms>",
+          "failure_category": null,
+          "observability": {
+            "cache_signal": "unknown",
+            "model_output_ms": "<ms>",
+            "wallclock_ms": "<ms>"
+          },
           "passed": true,
-          "paused_tool_calls": 0,
-          "prompt_tokens": null,
-          "refused_tool_calls": 0,
+          "policy_counts": {
+            "approved_tool_calls": 0,
+            "auto_allowed_tool_calls": 2,
+            "paused_tool_calls": 0,
+            "refused_tool_calls": 0
+          },
           "session_id": "<session-id>",
           "tool_names": [
             "code_search",
             "read_file"
           ],
-          "total_tokens": null
+          "transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl"
         },
         {
-          "approved_tool_calls": 0,
           "assistant_text": "SEARCH_READ_OK",
           "attempt_index": 1,
-          "auto_allowed_tool_calls": 2,
-          "cache_signal": "unknown",
-          "completion_tokens": null,
           "error": null,
           "executed_tool_calls": 2,
-          "final_wallclock_ms": "<ms>",
+          "failure_category": null,
+          "observability": {
+            "cache_signal": "unknown",
+            "model_output_ms": "<ms>",
+            "wallclock_ms": "<ms>"
+          },
           "passed": true,
-          "paused_tool_calls": 0,
-          "prompt_tokens": null,
-          "refused_tool_calls": 0,
+          "policy_counts": {
+            "approved_tool_calls": 0,
+            "auto_allowed_tool_calls": 2,
+            "paused_tool_calls": 0,
+            "refused_tool_calls": 0
+          },
           "session_id": "<session-id>",
           "tool_names": [
             "code_search",
             "read_file"
           ],
-          "total_tokens": null
+          "transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl"
         }
       ],
+      "case_index": 2,
       "case_name": "search_then_read",
       "error": null,
-      "executed_tool_calls": 2,
-      "median_wallclock_ms": "<ms>",
+      "failed_attempts": 0,
+      "failure_category": null,
+      "latest_assistant_text": "SEARCH_READ_OK",
+      "latest_executed_tool_calls": 2,
+      "latest_observability": {
+        "cache_signal": "unknown",
+        "model_output_ms": "<ms>",
+        "wallclock_ms": "<ms>"
+      },
+      "latest_policy_counts": {
+        "approved_tool_calls": 0,
+        "auto_allowed_tool_calls": 2,
+        "paused_tool_calls": 0,
+        "refused_tool_calls": 0
+      },
+      "latest_session_id": "<session-id>",
+      "latest_tool_names": [
+        "code_search",
+        "read_file"
+      ],
+      "latest_transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl",
+      "median_elapsed_ms": "<ms>",
       "passed": true,
-      "repeat_runs": 2,
-      "session_id": "<session-id>"
+      "passed_attempts": 2,
+      "repeat_runs": 2
     },
     {
-      "assistant_text": "SHELL_OK",
       "attempts": [
         {
-          "approved_tool_calls": 0,
           "assistant_text": "SHELL_OK",
           "attempt_index": 0,
-          "auto_allowed_tool_calls": 1,
-          "cache_signal": "unknown",
-          "completion_tokens": null,
           "error": null,
           "executed_tool_calls": 1,
-          "final_wallclock_ms": "<ms>",
+          "failure_category": null,
+          "observability": {
+            "cache_signal": "unknown",
+            "model_output_ms": "<ms>",
+            "wallclock_ms": "<ms>"
+          },
           "passed": true,
-          "paused_tool_calls": 0,
-          "prompt_tokens": null,
-          "refused_tool_calls": 0,
+          "policy_counts": {
+            "approved_tool_calls": 0,
+            "auto_allowed_tool_calls": 1,
+            "paused_tool_calls": 0,
+            "refused_tool_calls": 0
+          },
           "session_id": "<session-id>",
           "tool_names": [
             "shell"
           ],
-          "total_tokens": null
+          "transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl"
         },
         {
-          "approved_tool_calls": 0,
           "assistant_text": "SHELL_OK",
           "attempt_index": 1,
-          "auto_allowed_tool_calls": 1,
-          "cache_signal": "unknown",
-          "completion_tokens": null,
           "error": null,
           "executed_tool_calls": 1,
-          "final_wallclock_ms": "<ms>",
+          "failure_category": null,
+          "observability": {
+            "cache_signal": "unknown",
+            "model_output_ms": "<ms>",
+            "wallclock_ms": "<ms>"
+          },
           "passed": true,
-          "paused_tool_calls": 0,
-          "prompt_tokens": null,
-          "refused_tool_calls": 0,
+          "policy_counts": {
+            "approved_tool_calls": 0,
+            "auto_allowed_tool_calls": 1,
+            "paused_tool_calls": 0,
+            "refused_tool_calls": 0
+          },
           "session_id": "<session-id>",
           "tool_names": [
             "shell"
           ],
-          "total_tokens": null
+          "transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl"
         }
       ],
+      "case_index": 3,
       "case_name": "shell_then_summarize",
       "error": null,
-      "executed_tool_calls": 1,
-      "median_wallclock_ms": "<ms>",
+      "failed_attempts": 0,
+      "failure_category": null,
+      "latest_assistant_text": "SHELL_OK",
+      "latest_executed_tool_calls": 1,
+      "latest_observability": {
+        "cache_signal": "unknown",
+        "model_output_ms": "<ms>",
+        "wallclock_ms": "<ms>"
+      },
+      "latest_policy_counts": {
+        "approved_tool_calls": 0,
+        "auto_allowed_tool_calls": 1,
+        "paused_tool_calls": 0,
+        "refused_tool_calls": 0
+      },
+      "latest_session_id": "<session-id>",
+      "latest_tool_names": [
+        "shell"
+      ],
+      "latest_transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl",
+      "median_elapsed_ms": "<ms>",
       "passed": true,
-      "repeat_runs": 2,
-      "session_id": "<session-id>"
+      "passed_attempts": 2,
+      "repeat_runs": 2
     },
     {
-      "assistant_text": "PATCH_OK",
       "attempts": [
         {
-          "approved_tool_calls": 1,
           "assistant_text": "PATCH_OK",
           "attempt_index": 0,
-          "auto_allowed_tool_calls": 1,
-          "cache_signal": "unknown",
-          "completion_tokens": null,
           "error": null,
           "executed_tool_calls": 2,
-          "final_wallclock_ms": "<ms>",
+          "failure_category": null,
+          "observability": {
+            "cache_signal": "unknown",
+            "model_output_ms": "<ms>",
+            "wallclock_ms": "<ms>"
+          },
           "passed": true,
-          "paused_tool_calls": 0,
-          "prompt_tokens": null,
-          "refused_tool_calls": 0,
+          "policy_counts": {
+            "approved_tool_calls": 1,
+            "auto_allowed_tool_calls": 1,
+            "paused_tool_calls": 0,
+            "refused_tool_calls": 0
+          },
           "session_id": "<session-id>",
           "tool_names": [
             "apply_patch",
             "read_file"
           ],
-          "total_tokens": null
+          "transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl"
         },
         {
-          "approved_tool_calls": 1,
           "assistant_text": "PATCH_OK",
           "attempt_index": 1,
-          "auto_allowed_tool_calls": 1,
-          "cache_signal": "unknown",
-          "completion_tokens": null,
           "error": null,
           "executed_tool_calls": 2,
-          "final_wallclock_ms": "<ms>",
+          "failure_category": null,
+          "observability": {
+            "cache_signal": "unknown",
+            "model_output_ms": "<ms>",
+            "wallclock_ms": "<ms>"
+          },
           "passed": true,
-          "paused_tool_calls": 0,
-          "prompt_tokens": null,
-          "refused_tool_calls": 0,
+          "policy_counts": {
+            "approved_tool_calls": 1,
+            "auto_allowed_tool_calls": 1,
+            "paused_tool_calls": 0,
+            "refused_tool_calls": 0
+          },
           "session_id": "<session-id>",
           "tool_names": [
             "apply_patch",
             "read_file"
           ],
-          "total_tokens": null
+          "transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl"
         }
       ],
+      "case_index": 4,
       "case_name": "patch_then_verify",
       "error": null,
-      "executed_tool_calls": 2,
-      "median_wallclock_ms": "<ms>",
+      "failed_attempts": 0,
+      "failure_category": null,
+      "latest_assistant_text": "PATCH_OK",
+      "latest_executed_tool_calls": 2,
+      "latest_observability": {
+        "cache_signal": "unknown",
+        "model_output_ms": "<ms>",
+        "wallclock_ms": "<ms>"
+      },
+      "latest_policy_counts": {
+        "approved_tool_calls": 1,
+        "auto_allowed_tool_calls": 1,
+        "paused_tool_calls": 0,
+        "refused_tool_calls": 0
+      },
+      "latest_session_id": "<session-id>",
+      "latest_tool_names": [
+        "apply_patch",
+        "read_file"
+      ],
+      "latest_transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl",
+      "median_elapsed_ms": "<ms>",
       "passed": true,
-      "repeat_runs": 2,
-      "session_id": "<session-id>"
+      "passed_attempts": 2,
+      "repeat_runs": 2
     },
     {
-      "assistant_text": null,
       "attempts": [
         {
-          "approved_tool_calls": 0,
           "assistant_text": null,
           "attempt_index": 0,
-          "auto_allowed_tool_calls": 0,
-          "cache_signal": "cold_start",
-          "completion_tokens": null,
           "error": "session <session-id> paused for approval on tool `apply_patch` (call_blocked_patch_1): tool `apply_patch` requires write approval under the active local policy",
           "executed_tool_calls": 0,
-          "final_wallclock_ms": "<ms>",
+          "failure_category": null,
+          "observability": {
+            "cache_signal": "cold_start",
+            "model_output_ms": "<ms>",
+            "wallclock_ms": "<ms>"
+          },
           "passed": true,
-          "paused_tool_calls": 1,
-          "prompt_tokens": null,
-          "refused_tool_calls": 0,
+          "policy_counts": {
+            "approved_tool_calls": 0,
+            "auto_allowed_tool_calls": 0,
+            "paused_tool_calls": 1,
+            "refused_tool_calls": 0
+          },
           "session_id": "<session-id>",
           "tool_names": [
             "apply_patch"
           ],
-          "total_tokens": null
+          "transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl"
         },
         {
-          "approved_tool_calls": 0,
           "assistant_text": null,
           "attempt_index": 1,
-          "auto_allowed_tool_calls": 0,
-          "cache_signal": "cold_start",
-          "completion_tokens": null,
           "error": "session <session-id> paused for approval on tool `apply_patch` (call_blocked_patch_2): tool `apply_patch` requires write approval under the active local policy",
           "executed_tool_calls": 0,
-          "final_wallclock_ms": "<ms>",
+          "failure_category": null,
+          "observability": {
+            "cache_signal": "cold_start",
+            "model_output_ms": "<ms>",
+            "wallclock_ms": "<ms>"
+          },
           "passed": true,
-          "paused_tool_calls": 1,
-          "prompt_tokens": null,
-          "refused_tool_calls": 0,
+          "policy_counts": {
+            "approved_tool_calls": 0,
+            "auto_allowed_tool_calls": 0,
+            "paused_tool_calls": 1,
+            "refused_tool_calls": 0
+          },
           "session_id": "<session-id>",
           "tool_names": [
             "apply_patch"
           ],
-          "total_tokens": null
+          "transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl"
         }
       ],
+      "case_index": 5,
       "case_name": "approval_pause_or_refusal",
       "error": "session <session-id> paused for approval on tool `apply_patch` (call_blocked_patch_1): tool `apply_patch` requires write approval under the active local policy",
-      "executed_tool_calls": 0,
-      "median_wallclock_ms": "<ms>",
+      "failed_attempts": 0,
+      "failure_category": null,
+      "latest_assistant_text": null,
+      "latest_executed_tool_calls": 0,
+      "latest_observability": {
+        "cache_signal": "cold_start",
+        "model_output_ms": "<ms>",
+        "wallclock_ms": "<ms>"
+      },
+      "latest_policy_counts": {
+        "approved_tool_calls": 0,
+        "auto_allowed_tool_calls": 0,
+        "paused_tool_calls": 1,
+        "refused_tool_calls": 0
+      },
+      "latest_session_id": "<session-id>",
+      "latest_tool_names": [
+        "apply_patch"
+      ],
+      "latest_transcript_path": "$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl",
+      "median_elapsed_ms": "<ms>",
       "passed": true,
-      "repeat_runs": 2,
-      "session_id": "<session-id>"
+      "passed_attempts": 2,
+      "repeat_runs": 2
     }
   ],
+  "run": {
+    "git_commit_sha": "<git-sha>",
+    "git_dirty": "<git-dirty>",
+    "probe_version": "0.1.0",
+    "run_id": "<run-id>",
+    "schema_version": "v2"
+  },
   "started_at_ms": "<ms>"
 }

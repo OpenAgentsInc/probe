@@ -1,9 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use probe_core::harness::resolve_harness_profile;
-use probe_core::runtime::{PlainTextExecOutcome, PlainTextExecRequest, ProbeRuntime};
+use probe_core::runtime::{PlainTextExecOutcome, PlainTextExecRequest, ProbeRuntime, RuntimeError};
 use probe_core::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig};
 use probe_protocol::backend::BackendProfile;
 use probe_protocol::session::{
@@ -13,6 +14,10 @@ use probe_protocol::session::{
 use serde::{Deserialize, Serialize};
 
 const ACCEPTANCE_REPEAT_RUNS: usize = 2;
+const ACCEPTANCE_REPORT_SCHEMA_VERSION: &str = "v2";
+const ACCEPTANCE_TOOL_SET: &str = "coding_bootstrap";
+const ACCEPTANCE_HARNESS_PROFILE_NAME: &str = "coding_bootstrap_default";
+const ACCEPTANCE_HARNESS_PROFILE_VERSION: &str = "v1";
 
 #[derive(Clone, Debug)]
 pub struct AcceptanceHarnessConfig {
@@ -23,46 +28,136 @@ pub struct AcceptanceHarnessConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcceptanceRunReport {
+    pub run: AcceptanceRunIdentity,
+    pub backend: AcceptanceBackendSummary,
+    pub harness: AcceptanceHarnessSummary,
     pub started_at_ms: u64,
     pub finished_at_ms: u64,
-    pub base_url: String,
-    pub model: String,
+    pub duration_ms: u64,
     pub overall_pass: bool,
-    pub repeat_runs_per_case: usize,
+    pub counts: AcceptanceRunCounts,
     pub results: Vec<AcceptanceCaseReport>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AcceptanceCaseReport {
-    pub case_name: String,
-    pub passed: bool,
-    pub repeat_runs: usize,
-    pub median_wallclock_ms: Option<u64>,
-    pub session_id: Option<String>,
-    pub assistant_text: Option<String>,
-    pub executed_tool_calls: usize,
-    pub error: Option<String>,
-    pub attempts: Vec<AcceptanceAttemptReport>,
+pub struct AcceptanceRunIdentity {
+    pub run_id: String,
+    pub schema_version: String,
+    pub probe_version: String,
+    pub git_commit_sha: Option<String>,
+    pub git_dirty: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcceptanceBackendSummary {
+    pub profile_name: String,
+    pub base_url: String,
+    pub model: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcceptanceHarnessSummary {
+    pub tool_set: String,
+    pub profile_name: String,
+    pub profile_version: String,
+    pub repeat_runs_per_case: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcceptanceRunCounts {
+    pub total_cases: usize,
+    pub passed_cases: usize,
+    pub failed_cases: usize,
+    pub total_attempts: usize,
+    pub passed_attempts: usize,
+    pub failed_attempts: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcceptanceAttemptReport {
     pub attempt_index: usize,
     pub passed: bool,
+    pub failure_category: Option<AcceptanceFailureCategory>,
     pub session_id: Option<String>,
+    pub transcript_path: Option<PathBuf>,
     pub assistant_text: Option<String>,
     pub executed_tool_calls: usize,
     pub tool_names: Vec<String>,
+    pub policy_counts: AcceptancePolicyCounts,
+    pub observability: Option<AcceptanceObservabilitySummary>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcceptanceCaseReport {
+    pub case_name: String,
+    pub case_index: usize,
+    pub passed: bool,
+    pub repeat_runs: usize,
+    pub passed_attempts: usize,
+    pub failed_attempts: usize,
+    pub median_elapsed_ms: Option<u64>,
+    pub latest_session_id: Option<String>,
+    pub latest_transcript_path: Option<PathBuf>,
+    pub latest_assistant_text: Option<String>,
+    pub latest_executed_tool_calls: usize,
+    pub latest_tool_names: Vec<String>,
+    pub latest_policy_counts: AcceptancePolicyCounts,
+    pub latest_observability: Option<AcceptanceObservabilitySummary>,
+    pub failure_category: Option<AcceptanceFailureCategory>,
+    pub error: Option<String>,
+    pub attempts: Vec<AcceptanceAttemptReport>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AcceptancePolicyCounts {
     pub auto_allowed_tool_calls: usize,
     pub approved_tool_calls: usize,
     pub refused_tool_calls: usize,
     pub paused_tool_calls: usize,
-    pub final_wallclock_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcceptanceObservabilitySummary {
+    pub wallclock_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_output_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u32>,
-    pub cache_signal: Option<String>,
-    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_per_second_x1000: Option<u64>,
+    pub cache_signal: CacheSignal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptanceFailureCategory {
+    BackendFailure,
+    ToolExecutionFailure,
+    PolicyRefusal,
+    PolicyPaused,
+    VerificationFailure,
+    ConfigurationFailure,
+    UnknownFailure,
+}
+
+#[derive(Debug)]
+enum AcceptanceExecutionError {
+    Runtime(RuntimeError),
+    Setup(String),
+}
+
+impl std::fmt::Display for AcceptanceExecutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Runtime(error) => write!(f, "{error}"),
+            Self::Setup(error) => write!(f, "{error}"),
+        }
+    }
 }
 
 pub fn run_acceptance_harness(
@@ -75,7 +170,7 @@ pub fn run_acceptance_harness(
     }
 
     let runtime = ProbeRuntime::new(config.probe_home.clone());
-    let results = vec![
+    let mut results = vec![
         run_case_read_file_answer(&runtime, &config.base_profile, config.probe_home.as_path()),
         run_case_list_then_read(&runtime, &config.base_profile, config.probe_home.as_path()),
         run_case_search_then_read(&runtime, &config.base_profile, config.probe_home.as_path()),
@@ -87,14 +182,38 @@ pub fn run_acceptance_harness(
             config.probe_home.as_path(),
         ),
     ];
+    for (case_index, result) in results.iter_mut().enumerate() {
+        result.case_index = case_index;
+    }
+
+    let finished_at_ms = now_ms();
+    let counts = build_run_counts(results.as_slice());
+    let git_state = current_probe_git_state();
 
     let report = AcceptanceRunReport {
+        run: AcceptanceRunIdentity {
+            run_id: format!("acceptance_{}_{}", started_at_ms, std::process::id()),
+            schema_version: String::from(ACCEPTANCE_REPORT_SCHEMA_VERSION),
+            probe_version: String::from(env!("CARGO_PKG_VERSION")),
+            git_commit_sha: git_state.git_commit_sha,
+            git_dirty: git_state.git_dirty,
+        },
+        backend: AcceptanceBackendSummary {
+            profile_name: config.base_profile.name.clone(),
+            base_url: config.base_profile.base_url.clone(),
+            model: config.base_profile.model.clone(),
+        },
+        harness: AcceptanceHarnessSummary {
+            tool_set: String::from(ACCEPTANCE_TOOL_SET),
+            profile_name: String::from(ACCEPTANCE_HARNESS_PROFILE_NAME),
+            profile_version: String::from(ACCEPTANCE_HARNESS_PROFILE_VERSION),
+            repeat_runs_per_case: ACCEPTANCE_REPEAT_RUNS,
+        },
         started_at_ms,
-        finished_at_ms: now_ms(),
-        base_url: config.base_profile.base_url.clone(),
-        model: config.base_profile.model.clone(),
+        finished_at_ms,
+        duration_ms: finished_at_ms.saturating_sub(started_at_ms),
         overall_pass: results.iter().all(|result| result.passed),
-        repeat_runs_per_case: ACCEPTANCE_REPEAT_RUNS,
+        counts,
         results,
     };
 
@@ -217,7 +336,7 @@ fn run_case_shell_then_summarize(
         |attempt, _workspace| {
             attempt.assistant_text.as_deref() == Some("SHELL_OK")
                 && attempt.tool_names.iter().any(|name| name == "shell")
-                && attempt.auto_allowed_tool_calls >= 1
+                && attempt.policy_counts.auto_allowed_tool_calls >= 1
         },
     )
 }
@@ -246,7 +365,7 @@ fn run_case_patch_then_verify(
             attempt.assistant_text.as_deref() == Some("PATCH_OK")
                 && attempt.tool_names.iter().any(|name| name == "apply_patch")
                 && attempt.tool_names.iter().any(|name| name == "read_file")
-                && attempt.approved_tool_calls >= 1
+                && attempt.policy_counts.approved_tool_calls >= 1
                 && fs::read_to_string(workspace.join("hello.txt"))
                     .map(|content| content == "hello probe\n")
                     .unwrap_or(false)
@@ -275,7 +394,7 @@ fn run_case_approval_pause_or_refusal(
             )
         },
         |attempt, workspace| {
-            attempt.paused_tool_calls >= 1
+            attempt.policy_counts.paused_tool_calls >= 1
                 && attempt.tool_names.iter().any(|name| name == "apply_patch")
                 && attempt
                     .error
@@ -298,7 +417,12 @@ fn run_repeated_case<F, G>(
     mut validator: G,
 ) -> AcceptanceCaseReport
 where
-    F: FnMut(&ProbeRuntime, &BackendProfile, &Path, &str) -> Result<PlainTextExecOutcome, String>,
+    F: FnMut(
+        &ProbeRuntime,
+        &BackendProfile,
+        &Path,
+        &str,
+    ) -> Result<PlainTextExecOutcome, AcceptanceExecutionError>,
     G: FnMut(&AcceptanceAttemptReport, &Path) -> bool,
 {
     let mut attempts = Vec::new();
@@ -311,6 +435,11 @@ where
         let outcome = runner(runtime, base_profile, workspace.as_path(), title.as_str());
         let mut attempt = capture_attempt_report(runtime, title.as_str(), attempt_index, outcome);
         attempt.passed = validator(&attempt, workspace.as_path());
+        if attempt.passed {
+            attempt.failure_category = None;
+        } else if attempt.failure_category.is_none() {
+            attempt.failure_category = Some(AcceptanceFailureCategory::VerificationFailure);
+        }
         attempts.push(attempt);
     }
 
@@ -324,14 +453,17 @@ fn execute_coding_case(
     title: &str,
     prompt: &str,
     tool_loop: ToolLoopConfig,
-) -> Result<PlainTextExecOutcome, String> {
+) -> Result<PlainTextExecOutcome, AcceptanceExecutionError> {
     let resolved = resolve_harness_profile(
         Some("coding_bootstrap"),
         Some("coding_bootstrap_default"),
         workspace,
         None,
-    )?
-    .ok_or_else(|| String::from("missing coding bootstrap harness profile"))?;
+    )
+    .map_err(AcceptanceExecutionError::Setup)?
+    .ok_or_else(|| {
+        AcceptanceExecutionError::Setup(String::from("missing coding bootstrap harness profile"))
+    })?;
 
     runtime
         .exec_plain_text(PlainTextExecRequest {
@@ -343,7 +475,7 @@ fn execute_coding_case(
             harness_profile: Some(resolved.profile),
             tool_loop: Some(tool_loop),
         })
-        .map_err(|error| error.to_string())
+        .map_err(AcceptanceExecutionError::Runtime)
 }
 
 fn coding_tool_loop(
@@ -366,7 +498,7 @@ fn capture_attempt_report(
     runtime: &ProbeRuntime,
     title: &str,
     attempt_index: usize,
-    outcome: Result<PlainTextExecOutcome, String>,
+    outcome: Result<PlainTextExecOutcome, AcceptanceExecutionError>,
 ) -> AcceptanceAttemptReport {
     let session_metadata = match &outcome {
         Ok(outcome) => Some(outcome.session.clone()),
@@ -382,6 +514,7 @@ fn capture_attempt_report(
     let transcript_summary = transcript
         .as_ref()
         .map(|(_, events)| summarize_transcript(events.as_slice()));
+    let failure_category = classify_attempt(transcript_summary.as_ref(), outcome.as_ref());
 
     let (assistant_text, executed_tool_calls, error) = match outcome {
         Ok(outcome) => (
@@ -392,60 +525,38 @@ fn capture_attempt_report(
         Err(error) => {
             let executed = transcript_summary
                 .as_ref()
-                .map(|summary| summary.auto_allowed_tool_calls + summary.approved_tool_calls)
+                .map(|summary| {
+                    summary.policy_counts.auto_allowed_tool_calls
+                        + summary.policy_counts.approved_tool_calls
+                })
                 .unwrap_or(0);
-            (None, executed, Some(error))
+            (None, executed, Some(error.to_string()))
         }
     };
 
     AcceptanceAttemptReport {
         attempt_index,
         passed: false,
+        failure_category,
         session_id: session_metadata
             .as_ref()
             .map(|metadata| metadata.id.as_str().to_string()),
+        transcript_path: session_metadata
+            .as_ref()
+            .map(|metadata| metadata.transcript_path.clone()),
         assistant_text,
         executed_tool_calls,
         tool_names: transcript_summary
             .as_ref()
             .map(|summary| summary.tool_names.clone())
             .unwrap_or_default(),
-        auto_allowed_tool_calls: transcript_summary
+        policy_counts: transcript_summary
             .as_ref()
-            .map(|summary| summary.auto_allowed_tool_calls)
-            .unwrap_or(0),
-        approved_tool_calls: transcript_summary
+            .map(|summary| summary.policy_counts.clone())
+            .unwrap_or_default(),
+        observability: transcript_summary
             .as_ref()
-            .map(|summary| summary.approved_tool_calls)
-            .unwrap_or(0),
-        refused_tool_calls: transcript_summary
-            .as_ref()
-            .map(|summary| summary.refused_tool_calls)
-            .unwrap_or(0),
-        paused_tool_calls: transcript_summary
-            .as_ref()
-            .map(|summary| summary.paused_tool_calls)
-            .unwrap_or(0),
-        final_wallclock_ms: transcript_summary
-            .as_ref()
-            .and_then(|summary| summary.final_observability.as_ref())
-            .map(|observability| observability.wallclock_ms),
-        prompt_tokens: transcript_summary
-            .as_ref()
-            .and_then(|summary| summary.final_observability.as_ref())
-            .and_then(|observability| observability.prompt_tokens),
-        completion_tokens: transcript_summary
-            .as_ref()
-            .and_then(|summary| summary.final_observability.as_ref())
-            .and_then(|observability| observability.completion_tokens),
-        total_tokens: transcript_summary
-            .as_ref()
-            .and_then(|summary| summary.final_observability.as_ref())
-            .and_then(|observability| observability.total_tokens),
-        cache_signal: transcript_summary
-            .as_ref()
-            .and_then(|summary| summary.final_observability.as_ref())
-            .map(|observability| render_cache_signal(observability.cache_signal).to_string()),
+            .and_then(|summary| summary.final_observability.clone()),
         error,
     }
 }
@@ -455,26 +566,77 @@ fn build_case_report(
     attempts: Vec<AcceptanceAttemptReport>,
 ) -> AcceptanceCaseReport {
     let passed = attempts.iter().all(|attempt| attempt.passed);
-    let median_wallclock_ms = median(
+    let median_elapsed_ms = median(
         attempts
             .iter()
-            .filter_map(|attempt| attempt.final_wallclock_ms)
+            .filter_map(|attempt| attempt.observability.as_ref())
+            .map(|observability| observability.wallclock_ms)
             .collect(),
     );
-    let summary_attempt = attempts.last();
+    let passed_attempts = attempts.iter().filter(|attempt| attempt.passed).count();
+    let failed_attempts = attempts.len().saturating_sub(passed_attempts);
+    let summary_attempt = attempts.last().cloned();
 
     AcceptanceCaseReport {
         case_name: String::from(case_name),
+        case_index: 0,
         passed,
         repeat_runs: attempts.len(),
-        median_wallclock_ms,
-        session_id: summary_attempt.and_then(|attempt| attempt.session_id.clone()),
-        assistant_text: summary_attempt.and_then(|attempt| attempt.assistant_text.clone()),
-        executed_tool_calls: summary_attempt
+        passed_attempts,
+        failed_attempts,
+        median_elapsed_ms,
+        latest_session_id: summary_attempt
+            .as_ref()
+            .and_then(|attempt| attempt.session_id.clone()),
+        latest_transcript_path: summary_attempt
+            .as_ref()
+            .and_then(|attempt| attempt.transcript_path.clone()),
+        latest_assistant_text: summary_attempt
+            .as_ref()
+            .and_then(|attempt| attempt.assistant_text.clone()),
+        latest_executed_tool_calls: summary_attempt
+            .as_ref()
             .map(|attempt| attempt.executed_tool_calls)
             .unwrap_or(0),
+        latest_tool_names: summary_attempt
+            .as_ref()
+            .map(|attempt| attempt.tool_names.clone())
+            .unwrap_or_default(),
+        latest_policy_counts: summary_attempt
+            .as_ref()
+            .map(|attempt| attempt.policy_counts.clone())
+            .unwrap_or_default(),
+        latest_observability: summary_attempt
+            .as_ref()
+            .and_then(|attempt| attempt.observability.clone()),
+        failure_category: attempts
+            .iter()
+            .find(|attempt| !attempt.passed)
+            .and_then(|attempt| attempt.failure_category.clone()),
         error: attempts.iter().find_map(|attempt| attempt.error.clone()),
         attempts,
+    }
+}
+
+fn build_run_counts(results: &[AcceptanceCaseReport]) -> AcceptanceRunCounts {
+    let total_cases = results.len();
+    let passed_cases = results.iter().filter(|result| result.passed).count();
+    let failed_cases = total_cases.saturating_sub(passed_cases);
+    let total_attempts: usize = results.iter().map(|result| result.attempts.len()).sum();
+    let passed_attempts = results
+        .iter()
+        .flat_map(|result| result.attempts.iter())
+        .filter(|attempt| attempt.passed)
+        .count();
+    let failed_attempts = total_attempts.saturating_sub(passed_attempts);
+
+    AcceptanceRunCounts {
+        total_cases,
+        passed_cases,
+        failed_cases,
+        total_attempts,
+        passed_attempts,
+        failed_attempts,
     }
 }
 
@@ -530,18 +692,15 @@ fn find_session_by_title(runtime: &ProbeRuntime, title: &str) -> Option<SessionM
 #[derive(Clone, Debug, Default)]
 struct TranscriptSummary {
     tool_names: Vec<String>,
-    auto_allowed_tool_calls: usize,
-    approved_tool_calls: usize,
-    refused_tool_calls: usize,
-    paused_tool_calls: usize,
-    final_observability: Option<TurnObservability>,
+    policy_counts: AcceptancePolicyCounts,
+    final_observability: Option<AcceptanceObservabilitySummary>,
 }
 
 fn summarize_transcript(events: &[TranscriptEvent]) -> TranscriptSummary {
     let mut summary = TranscriptSummary::default();
     for event in events {
         if let Some(observability) = event.turn.observability.clone() {
-            summary.final_observability = Some(observability);
+            summary.final_observability = Some(observability_summary(&observability));
         }
         for item in &event.turn.items {
             if item.kind != TranscriptItemKind::ToolResult {
@@ -552,15 +711,72 @@ fn summarize_transcript(events: &[TranscriptEvent]) -> TranscriptSummary {
             }
             if let Some(tool_execution) = item.tool_execution.as_ref() {
                 match tool_execution.policy_decision {
-                    ToolPolicyDecision::AutoAllow => summary.auto_allowed_tool_calls += 1,
-                    ToolPolicyDecision::Approved => summary.approved_tool_calls += 1,
-                    ToolPolicyDecision::Refused => summary.refused_tool_calls += 1,
-                    ToolPolicyDecision::Paused => summary.paused_tool_calls += 1,
+                    ToolPolicyDecision::AutoAllow => {
+                        summary.policy_counts.auto_allowed_tool_calls += 1;
+                    }
+                    ToolPolicyDecision::Approved => {
+                        summary.policy_counts.approved_tool_calls += 1;
+                    }
+                    ToolPolicyDecision::Refused => {
+                        summary.policy_counts.refused_tool_calls += 1;
+                    }
+                    ToolPolicyDecision::Paused => {
+                        summary.policy_counts.paused_tool_calls += 1;
+                    }
                 }
             }
         }
     }
     summary
+}
+
+fn classify_attempt(
+    transcript_summary: Option<&TranscriptSummary>,
+    outcome: Result<&PlainTextExecOutcome, &AcceptanceExecutionError>,
+) -> Option<AcceptanceFailureCategory> {
+    match outcome {
+        Ok(_) => None,
+        Err(error) => {
+            if transcript_summary
+                .map(|summary| summary.policy_counts.paused_tool_calls > 0)
+                .unwrap_or(false)
+                || matches!(
+                    error,
+                    AcceptanceExecutionError::Runtime(RuntimeError::ToolApprovalPending { .. })
+                )
+            {
+                return Some(AcceptanceFailureCategory::PolicyPaused);
+            }
+            if transcript_summary
+                .map(|summary| summary.policy_counts.refused_tool_calls > 0)
+                .unwrap_or(false)
+            {
+                return Some(AcceptanceFailureCategory::PolicyRefusal);
+            }
+            match error {
+                AcceptanceExecutionError::Setup(_) => {
+                    Some(AcceptanceFailureCategory::ConfigurationFailure)
+                }
+                AcceptanceExecutionError::Runtime(RuntimeError::ProviderBuild(_))
+                | AcceptanceExecutionError::Runtime(RuntimeError::ProviderRequest { .. })
+                | AcceptanceExecutionError::Runtime(RuntimeError::MissingAssistantMessage {
+                    ..
+                }) => Some(AcceptanceFailureCategory::BackendFailure),
+                AcceptanceExecutionError::Runtime(RuntimeError::MaxToolRoundTrips { .. })
+                | AcceptanceExecutionError::Runtime(RuntimeError::MalformedTranscript(_)) => {
+                    Some(AcceptanceFailureCategory::ToolExecutionFailure)
+                }
+                AcceptanceExecutionError::Runtime(RuntimeError::ProbeHomeUnavailable)
+                | AcceptanceExecutionError::Runtime(RuntimeError::CurrentDir(_))
+                | AcceptanceExecutionError::Runtime(RuntimeError::SessionStore(_)) => {
+                    Some(AcceptanceFailureCategory::ConfigurationFailure)
+                }
+                AcceptanceExecutionError::Runtime(RuntimeError::ToolApprovalPending { .. }) => {
+                    Some(AcceptanceFailureCategory::PolicyPaused)
+                }
+            }
+        }
+    }
 }
 
 fn median(mut values: Vec<u64>) -> Option<u64> {
@@ -571,12 +787,63 @@ fn median(mut values: Vec<u64>) -> Option<u64> {
     Some(values[values.len() / 2])
 }
 
-fn render_cache_signal(signal: CacheSignal) -> &'static str {
-    match signal {
-        CacheSignal::Unknown => "unknown",
-        CacheSignal::ColdStart => "cold_start",
-        CacheSignal::LikelyWarm => "likely_warm",
-        CacheSignal::NoClearSignal => "no_clear_signal",
+#[derive(Clone, Debug)]
+struct ProbeGitState {
+    git_commit_sha: Option<String>,
+    git_dirty: Option<bool>,
+}
+
+fn current_probe_git_state() -> ProbeGitState {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+
+    let Some(repo_root) = repo_root else {
+        return ProbeGitState {
+            git_commit_sha: None,
+            git_dirty: None,
+        };
+    };
+
+    let git_commit_sha = run_git(repo_root.as_path(), ["rev-parse", "HEAD"]);
+    let git_dirty =
+        run_git(repo_root.as_path(), ["status", "--porcelain"]).map(|output| !output.is_empty());
+
+    ProbeGitState {
+        git_commit_sha,
+        git_dirty,
+    }
+}
+
+fn run_git<const N: usize>(repo_root: &Path, args: [&str; N]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn observability_summary(observability: &TurnObservability) -> AcceptanceObservabilitySummary {
+    AcceptanceObservabilitySummary {
+        wallclock_ms: observability.wallclock_ms,
+        model_output_ms: observability.model_output_ms,
+        prompt_tokens: observability.prompt_tokens,
+        completion_tokens: observability.completion_tokens,
+        total_tokens: observability.total_tokens,
+        completion_tokens_per_second_x1000: observability.completion_tokens_per_second_x1000,
+        cache_signal: observability.cache_signal,
     }
 }
 
@@ -724,7 +991,22 @@ mod tests {
 
         assert!(report.overall_pass);
         assert_eq!(report.results.len(), 6);
-        assert_eq!(report.repeat_runs_per_case, 2);
+        assert_eq!(report.harness.repeat_runs_per_case, 2);
+        assert_eq!(report.counts.total_cases, 6);
+        assert_eq!(report.counts.passed_cases, 6);
+        assert_eq!(report.counts.failed_cases, 0);
+        assert_eq!(report.backend.profile_name, "psionic-qwen35-2b-q8-registry");
+        assert_eq!(report.harness.tool_set, "coding_bootstrap");
+        assert_eq!(report.run.schema_version, "v2");
+        assert_eq!(report.results[5].failure_category, None);
+        assert_eq!(report.results[5].latest_policy_counts.paused_tool_calls, 1);
+        assert!(report.results[0].latest_transcript_path.is_some());
+        assert!(
+            report.results[0].attempts[0]
+                .observability
+                .as_ref()
+                .is_some()
+        );
         assert!(report_path.exists());
 
         handle.join().expect("server thread should exit cleanly");

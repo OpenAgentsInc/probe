@@ -576,22 +576,42 @@ fn run_accept(args: AcceptArgs) -> Result<(), String> {
     })?;
 
     eprintln!(
-        "acceptance overall_pass={} report={}",
+        "acceptance run_id={} overall_pass={} report={} cases={}/{} git_sha={} git_dirty={}",
+        report.run.run_id,
         report.overall_pass,
-        report_path.display()
+        report_path.display(),
+        report.counts.passed_cases,
+        report.counts.total_cases,
+        report.run.git_commit_sha.as_deref().unwrap_or("-"),
+        report
+            .run
+            .git_dirty
+            .map(|value| if value { "true" } else { "false" })
+            .unwrap_or("unknown")
     );
     for result in &report.results {
         eprintln!(
-            "case={} passed={} repeats={} median_wallclock_ms={} tool_calls={} session={} error={}",
+            "case={} passed={} attempts={}/{} median_elapsed_ms={} failure_category={} tool_calls={} session={} transcript={} error={}",
             result.case_name,
             result.passed,
+            result.passed_attempts,
             result.repeat_runs,
             result
-                .median_wallclock_ms
+                .median_elapsed_ms
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| String::from("-")),
-            result.executed_tool_calls,
-            result.session_id.as_deref().unwrap_or("-"),
+            result
+                .failure_category
+                .as_ref()
+                .map(render_acceptance_failure_category)
+                .unwrap_or("-"),
+            result.latest_executed_tool_calls,
+            result.latest_session_id.as_deref().unwrap_or("-"),
+            result
+                .latest_transcript_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| String::from("-")),
             result.error.as_deref().unwrap_or("-")
         );
     }
@@ -772,7 +792,8 @@ fn optimization_scorecard_from_acceptance(
         .results
         .iter()
         .flat_map(|case| case.attempts.iter())
-        .filter_map(|attempt| attempt.final_wallclock_ms)
+        .filter_map(|attempt| attempt.observability.as_ref())
+        .map(|observability| observability.wallclock_ms)
         .collect::<Vec<_>>();
     wallclocks.sort_unstable();
     let median_wallclock_ms = if wallclocks.is_empty() {
@@ -784,7 +805,10 @@ fn optimization_scorecard_from_acceptance(
         .results
         .iter()
         .flat_map(|case| case.attempts.iter())
-        .map(|attempt| (attempt.refused_tool_calls + attempt.paused_tool_calls) as u64)
+        .map(|attempt| {
+            (attempt.policy_counts.refused_tool_calls + attempt.policy_counts.paused_tool_calls)
+                as u64
+        })
         .sum();
 
     OptimizationScorecard {
@@ -1122,6 +1146,20 @@ fn render_tool_risk_class(risk_class: ToolRiskClass) -> &'static str {
         ToolRiskClass::Write => "write",
         ToolRiskClass::Network => "network",
         ToolRiskClass::Destructive => "destructive",
+    }
+}
+
+fn render_acceptance_failure_category(
+    category: &acceptance::AcceptanceFailureCategory,
+) -> &'static str {
+    match category {
+        acceptance::AcceptanceFailureCategory::BackendFailure => "backend_failure",
+        acceptance::AcceptanceFailureCategory::ToolExecutionFailure => "tool_execution_failure",
+        acceptance::AcceptanceFailureCategory::PolicyRefusal => "policy_refusal",
+        acceptance::AcceptanceFailureCategory::PolicyPaused => "policy_paused",
+        acceptance::AcceptanceFailureCategory::VerificationFailure => "verification_failure",
+        acceptance::AcceptanceFailureCategory::ConfigurationFailure => "configuration_failure",
+        acceptance::AcceptanceFailureCategory::UnknownFailure => "unknown_failure",
     }
 }
 

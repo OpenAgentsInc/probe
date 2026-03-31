@@ -38,29 +38,35 @@ Optional overrides:
 
 The runner writes a JSON report that records:
 
-- base URL
-- model id
-- overall pass/fail
-- repeat-run count per case
-- per-case pass/fail
-- per-case median wallclock when available
-- per-attempt session id when available
-- per-attempt assistant text when available
-- per-attempt executed tool-call count
-- per-attempt tool names
-- per-attempt auto-allowed, approved, refused, and paused tool counts
-- per-attempt final-turn observability receipts when available
-- error text when a case fails
+- run identity and schema version
+- Probe version plus best-effort git SHA and dirty-state provenance
+- backend profile, base URL, and model metadata
+- harness tool set, harness profile, and repeat-run count
+- aggregate case and attempt counts
+- per-case pass/fail plus passed-attempt and failed-attempt counts
+- per-case median elapsed time when available
+- per-case latest session id and transcript path when available
+- per-case latest tool names, policy counts, and observability summary
+- per-attempt failure category when an attempt does not verify cleanly
+- per-attempt session id, transcript path, assistant text, policy counts, and
+  observability summary
+- error text when a case emits an error path even if that path is the expected
+  passing behavior for the case
 
 When reading the report, the main things to watch are:
 
 - correctness:
   - did the case pass across every retained repeat run
+- provenance:
+  - which Probe revision and local repo state produced the receipt
 - tool behavior:
   - did the expected coding tools actually appear
   - did the policy counts match the intended lane
+- failure typing:
+  - when a case does fail, is the breakage backend-side, tool-side,
+    policy-related, or simple verification drift
 - performance:
-  - did wallclock or token receipts regress materially between runs
+  - did elapsed time or observability receipts regress materially between runs
 
 ## Current Operating Assumption
 

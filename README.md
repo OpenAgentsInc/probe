@@ -112,6 +112,10 @@ Probe now also has binary-level CLI regression tests and narrow normalized
 snapshots for `exec` stderr, selected transcript receipts, and the acceptance
 report shape.
 
+The acceptance report itself now carries run identity, git provenance, backend
+and harness metadata, aggregate counts, typed failure categories, and
+transcript references so it can serve as a real local eval receipt.
+
 ## Commands
 
 Build and validation:
