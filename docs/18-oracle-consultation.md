@@ -32,6 +32,7 @@ cargo run -p probe-cli -- exec \
 Probe now ships a built-in auxiliary profile:
 
 - `psionic-qwen35-2b-q8-oracle`
+- `psionic-apple-fm-oracle`
 
 ## Boundaries
 
@@ -69,3 +70,15 @@ runtime clarity.
 The coding lane still owns execution truth.
 
 The oracle just becomes one more bounded, typed decision aid inside that lane.
+
+## Apple FM Oracle Boundary
+
+Probe's Apple FM oracle support uses the real Apple FM backend kind rather than
+pretending the existing Qwen profile is interchangeable.
+
+Current honest claim:
+
+- `consult_oracle` can target `psionic-apple-fm-oracle`
+- Probe preserves typed Apple FM error detail if the bridge refuses or reports
+  a Foundation Models failure
+- this does not yet imply full Apple FM coding-tool parity

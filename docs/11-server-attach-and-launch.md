@@ -9,6 +9,7 @@ That means:
 - loading a local server config
 - attaching to an already-running local server
 - optionally launching `psionic-openai-server` as a supervised child process
+- distinguishing the current Psionic OpenAI-compatible lane from the Apple FM bridge attach lane
 
 It does not mean Probe owns serving semantics.
 
@@ -26,6 +27,7 @@ By default, Probe stores the local server config at:
 The config records:
 
 - mode
+- api kind
 - host
 - port
 - backend
@@ -57,8 +59,17 @@ In this mode, Probe:
 1. loads the local server config
 2. applies any CLI overrides
 3. writes the effective config back to disk
-4. waits for `GET <base_url>/models` to succeed
+4. waits for the configured backend kind to become ready
 5. runs the requested Probe command against that server
+
+Current readiness rules:
+
+- `open_ai_chat_completions`
+  - waits for `GET <base_url>/models`
+- `apple_fm_bridge`
+  - checks `GET <base_url>/health`
+  - refuses early if the bridge reports the model unavailable and preserves the
+    typed unavailability reason in the operator error
 
 ## Launch Mode
 
@@ -71,6 +82,13 @@ In `launch` mode, Probe:
 4. waits for the server to become ready
 5. keeps the child process alive for the lifetime of the Probe command
 6. terminates the child on drop
+
+Current boundary:
+
+- managed launch is only implemented for the OpenAI-compatible Psionic lane
+- Apple FM is attach-only for now
+- that is intentional because the Apple FM bridge does not share the same
+  `psionic-openai-server` launch contract
 
 ## Current Boundary
 

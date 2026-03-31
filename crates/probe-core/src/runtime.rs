@@ -3,17 +3,17 @@ use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use probe_protocol::backend::BackendProfile;
+use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_protocol::session::{
     CacheSignal, SessionBackendTarget, SessionHarnessProfile, SessionId, SessionMetadata,
     SessionTurn, TranscriptItemKind, TurnObservability,
 };
-use probe_provider_openai::{
-    ChatCompletionRequest, ChatCompletionUsage, ChatMessage, ChatToolCall, OpenAiProviderClient,
-    OpenAiProviderConfig, OpenAiProviderError,
-};
+use probe_provider_openai::{ChatMessage, ChatToolCall};
 
 use crate::dataset_export::build_decision_summary;
+use crate::provider::{
+    PlainTextMessage, ProviderError, ProviderUsage, complete_plain_text, openai_tool_loop_response,
+};
 use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionStoreError};
 use crate::tools::{
     ExecutedToolCall, ToolExecutionContext, ToolLongContextContext, ToolLoopConfig,
@@ -50,7 +50,7 @@ pub struct PlainTextExecOutcome {
     pub assistant_text: String,
     pub response_id: String,
     pub response_model: String,
-    pub usage: Option<ChatCompletionUsage>,
+    pub usage: Option<ProviderUsage>,
     pub executed_tool_calls: usize,
     pub tool_results: Vec<ExecutedToolCall>,
 }
@@ -60,14 +60,18 @@ pub enum RuntimeError {
     ProbeHomeUnavailable,
     CurrentDir(std::io::Error),
     SessionStore(SessionStoreError),
-    ProviderBuild(OpenAiProviderError),
     ProviderRequest {
         session_id: SessionId,
-        source: OpenAiProviderError,
+        source: ProviderError,
     },
     MissingAssistantMessage {
         session_id: SessionId,
         response_id: String,
+    },
+    UnsupportedBackendFeature {
+        session_id: SessionId,
+        backend: BackendKind,
+        feature: &'static str,
     },
     ToolApprovalPending {
         session_id: SessionId,
@@ -90,7 +94,6 @@ impl Display for RuntimeError {
             }
             Self::CurrentDir(error) => write!(f, "failed to resolve current directory: {error}"),
             Self::SessionStore(error) => write!(f, "{error}"),
-            Self::ProviderBuild(error) => write!(f, "{error}"),
             Self::ProviderRequest { session_id, source } => {
                 write!(
                     f,
@@ -105,6 +108,16 @@ impl Display for RuntimeError {
                 f,
                 "backend response {response_id} for session {} did not include assistant text",
                 session_id.as_str()
+            ),
+            Self::UnsupportedBackendFeature {
+                session_id,
+                backend,
+                feature,
+            } => write!(
+                f,
+                "session {} cannot use backend {:?} for {feature}",
+                session_id.as_str(),
+                backend
             ),
             Self::ToolApprovalPending {
                 session_id,
@@ -234,14 +247,30 @@ impl ProbeRuntime {
         prompt: String,
         tool_loop: Option<ToolLoopConfig>,
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
-        let provider_config = OpenAiProviderConfig::from_backend_profile(&profile);
-        let provider = OpenAiProviderClient::new(provider_config.clone())
-            .map_err(RuntimeError::ProviderBuild)?;
+        let tool_loop = tool_loop.filter(|config| !config.registry.is_empty());
+        if tool_loop.is_none() {
+            return self.run_plain_completion_turn(session, profile, prompt);
+        }
+        if profile.kind != BackendKind::OpenAiChatCompletions {
+            let error = RuntimeError::UnsupportedBackendFeature {
+                session_id: session.id.clone(),
+                backend: profile.kind,
+                feature: "coding tool loops",
+            };
+            let _ = self.session_store.append_turn(
+                &session.id,
+                &[
+                    NewItem::new(TranscriptItemKind::UserMessage, prompt),
+                    NewItem::new(TranscriptItemKind::Note, error.to_string()),
+                ],
+            );
+            return Err(error);
+        }
+
         let mut messages = self.replay_messages(&session)?;
         let mut pending_user_prompt = Some(prompt);
         let mut executed_tool_calls = 0_usize;
         let mut tool_results = Vec::new();
-        let tool_loop = tool_loop.filter(|config| !config.registry.is_empty());
         let max_round_trips = tool_loop
             .as_ref()
             .map(|config| config.max_model_round_trips)
@@ -254,18 +283,18 @@ impl ProbeRuntime {
             }
 
             let request_started = Instant::now();
-            let response = if let Some(tool_loop) = tool_loop.as_ref() {
-                let request =
-                    ChatCompletionRequest::from_config(&provider_config, messages.clone())
-                        .with_tools(
-                            tool_loop.registry.declared_tools(),
-                            tool_loop.tool_choice.to_provider_choice(),
-                            Some(tool_loop.parallel_tool_calls),
-                        );
-                provider.send_chat_completion(&request)
-            } else {
-                provider.chat_completion(messages.clone())
-            }
+            let response = openai_tool_loop_response(
+                &profile,
+                messages.clone(),
+                tool_loop
+                    .as_ref()
+                    .map(|config| config.registry.declared_tools())
+                    .unwrap_or_default(),
+                tool_loop
+                    .as_ref()
+                    .and_then(|config| config.tool_choice.to_provider_choice()),
+                tool_loop.as_ref().map(|config| config.parallel_tool_calls),
+            )
             .map_err(|source| RuntimeError::ProviderRequest {
                 session_id: session.id.clone(),
                 source,
@@ -285,12 +314,12 @@ impl ProbeRuntime {
                 }
             };
             let observability =
-                self.build_turn_observability(&session.id, wallclock_ms, response.usage.as_ref())?;
+                self.build_turn_observability(&session.id, wallclock_ms, response.2.as_ref())?;
 
-            if let Some(tool_calls) = response.first_tool_calls()
+            if let Some(tool_calls) = response.4.as_ref()
                 && !tool_calls.is_empty()
             {
-                let tool_calls = tool_calls.to_vec();
+                let tool_calls = tool_calls.clone();
                 let tool_call_turn = self.append_tool_call_turn(
                     &session.id,
                     pending_user_prompt.take(),
@@ -302,7 +331,7 @@ impl ProbeRuntime {
                 let Some(tool_loop) = tool_loop.as_ref() else {
                     return Err(RuntimeError::MissingAssistantMessage {
                         session_id: session.id.clone(),
-                        response_id: response.id,
+                        response_id: response.0,
                     });
                 };
                 let transcript = self.session_store.read_transcript(&session.id)?;
@@ -335,7 +364,7 @@ impl ProbeRuntime {
                 }
                 let executed = tool_loop.registry.execute_batch(
                     &execution_context,
-                    &tool_calls,
+                    tool_calls.as_slice(),
                     &tool_loop.approval,
                 );
                 executed_tool_calls += executed.iter().filter(|tool| tool.was_executed()).count();
@@ -351,7 +380,7 @@ impl ProbeRuntime {
                     });
                 }
 
-                messages.push(ChatMessage::assistant_tool_calls(tool_calls));
+                messages.push(ChatMessage::assistant_tool_calls(tool_calls.clone()));
                 for tool_result in executed {
                     messages.push(ChatMessage::tool(
                         tool_result.name,
@@ -364,13 +393,14 @@ impl ProbeRuntime {
                 continue;
             }
 
-            let assistant_text = response
-                .first_message_text()
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| RuntimeError::MissingAssistantMessage {
-                    session_id: session.id.clone(),
-                    response_id: response.id.clone(),
-                })?;
+            let assistant_text =
+                response
+                    .3
+                    .clone()
+                    .ok_or_else(|| RuntimeError::MissingAssistantMessage {
+                        session_id: session.id.clone(),
+                        response_id: response.0.clone(),
+                    })?;
 
             let mut items = Vec::new();
             if let Some(user_prompt) = pending_user_prompt.take() {
@@ -390,9 +420,9 @@ impl ProbeRuntime {
                 session,
                 turn,
                 assistant_text,
-                response_id: response.id,
-                response_model: response.model,
-                usage: response.usage,
+                response_id: response.0,
+                response_model: response.1,
+                usage: response.2,
                 executed_tool_calls,
                 tool_results,
             });
@@ -411,6 +441,67 @@ impl ProbeRuntime {
         Err(RuntimeError::MaxToolRoundTrips {
             session_id: session.id,
             max_round_trips,
+        })
+    }
+
+    fn run_plain_completion_turn(
+        &self,
+        session: SessionMetadata,
+        profile: BackendProfile,
+        prompt: String,
+    ) -> Result<PlainTextExecOutcome, RuntimeError> {
+        let mut messages = self.replay_plain_text_messages(&session)?;
+        messages.push(PlainTextMessage::user(prompt.clone()));
+
+        let request_started = Instant::now();
+        let response = complete_plain_text(&profile, messages).map_err(|source| {
+            RuntimeError::ProviderRequest {
+                session_id: session.id.clone(),
+                source,
+            }
+        });
+        let wallclock_ms = elapsed_ms(request_started);
+
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                let _ = self.session_store.append_turn(
+                    &session.id,
+                    &[
+                        NewItem::new(TranscriptItemKind::UserMessage, prompt),
+                        NewItem::new(TranscriptItemKind::Note, error.to_string()),
+                    ],
+                );
+                return Err(error);
+            }
+        };
+        let observability =
+            self.build_turn_observability(&session.id, wallclock_ms, response.usage.as_ref())?;
+        let assistant_text = response.assistant_text.clone().ok_or_else(|| {
+            RuntimeError::MissingAssistantMessage {
+                session_id: session.id.clone(),
+                response_id: response.response_id.clone(),
+            }
+        })?;
+
+        let turn = self.session_store.append_turn_with_observability(
+            &session.id,
+            &[
+                NewItem::new(TranscriptItemKind::UserMessage, prompt),
+                NewItem::new(TranscriptItemKind::AssistantMessage, assistant_text.clone()),
+            ],
+            Some(observability),
+        )?;
+        let session = self.session_store.read_metadata(&session.id)?;
+        Ok(PlainTextExecOutcome {
+            session,
+            turn,
+            assistant_text,
+            response_id: response.response_id,
+            response_model: response.response_model,
+            usage: response.usage,
+            executed_tool_calls: 0,
+            tool_results: Vec::new(),
         })
     }
 
@@ -504,6 +595,37 @@ impl ProbeRuntime {
         Ok(messages)
     }
 
+    fn replay_plain_text_messages(
+        &self,
+        session: &SessionMetadata,
+    ) -> Result<Vec<PlainTextMessage>, RuntimeError> {
+        let mut messages = Vec::new();
+        if let Some(system_prompt) = &session.system_prompt {
+            messages.push(PlainTextMessage::system(system_prompt.clone()));
+        }
+
+        for event in self.session_store.read_transcript(&session.id)? {
+            for item in event.turn.items {
+                match item.kind {
+                    TranscriptItemKind::UserMessage => {
+                        messages.push(PlainTextMessage::user(item.text));
+                    }
+                    TranscriptItemKind::AssistantMessage => {
+                        messages.push(PlainTextMessage::assistant(item.text));
+                    }
+                    TranscriptItemKind::Note => {}
+                    TranscriptItemKind::ToolCall | TranscriptItemKind::ToolResult => {
+                        return Err(RuntimeError::MalformedTranscript(String::from(
+                            "plain-text backend replay does not support stored tool items",
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(messages)
+    }
+
     fn append_tool_call_turn(
         &self,
         session_id: &SessionId,
@@ -562,9 +684,9 @@ impl ProbeRuntime {
         &self,
         session_id: &SessionId,
         wallclock_ms: u64,
-        usage: Option<&ChatCompletionUsage>,
+        usage: Option<&ProviderUsage>,
     ) -> Result<TurnObservability, RuntimeError> {
-        let prompt_tokens = usage.map(|usage| usage.prompt_tokens);
+        let prompt_tokens = usage.and_then(ProviderUsage::prompt_tokens_u32);
         let previous = if prompt_tokens.is_some() {
             self.last_prompt_bearing_observability(session_id)?
         } else {
@@ -575,10 +697,12 @@ impl ProbeRuntime {
             wallclock_ms,
             model_output_ms: Some(wallclock_ms),
             prompt_tokens,
-            completion_tokens: usage.map(|usage| usage.completion_tokens),
-            total_tokens: usage.map(|usage| usage.total_tokens),
+            completion_tokens: usage.and_then(ProviderUsage::completion_tokens_u32),
+            total_tokens: usage.and_then(ProviderUsage::total_tokens_u32),
             completion_tokens_per_second_x1000: usage.and_then(|usage| {
-                completion_tokens_per_second_x1000(usage.completion_tokens, wallclock_ms)
+                usage.completion_tokens_u32().and_then(|completion_tokens| {
+                    completion_tokens_per_second_x1000(completion_tokens, wallclock_ms)
+                })
             }),
             cache_signal: infer_cache_signal(previous.as_ref(), prompt_tokens, wallclock_ms),
         })
@@ -654,13 +778,13 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use crate::backend_profiles::psionic_qwen35_2b_q8_registry;
+    use crate::backend_profiles::{psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry};
     use crate::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig};
     use probe_protocol::session::{
         CacheSignal, SessionHarnessProfile, ToolApprovalState, ToolPolicyDecision,
         TranscriptItemKind,
     };
-    use probe_test_support::{FakeOpenAiServer, ProbeTestEnvironment};
+    use probe_test_support::{FakeAppleFmServer, FakeOpenAiServer, ProbeTestEnvironment};
 
     use super::{
         PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, default_session_title,
@@ -777,6 +901,78 @@ mod tests {
     }
 
     #[test]
+    fn apple_fm_exec_plain_text_persists_session_and_transcript() {
+        let server = FakeAppleFmServer::from_json_responses(vec![serde_json::json!({
+            "id": "apple_fm_exec_test",
+            "model": "apple-foundation-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello from apple fm"},
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens_detail": {"value": 9, "truth": "estimated"},
+                "completion_tokens_detail": {"value": 4, "truth": "estimated"},
+                "total_tokens_detail": {"value": 13, "truth": "estimated"}
+            }
+        })]);
+
+        let environment = ProbeTestEnvironment::new();
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = String::from(server.base_url());
+
+        let outcome = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile,
+                prompt: String::from("say hello"),
+                title: Some(String::from("Apple FM Exec Test")),
+                cwd: environment.workspace().to_path_buf(),
+                system_prompt: Some(String::from("You are helpful")),
+                harness_profile: None,
+                tool_loop: None,
+            })
+            .expect("apple fm exec should succeed");
+
+        assert_eq!(outcome.assistant_text, "hello from apple fm");
+        assert_eq!(outcome.response_id, "apple_fm_exec_test");
+        assert_eq!(outcome.response_model, "apple-foundation-model");
+        assert_eq!(outcome.turn.items.len(), 2);
+        assert_eq!(
+            outcome
+                .session
+                .backend
+                .as_ref()
+                .expect("backend metadata")
+                .profile_name,
+            "psionic-apple-fm-bridge"
+        );
+        let observability = outcome
+            .turn
+            .observability
+            .as_ref()
+            .expect("observability should exist");
+        assert_eq!(observability.prompt_tokens, Some(9));
+        assert_eq!(observability.completion_tokens, Some(4));
+        assert_eq!(observability.total_tokens, Some(13));
+
+        let transcript = runtime
+            .session_store()
+            .read_transcript(&outcome.session.id)
+            .expect("read transcript");
+        assert_eq!(transcript.len(), 1);
+        assert_eq!(transcript[0].turn.items[1].text, "hello from apple fm");
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("POST /v1/chat/completions HTTP/1.1"));
+        assert!(requests[0].contains("\"system\""));
+        assert!(requests[0].contains("say hello"));
+    }
+
+    #[test]
     fn continue_plain_text_session_replays_prior_context() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let address = listener.local_addr().expect("listener addr");
@@ -885,6 +1081,97 @@ mod tests {
         ));
 
         handle.join().expect("server thread should exit cleanly");
+    }
+
+    #[test]
+    fn apple_fm_resume_replays_prior_context() {
+        let server = FakeAppleFmServer::from_json_responses(vec![
+            serde_json::json!({
+                "id": "apple_fm_first",
+                "model": "apple-foundation-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "first apple answer"},
+                        "finish_reason": "stop"
+                    }
+                ]
+            }),
+            serde_json::json!({
+                "id": "apple_fm_second",
+                "model": "apple-foundation-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "second apple answer"},
+                        "finish_reason": "stop"
+                    }
+                ]
+            }),
+        ]);
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let runtime = ProbeRuntime::new(temp.path().join(".probe"));
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = server.base_url().to_string();
+
+        let first = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile: profile.clone(),
+                prompt: String::from("first prompt"),
+                title: Some(String::from("Apple FM Chat")),
+                cwd: temp.path().to_path_buf(),
+                system_prompt: Some(String::from("You are helpful")),
+                harness_profile: None,
+                tool_loop: None,
+            })
+            .expect("first turn should succeed");
+
+        let second = runtime
+            .continue_plain_text_session(PlainTextResumeRequest {
+                session_id: first.session.id.clone(),
+                profile,
+                prompt: String::from("second prompt"),
+                tool_loop: None,
+            })
+            .expect("second turn should succeed");
+
+        assert_eq!(second.assistant_text, "second apple answer");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].contains("first prompt"));
+        assert!(requests[1].contains("first apple answer"));
+        assert!(requests[1].contains("second prompt"));
+    }
+
+    #[test]
+    fn apple_fm_tool_loops_are_rejected_explicitly() {
+        let environment = ProbeTestEnvironment::new();
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let profile = psionic_apple_fm_bridge();
+
+        let error = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile,
+                prompt: String::from("Use read_file on README.md."),
+                title: None,
+                cwd: environment.workspace().to_path_buf(),
+                system_prompt: None,
+                harness_profile: None,
+                tool_loop: Some(ToolLoopConfig::coding_bootstrap(
+                    ProbeToolChoice::Auto,
+                    false,
+                )),
+            })
+            .expect_err("apple fm tool loop should be rejected");
+
+        assert!(matches!(
+            error,
+            super::RuntimeError::UnsupportedBackendFeature {
+                backend: probe_protocol::backend::BackendKind::AppleFmBridge,
+                ..
+            }
+        ));
     }
 
     #[test]

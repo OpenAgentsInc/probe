@@ -7,11 +7,13 @@ Rust-first controller with a CLI, durable local session state, a typed runtime
 protocol, bounded tool execution, and a clean seam to local or remote model
 backends.
 
-The repo currently contains six crates: `probe-protocol`, `probe-core`,
-`probe-provider-openai`, `probe-decisions`, `probe-optimizer`, and
-`probe-cli`. The default local backend lane is
+The repo currently contains seven crates: `probe-protocol`, `probe-core`,
+`probe-provider-openai`, `probe-provider-apple-fm`, `probe-decisions`,
+`probe-optimizer`, and `probe-cli`. The default local backend lane is
 `psionic-qwen35-2b-q8-registry`, targeting `http://127.0.0.1:8080/v1` with the
-model id `qwen3.5-2b-q8_0-registry.gguf`.
+model id `qwen3.5-2b-q8_0-registry.gguf`. Probe now also ships the first real
+Apple FM backend lane through `psionic-apple-fm-bridge`, targeting
+`http://127.0.0.1:8081` with the model id `apple-foundation-model`.
 
 ## Status Snapshot
 
@@ -27,6 +29,7 @@ Shipped now:
 - narrow offline-evaluable decision modules plus optimizer receipts
 - bounded oracle consultation and bounded long-context repo-analysis escalation
 - local backend attach and supervised launch flows
+- Apple FM plain-text `exec`/`chat` turns plus Apple-FM-backed `consult_oracle`
 
 Current posture:
 
@@ -88,7 +91,8 @@ crate for offline module evaluation. The first module families are
 
 Probe also now supports a bounded auxiliary oracle lane through a typed
 `consult_oracle` tool. Oracle calls stay inside the main controller loop as
-tool invocations rather than becoming a second controller.
+tool invocations rather than becoming a second controller. The auxiliary oracle
+can now target either the current Psionic Qwen lane or the Apple FM bridge lane.
 
 Probe also now supports a bounded long-context repo-analysis lane through a
 typed `analyze_repository` tool. This path is opt-in, budgeted, and only
@@ -101,6 +105,12 @@ controller-side observability on model-generated turns, including wallclock,
 usage when available, derived completion throughput, and a conservative
 cache-signal heuristic. More detailed design and implementation notes live
 under `docs/`.
+
+The current Apple FM claim boundary is intentionally narrower than Qwen:
+
+- `probe exec` and `probe chat` support plain-text Apple FM turns
+- `consult_oracle` can target an Apple FM profile
+- tool-backed coding turns on Apple FM are still a separate follow-up lane
 
 For local validation, Probe now has a canonical runner script at the repo
 root: `./probe-dev fmt`, `./probe-dev check`, `./probe-dev test`, and
@@ -242,6 +252,24 @@ cargo run -p probe-cli -- exec \
   --oracle-profile psionic-qwen35-2b-q8-oracle \
   --oracle-max-calls 1 \
   "Ask the oracle for a checking recommendation before editing."
+```
+
+Apple FM plain-text session:
+
+```bash
+cargo run -p probe-cli -- exec \
+  --profile psionic-apple-fm-bridge \
+  "Summarize the Probe runtime boundary."
+```
+
+Apple FM oracle inside the Qwen coding lane:
+
+```bash
+cargo run -p probe-cli -- exec \
+  --tool-set coding_bootstrap \
+  --oracle-profile psionic-apple-fm-oracle \
+  --oracle-max-calls 1 \
+  "Consult the Apple FM oracle before deciding what file to inspect."
 ```
 
 Long-context repo-analysis session:

@@ -11,14 +11,15 @@ use probe_protocol::session::{
     ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
 };
 use probe_provider_openai::{
-    ChatMessage, ChatNamedToolChoice, ChatNamedToolChoiceFunction, ChatToolCall, ChatToolChoice,
-    ChatToolDefinition, ChatToolDefinitionEnvelope, OpenAiProviderClient, OpenAiProviderConfig,
+    ChatNamedToolChoice, ChatNamedToolChoiceFunction, ChatToolCall, ChatToolChoice,
+    ChatToolDefinition, ChatToolDefinitionEnvelope,
 };
 use wait_timeout::ChildExt;
 
 use crate::long_context::{
     LongContextEscalationContext, heuristic_long_context_escalation, is_long_context_task_kind,
 };
+use crate::provider::{PlainTextMessage, complete_plain_text};
 
 const READ_FILE_DEFAULT_MAX_LINES: u64 = 200;
 const LIST_FILES_DEFAULT_MAX_DEPTH: u64 = 4;
@@ -1207,29 +1208,24 @@ fn consult_oracle(
     }
     let question = expect_string(arguments, "question", "consult_oracle")?;
 
-    let provider_config = OpenAiProviderConfig::from_backend_profile(oracle.profile());
-    let provider = OpenAiProviderClient::new(provider_config.clone()).map_err(|error| {
-        ToolInvocationError::ExecutionFailed(format!("failed to build oracle client: {error}"))
-    })?;
-    let response = provider
-        .chat_completion(vec![
-            ChatMessage::system(format!(
+    let response = complete_plain_text(
+        oracle.profile(),
+        vec![
+            PlainTextMessage::system(format!(
                 "You are Probe's bounded oracle. Only help with {} support. Do not execute tools or claim filesystem changes. Return concise guidance grounded in the question.",
                 task_kind
             )),
-            ChatMessage::user(question),
-        ])
-        .map_err(|error| {
+            PlainTextMessage::user(question),
+        ],
+    )
+    .map_err(|error| {
             ToolInvocationError::ExecutionFailed(format!("oracle request failed: {error}"))
-        })?;
-    let answer = response
-        .first_message_text()
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| {
-            ToolInvocationError::ExecutionFailed(String::from(
-                "oracle response did not include assistant text",
-            ))
-        })?;
+    })?;
+    let answer = response.assistant_text.ok_or_else(|| {
+        ToolInvocationError::ExecutionFailed(String::from(
+            "oracle response did not include assistant text",
+        ))
+    })?;
 
     Ok(ToolInvocationOutcome {
         output: serde_json::json!({
@@ -1305,37 +1301,30 @@ fn analyze_repository(
         files_touched.push(path.clone());
     }
 
-    let provider_config = OpenAiProviderConfig::from_backend_profile(long_context.profile());
-    let provider = OpenAiProviderClient::new(provider_config.clone()).map_err(|error| {
-        ToolInvocationError::ExecutionFailed(format!(
-            "failed to build long-context analysis client: {error}"
-        ))
-    })?;
-    let response = provider
-        .chat_completion(vec![
-            ChatMessage::system(format!(
+    let response = complete_plain_text(
+        long_context.profile(),
+        vec![
+            PlainTextMessage::system(format!(
                 "You are Probe's bounded long-context repo-analysis lane. Only answer {} tasks. Use only the provided evidence. Cite the relevant file paths in your answer. Do not claim edits, commands, or repo facts that are not present in the evidence.",
                 task_kind
             )),
-            ChatMessage::user(format!(
+            PlainTextMessage::user(format!(
                 "Question:\n{}\n\nEvidence:\n\n{}",
                 question,
                 evidence_blocks.join("\n\n")
             )),
-        ])
-        .map_err(|error| {
+        ],
+    )
+    .map_err(|error| {
             ToolInvocationError::ExecutionFailed(format!(
                 "long-context analysis request failed: {error}"
             ))
-        })?;
-    let analysis = response
-        .first_message_text()
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| {
-            ToolInvocationError::ExecutionFailed(String::from(
-                "long-context analysis response did not include assistant text",
-            ))
-        })?;
+    })?;
+    let analysis = response.assistant_text.ok_or_else(|| {
+        ToolInvocationError::ExecutionFailed(String::from(
+            "long-context analysis response did not include assistant text",
+        ))
+    })?;
 
     Ok(ToolInvocationOutcome {
         output: serde_json::json!({
@@ -2002,9 +1991,12 @@ mod tests {
 
     use probe_protocol::session::{ToolPolicyDecision, ToolRiskClass};
     use probe_provider_openai::{ChatToolCall, ChatToolCallFunction};
+    use probe_test_support::FakeAppleFmServer;
     use tempfile::tempdir;
 
-    use crate::backend_profiles::{psionic_qwen35_2b_q8_long_context, psionic_qwen35_2b_q8_oracle};
+    use crate::backend_profiles::{
+        psionic_apple_fm_oracle, psionic_qwen35_2b_q8_long_context, psionic_qwen35_2b_q8_oracle,
+    };
 
     use super::{
         ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolExecutionContext,
@@ -2387,6 +2379,58 @@ mod tests {
         );
 
         handle.join().expect("oracle server should exit cleanly");
+    }
+
+    #[test]
+    fn coding_bootstrap_can_consult_apple_fm_oracle_with_budget() {
+        let server = FakeAppleFmServer::from_json_responses(vec![serde_json::json!({
+            "id": "apple_fm_oracle_tool_test",
+            "model": "apple-foundation-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Inspect src/lib.rs before editing."
+                    },
+                    "finish_reason": "stop"
+                }
+            ]
+        })]);
+
+        let tempdir = tempdir().expect("tempdir");
+        let mut oracle_profile = psionic_apple_fm_oracle();
+        oracle_profile.base_url = server.base_url().to_string();
+        let tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Auto, false).with_oracle(
+            ToolOracleConfig {
+                profile: oracle_profile.clone(),
+                max_calls: 1,
+            },
+        );
+        let context = ToolExecutionContext::new(tempdir.path())
+            .with_oracle(ToolOracleContext::new(oracle_profile, 1, 0));
+        let results = tool_loop.registry.execute_batch(
+            &context,
+            &[ChatToolCall {
+                id: String::from("call_oracle_1"),
+                kind: String::from("function"),
+                function: ChatToolCallFunction {
+                    name: String::from("consult_oracle"),
+                    arguments: String::from(
+                        "{\"task_kind\":\"planning\",\"question\":\"What should I inspect first?\"}",
+                    ),
+                },
+            }],
+            &ToolApprovalConfig::conservative(),
+        );
+
+        assert_eq!(
+            results[0].output["oracle_answer"],
+            "Inspect src/lib.rs before editing."
+        );
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("POST /v1/chat/completions HTTP/1.1"));
     }
 
     #[test]

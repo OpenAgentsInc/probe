@@ -757,9 +757,11 @@ fn classify_attempt(
                 AcceptanceExecutionError::Setup(_) => {
                     Some(AcceptanceFailureCategory::ConfigurationFailure)
                 }
-                AcceptanceExecutionError::Runtime(RuntimeError::ProviderBuild(_))
-                | AcceptanceExecutionError::Runtime(RuntimeError::ProviderRequest { .. })
+                AcceptanceExecutionError::Runtime(RuntimeError::ProviderRequest { .. })
                 | AcceptanceExecutionError::Runtime(RuntimeError::MissingAssistantMessage {
+                    ..
+                })
+                | AcceptanceExecutionError::Runtime(RuntimeError::UnsupportedBackendFeature {
                     ..
                 }) => Some(AcceptanceFailureCategory::BackendFailure),
                 AcceptanceExecutionError::Runtime(RuntimeError::MaxToolRoundTrips { .. })

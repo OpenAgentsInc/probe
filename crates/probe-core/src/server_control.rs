@@ -5,13 +5,17 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use probe_protocol::backend::BackendKind;
+use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig};
+use psionic_apple_fm::AppleFmSystemLanguageModelAvailability;
 use serde::{Deserialize, Serialize};
 
-use crate::backend_profiles::PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL;
+use crate::backend_profiles::{PSIONIC_APPLE_FM_MODEL, PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL};
 
 const DEFAULT_SERVER_CONFIG_PATH: &str = "server/psionic-local.json";
 const DEFAULT_SERVER_HOST: &str = "127.0.0.1";
-const DEFAULT_SERVER_PORT: u16 = 8080;
+const DEFAULT_OPENAI_SERVER_PORT: u16 = 8080;
+const DEFAULT_APPLE_FM_SERVER_PORT: u16 = 8081;
 const DEFAULT_SERVER_BACKEND: &str = "cpu";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +28,8 @@ pub enum PsionicServerMode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PsionicServerConfig {
     pub mode: PsionicServerMode,
+    #[serde(default = "default_server_api_kind")]
+    pub api_kind: BackendKind,
     pub host: String,
     pub port: u16,
     pub backend: String,
@@ -50,10 +56,12 @@ pub enum ServerControlError {
     Io(std::io::Error),
     Json(serde_json::Error),
     InvalidBackend(String),
+    UnsupportedManagedLaunch { backend: BackendKind },
     MissingBinaryPath,
     MissingModelPath,
     SpawnFailed(String),
     ReadinessTimeout { base_url: String, timeout_secs: u64 },
+    BackendUnavailable { base_url: String, detail: String },
     Http(String),
 }
 
@@ -65,6 +73,11 @@ impl Display for ServerControlError {
             Self::InvalidBackend(value) => {
                 write!(f, "invalid backend `{value}`; expected `cpu` or `cuda`")
             }
+            Self::UnsupportedManagedLaunch { backend } => write!(
+                f,
+                "managed launch is not supported for backend {:?}; attach to an already-running bridge instead",
+                backend
+            ),
             Self::MissingBinaryPath => write!(
                 f,
                 "launch mode requires `binary_path`; set it in the server config or via CLI"
@@ -82,6 +95,9 @@ impl Display for ServerControlError {
                 "server at {base_url} did not become ready within {}s",
                 timeout_secs
             ),
+            Self::BackendUnavailable { base_url, detail } => {
+                write!(f, "backend at {base_url} is not ready: {detail}")
+            }
             Self::Http(message) => write!(f, "{message}"),
         }
     }
@@ -101,6 +117,7 @@ impl From<serde_json::Error> for ServerControlError {
     }
 }
 
+#[derive(Debug)]
 pub struct ServerProcessGuard {
     config: PsionicServerConfig,
     child: Option<Child>,
@@ -119,8 +136,9 @@ impl Default for PsionicServerConfig {
     fn default() -> Self {
         Self {
             mode: PsionicServerMode::Attach,
+            api_kind: BackendKind::OpenAiChatCompletions,
             host: String::from(DEFAULT_SERVER_HOST),
-            port: DEFAULT_SERVER_PORT,
+            port: DEFAULT_OPENAI_SERVER_PORT,
             backend: String::from(DEFAULT_SERVER_BACKEND),
             binary_path: None,
             model_path: None,
@@ -138,17 +156,47 @@ impl PsionicServerConfig {
 
     #[must_use]
     pub fn base_url(&self) -> String {
-        format!("http://{}:{}/v1", self.host, self.port)
+        match self.api_kind {
+            BackendKind::OpenAiChatCompletions => format!("http://{}:{}/v1", self.host, self.port),
+            BackendKind::AppleFmBridge => format!("http://{}:{}", self.host, self.port),
+        }
     }
 
     #[must_use]
     pub fn resolved_model_id(&self) -> Option<String> {
-        self.model_id.clone().or_else(|| {
-            self.model_path.as_ref().and_then(|path| {
-                path.file_name()
-                    .map(|name| name.to_string_lossy().to_string())
+        self.model_id
+            .clone()
+            .or_else(|| {
+                self.model_path.as_ref().and_then(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                })
             })
-        })
+            .or_else(|| default_model_id_for(self.api_kind))
+    }
+
+    pub fn set_api_kind(&mut self, api_kind: BackendKind) {
+        if self.api_kind == api_kind {
+            self.ensure_kind_defaults();
+            return;
+        }
+
+        let previous_default_port = default_port_for(self.api_kind);
+        let previous_default_model = default_model_id_for(self.api_kind);
+        if self.port == previous_default_port {
+            self.port = default_port_for(api_kind);
+        }
+        if self.model_id.is_none() || self.model_id == previous_default_model {
+            self.model_id = default_model_id_for(api_kind);
+        }
+        self.api_kind = api_kind;
+        self.ensure_kind_defaults();
+    }
+
+    fn ensure_kind_defaults(&mut self) {
+        if self.model_id.is_none() {
+            self.model_id = default_model_id_for(self.api_kind);
+        }
     }
 
     pub fn load_or_create(path: &Path) -> Result<Self, ServerControlError> {
@@ -202,6 +250,7 @@ impl PsionicServerConfig {
         if let Some(reasoning_budget) = overrides.reasoning_budget {
             self.reasoning_budget = Some(reasoning_budget);
         }
+        self.ensure_kind_defaults();
         Ok(())
     }
 
@@ -211,13 +260,18 @@ impl PsionicServerConfig {
     ) -> Result<ServerProcessGuard, ServerControlError> {
         match self.mode {
             PsionicServerMode::Attach => {
-                wait_for_ready(self.base_url().as_str(), startup_timeout)?;
+                wait_for_ready(self, startup_timeout)?;
                 Ok(ServerProcessGuard {
                     config: self.clone(),
                     child: None,
                 })
             }
             PsionicServerMode::Launch => {
+                if self.api_kind != BackendKind::OpenAiChatCompletions {
+                    return Err(ServerControlError::UnsupportedManagedLaunch {
+                        backend: self.api_kind,
+                    });
+                }
                 let binary_path = self
                     .binary_path
                     .clone()
@@ -247,7 +301,7 @@ impl PsionicServerConfig {
                 let mut child = command.spawn().map_err(|error| {
                     ServerControlError::SpawnFailed(format!("failed to launch server: {error}"))
                 })?;
-                if let Err(error) = wait_for_ready(self.base_url().as_str(), startup_timeout) {
+                if let Err(error) = wait_for_ready(self, startup_timeout) {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(error);
@@ -273,33 +327,110 @@ impl ServerProcessGuard {
     }
 
     #[must_use]
+    pub fn api_kind(&self) -> BackendKind {
+        self.config.api_kind
+    }
+
+    #[must_use]
     pub fn mode(&self) -> &PsionicServerMode {
         &self.config.mode
     }
 }
 
-fn wait_for_ready(base_url: &str, timeout: Duration) -> Result<(), ServerControlError> {
+fn wait_for_ready(
+    config: &PsionicServerConfig,
+    timeout: Duration,
+) -> Result<(), ServerControlError> {
     let deadline = Instant::now() + timeout;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(1))
         .build()
         .map_err(|error| ServerControlError::Http(error.to_string()))?;
-    let models_url = format!("{}/models", base_url.trim_end_matches('/'));
+    let readiness_url = match config.api_kind {
+        BackendKind::OpenAiChatCompletions => {
+            format!("{}/models", config.base_url().trim_end_matches('/'))
+        }
+        BackendKind::AppleFmBridge => format!("{}/health", config.base_url().trim_end_matches('/')),
+    };
 
     loop {
-        match client.get(models_url.as_str()).send() {
-            Ok(response) if response.status().is_success() => return Ok(()),
-            Ok(_) | Err(_) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(250));
-            }
-            Ok(_) | Err(_) => {
-                return Err(ServerControlError::ReadinessTimeout {
-                    base_url: String::from(base_url),
-                    timeout_secs: timeout.as_secs(),
-                });
+        match config.api_kind {
+            BackendKind::OpenAiChatCompletions => match client.get(readiness_url.as_str()).send() {
+                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(_) | Err(_) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(250));
+                }
+                Ok(_) | Err(_) => {
+                    return Err(ServerControlError::ReadinessTimeout {
+                        base_url: config.base_url(),
+                        timeout_secs: timeout.as_secs(),
+                    });
+                }
+            },
+            BackendKind::AppleFmBridge => {
+                let apple_client = AppleFmProviderClient::new(AppleFmProviderConfig {
+                    base_url: config.base_url(),
+                    model: config
+                        .resolved_model_id()
+                        .unwrap_or_else(|| String::from(PSIONIC_APPLE_FM_MODEL)),
+                    timeout: Duration::from_secs(1),
+                })
+                .map_err(|error| ServerControlError::Http(error.to_string()))?;
+                match apple_client.system_model_availability() {
+                    Ok(availability) if availability.is_ready() => return Ok(()),
+                    Ok(availability) => {
+                        return Err(ServerControlError::BackendUnavailable {
+                            base_url: config.base_url(),
+                            detail: format_apple_fm_unavailability(&availability),
+                        });
+                    }
+                    Err(_) if Instant::now() < deadline => {
+                        thread::sleep(Duration::from_millis(250));
+                    }
+                    Err(_) => {
+                        return Err(ServerControlError::ReadinessTimeout {
+                            base_url: config.base_url(),
+                            timeout_secs: timeout.as_secs(),
+                        });
+                    }
+                }
             }
         }
     }
+}
+
+const fn default_server_api_kind() -> BackendKind {
+    BackendKind::OpenAiChatCompletions
+}
+
+const fn default_port_for(api_kind: BackendKind) -> u16 {
+    match api_kind {
+        BackendKind::OpenAiChatCompletions => DEFAULT_OPENAI_SERVER_PORT,
+        BackendKind::AppleFmBridge => DEFAULT_APPLE_FM_SERVER_PORT,
+    }
+}
+
+fn default_model_id_for(api_kind: BackendKind) -> Option<String> {
+    match api_kind {
+        BackendKind::OpenAiChatCompletions => {
+            Some(String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL))
+        }
+        BackendKind::AppleFmBridge => Some(String::from(PSIONIC_APPLE_FM_MODEL)),
+    }
+}
+
+fn format_apple_fm_unavailability(availability: &AppleFmSystemLanguageModelAvailability) -> String {
+    let mut fields = vec![format!("model={}", availability.model.id)];
+    if let Some(reason) = availability.unavailable_reason {
+        fields.push(format!("reason={}", reason.label()));
+    }
+    if let Some(message) = availability.availability_message.as_deref() {
+        fields.push(format!("message={message}"));
+    }
+    if let Some(platform) = availability.platform.as_deref() {
+        fields.push(format!("platform={platform}"));
+    }
+    fields.join(" ")
 }
 
 #[cfg(test)]
@@ -309,6 +440,10 @@ mod tests {
     use std::path::PathBuf;
     use std::thread;
     use std::time::Duration;
+
+    use probe_protocol::backend::BackendKind;
+    use probe_test_support::{FakeAppleFmServer, FakeHttpResponse};
+    use serde_json::json;
 
     use super::{
         PsionicServerConfig, PsionicServerMode, ServerConfigOverrides, ServerProcessGuard,
@@ -376,6 +511,77 @@ mod tests {
     }
 
     #[test]
+    fn apple_fm_attach_mode_waits_for_ready_bridge() {
+        let server = FakeAppleFmServer::from_responses(vec![FakeHttpResponse::json_status(
+            200,
+            json!({
+                "status": "ok",
+                "model_available": true,
+                "version": "1.0",
+                "platform": "macOS"
+            }),
+        )]);
+        let address = server
+            .base_url()
+            .strip_prefix("http://")
+            .expect("base url should start with http://");
+        let (host, port) = address.rsplit_once(':').expect("host:port pair");
+        let port = port.parse::<u16>().expect("port should parse");
+
+        let config = PsionicServerConfig {
+            api_kind: BackendKind::AppleFmBridge,
+            host: host.to_string(),
+            port,
+            model_id: Some(String::from("apple-foundation-model")),
+            ..PsionicServerConfig::default()
+        };
+        let guard = config
+            .prepare(Duration::from_secs(2))
+            .expect("attach should succeed");
+        assert!(matches!(guard.mode(), PsionicServerMode::Attach));
+        assert_eq!(guard.base_url(), server.base_url());
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("GET /health HTTP/1.1"));
+    }
+
+    #[test]
+    fn apple_fm_attach_mode_surfaces_unavailability() {
+        let server = FakeAppleFmServer::from_responses(vec![FakeHttpResponse::json_status(
+            200,
+            json!({
+                "status": "ok",
+                "model_available": false,
+                "unavailable_reason": "model_not_ready",
+                "availability_message": "Foundation model is still preparing"
+            }),
+        )]);
+        let address = server
+            .base_url()
+            .strip_prefix("http://")
+            .expect("base url should start with http://");
+        let (host, port) = address.rsplit_once(':').expect("host:port pair");
+        let port = port.parse::<u16>().expect("port should parse");
+
+        let config = PsionicServerConfig {
+            api_kind: BackendKind::AppleFmBridge,
+            host: host.to_string(),
+            port,
+            model_id: Some(String::from("apple-foundation-model")),
+            ..PsionicServerConfig::default()
+        };
+        let error = config
+            .prepare(Duration::from_secs(1))
+            .expect_err("unavailable model should fail");
+        assert!(
+            error.to_string().contains("reason=model_not_ready"),
+            "error should include the typed unavailability reason"
+        );
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+    }
+
+    #[test]
     fn launch_mode_spawns_fake_server_script() {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path();
@@ -417,6 +623,7 @@ cd "$(dirname "$0")" && exec python3 -m http.server "$PORT" --bind "$HOST"
 
         let config = PsionicServerConfig {
             mode: PsionicServerMode::Launch,
+            api_kind: BackendKind::OpenAiChatCompletions,
             host: String::from("127.0.0.1"),
             port,
             backend: String::from("cpu"),

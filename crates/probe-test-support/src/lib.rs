@@ -47,6 +47,13 @@ pub struct FakeOpenAiServer {
     thread: Option<JoinHandle<()>>,
 }
 
+pub struct FakeAppleFmServer {
+    base_url: String,
+    requests: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
 impl FakeOpenAiServer {
     pub fn from_json_responses(responses: Vec<Value>) -> Self {
         Self::from_responses(
@@ -131,7 +138,100 @@ impl FakeOpenAiServer {
     }
 }
 
+impl FakeAppleFmServer {
+    pub fn from_json_responses(responses: Vec<Value>) -> Self {
+        Self::from_responses(
+            responses
+                .into_iter()
+                .map(FakeHttpResponse::json_ok)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    pub fn from_responses(responses: Vec<FakeHttpResponse>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake server");
+        listener
+            .set_nonblocking(true)
+            .expect("set fake server nonblocking");
+        let address = listener.local_addr().expect("fake server address");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_thread = Arc::clone(&requests);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+
+        let thread = thread::spawn(move || {
+            let mut response_index = 0_usize;
+            while response_index < responses.len() && !stop_thread.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_request(&mut stream);
+                        requests_thread
+                            .lock()
+                            .expect("fake server request lock")
+                            .push(request);
+
+                        let response = &responses[response_index];
+                        response_index += 1;
+                        let payload = format!(
+                            "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            response.status_code,
+                            status_text(response.status_code),
+                            response.content_type,
+                            response.body.len(),
+                            response.body
+                        );
+                        stream
+                            .write_all(payload.as_bytes())
+                            .expect("write fake server response");
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("fake server accept failed: {error}"),
+                }
+            }
+        });
+
+        Self {
+            base_url: format!("http://{address}"),
+            requests,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    pub fn base_url(&self) -> &str {
+        self.base_url.as_str()
+    }
+
+    pub fn recorded_requests(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .expect("fake server request lock")
+            .clone()
+    }
+
+    pub fn finish(mut self) -> Vec<String> {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            thread
+                .join()
+                .expect("fake server thread should exit cleanly");
+        }
+        self.recorded_requests()
+    }
+}
+
 impl Drop for FakeOpenAiServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for FakeAppleFmServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(thread) = self.thread.take() {
@@ -254,7 +354,8 @@ fn status_text(status_code: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment, normalize_workspace_path,
+        FakeAppleFmServer, FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment,
+        normalize_workspace_path,
     };
 
     #[test]
@@ -266,6 +367,17 @@ mod tests {
         let requests = server.finish();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].contains("GET /v1 HTTP/1.1"));
+    }
+
+    #[test]
+    fn fake_apple_fm_server_uses_root_base_url() {
+        let server =
+            FakeAppleFmServer::from_responses(vec![FakeHttpResponse::text_status(200, "ok")]);
+        let response = reqwest::blocking::get(server.base_url()).expect("issue test request");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("GET / HTTP/1.1"));
     }
 
     #[test]

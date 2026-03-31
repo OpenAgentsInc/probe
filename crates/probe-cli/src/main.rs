@@ -36,6 +36,7 @@ use probe_optimizer::{
     CandidateComparisonReport, OptimizationScorecard, OptimizationTargetKind, PromotionRule,
     compare_candidate,
 };
+use probe_protocol::backend::BackendKind;
 use probe_protocol::session::{
     CacheSignal, SessionHarnessProfile, SessionId, SessionTurn, ToolPolicyDecision, ToolRiskClass,
 };
@@ -254,8 +255,8 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
         .probe_home
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
     let runtime = resolve_runtime(Some(probe_home.clone()))?;
-    let server_guard = prepare_server(probe_home.as_path(), &args.server)?;
     let mut profile = named_profile(args.profile.as_str())?;
+    let server_guard = prepare_server(probe_home.as_path(), &args.server, profile.kind)?;
     profile.base_url = server_guard.base_url();
     if let Some(model_id) = server_guard.model_id() {
         profile.model = model_id;
@@ -346,7 +347,9 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
     {
         eprintln!(
             "usage prompt_tokens={} completion_tokens={} total_tokens={}",
-            usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+            render_usage_value(usage.prompt_tokens),
+            render_usage_value(usage.completion_tokens),
+            render_usage_value(usage.total_tokens)
         );
     }
     if outcome.executed_tool_calls > 0 {
@@ -369,7 +372,19 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
         .probe_home
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
     let runtime = resolve_runtime(Some(probe_home.clone()))?;
-    let server_guard = prepare_server(probe_home.as_path(), &args.server)?;
+    let initial_profile_name = match (&args.resume, args.profile.as_deref()) {
+        (_, Some(profile)) => profile.to_string(),
+        (Some(session_id), None) => runtime
+            .session_store()
+            .read_metadata(&SessionId::new(session_id.clone()))
+            .map_err(|error| error.to_string())?
+            .backend
+            .map(|backend| backend.profile_name)
+            .unwrap_or_else(|| String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE)),
+        (None, None) => String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE),
+    };
+    let initial_profile = named_profile(initial_profile_name.as_str())?;
+    let server_guard = prepare_server(probe_home.as_path(), &args.server, initial_profile.kind)?;
     let tool_loop = resolve_tool_loop(
         args.tool_set.as_deref(),
         args.tool_choice.as_str(),
@@ -409,17 +424,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
         )?
     };
     let mut session_id = args.resume.map(SessionId::new);
-    let mut profile_name = match (&session_id, args.profile) {
-        (_, Some(profile)) => profile,
-        (Some(session_id), None) => runtime
-            .session_store()
-            .read_metadata(session_id)
-            .map_err(|error| error.to_string())?
-            .backend
-            .and_then(|backend| Some(backend.profile_name))
-            .unwrap_or_else(|| String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE)),
-        (None, None) => String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE),
-    };
+    let mut profile_name = initial_profile_name;
 
     if let Some(active_session_id) = &session_id {
         let metadata = runtime
@@ -554,7 +559,11 @@ fn run_accept(args: AcceptArgs) -> Result<(), String> {
     let probe_home = args
         .probe_home
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
-    let server_guard = prepare_server(probe_home.as_path(), &args.server)?;
+    let server_guard = prepare_server(
+        probe_home.as_path(),
+        &args.server,
+        BackendKind::OpenAiChatCompletions,
+    )?;
     let mut profile = named_profile(PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE)?;
     profile.base_url = server_guard.base_url();
     if let Some(model_id) = server_guard.model_id() {
@@ -843,6 +852,7 @@ fn resolve_runtime(probe_home: Option<PathBuf>) -> Result<ProbeRuntime, String> 
 fn prepare_server(
     probe_home: &Path,
     server_args: &ServerArgs,
+    desired_backend_kind: BackendKind,
 ) -> Result<ServerProcessGuard, String> {
     let config_path = server_args
         .server_config
@@ -850,6 +860,7 @@ fn prepare_server(
         .unwrap_or_else(|| PsionicServerConfig::config_path(probe_home));
     let mut config = PsionicServerConfig::load_or_create(config_path.as_path())
         .map_err(|error| error.to_string())?;
+    config.set_api_kind(desired_backend_kind);
     config
         .apply_overrides(&ServerConfigOverrides {
             mode: Some(parse_server_mode(server_args.server_mode.as_str())?),
@@ -1172,6 +1183,12 @@ fn render_optimization_target(kind: OptimizationTargetKind) -> &'static str {
 
 fn format_rate_x1000(value: u64) -> String {
     format!("{}.{:03}", value / 1000, value % 1000)
+}
+
+fn render_usage_value(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| String::from("-"))
 }
 
 #[cfg(test)]
