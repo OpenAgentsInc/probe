@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use probe_protocol::session::{
-    ItemId, SessionId, SessionIndex, SessionMetadata, SessionState, SessionTurn, TimestampMs,
-    TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnId,
+    ItemId, SessionBackendTarget, SessionId, SessionIndex, SessionMetadata, SessionState,
+    SessionTurn, TimestampMs, TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnId,
 };
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -65,6 +65,30 @@ impl NewItem {
 }
 
 #[derive(Clone, Debug)]
+pub struct NewSession {
+    pub title: String,
+    pub cwd: PathBuf,
+    pub backend: Option<SessionBackendTarget>,
+}
+
+impl NewSession {
+    #[must_use]
+    pub fn new(title: impl Into<String>, cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            title: title.into(),
+            cwd: cwd.into(),
+            backend: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_backend(mut self, backend: SessionBackendTarget) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct FilesystemSessionStore {
     root: PathBuf,
 }
@@ -85,6 +109,13 @@ impl FilesystemSessionStore {
         title: impl Into<String>,
         cwd: impl Into<PathBuf>,
     ) -> Result<SessionMetadata, SessionStoreError> {
+        self.create_session_with(NewSession::new(title, cwd))
+    }
+
+    pub fn create_session_with(
+        &self,
+        session: NewSession,
+    ) -> Result<SessionMetadata, SessionStoreError> {
         self.ensure_layout()?;
         let created_at_ms = now_ms();
         let session_id = SessionId::new(format!(
@@ -101,12 +132,13 @@ impl FilesystemSessionStore {
 
         let metadata = SessionMetadata {
             id: session_id,
-            title: title.into(),
-            cwd: cwd.into(),
+            title: session.title,
+            cwd: session.cwd,
             created_at_ms,
             updated_at_ms: created_at_ms,
             state: SessionState::Active,
             next_turn_index: 0,
+            backend: session.backend,
             transcript_path,
         };
         self.write_metadata(&metadata)?;
@@ -255,8 +287,8 @@ fn now_ms() -> TimestampMs {
 
 #[cfg(test)]
 mod tests {
-    use super::{FilesystemSessionStore, NewItem};
-    use probe_protocol::session::TranscriptItemKind;
+    use super::{FilesystemSessionStore, NewItem, NewSession};
+    use probe_protocol::session::{SessionBackendTarget, TranscriptItemKind};
 
     #[test]
     fn create_session_persists_metadata_and_index() {
@@ -264,12 +296,26 @@ mod tests {
         let store = FilesystemSessionStore::new(temp.path());
 
         let metadata = store
-            .create_session("bootstrap", temp.path())
+            .create_session_with(NewSession::new("bootstrap", temp.path()).with_backend(
+                SessionBackendTarget {
+                    profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+                    base_url: String::from("http://127.0.0.1:8080/v1"),
+                    model: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+                },
+            ))
             .expect("create session");
 
         let listed = store.list_sessions().expect("list sessions");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0], metadata);
+        assert_eq!(
+            listed[0]
+                .backend
+                .as_ref()
+                .expect("backend should be recorded")
+                .profile_name,
+            "psionic-qwen35-2b-q8-registry"
+        );
     }
 
     #[test]

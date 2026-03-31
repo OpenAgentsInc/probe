@@ -68,6 +68,13 @@ pub struct SessionTurn {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionBackendTarget {
+    pub profile_name: String,
+    pub base_url: String,
+    pub model: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMetadata {
     pub id: SessionId,
     pub title: String,
@@ -76,6 +83,7 @@ pub struct SessionMetadata {
     pub updated_at_ms: TimestampMs,
     pub state: SessionState,
     pub next_turn_index: u64,
+    pub backend: Option<SessionBackendTarget>,
     pub transcript_path: PathBuf,
 }
 

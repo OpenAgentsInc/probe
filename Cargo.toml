@@ -13,6 +13,7 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
 probe-core = { path = "crates/probe-core" }
 probe-protocol = { path = "crates/probe-protocol" }
 probe-provider-openai = { path = "crates/probe-provider-openai" }

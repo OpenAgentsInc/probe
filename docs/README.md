@@ -20,3 +20,6 @@ This folder holds technical planning docs for the Probe runtime.
 - `06-psionic-qwen35-backend-profile.md`
   - the first explicit built-in backend profile for a local Psionic-served
     Qwen3.5 model
+- `07-probe-exec.md`
+  - the first non-interactive end-to-end Probe controller lane with local
+    transcript persistence

@@ -47,6 +47,12 @@ The first canonical backend profile is a local Psionic-served Qwen lane:
 - base URL: `http://127.0.0.1:8080/v1`
 - model id: `qwen3.5-2b-q8_0-registry.gguf`
 
+The first end-to-end CLI lane is `probe exec`, which:
+
+- sends a plain-text request to the configured backend profile
+- prints the assistant answer to the terminal
+- persists the resulting session transcript under `PROBE_HOME` or `~/.probe`
+
 ## Non-Goals For The First Milestone
 
 - a large plugin marketplace
