@@ -10,7 +10,7 @@ use crate::message::{
     AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
     AppleFmFailureSummary, AppleFmUsageSummary,
 };
-use crate::widgets::{InfoPanel, ModalCard, SidebarPanel, TabStrip};
+use crate::widgets::{InfoPanel, ModalCard, SidebarPanel, TabStrip, padded_title};
 
 const MAX_EVENT_LOG: usize = 8;
 
@@ -459,7 +459,8 @@ impl HelloScreen {
             .map(|(index, entry)| ListItem::new(format!("{:>2}. {entry}", index + 1)))
             .collect::<Vec<_>>();
         frame.render_widget(
-            List::new(ui_items).block(ratatui::widgets::Block::bordered().title("UI Event Log")),
+            List::new(ui_items)
+                .block(ratatui::widgets::Block::bordered().title(padded_title("UI Event Log"))),
             columns[0],
         );
 
@@ -471,7 +472,9 @@ impl HelloScreen {
             .collect::<Vec<_>>();
         frame.render_widget(
             List::new(worker_items)
-                .block(ratatui::widgets::Block::bordered().title("Apple FM Timeline")),
+                .block(
+                    ratatui::widgets::Block::bordered().title(padded_title("Apple FM Timeline")),
+                ),
             columns[1],
         );
     }

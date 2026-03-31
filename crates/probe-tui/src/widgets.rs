@@ -17,6 +17,10 @@ fn shell_accent() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+pub(crate) fn padded_title(title: &str) -> String {
+    format!(" {title} ")
+}
+
 pub struct HeaderBar<'a> {
     title: &'a str,
     subtitle: &'a str,
@@ -97,7 +101,7 @@ impl<'a> TabStrip<'a> {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(self.title)
+                    .title(padded_title(self.title))
                     .style(shell_border()),
             )
             .highlight_style(shell_accent());
@@ -121,7 +125,7 @@ impl<'a> InfoPanel<'a> {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(self.title)
+                        .title(padded_title(self.title))
                         .style(shell_border()),
                 )
                 .wrap(Wrap { trim: false }),
@@ -150,7 +154,7 @@ impl SidebarPanel {
             List::new(items).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(self.title)
+                    .title(padded_title(self.title))
                     .style(shell_border()),
             ),
             area,
@@ -183,7 +187,7 @@ impl<'a> ModalCard<'a> {
         let modal_area = horizontal[0];
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(self.title)
+            .title(padded_title(self.title))
             .style(
                 Style::default()
                     .fg(Color::Rgb(0xff, 0xf1, 0xd0))
