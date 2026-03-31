@@ -8,16 +8,16 @@ expression: snapshot
 └──────────────────────────────────────────────────────────────────────────────┘
 
 Probe-owned Apple Foundation Models prove-out with availability gating and live
-┌ Apple FM Setup ──────────────────────────────────────────────────────────────┐
+┌─ Apple FM Setup ─────────────────────────────────────────────────────────────┐
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌ Current Detail ─────────────────────────────┐ ┌ Setup Status ────────────────┐
+┌─ Current Detail ────────────────────────────┐ ┌─ Setup Status ───────────────┐
 │Completed calls: 3                           │ │phase: completed              │
 │ 1. Sanity Check                             │ │calls_done: 3                 │
 │    READY                                    │ │focus: setup screen           │
 │ 2. Runtime Boundary                         │ └──────────────────────────────┘
 │    Probe owns the coding-agent runtime.     │
-│ 3. Next Step                                │ ┌ Backend Facts ───────────────┐
+│ 3. Next Step                                │ ┌─ Backend Facts ──────────────┐
 │    The TUI should now prove live Apple FM   │ │profile: psionic-apple-fm-brid│
 │setup...                                     │ │base_url: http://127.0.0.1:114│
 │                                             │ │model: apple-foundation-model │

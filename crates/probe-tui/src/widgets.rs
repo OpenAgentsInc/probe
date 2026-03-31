@@ -18,7 +18,7 @@ fn shell_accent() -> Style {
 }
 
 pub(crate) fn padded_title(title: &str) -> String {
-    format!(" {title} ")
+    format!("─ {title} ")
 }
 
 pub struct HeaderBar<'a> {

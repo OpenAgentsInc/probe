@@ -8,16 +8,16 @@ expression: snapshot
 └──────────────────────────────────────────────────────────────────────────────┘
 
 Probe-owned Apple Foundation Models prove-out with availability gating and live
-┌ Apple FM Setup ──────────────────────────────────────────────────────────────┐
+┌─ Apple FM Setup ─────────────────────────────────────────────────────────────┐
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌ Current Detail ─────────────────────────────┐ ┌ Setup Status ────────────────┐
+┌─ Current Detail ────────────────────────────┐ ┌─ Setup Status ───────────────┐
 │Apple FM is not ready on this machine right  │ │phase: unavailable            │
 │now.                                         │ │calls_done: 0                 │
 │                                             │ │focus: setup screen           │
 │Foundation model is still preparing          │ └──────────────────────────────┘
 │                                             │
-│Press r to rerun the setup check after the   │ ┌ Backend Facts ───────────────┐
+│Press r to rerun the setup check after the   │ ┌─ Backend Facts ──────────────┐
 │machine is admitted.                         │ │profile: psionic-apple-fm-brid│
 │                                             │ │base_url: http://127.0.0.1:114│
 │                                             │ │model: apple-foundation-model │
