@@ -11,8 +11,8 @@ use probe_core::runtime::{
 };
 use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError};
 use probe_protocol::session::{
-    SessionId, SessionMetadata, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision,
-    ToolRiskClass, TranscriptEvent, TranscriptItem, TranscriptItemKind,
+    SessionId, SessionMetadata, ToolApprovalState, ToolPolicyDecision, ToolRiskClass,
+    TranscriptEvent, TranscriptItem, TranscriptItemKind,
 };
 use psionic_apple_fm::AppleFmSystemLanguageModelAvailability;
 use serde_json::Value;
@@ -348,19 +348,26 @@ fn transcript_entry_from_item(turn_index: u64, item: &TranscriptItem) -> Option<
             "Probe",
             split_body_lines(item.text.as_str()),
         )),
-        TranscriptItemKind::ToolCall => Some(TranscriptEntry::new(
-            TranscriptRole::Tool,
-            format!(
-                "Tool Call: {}",
-                item.name.as_deref().unwrap_or("unknown_tool")
-            ),
+        TranscriptItemKind::ToolCall => Some(TranscriptEntry::tool_call(
+            item.name.as_deref().unwrap_or("unknown_tool"),
             tool_call_lines(turn_index, item),
         )),
-        TranscriptItemKind::ToolResult => Some(TranscriptEntry::new(
-            transcript_role_for_tool_result(item.tool_execution.as_ref()),
-            tool_result_title(item),
-            tool_result_lines(turn_index, item),
-        )),
+        TranscriptItemKind::ToolResult => Some(match item.tool_execution.as_ref().map(|record| record.policy_decision) {
+            Some(ToolPolicyDecision::Paused) => TranscriptEntry::approval_pending(
+                item.name.as_deref().unwrap_or("unknown_tool"),
+                tool_result_lines(turn_index, item),
+            ),
+            Some(ToolPolicyDecision::Refused) => TranscriptEntry::tool_refused(
+                item.name.as_deref().unwrap_or("unknown_tool"),
+                tool_result_lines(turn_index, item),
+            ),
+            Some(ToolPolicyDecision::AutoAllow) | Some(ToolPolicyDecision::Approved) | None => {
+                TranscriptEntry::tool_result(
+                    item.name.as_deref().unwrap_or("unknown_tool"),
+                    tool_result_lines(turn_index, item),
+                )
+            }
+        }),
         TranscriptItemKind::Note => Some(TranscriptEntry::new(
             TranscriptRole::Status,
             "Runtime Note",
@@ -369,65 +376,36 @@ fn transcript_entry_from_item(turn_index: u64, item: &TranscriptItem) -> Option<
     }
 }
 
-fn transcript_role_for_tool_result(
-    tool_execution: Option<&ToolExecutionRecord>,
-) -> TranscriptRole {
-    match tool_execution.map(|record| record.policy_decision) {
-        Some(ToolPolicyDecision::Paused) | Some(ToolPolicyDecision::Refused) => {
-            TranscriptRole::Status
-        }
-        Some(ToolPolicyDecision::AutoAllow) | Some(ToolPolicyDecision::Approved) | None => {
-            TranscriptRole::Tool
-        }
-    }
-}
-
 fn tool_call_lines(turn_index: u64, item: &TranscriptItem) -> Vec<String> {
-    let mut lines = vec![
-        format!("turn: {turn_index}"),
-        format!(
-            "call_id: {}",
-            item.tool_call_id.as_deref().unwrap_or("missing")
-        ),
-    ];
+    let mut lines = vec![format!(
+        "call: {}",
+        short_call_id(item.tool_call_id.as_deref().unwrap_or("missing"))
+    )];
     if let Some(arguments) = item.arguments.as_ref() {
-        lines.push(String::from("arguments"));
-        lines.extend(pretty_json_lines(arguments));
+        lines.push(format!("args: {}", compact_argument_summary(arguments)));
     } else {
-        lines.push(format!("arguments: {}", item.text));
+        lines.push(format!("args: {}", preview(item.text.as_str(), 72)));
     }
+    lines.push(format!("turn: {turn_index}"));
     lines
-}
-
-fn tool_result_title(item: &TranscriptItem) -> String {
-    let name = item.name.as_deref().unwrap_or("unknown_tool");
-    match item.tool_execution.as_ref().map(|record| record.policy_decision) {
-        Some(ToolPolicyDecision::Paused) => format!("Approval Pending: {name}"),
-        Some(ToolPolicyDecision::Refused) => format!("Tool Refused: {name}"),
-        Some(ToolPolicyDecision::AutoAllow) | Some(ToolPolicyDecision::Approved) | None => {
-            format!("Tool Result: {name}")
-        }
-    }
 }
 
 fn tool_result_lines(turn_index: u64, item: &TranscriptItem) -> Vec<String> {
     let mut lines = vec![
-        format!("turn: {turn_index}"),
         format!(
-            "call_id: {}",
-            item.tool_call_id.as_deref().unwrap_or("missing")
+            "call: {}",
+            short_call_id(item.tool_call_id.as_deref().unwrap_or("missing"))
         ),
+        format!("result: {}", compact_result_summary(item.text.as_str())),
+        format!("turn: {turn_index}"),
     ];
     if let Some(record) = item.tool_execution.as_ref() {
-        lines.push(format!("risk_class: {}", render_tool_risk_class(record.risk_class)));
         lines.push(format!(
-            "policy_decision: {}",
+            "policy: {}",
             render_policy_decision(record.policy_decision)
         ));
-        lines.push(format!(
-            "approval_state: {}",
-            render_approval_state(record.approval_state)
-        ));
+        lines.push(format!("risk: {}", render_tool_risk_class(record.risk_class)));
+        lines.push(format!("approval: {}", render_approval_state(record.approval_state)));
         if let Some(command) = record.command.as_ref() {
             lines.push(format!("command: {command}"));
         }
@@ -450,18 +428,64 @@ fn tool_result_lines(turn_index: u64, item: &TranscriptItem) -> Vec<String> {
             lines.push(format!("reason: {reason}"));
         }
     }
-    lines.push(String::from("output"));
-    match serde_json::from_str::<Value>(item.text.as_str()) {
-        Ok(value) => lines.extend(pretty_json_lines(&value)),
-        Err(_) => lines.extend(split_body_lines(item.text.as_str())),
-    }
     lines
 }
 
-fn pretty_json_lines(value: &Value) -> Vec<String> {
-    serde_json::to_string_pretty(value)
-        .map(|body| split_body_lines(body.as_str()))
-        .unwrap_or_else(|_| vec![value.to_string()])
+fn compact_argument_summary(arguments: &Value) -> String {
+    compact_json_preview(arguments, 72)
+}
+
+fn compact_result_summary(value: &str) -> String {
+    match serde_json::from_str::<Value>(value) {
+        Ok(parsed) => tool_result_preview(&parsed),
+        Err(_) => preview(value, 72),
+    }
+}
+
+fn compact_json_preview(value: &Value, max_chars: usize) -> String {
+    preview(
+        serde_json::to_string(value)
+            .unwrap_or_else(|_| value.to_string())
+            .as_str(),
+        max_chars,
+    )
+}
+
+fn tool_result_preview(value: &Value) -> String {
+    if let Some(path) = value.get("path").and_then(Value::as_str) {
+        let start_line = value.get("start_line").and_then(Value::as_u64);
+        let end_line = value.get("end_line").and_then(Value::as_u64);
+        let truncated = value.get("truncated").and_then(Value::as_bool);
+        return match (start_line, end_line, truncated) {
+            (Some(start), Some(end), Some(true)) => format!("read {path}:{start}-{end} (truncated)"),
+            (Some(start), Some(end), _) => format!("read {path}:{start}-{end}"),
+            _ => format!("path={path}"),
+        };
+    }
+    if let Some(entries) = value.get("entries").and_then(Value::as_array) {
+        return format!("listed {} entries", entries.len());
+    }
+    if let Some(matches) = value.get("matches").and_then(Value::as_array) {
+        return format!("found {} matches", matches.len());
+    }
+    if let Some(content) = value.get("content").and_then(Value::as_str) {
+        return preview(content, 72);
+    }
+    compact_json_preview(value, 72)
+}
+
+fn short_call_id(value: &str) -> String {
+    preview(value, 16)
+}
+
+fn preview(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let preview = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
 }
 
 fn split_body_lines(value: &str) -> Vec<String> {

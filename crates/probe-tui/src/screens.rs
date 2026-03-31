@@ -578,20 +578,20 @@ impl ChatScreen {
                 let entry_count = entries.len();
                 self.transcript.clear_active_turn();
                 for entry in entries {
-                    let role = entry.role().label().to_string();
+                    let label = entry.label().to_string();
                     let title = entry.title().to_string();
                     self.transcript.push_entry(entry);
-                    self.record_worker_event(format!("committed {role} turn: {title}"));
+                    self.record_worker_event(format!("committed {label} row: {title}"));
                 }
                 format!("committed {entry_count} transcript entries")
             }
             AppMessage::TranscriptEntryCommitted { entry } => {
-                let role = entry.role().label().to_string();
+                let label = entry.label().to_string();
                 let title = entry.title().to_string();
                 self.transcript.clear_active_turn();
                 self.transcript.push_entry(entry);
-                self.record_worker_event(format!("committed {role} turn: {title}"));
-                format!("committed {role} turn")
+                self.record_worker_event(format!("committed {label} row: {title}"));
+                format!("committed {label} row")
             }
             AppMessage::ProbeRuntimeSessionReady {
                 session_id,

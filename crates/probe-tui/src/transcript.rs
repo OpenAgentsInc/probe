@@ -21,9 +21,19 @@ impl TranscriptRole {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptEntryKind {
+    Generic,
+    ToolCall,
+    ToolResult,
+    ToolRefused,
+    ApprovalPending,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptEntry {
     role: TranscriptRole,
+    kind: TranscriptEntryKind,
     title: String,
     body: Vec<String>,
 }
@@ -33,6 +43,47 @@ impl TranscriptEntry {
     pub fn new(role: TranscriptRole, title: impl Into<String>, body: Vec<String>) -> Self {
         Self {
             role,
+            kind: TranscriptEntryKind::Generic,
+            title: title.into(),
+            body,
+        }
+    }
+
+    #[must_use]
+    pub fn tool_call(title: impl Into<String>, body: Vec<String>) -> Self {
+        Self {
+            role: TranscriptRole::Tool,
+            kind: TranscriptEntryKind::ToolCall,
+            title: title.into(),
+            body,
+        }
+    }
+
+    #[must_use]
+    pub fn tool_result(title: impl Into<String>, body: Vec<String>) -> Self {
+        Self {
+            role: TranscriptRole::Tool,
+            kind: TranscriptEntryKind::ToolResult,
+            title: title.into(),
+            body,
+        }
+    }
+
+    #[must_use]
+    pub fn tool_refused(title: impl Into<String>, body: Vec<String>) -> Self {
+        Self {
+            role: TranscriptRole::Status,
+            kind: TranscriptEntryKind::ToolRefused,
+            title: title.into(),
+            body,
+        }
+    }
+
+    #[must_use]
+    pub fn approval_pending(title: impl Into<String>, body: Vec<String>) -> Self {
+        Self {
+            role: TranscriptRole::Status,
+            kind: TranscriptEntryKind::ApprovalPending,
             title: title.into(),
             body,
         }
@@ -41,6 +92,11 @@ impl TranscriptEntry {
     #[must_use]
     pub const fn role(&self) -> TranscriptRole {
         self.role
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> TranscriptEntryKind {
+        self.kind
     }
 
     #[must_use]
@@ -53,12 +109,19 @@ impl TranscriptEntry {
         self.body.as_slice()
     }
 
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self.kind {
+            TranscriptEntryKind::Generic => self.role.label(),
+            TranscriptEntryKind::ToolCall => "tool call",
+            TranscriptEntryKind::ToolResult => "tool result",
+            TranscriptEntryKind::ToolRefused => "tool refused",
+            TranscriptEntryKind::ApprovalPending => "approval pending",
+        }
+    }
+
     fn render_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(format!(
-            "[{}] {}",
-            self.role.label(),
-            self.title
-        ))];
+        let mut lines = vec![Line::from(format!("[{}] {}", self.label(), self.title))];
         for line in &self.body {
             lines.push(Line::from(format!("  {line}")));
         }

@@ -10,16 +10,16 @@ expression: snapshot
 │ [user] You                                                 │ │ focus: chat   │
 │   Summarize what Probe owns.                               │ │ stack: 1      │
 │                                                            │ │ turns: 4      │
-│ [tool] Tool Call: read_file                                │ │ active: none  │
-│   turn: 1                                                  │ │ session: sess │
-│   call_id: call_readme_1                                   │ │ runtime: psio │
-│   arguments                                                │ │ model: qwen3. │
-│   {                                                        │ │ phase: pendin │
-│     "path": "README.md"                                    │ └───────────────┘
+│ [tool call] read_file                                      │ │ active: none  │
+│   call: call_readme_1                                      │ │ session: sess │
+│   args: {"path":"README.md"}                               │ │ runtime: psio │
+│   turn: 1                                                  │ │ model: qwen3. │
+│                                                            │ │ phase: pendin │
+│ [tool result] read_file                                    │ └───────────────┘
 └────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: committed assistant turn | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 |     │
+│ status: committed assistant row | Tab | Ctrl+R/S/A/P/O | Up/Down | F1 |      │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer ───────────────────────────────────────────────────────────────────┐

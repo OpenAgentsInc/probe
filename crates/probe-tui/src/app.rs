@@ -685,22 +685,22 @@ mod tests {
                 && app
                     .worker_events()
                     .iter()
-                .any(|entry| entry.contains("committed tool turn: Tool Call: read_file"))
+                    .any(|entry| entry.contains("committed tool call row: read_file"))
                 && app
                     .worker_events()
                     .iter()
-                    .any(|entry| entry.contains("committed tool turn: Tool Result: read_file"))
+                    .any(|entry| entry.contains("committed tool result row: read_file"))
                 && app
                     .worker_events()
                     .iter()
-                    .any(|entry| entry.contains("committed assistant turn: Probe"))
+                    .any(|entry| entry.contains("committed assistant row: Probe"))
                 && app.runtime_session_id().is_some()
         });
 
         assert!(saw_active_turn);
         let rendered = app.render_to_string(120, 32);
-        assert!(rendered.contains("Tool Call: read_file"));
-        assert!(rendered.contains("Tool Result: read_file"));
+        assert!(rendered.contains("[tool call] read_file"));
+        assert!(rendered.contains("[tool result] read_file"));
         assert!(rendered.contains("README.md"));
         assert!(
             app.worker_events()
@@ -790,6 +790,63 @@ mod tests {
         });
 
         assert_eq!(app.runtime_session_id(), Some(session_id.as_str()));
+    }
+
+    #[test]
+    fn paused_tool_rows_render_as_approval_pending_entries() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let server = FakeOpenAiServer::from_json_responses(vec![json!({
+            "id": "chatcmpl_probe_tui_pause_1",
+            "model": "qwen3.5-2b-q8_0-registry.gguf",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_patch_1",
+                        "type": "function",
+                        "function": {
+                            "name": "apply_patch",
+                            "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        })]);
+        let mut config = runtime_test_config(&environment, server.base_url());
+        let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Required, false);
+        tool_loop.approval = probe_core::tools::ToolApprovalConfig {
+            allow_write_tools: false,
+            allow_network_shell: false,
+            allow_destructive_shell: false,
+            denied_action: probe_core::tools::ToolDeniedAction::Pause,
+        };
+        config.tool_loop = Some(tool_loop);
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        for event in [
+            UiEvent::ComposerInsert('p'),
+            UiEvent::ComposerInsert('a'),
+            UiEvent::ComposerInsert('t'),
+            UiEvent::ComposerInsert('c'),
+            UiEvent::ComposerInsert('h'),
+            UiEvent::ComposerSubmit,
+        ] {
+            app.dispatch(event);
+        }
+
+        wait_for_app_condition(&mut app, Duration::from_secs(2), |app| {
+            app.worker_events()
+                .iter()
+                .any(|entry| entry.contains("committed approval pending row: apply_patch"))
+        });
+
+        let rendered = app.render_to_string(120, 32);
+        assert!(rendered.contains("[approval pending] apply_patch"));
+        assert!(rendered.contains("policy: paused"));
+        assert!(rendered.contains("approval: pending"));
     }
 
     #[test]

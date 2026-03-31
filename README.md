@@ -78,7 +78,9 @@ conservative tool approval policy. The first submit creates a persisted Probe
 session; later submits continue that same session. The active-turn cell is now
 driven by real runtime lifecycle events, so the TUI can show model requests,
 tool request/start/completion, refusal or pause, and the final assistant commit
-before the transcript delta is rendered.
+before the transcript delta is rendered. Persisted tool activity renders as
+first-class transcript rows such as `[tool call]`, `[tool result]`, and
+`[approval pending]` rather than generic notes.
 
 Setup, help, approval, and request-input flows live in a typed overlay stack
 above or in place of the composer. A background Apple FM availability/setup
@@ -147,3 +149,4 @@ Start with:
 - [docs/40-probe-tui-composer-history-commands-mentions-attachments-and-paste.md](docs/40-probe-tui-composer-history-commands-mentions-attachments-and-paste.md)
 - [docs/42-probe-tui-real-runtime-session-worker.md](docs/42-probe-tui-real-runtime-session-worker.md)
 - [docs/43-probe-runtime-event-stream-and-live-tui-lifecycle.md](docs/43-probe-runtime-event-stream-and-live-tui-lifecycle.md)
+- [docs/44-probe-tui-tool-call-and-tool-result-rows.md](docs/44-probe-tui-tool-call-and-tool-result-rows.md)

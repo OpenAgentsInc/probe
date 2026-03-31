@@ -129,3 +129,7 @@ This folder holds technical planning docs for the Probe runtime.
   - typed per-turn runtime events in `probe-core`, plus the first live Probe
     TUI lifecycle rendering for model requests, tool activity, refusal/pause,
     and assistant commit
+- `44-probe-tui-tool-call-and-tool-result-rows.md`
+  - first-class transcript row kinds for persisted Probe tool calls, tool
+    results, refusals, and approval-pending outcomes, plus compact operator
+    summaries built from the stored `tool_execution` truth

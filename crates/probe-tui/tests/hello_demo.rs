@@ -84,33 +84,25 @@ fn transcript_committed_turn_snapshot_is_stable() {
         ),
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
-        entry: TranscriptEntry::new(
-            TranscriptRole::Tool,
-            "Tool Call: read_file",
+        entry: TranscriptEntry::tool_call(
+            "read_file",
             vec![
+                String::from("call: call_readme_1"),
+                String::from("args: {\"path\":\"README.md\"}"),
                 String::from("turn: 1"),
-                String::from("call_id: call_readme_1"),
-                String::from("arguments"),
-                String::from("{"),
-                String::from("  \"path\": \"README.md\""),
-                String::from("}"),
             ],
         ),
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
-        entry: TranscriptEntry::new(
-            TranscriptRole::Tool,
-            "Tool Result: read_file",
+        entry: TranscriptEntry::tool_result(
+            "read_file",
             vec![
+                String::from("call: call_readme_1"),
+                String::from("result: read README.md:1-3"),
                 String::from("turn: 2"),
-                String::from("call_id: call_readme_1"),
-                String::from("risk_class: read_only"),
-                String::from("policy_decision: auto_allow"),
-                String::from("approval_state: not_required"),
-                String::from("output"),
-                String::from("{"),
-                String::from("  \"path\": \"README.md\""),
-                String::from("}"),
+                String::from("policy: auto_allow"),
+                String::from("risk: read_only"),
+                String::from("approval: not_required"),
             ],
         ),
     });
