@@ -6,17 +6,17 @@ expression: snapshot
 │  Chat │ Events                                                               │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌─ Transcript ───────────────────────────────────────────────┐ ┌─ Shell ───────┐
-│ Transcript is empty.                                       │ │ focus: chat   │
-│                                                            │ │ stack: 1      │
-│ Type in the composer to start a real chat turn.            │ │ turns: 0      │
-│ Committed turns stay in app state while one explicit       │ │ active: none  │
-│ active turn renders live work.                             │ │ session: pend │
-│                                                            │ │ runtime: pend │
-│                                                            │ │ model: pendin │
-│                                                            │ │ phase: pendin │
-│                                                            │ └───────────────┘
-└────────────────────────────────────────────────────────────┘
+┌─ Transcript ─────────────────────────────────────────────────────────────────┐
+│ Transcript is empty.                                                         │
+│                                                                              │
+│ Type in the composer to start a real chat turn.                              │
+│ Committed turns stay in app state while one explicit active turn renders     │
+│ live work.                                                                   │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ status: probe tui launched | Tab | Ctrl+R/S/A/O | Up/Down | F1 | Ctrl+C      │

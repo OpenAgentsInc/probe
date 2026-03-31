@@ -167,6 +167,7 @@ fn unavailable_state_snapshot_is_stable() {
             apple_intelligence_required: Some(true),
         },
     });
+    app.dispatch(UiEvent::OpenSetupOverlay);
     let snapshot = app.render_to_string(80, 24);
     assert_snapshot!("probe_tui_unavailable_state", snapshot);
 }
@@ -201,6 +202,7 @@ fn running_state_snapshot_is_stable() {
         title: String::from("Sanity Check"),
         prompt: String::from("Reply with exactly READY."),
     });
+    app.dispatch(UiEvent::OpenSetupOverlay);
     let snapshot = app.render_to_string(80, 24);
     assert_snapshot!("probe_tui_running_state", snapshot);
 }
@@ -249,6 +251,7 @@ fn running_state_keeps_completed_reply_visible_while_next_call_waits() {
         title: String::from("Runtime Boundary"),
         prompt: String::from("In one sentence, summarize what Probe owns."),
     });
+    app.dispatch(UiEvent::OpenSetupOverlay);
 
     let rendered = app.render_to_string(120, 40);
     assert!(rendered.contains("READY"));
@@ -335,6 +338,7 @@ fn completed_state_snapshot_is_stable() {
         backend,
         total_calls: 3,
     });
+    app.dispatch(UiEvent::OpenSetupOverlay);
     let snapshot = app.render_to_string(80, 24);
     assert_snapshot!("probe_tui_completed_state", snapshot);
 }

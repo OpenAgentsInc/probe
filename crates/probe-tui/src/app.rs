@@ -1,7 +1,7 @@
 use std::io::{self, Stdout};
 use std::time::Duration;
 
-use crossterm::event::{self, Event as CrosstermEvent};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -18,7 +18,7 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::{Frame, Terminal};
 
 use crate::bottom_pane::{BottomPane, BottomPaneState};
-use crate::event::{UiEvent, event_from_key};
+use crate::event::{UiEvent, event_from_key, event_from_mouse};
 use crate::message::{AppMessage, BackgroundTaskRequest, ProbeRuntimeTurnConfig};
 use crate::screens::{
     ActiveTab, ApprovalOverlay, ChatScreen, HelpScreen, ScreenAction, ScreenCommand, ScreenId,
@@ -476,7 +476,7 @@ fn submission_preview(
 pub fn run_probe_tui() -> io::Result<()> {
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -501,6 +501,11 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()>
                         app.dispatch(event);
                     }
                 }
+                CrosstermEvent::Mouse(mouse) => {
+                    if let Some(event) = event_from_mouse(mouse) {
+                        app.dispatch(event);
+                    }
+                }
                 CrosstermEvent::Paste(text) => app.dispatch(UiEvent::ComposerPaste(text)),
                 _ => {}
             }
@@ -514,7 +519,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()>
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -754,7 +759,15 @@ mod tests {
         });
 
         assert!(saw_active_turn);
-        let rendered = app.render_to_string(120, 32);
+        let mut rendered = app.render_to_string(120, 32);
+        for _ in 0..6 {
+            if rendered.contains("[tool call] read_file") && rendered.contains("[tool result] read_file")
+            {
+                break;
+            }
+            app.dispatch(UiEvent::PageUp);
+            rendered = app.render_to_string(120, 32);
+        }
         assert!(rendered.contains("[tool call] read_file"));
         assert!(rendered.contains("[tool result] read_file"));
         assert!(rendered.contains("README.md"));
@@ -1204,9 +1217,14 @@ mod tests {
 
         assert_eq!(app.task_phase(), TaskPhase::Completed);
         assert_eq!(app.call_count(), 3);
+        let rendered = app.render_to_string(120, 32);
+        assert!(!rendered.contains("Next Step"));
+        assert!(!rendered.contains("resp-3"));
+
+        app.dispatch(UiEvent::OpenSetupOverlay);
         let rendered = app.render_to_string(120, 72);
         assert!(rendered.contains("Next Step"));
-        assert!(rendered.contains("Setup Complete"));
+        assert!(rendered.contains("phase: completed"));
         assert!(rendered.contains("resp-3"));
         let requests = server.finish();
         assert_eq!(requests.len(), 4);

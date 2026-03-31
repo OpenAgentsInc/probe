@@ -6,17 +6,17 @@ expression: snapshot
 │  Chat │ Events                                                               │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌─ Transcript ───────────────────────────────────────────────┐ ┌─ Shell ───────┐
-│ [user] You                                                 │ │ focus: chat   │
-│   Summarize what Probe owns.                               │ │ stack: 1      │
-│                                                            │ │ turns: 1      │
-│ [active tool] Tool Requested: read_file                    │ │ active: tool  │
-│   round_trip: 1                                            │ │ session: sess │
-│   call_id: call_readme_1                                   │ │ runtime: psio │
-│   arguments                                                │ │ model: qwen3. │
-│   {                                                        │ │ phase: tool_r │
-│     "path": "README.md"                                    │ └───────────────┘
-└────────────────────────────────────────────────────────────┘
+┌─ Transcript ─────────────────────────────────────────────────────────────────┐
+│   Summarize what Probe owns.                                                 │
+│                                                                              │
+│ [active tool] Tool Requested: read_file                                      │
+│   round_trip: 1                                                              │
+│   call_id: call_readme_1                                                     │
+│   arguments                                                                  │
+│   {                                                                          │
+│     "path": "README.md"                                                      │
+│   }                                                                          │
+└──────────────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ status: tool call requested: read_file | Tab | Ctrl+R/S/A/O | Up/Down | F1 | │

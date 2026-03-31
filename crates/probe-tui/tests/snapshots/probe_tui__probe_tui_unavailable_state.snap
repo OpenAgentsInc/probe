@@ -2,27 +2,27 @@
 source: crates/probe-tui/tests/probe_tui.rs
 expression: snapshot
 ---
+
+
+
+           ┌─ Setup ────────────────────────────────────────────────┐
+           │ Apple FM is not ready on this machine right now.       │
+           │                                                        │
+           │ Foundation model is still preparing                    │
+           │                                                        │
+           │ Press Ctrl+R to rerun the setup check after the        │
+           │ machine is admitted.                                   │
+           │                                                        │
+           │ Setup Status                                           │
+           └────────────────────────────────────────────────────────┘
+
+
+
+
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  Chat │ Events                                                               │
+│ status: opened setup overlay | Tab | Ctrl+R/S/A/O | Up/Down | F1 | Ctrl+C    │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌─ Transcript ───────────────────────────────────────────────┐ ┌─ Shell ───────┐
-│ [status] Availability Unavailable                          │ │ focus: chat   │
-│   reason: model_not_ready                                  │ │ stack: 1      │
-│   Probe stopped before issuing any inference call.         │ │ turns: 1      │
-│                                                            │ │ active: none  │
-│                                                            │ │ session: pend │
-│                                                            │ │ runtime: pend │
-│                                                            │ │ model: pendin │
-│                                                            │ │ phase: pendin │
-│                                                            │ └───────────────┘
-└────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: Apple FM unavailable | Tab | Ctrl+R/S/A/O | Up/Down | F1 | Ctrl+C    │
-└──────────────────────────────────────────────────────────────────────────────┘
-
-┌─ Composer ───────────────────────────────────────────────────────────────────┐
-│ cmd: plain                                                                   │
-│ Type a Probe message. Enter submits. Ctrl+J inserts a newline.               │
+┌─ Composer (disabled) ────────────────────────────────────────────────────────┐
+│ Composer disabled while setup owns focus. Esc returns to chat.               │
 └──────────────────────────────────────────────────────────────────────────────┘

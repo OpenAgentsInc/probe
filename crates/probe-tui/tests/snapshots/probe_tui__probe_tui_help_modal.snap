@@ -11,9 +11,9 @@ expression: snapshot
            │ Tab / Shift+Tab     switch Chat / Events               │
            │ Enter / Ctrl+J      submit / newline                   │
            │ Up / Down           draft history recall               │
+           │ Mouse wheel / PgUp  scroll active panel                │
+           │ PgDn                scroll back toward latest          │
            │ Ctrl+O              add attachment placeholder         │
-           │ Ctrl+R / Ctrl+S     rerun setup / open setup           │
-           │ Ctrl+A              approval                           │
            └────────────────────────────────────────────────────────┘
 
 

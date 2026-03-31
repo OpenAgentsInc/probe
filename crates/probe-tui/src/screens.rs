@@ -4,7 +4,7 @@ use probe_core::runtime::RuntimeEvent;
 use probe_protocol::session::{PendingToolApproval, ToolApprovalResolution};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, Padding, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::bottom_pane::ComposerSubmission;
@@ -14,9 +14,11 @@ use crate::message::{
     AppleFmFailureSummary, AppleFmUsageSummary,
 };
 use crate::transcript::{ActiveTurn, RetainedTranscript, TranscriptEntry, TranscriptRole};
-use crate::widgets::{padded_title, InfoPanel, ModalCard, SidebarPanel, TabStrip};
+use crate::widgets::{InfoPanel, ModalCard, TabStrip};
 
 const MAX_EVENT_LOG: usize = 16;
+const LINE_SCROLL_STEP: u16 = 3;
+const PAGE_SCROLL_STEP: u16 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenId {
@@ -262,6 +264,8 @@ pub struct ChatScreen {
     recent_events: VecDeque<String>,
     task_events: VecDeque<String>,
     transcript: RetainedTranscript,
+    transcript_scroll_from_bottom: u16,
+    events_scroll: u16,
     runtime: ProbeRuntimeState,
     setup: AppleFmSetupState,
 }
@@ -274,6 +278,8 @@ impl Default for ChatScreen {
             recent_events: VecDeque::new(),
             task_events: VecDeque::new(),
             transcript: RetainedTranscript::new(),
+            transcript_scroll_from_bottom: 0,
+            events_scroll: 0,
             runtime: ProbeRuntimeState::default(),
             setup: AppleFmSetupState::default(),
         };
@@ -383,6 +389,7 @@ impl ChatScreen {
             "You",
             body,
         ));
+        self.snap_transcript_to_latest();
         self.record_event(format!(
             "submitted chat turn ({} chars)",
             submission.text.chars().count()
@@ -395,17 +402,8 @@ impl ChatScreen {
             backend: Some(backend.clone()),
             ..AppleFmSetupState::default()
         };
-        self.transcript.push_entry(TranscriptEntry::new(
-            TranscriptRole::Status,
-            "Apple FM Setup Queued",
-            vec![
-                format!("profile: {}", backend.profile_name),
-                format!("base_url: {}", backend.base_url),
-                String::from("Probe will check availability before any inference."),
-            ],
-        ));
-        self.transcript.clear_active_turn();
         self.task_events.clear();
+        self.events_scroll = 0;
         self.record_worker_event(format!(
             "queued Apple FM setup against {}",
             backend.profile_name
@@ -435,6 +433,7 @@ impl ChatScreen {
                         format!("session: {}", short_session_id(session_id.as_str())),
                     ],
                 ));
+                self.snap_transcript_to_latest();
                 self.record_worker_event(String::from("runtime turn started"));
                 String::from("runtime turn started")
             }
@@ -456,6 +455,7 @@ impl ChatScreen {
                         format!("session: {}", short_session_id(session_id.as_str())),
                     ],
                 ));
+                self.snap_transcript_to_latest();
                 self.record_worker_event(format!("model request started: round {round_trip}"));
                 format!("model request started for round {round_trip}")
             }
@@ -481,6 +481,7 @@ impl ChatScreen {
                     format!("Tool Requested: {tool_name}"),
                     body,
                 ));
+                self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool call requested: {tool_name}"));
                 format!("tool call requested: {tool_name}")
             }
@@ -504,6 +505,7 @@ impl ChatScreen {
                         format!("risk_class: {}", render_runtime_risk_class(risk_class)),
                     ],
                 ));
+                self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool execution started: {tool_name}"));
                 format!("tool execution started: {tool_name}")
             }
@@ -521,6 +523,7 @@ impl ChatScreen {
                     format!("Completed Tool: {}", tool.name),
                     runtime_tool_body_lines(round_trip, &tool),
                 ));
+                self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool execution completed: {}", tool.name));
                 format!("tool execution completed: {}", tool.name)
             }
@@ -538,6 +541,7 @@ impl ChatScreen {
                     format!("Tool Refused: {}", tool.name),
                     runtime_tool_body_lines(round_trip, &tool),
                 ));
+                self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool refused: {}", tool.name));
                 format!("tool refused: {}", tool.name)
             }
@@ -555,6 +559,7 @@ impl ChatScreen {
                     format!("Approval Pending: {}", tool.name),
                     runtime_tool_body_lines(round_trip, &tool),
                 ));
+                self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool paused for approval: {}", tool.name));
                 format!("tool paused for approval: {}", tool.name)
             }
@@ -576,6 +581,7 @@ impl ChatScreen {
                         preview(assistant_text.as_str(), 96),
                     ],
                 ));
+                self.snap_transcript_to_latest();
                 self.record_worker_event(String::from("assistant turn committed"));
                 String::from("assistant turn committed")
             }
@@ -588,6 +594,7 @@ impl ChatScreen {
                 let role = turn.role().label().to_string();
                 let title = turn.title().to_string();
                 self.transcript.set_active_turn(turn);
+                self.snap_transcript_to_latest();
                 self.record_worker_event(format!("updated active {role} turn: {title}"));
                 format!("updated active {role} turn")
             }
@@ -600,6 +607,7 @@ impl ChatScreen {
                     self.transcript.push_entry(entry);
                     self.record_worker_event(format!("committed {label} row: {title}"));
                 }
+                self.snap_transcript_to_latest();
                 format!("committed {entry_count} transcript entries")
             }
             AppMessage::TranscriptEntryCommitted { entry } => {
@@ -607,6 +615,7 @@ impl ChatScreen {
                 let title = entry.title().to_string();
                 self.transcript.clear_active_turn();
                 self.transcript.push_entry(entry);
+                self.snap_transcript_to_latest();
                 self.record_worker_event(format!("committed {label} row: {title}"));
                 format!("committed {label} row")
             }
@@ -662,14 +671,6 @@ impl ChatScreen {
             AppMessage::AppleFmSetupStarted { backend } => {
                 self.setup.backend = Some(backend.clone());
                 self.setup.phase = TaskPhase::CheckingAvailability;
-                self.transcript.set_active_turn(ActiveTurn::new(
-                    TranscriptRole::Status,
-                    "Availability Check",
-                    vec![
-                        format!("bridge: {}", backend.base_url),
-                        String::from("Checking Apple FM readiness before any inference call."),
-                    ],
-                ));
                 self.record_worker_event(format!(
                     "checking Apple FM availability via {}",
                     backend.base_url
@@ -686,15 +687,6 @@ impl ChatScreen {
                     .unwrap_or_else(|| String::from("unknown platform"));
                 self.setup.backend = Some(backend);
                 self.setup.availability = Some(availability);
-                self.transcript.clear_active_turn();
-                self.transcript.push_entry(TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Availability Ready",
-                    vec![
-                        format!("platform: {platform}"),
-                        String::from("Apple FM admitted this machine for the setup check."),
-                    ],
-                ));
                 self.record_worker_event(format!("Apple FM availability ready on {platform}"));
                 String::from("Apple FM availability check passed")
             }
@@ -710,15 +702,6 @@ impl ChatScreen {
                 self.setup.availability = Some(availability);
                 self.setup.active_call = None;
                 self.setup.phase = TaskPhase::Unavailable;
-                self.transcript.clear_active_turn();
-                self.transcript.push_entry(TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Availability Unavailable",
-                    vec![
-                        format!("reason: {reason}"),
-                        String::from("Probe stopped before issuing any inference call."),
-                    ],
-                ));
                 self.record_worker_event(format!("Apple FM unavailable: {reason}"));
                 String::from("Apple FM unavailable")
             }
@@ -737,20 +720,6 @@ impl ChatScreen {
                     index,
                     total_calls,
                 });
-                self.transcript.set_active_turn(ActiveTurn::new(
-                    TranscriptRole::Tool,
-                    format!("Call {index}/{total_calls}: {title}"),
-                    vec![
-                        String::from("Prompt"),
-                        self.setup
-                            .active_call
-                            .as_ref()
-                            .map(|call| call.prompt.clone())
-                            .unwrap_or_default(),
-                        String::from("Response"),
-                        String::from("[waiting for Apple FM reply]"),
-                    ],
-                ));
                 self.record_worker_event(format!("started call {index}/{total_calls}: {title}"));
                 format!("running Apple FM call {index}/{total_calls}")
             }
@@ -762,12 +731,6 @@ impl ChatScreen {
             } => {
                 let preview = preview(call.response_text.as_str(), 36);
                 self.setup.backend = Some(backend);
-                self.transcript.clear_active_turn();
-                self.transcript.push_entry(TranscriptEntry::new(
-                    TranscriptRole::Tool,
-                    format!("Call {index}/{total_calls}: {}", call.title),
-                    completed_call_lines(&call),
-                ));
                 self.setup.calls.push(call);
                 self.setup.active_call = None;
                 self.record_worker_event(format!(
@@ -782,17 +745,6 @@ impl ChatScreen {
                 self.setup.backend = Some(backend);
                 self.setup.phase = TaskPhase::Completed;
                 self.setup.active_call = None;
-                self.transcript.clear_active_turn();
-                self.transcript.push_entry(TranscriptEntry::new(
-                    TranscriptRole::Assistant,
-                    "Setup Complete",
-                    vec![
-                        format!("completed_calls: {total_calls}"),
-                        String::from(
-                            "The retained transcript widget is now the canonical shell render model.",
-                        ),
-                    ],
-                ));
                 self.record_worker_event(format!(
                     "Apple FM setup completed after {total_calls} calls"
                 ));
@@ -808,22 +760,6 @@ impl ChatScreen {
                 self.setup.failure = Some(failure);
                 self.setup.phase = TaskPhase::Failed;
                 self.setup.active_call = None;
-                self.transcript.clear_active_turn();
-                self.transcript.push_entry(TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    format!("Setup Failed: {stage}"),
-                    vec![
-                        format!(
-                            "detail: {}",
-                            self.setup
-                                .failure
-                                .as_ref()
-                                .map(|value| value.detail.clone())
-                                .unwrap_or_default()
-                        ),
-                        format!("reason: {reason}"),
-                    ],
-                ));
                 self.record_worker_event(format!("Apple FM setup failed at {stage} ({reason})"));
                 format!("Apple FM setup failed at {stage}")
             }
@@ -846,6 +782,7 @@ impl ChatScreen {
             }
             UiEvent::ToggleBody => {
                 self.emphasized_copy = !self.emphasized_copy;
+                self.snap_transcript_to_latest();
                 let status = if self.emphasized_copy {
                     String::from("showing operator notes instead of live response detail")
                 } else {
@@ -853,6 +790,34 @@ impl ChatScreen {
                 };
                 self.record_event(status.clone());
                 ScreenOutcome::with_status(ScreenAction::None, status)
+            }
+            UiEvent::ScrollUp => {
+                match self.active_tab {
+                    ActiveTab::Chat => self.scroll_transcript_up(LINE_SCROLL_STEP),
+                    ActiveTab::Events => self.scroll_events_up(LINE_SCROLL_STEP),
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ScrollDown => {
+                match self.active_tab {
+                    ActiveTab::Chat => self.scroll_transcript_down(LINE_SCROLL_STEP),
+                    ActiveTab::Events => self.scroll_events_down(LINE_SCROLL_STEP),
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::PageUp => {
+                match self.active_tab {
+                    ActiveTab::Chat => self.scroll_transcript_up(PAGE_SCROLL_STEP),
+                    ActiveTab::Events => self.scroll_events_up(PAGE_SCROLL_STEP),
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::PageDown => {
+                match self.active_tab {
+                    ActiveTab::Chat => self.scroll_transcript_down(PAGE_SCROLL_STEP),
+                    ActiveTab::Events => self.scroll_events_down(PAGE_SCROLL_STEP),
+                }
+                ScreenOutcome::idle()
             }
             UiEvent::RunBackgroundTask => {
                 self.record_event(String::from("requested Apple FM setup rerun"));
@@ -904,26 +869,12 @@ impl ChatScreen {
         }
     }
 
-    fn render_chat_shell(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
-        let columns = Layout::horizontal([Constraint::Percentage(79), Constraint::Percentage(21)])
-            .spacing(1)
-            .split(area);
-        let focus_name = if stack_depth > 1 {
-            "overlay"
-        } else {
-            "chat shell"
-        };
-        InfoPanel::new("Transcript", self.render_primary_body()).render(frame, columns[0]);
-
-        let sidebar = Layout::vertical([Constraint::Length(12), Constraint::Min(0)])
-            .spacing(1)
-            .split(columns[1]);
-        SidebarPanel::new(
-            "Shell",
-            self.render_chat_shell_lines(focus_name, stack_depth),
-        )
-        .render(frame, sidebar[0]);
-        SidebarPanel::new("Apple FM", self.render_chat_setup_lines()).render(frame, sidebar[1]);
+    fn render_chat_shell(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
+        let body = self.render_primary_body();
+        let scroll_y = self.transcript_scroll_y(body.lines.len(), area.height);
+        InfoPanel::new("Transcript", body)
+            .with_scroll(scroll_y)
+            .render(frame, area);
     }
 
     fn render_setup_overlay_text(&self, stack_depth: usize) -> Text<'static> {
@@ -972,37 +923,14 @@ impl ChatScreen {
         let columns = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
             .spacing(1)
             .split(rows[1]);
-        let ui_items = self
-            .recent_events
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| ListItem::new(format!("{:>2}. {entry}", index + 1)))
-            .collect::<Vec<_>>();
-        frame.render_widget(
-            List::new(ui_items).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .padding(Padding::horizontal(1))
-                    .title(padded_title("UI Event Log")),
-            ),
-            columns[0],
-        );
-
-        let worker_items = self
-            .task_events
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| ListItem::new(format!("{:>2}. {entry}", index + 1)))
-            .collect::<Vec<_>>();
-        frame.render_widget(
-            List::new(worker_items).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .padding(Padding::horizontal(1))
-                    .title(padded_title("Apple FM Timeline")),
-            ),
-            columns[1],
-        );
+        let ui_body = numbered_event_log(self.recent_events.iter());
+        let worker_body = numbered_event_log(self.task_events.iter());
+        InfoPanel::new("UI Event Log", ui_body)
+            .with_scroll(self.events_scroll)
+            .render(frame, columns[0]);
+        InfoPanel::new("Apple FM Timeline", worker_body)
+            .with_scroll(self.events_scroll)
+            .render(frame, columns[1]);
     }
 
     fn render_primary_body(&self) -> Text<'static> {
@@ -1023,105 +951,6 @@ impl ChatScreen {
             ]);
         }
         self.transcript.as_text()
-    }
-
-    fn render_chat_shell_lines(&self, focus_name: &str, stack_depth: usize) -> Vec<String> {
-        let active_turn = self
-            .transcript
-            .active_turn()
-            .map(|turn| turn.role().label().to_string())
-            .unwrap_or_else(|| String::from("none"));
-        let session = self
-            .runtime
-            .session_id
-            .as_deref()
-            .map(short_session_id)
-            .unwrap_or_else(|| String::from("pending"));
-        let profile = self
-            .runtime
-            .profile_name
-            .clone()
-            .unwrap_or_else(|| String::from("pending"));
-        let model = self
-            .runtime
-            .model_id
-            .as_deref()
-            .map(|value| preview(value, 18))
-            .unwrap_or_else(|| String::from("pending"));
-        let phase = self
-            .runtime
-            .phase
-            .clone()
-            .unwrap_or_else(|| String::from("pending"));
-        let round_trip = self
-            .runtime
-            .round_trip
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| String::from("pending"));
-        let active_tool = self
-            .runtime
-            .active_tool
-            .as_deref()
-            .map(|value| preview(value, 18))
-            .unwrap_or_else(|| String::from("none"));
-        let cwd = self
-            .runtime
-            .cwd
-            .as_deref()
-            .map(|value| preview(value, 18))
-            .unwrap_or_else(|| String::from("pending"));
-        let pending_approvals = self.runtime.pending_approvals.len();
-        vec![
-            format!(
-                "focus: {}",
-                if focus_name == "chat shell" {
-                    "chat"
-                } else {
-                    "overlay"
-                }
-            ),
-            format!("stack: {stack_depth}"),
-            format!("turns: {}", self.transcript.entries().len()),
-            format!("active: {active_turn}"),
-            format!("session: {session}"),
-            format!("runtime: {profile}"),
-            format!("model: {model}"),
-            format!("phase: {phase}"),
-            format!("round: {round_trip}"),
-            format!("tool: {active_tool}"),
-            format!("approvals: {pending_approvals}"),
-            format!("cwd: {cwd}"),
-        ]
-    }
-
-    fn render_chat_setup_lines(&self) -> Vec<String> {
-        let backend = self
-            .setup
-            .backend
-            .as_ref()
-            .map(|backend| backend.profile_name.clone())
-            .unwrap_or_else(|| String::from("pending"));
-        let availability = self
-            .setup
-            .availability
-            .as_ref()
-            .map(|availability| availability.ready.to_string())
-            .unwrap_or_else(|| match self.setup.phase {
-                TaskPhase::Failed => String::from("failed"),
-                TaskPhase::Unavailable => String::from("false"),
-                TaskPhase::Idle => String::from("idle"),
-                TaskPhase::Queued | TaskPhase::CheckingAvailability | TaskPhase::Running => {
-                    String::from("pending")
-                }
-                TaskPhase::Completed => String::from("true"),
-            });
-        vec![
-            format!("state: {}", self.render_phase_label()),
-            format!("backend: {backend}"),
-            format!("ready: {availability}"),
-            String::from("Ctrl+R reruns"),
-            String::from("Ctrl+S opens"),
-        ]
     }
 
     fn render_setup_body(&self) -> Text<'static> {
@@ -1171,7 +1000,18 @@ impl ChatScreen {
         }
 
         if let Some(active_call) = &self.setup.active_call {
-            return Text::from(vec![
+            let mut lines = Vec::new();
+            if let Some(last_call) = self.setup.calls.last() {
+                lines.extend([
+                    Line::from(format!("Completed calls: {}", self.setup.calls.len())),
+                    Line::from(""),
+                    Line::from(format!("Last completed call: {}", last_call.title)),
+                    Line::from("Response"),
+                    Line::from(last_call.response_text.clone()),
+                    Line::from(""),
+                ]);
+            }
+            lines.extend([
                 Line::from(format!(
                     "Running call {}/{}: {}",
                     active_call.index, active_call.total_calls, active_call.title
@@ -1183,6 +1023,7 @@ impl ChatScreen {
                 Line::from("Response"),
                 Line::from("[waiting for Apple FM reply]"),
             ]);
+            return Text::from(lines);
         }
 
         if let Some(last_call) = self.setup.calls.last() {
@@ -1346,6 +1187,60 @@ impl ChatScreen {
             TaskPhase::Failed => "failed",
         }
     }
+
+    fn snap_transcript_to_latest(&mut self) {
+        self.transcript_scroll_from_bottom = 0;
+    }
+
+    fn scroll_transcript_up(&mut self, amount: u16) {
+        let max = self.max_transcript_scroll_from_bottom();
+        self.transcript_scroll_from_bottom = self
+            .transcript_scroll_from_bottom
+            .saturating_add(amount)
+            .min(max);
+    }
+
+    fn scroll_transcript_down(&mut self, amount: u16) {
+        self.transcript_scroll_from_bottom =
+            self.transcript_scroll_from_bottom.saturating_sub(amount);
+    }
+
+    fn scroll_events_up(&mut self, amount: u16) {
+        self.events_scroll = self.events_scroll.saturating_sub(amount);
+    }
+
+    fn scroll_events_down(&mut self, amount: u16) {
+        let max = self.max_events_scroll();
+        self.events_scroll = self.events_scroll.saturating_add(amount).min(max);
+    }
+
+    fn max_transcript_scroll_from_bottom(&self) -> u16 {
+        self.render_primary_body()
+            .lines
+            .len()
+            .saturating_sub(1)
+            .min(u16::MAX as usize) as u16
+    }
+
+    fn max_events_scroll(&self) -> u16 {
+        let max_lines = self
+            .recent_events
+            .len()
+            .max(self.task_events.len())
+            .saturating_sub(1)
+            .min(u16::MAX as usize);
+        max_lines as u16
+    }
+
+    fn transcript_scroll_y(&self, line_count: usize, panel_height: u16) -> u16 {
+        let viewport_height = panel_height.saturating_sub(2) as usize;
+        let max_top_scroll = line_count.saturating_sub(viewport_height);
+        let from_bottom = usize::from(
+            self.transcript_scroll_from_bottom
+                .min(max_top_scroll.min(u16::MAX as usize) as u16),
+        );
+        max_top_scroll.saturating_sub(from_bottom).min(u16::MAX as usize) as u16
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1373,6 +1268,8 @@ impl HelpScreen {
             Line::from("Tab / Shift+Tab     switch Chat / Events"),
             Line::from("Enter / Ctrl+J      submit / newline"),
             Line::from("Up / Down           draft history recall"),
+            Line::from("Mouse wheel / PgUp  scroll active panel"),
+            Line::from("PgDn                scroll back toward latest"),
             Line::from("Ctrl+O              add attachment placeholder"),
             Line::from("Ctrl+R / Ctrl+S     rerun setup / open setup"),
             Line::from("Ctrl+A              approval"),
@@ -1624,6 +1521,21 @@ fn compact_json_lines(value: &serde_json::Value, max_lines: usize) -> Vec<String
     lines
 }
 
+fn numbered_event_log<'a>(items: impl Iterator<Item = &'a String>) -> Text<'static> {
+    let lines = items
+        .enumerate()
+        .map(|(index, message)| Line::from(format!("{:>2}. {}", index + 1, message)))
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Text::from(vec![
+            Line::from("No events yet."),
+            Line::from(""),
+            Line::from("Worker and UI events will accumulate here."),
+        ]);
+    }
+    Text::from(lines)
+}
+
 fn render_runtime_risk_class(value: probe_protocol::session::ToolRiskClass) -> &'static str {
     match value {
         probe_protocol::session::ToolRiskClass::ReadOnly => "read_only",
@@ -1632,21 +1544,6 @@ fn render_runtime_risk_class(value: probe_protocol::session::ToolRiskClass) -> &
         probe_protocol::session::ToolRiskClass::Network => "network",
         probe_protocol::session::ToolRiskClass::Destructive => "destructive",
     }
-}
-
-fn completed_call_lines(call: &AppleFmCallRecord) -> Vec<String> {
-    let mut lines = vec![
-        String::from("Prompt"),
-        call.prompt.clone(),
-        String::from("Response"),
-        call.response_text.clone(),
-        format!("response_id: {}", call.response_id),
-        format!("model: {}", call.response_model),
-    ];
-    for line in call.usage.render_lines() {
-        lines.push(line.to_string());
-    }
-    lines
 }
 
 fn render_usage_value(value: Option<u64>, truth: Option<&str>) -> String {

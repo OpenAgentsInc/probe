@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiEvent {
@@ -9,6 +9,10 @@ pub enum UiEvent {
     OpenHelp,
     OpenSetupOverlay,
     OpenApprovalOverlay,
+    ScrollUp,
+    ScrollDown,
+    PageUp,
+    PageDown,
     Dismiss,
     Quit,
     ComposerInsert(char),
@@ -38,6 +42,8 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
         KeyCode::BackTab => Some(UiEvent::PreviousView),
         KeyCode::Esc => Some(UiEvent::Dismiss),
         KeyCode::F(1) => Some(UiEvent::OpenHelp),
+        KeyCode::PageUp => Some(UiEvent::PageUp),
+        KeyCode::PageDown => Some(UiEvent::PageDown),
         KeyCode::Enter if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::ComposerNewline)
         }
@@ -75,6 +81,14 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
         {
             Some(UiEvent::ComposerInsert(character))
         }
+        _ => None,
+    }
+}
+
+pub fn event_from_mouse(mouse: MouseEvent) -> Option<UiEvent> {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => Some(UiEvent::ScrollUp),
+        MouseEventKind::ScrollDown => Some(UiEvent::ScrollDown),
         _ => None,
     }
 }
