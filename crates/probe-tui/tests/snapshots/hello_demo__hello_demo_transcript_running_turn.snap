@@ -1,6 +1,5 @@
 ---
 source: crates/probe-tui/tests/hello_demo.rs
-assertion_line: 70
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -10,13 +9,13 @@ expression: snapshot
 ┌─ Transcript ───────────────────────────────────────────────┐ ┌─ Shell ───────┐
 │ [user] You                                                 │ │ focus: chat   │
 │   Summarize what Probe owns.                               │ │ stack: 1      │
-│                                                            │ │ turns: 2      │
-│ [tool] Runtime dispatch                                    │ │ active: assis │
-│   Probe accepted the latest composer submission.           │ │ setup: idle   │
-│   prompt_chars: 27                                         │ │               │
-│                                                            │ └───────────────┘
-│ [active assistant] Probe                                   │
-│   Drafting a reply through the background worker seam.     │ ┌─ Apple FM ────┐
+│                                                            │ │ turns: 1      │
+│ [active assistant] Probe Runtime                           │ │ active: assis │
+│   Dispatching the submitted prompt through the real Probe  │ │ session: sess │
+│ runtime.                                                   │ │ runtime: psio │
+│   prompt_preview: Summarize what Probe owns.               │ └───────────────┘
+│   session: sess_demo_running                               │
+│                                                            │ ┌─ Apple FM ────┐
 └────────────────────────────────────────────────────────────┘ └───────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐

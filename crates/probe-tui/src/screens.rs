@@ -77,6 +77,14 @@ pub enum TaskPhase {
     Failed,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ProbeRuntimeState {
+    session_id: Option<String>,
+    profile_name: Option<String>,
+    model_id: Option<String>,
+    cwd: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScreenAction {
     None,
@@ -245,6 +253,7 @@ pub struct ChatScreen {
     recent_events: VecDeque<String>,
     task_events: VecDeque<String>,
     transcript: RetainedTranscript,
+    runtime: ProbeRuntimeState,
     setup: AppleFmSetupState,
 }
 
@@ -256,6 +265,7 @@ impl Default for ChatScreen {
             recent_events: VecDeque::new(),
             task_events: VecDeque::new(),
             transcript: RetainedTranscript::new(),
+            runtime: ProbeRuntimeState::default(),
             setup: AppleFmSetupState::default(),
         };
         screen.record_event("probe tui ready");
@@ -289,6 +299,14 @@ impl ChatScreen {
 
     pub fn worker_events(&self) -> impl Iterator<Item = &String> {
         self.task_events.iter()
+    }
+
+    pub fn runtime_session_id(&self) -> Option<&str> {
+        self.runtime.session_id.as_deref()
+    }
+
+    pub fn runtime_session_label(&self) -> &str {
+        self.runtime_session_id().unwrap_or("new session")
     }
 
     pub fn record_event(&mut self, message: impl Into<String>) {
@@ -386,6 +404,17 @@ impl ChatScreen {
                 self.record_worker_event(format!("updated active {role} turn: {title}"));
                 format!("updated active {role} turn")
             }
+            AppMessage::TranscriptEntriesCommitted { entries } => {
+                let entry_count = entries.len();
+                self.transcript.clear_active_turn();
+                for entry in entries {
+                    let role = entry.role().label().to_string();
+                    let title = entry.title().to_string();
+                    self.transcript.push_entry(entry);
+                    self.record_worker_event(format!("committed {role} turn: {title}"));
+                }
+                format!("committed {entry_count} transcript entries")
+            }
             AppMessage::TranscriptEntryCommitted { entry } => {
                 let role = entry.role().label().to_string();
                 let title = entry.title().to_string();
@@ -393,6 +422,28 @@ impl ChatScreen {
                 self.transcript.push_entry(entry);
                 self.record_worker_event(format!("committed {role} turn: {title}"));
                 format!("committed {role} turn")
+            }
+            AppMessage::ProbeRuntimeSessionReady {
+                session_id,
+                profile_name,
+                model_id,
+                cwd,
+            } => {
+                self.runtime = ProbeRuntimeState {
+                    session_id: Some(session_id.clone()),
+                    profile_name: Some(profile_name.clone()),
+                    model_id: Some(model_id.clone()),
+                    cwd: Some(cwd),
+                };
+                self.record_worker_event(format!(
+                    "runtime session ready: {} via {}",
+                    short_session_id(session_id.as_str()),
+                    profile_name
+                ));
+                format!(
+                    "runtime session {} ready",
+                    short_session_id(session_id.as_str())
+                )
             }
             AppMessage::AppleFmSetupStarted { backend } => {
                 self.setup.backend = Some(backend.clone());
@@ -756,11 +807,9 @@ impl ChatScreen {
                     "A single explicit active-turn cell renders in-flight runtime or assistant work.",
                 ),
                 Line::from(
-                    "Composer submission now lands a user turn and drives a worker-backed assistant demo reply.",
+                    "Composer submission now lands a user turn and drives a real Probe runtime turn.",
                 ),
-                Line::from(
-                    "Issue #38 makes the transcript the primary shell surface instead of a setup dashboard.",
-                ),
+                Line::from("The worker now owns a real session-backed runtime loop."),
             ]);
         }
         self.transcript.as_text()
@@ -772,6 +821,29 @@ impl ChatScreen {
             .active_turn()
             .map(|turn| turn.role().label().to_string())
             .unwrap_or_else(|| String::from("none"));
+        let session = self
+            .runtime
+            .session_id
+            .as_deref()
+            .map(short_session_id)
+            .unwrap_or_else(|| String::from("pending"));
+        let profile = self
+            .runtime
+            .profile_name
+            .clone()
+            .unwrap_or_else(|| String::from("pending"));
+        let model = self
+            .runtime
+            .model_id
+            .as_deref()
+            .map(|value| preview(value, 18))
+            .unwrap_or_else(|| String::from("pending"));
+        let cwd = self
+            .runtime
+            .cwd
+            .as_deref()
+            .map(|value| preview(value, 18))
+            .unwrap_or_else(|| String::from("pending"));
         vec![
             format!(
                 "focus: {}",
@@ -784,7 +856,10 @@ impl ChatScreen {
             format!("stack: {stack_depth}"),
             format!("turns: {}", self.transcript.entries().len()),
             format!("active: {active_turn}"),
-            format!("setup: {}", self.render_phase_label()),
+            format!("session: {session}"),
+            format!("runtime: {profile}"),
+            format!("model: {model}"),
+            format!("cwd: {cwd}"),
         ]
     }
 
@@ -1364,6 +1439,16 @@ fn render_usage_value(value: Option<u64>, truth: Option<&str>) -> String {
         (Some(value), Some(truth)) => format!("{value} ({truth})"),
         (Some(value), None) => value.to_string(),
         (None, _) => String::from("n/a"),
+    }
+}
+
+fn short_session_id(value: &str) -> String {
+    let mut chars = value.chars();
+    let prefix = chars.by_ref().take(16).collect::<String>();
+    if chars.next().is_some() {
+        format!("{prefix}...")
+    } else {
+        prefix
     }
 }
 

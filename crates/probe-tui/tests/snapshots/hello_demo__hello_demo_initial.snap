@@ -1,6 +1,5 @@
 ---
 source: crates/probe-tui/tests/hello_demo.rs
-assertion_line: 11
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -12,8 +11,8 @@ expression: snapshot
 │                                                            │ │ stack: 1      │
 │ Type in the composer to start a real chat turn.            │ │ turns: 0      │
 │ Committed turns stay in app state while one explicit       │ │ active: none  │
-│ active turn renders live work.                             │ │ setup: idle   │
-│                                                            │ │               │
+│ active turn renders live work.                             │ │ session: pend │
+│                                                            │ │ runtime: pend │
 │                                                            │ └───────────────┘
 │                                                            │
 │                                                            │ ┌─ Apple FM ────┐

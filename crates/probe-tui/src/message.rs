@@ -1,11 +1,18 @@
+use std::path::PathBuf;
+
+use probe_core::tools::ToolLoopConfig;
 use probe_protocol::backend::BackendProfile;
+use probe_protocol::session::SessionHarnessProfile;
 
 use crate::transcript::{ActiveTurn, TranscriptEntry};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum BackgroundTaskRequest {
     AppleFmSetup { profile: BackendProfile },
-    TranscriptDemoReply { prompt: String },
+    ProbeRuntimeTurn {
+        prompt: String,
+        config: ProbeRuntimeTurnConfig,
+    },
 }
 
 impl BackgroundTaskRequest {
@@ -15,9 +22,10 @@ impl BackgroundTaskRequest {
     }
 
     #[must_use]
-    pub fn transcript_demo_reply(prompt: impl Into<String>) -> Self {
-        Self::TranscriptDemoReply {
+    pub fn probe_runtime_turn(prompt: impl Into<String>, config: ProbeRuntimeTurnConfig) -> Self {
+        Self::ProbeRuntimeTurn {
             prompt: prompt.into(),
+            config,
         }
     }
 
@@ -25,23 +33,7 @@ impl BackgroundTaskRequest {
     pub fn setup_backend(&self) -> Option<AppleFmBackendSummary> {
         match self {
             Self::AppleFmSetup { profile } => Some(AppleFmBackendSummary::from_profile(profile)),
-            Self::TranscriptDemoReply { .. } => None,
-        }
-    }
-
-    #[must_use]
-    pub fn prompt(&self) -> Option<&str> {
-        match self {
-            Self::AppleFmSetup { .. } => None,
-            Self::TranscriptDemoReply { prompt } => Some(prompt.as_str()),
-        }
-    }
-
-    #[must_use]
-    pub fn profile(&self) -> Option<&BackendProfile> {
-        match self {
-            Self::AppleFmSetup { profile } => Some(profile),
-            Self::TranscriptDemoReply { .. } => None,
+            Self::ProbeRuntimeTurn { .. } => None,
         }
     }
 
@@ -49,9 +41,19 @@ impl BackgroundTaskRequest {
     pub const fn title(&self) -> &'static str {
         match self {
             Self::AppleFmSetup { .. } => "Apple FM setup demo",
-            Self::TranscriptDemoReply { .. } => "transcript demo reply",
+            Self::ProbeRuntimeTurn { .. } => "Probe runtime turn",
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProbeRuntimeTurnConfig {
+    pub probe_home: Option<PathBuf>,
+    pub cwd: PathBuf,
+    pub profile: BackendProfile,
+    pub system_prompt: Option<String>,
+    pub harness_profile: Option<SessionHarnessProfile>,
+    pub tool_loop: Option<ToolLoopConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,8 +120,17 @@ pub enum AppMessage {
     TranscriptActiveTurnSet {
         turn: ActiveTurn,
     },
+    TranscriptEntriesCommitted {
+        entries: Vec<TranscriptEntry>,
+    },
     TranscriptEntryCommitted {
         entry: TranscriptEntry,
+    },
+    ProbeRuntimeSessionReady {
+        session_id: String,
+        profile_name: String,
+        model_id: String,
+        cwd: String,
     },
     AppleFmSetupStarted {
         backend: AppleFmBackendSummary,

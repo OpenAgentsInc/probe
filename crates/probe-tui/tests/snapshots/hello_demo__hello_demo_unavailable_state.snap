@@ -1,6 +1,5 @@
 ---
 source: crates/probe-tui/tests/hello_demo.rs
-assertion_line: 129
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -12,8 +11,8 @@ expression: snapshot
 │   reason: model_not_ready                                  │ │ stack: 1      │
 │   Probe stopped before issuing any inference call.         │ │ turns: 1      │
 │                                                            │ │ active: none  │
-│                                                            │ │ setup: unavai │
-│                                                            │ │               │
+│                                                            │ │ session: pend │
+│                                                            │ │ runtime: pend │
 │                                                            │ └───────────────┘
 │                                                            │
 │                                                            │ ┌─ Apple FM ────┐

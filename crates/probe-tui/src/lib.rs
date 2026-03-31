@@ -12,7 +12,7 @@ pub use bottom_pane::BottomPane;
 pub use event::{UiEvent, event_from_key};
 pub use message::{
     AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
-    AppleFmFailureSummary, AppleFmUsageSummary, BackgroundTaskRequest,
+    AppleFmFailureSummary, AppleFmUsageSummary, BackgroundTaskRequest, ProbeRuntimeTurnConfig,
 };
 pub use screens::{ActiveTab, ScreenId, TaskPhase};
 pub use transcript::{ActiveTurn, RetainedTranscript, TranscriptEntry, TranscriptRole};

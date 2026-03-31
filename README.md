@@ -70,17 +70,21 @@ cargo run -p probe-cli -- exec \
 ## TUI
 
 `cargo probe` is the current top-level Probe UI entrypoint. The current shell
-uses a retained in-memory transcript widget with committed user, tool, and
-assistant turns plus one explicit active-turn cell. `Chat` is the home tab,
-while setup, help, approvals, and request-input flows now live in a typed
-overlay stack above or in place of the composer. A dedicated bottom pane owns
-shell status plus the first real composer. On launch Probe checks the Apple FM
-bridge, then runs a short plain-text prove-out when the model is ready.
+uses a retained transcript widget with committed user, tool, and assistant
+turns plus one explicit active-turn cell. `Chat` is the home surface and the
+composer now submits through the real Probe runtime, using the default
+`psionic-qwen35-2b-q8-registry` backend with the `coding_bootstrap` harness and
+conservative tool approval policy. The first submit creates a persisted Probe
+session; later submits continue that same session.
 
-Tabs:
+Setup, help, approval, and request-input flows live in a typed overlay stack
+above or in place of the composer. A background Apple FM availability/setup
+prove-out still runs on launch, and the full setup detail can be opened on
+demand from the overlay.
 
-- `Chat`: transcript-first home shell
-- `Setup`: Apple FM prove-out details
+Views:
+
+- `Chat`: transcript-first home shell with the live composer
 - `Events`: shell and worker event logs
 
 Keys:
@@ -99,9 +103,9 @@ Keys:
 - `Esc`: dismiss modal
 - `Ctrl+C`: quit
 
-The composer is active on `Chat` and explicitly disabled while help or other
-tabs own focus. The draft model now tracks slash commands, typed mentions such
-as `@skill:rust` or `@app:github`, attachment placeholders, submission
+The composer is active on `Chat` and disabled while overlays own focus or while
+`Events` is selected. The draft model tracks slash commands, typed mentions
+such as `@skill:rust` or `@app:github`, attachment placeholders, submission
 history, and multiline paste state.
 
 ## Dev Helpers
@@ -138,3 +142,4 @@ Start with:
 - [docs/38-probe-tui-transcript-turn-rendering.md](docs/38-probe-tui-transcript-turn-rendering.md)
 - [docs/39-probe-tui-typed-overlay-stack-and-focus-routing.md](docs/39-probe-tui-typed-overlay-stack-and-focus-routing.md)
 - [docs/40-probe-tui-composer-history-commands-mentions-attachments-and-paste.md](docs/40-probe-tui-composer-history-commands-mentions-attachments-and-paste.md)
+- [docs/42-probe-tui-real-runtime-session-worker.md](docs/42-probe-tui-real-runtime-session-worker.md)

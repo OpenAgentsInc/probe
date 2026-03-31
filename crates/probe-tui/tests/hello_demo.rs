@@ -38,6 +38,12 @@ fn approval_overlay_snapshot_is_stable() {
 #[test]
 fn transcript_running_turn_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
+    app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+        session_id: String::from("sess_demo_running"),
+        profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+        model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+        cwd: String::from("/tmp/probe-workspace"),
+    });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
         entry: TranscriptEntry::new(
             TranscriptRole::User,
@@ -45,23 +51,14 @@ fn transcript_running_turn_snapshot_is_stable() {
             vec![String::from("Summarize what Probe owns.")],
         ),
     });
-    app.apply_message(AppMessage::TranscriptEntryCommitted {
-        entry: TranscriptEntry::new(
-            TranscriptRole::Tool,
-            "Runtime dispatch",
-            vec![
-                String::from("Probe accepted the latest composer submission."),
-                String::from("prompt_chars: 27"),
-            ],
-        ),
-    });
     app.apply_message(AppMessage::TranscriptActiveTurnSet {
         turn: ActiveTurn::new(
             TranscriptRole::Assistant,
-            "Probe",
+            "Probe Runtime",
             vec![
-                String::from("Drafting a reply through the background worker seam."),
-                String::from("This is the live active-turn cell."),
+                String::from("Dispatching the submitted prompt through the real Probe runtime."),
+                String::from("prompt_preview: Summarize what Probe owns."),
+                String::from("session: sess_demo_running"),
             ],
         ),
     });
@@ -73,6 +70,12 @@ fn transcript_running_turn_snapshot_is_stable() {
 #[test]
 fn transcript_committed_turn_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
+    app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+        session_id: String::from("sess_demo_committed"),
+        profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+        model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+        cwd: String::from("/tmp/probe-workspace"),
+    });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
         entry: TranscriptEntry::new(
             TranscriptRole::User,
@@ -83,10 +86,31 @@ fn transcript_committed_turn_snapshot_is_stable() {
     app.apply_message(AppMessage::TranscriptEntryCommitted {
         entry: TranscriptEntry::new(
             TranscriptRole::Tool,
-            "Runtime dispatch",
+            "Tool Call: read_file",
             vec![
-                String::from("Probe accepted the latest composer submission."),
-                String::from("prompt_chars: 27"),
+                String::from("turn: 1"),
+                String::from("call_id: call_readme_1"),
+                String::from("arguments"),
+                String::from("{"),
+                String::from("  \"path\": \"README.md\""),
+                String::from("}"),
+            ],
+        ),
+    });
+    app.apply_message(AppMessage::TranscriptEntryCommitted {
+        entry: TranscriptEntry::new(
+            TranscriptRole::Tool,
+            "Tool Result: read_file",
+            vec![
+                String::from("turn: 2"),
+                String::from("call_id: call_readme_1"),
+                String::from("risk_class: read_only"),
+                String::from("policy_decision: auto_allow"),
+                String::from("approval_state: not_required"),
+                String::from("output"),
+                String::from("{"),
+                String::from("  \"path\": \"README.md\""),
+                String::from("}"),
             ],
         ),
     });
@@ -96,7 +120,7 @@ fn transcript_committed_turn_snapshot_is_stable() {
             "Probe",
             vec![
                 String::from("Probe owns the coding-agent runtime: sessions, transcripts, tools, approvals, and CLI/TUI surfaces."),
-                String::from("Next step: wire this transcript shell into the real controller turn loop."),
+                String::from("This reply came back through the persisted runtime session."),
             ],
         ),
     });

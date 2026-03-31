@@ -121,3 +121,7 @@ This folder holds technical planning docs for the Probe runtime.
   - the first richer Probe draft model with shell-style history recall,
     slash-command and typed-mention semantics, attachment placeholders, and
     explicit paste-aware input handling
+- `42-probe-tui-real-runtime-session-worker.md`
+  - the first real `probe-core`-backed TUI turn loop, replacing the demo
+    worker with persisted runtime sessions, transcript hydration from the
+    session store, and honest error recovery

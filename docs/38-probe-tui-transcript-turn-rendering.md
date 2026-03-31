@@ -12,8 +12,10 @@ The shell now renders:
 - one explicit in-flight active turn cell
 
 Composer submission now produces a visible user turn immediately, then drives a
-background-worker demo reply that mutates the active turn before committing the
-assistant response.
+worker-owned active turn before committing the assistant response.
+
+Issue `#42` later replaced the original demo worker behind this shell shape
+with a real persisted Probe runtime session loop.
 
 ## What Changed
 
@@ -37,13 +39,13 @@ transcript.
 Submitting from the bottom composer now:
 
 1. commits a user turn to the transcript immediately
-2. queues a background transcript demo reply task
+2. queues a background runtime task
 3. commits a runtime/tool entry
 4. renders a live assistant active turn
 5. commits the final assistant reply
 
-That gives Probe its first honest transcript-first shell loop without
-pretending the full controller runtime is already wired into the TUI.
+That gave Probe its first transcript-first shell loop before the real runtime
+worker landed in issue `#42`.
 
 ### Layout shift
 

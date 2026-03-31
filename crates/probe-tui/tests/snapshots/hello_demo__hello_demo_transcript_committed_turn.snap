@@ -1,6 +1,5 @@
 ---
 source: crates/probe-tui/tests/hello_demo.rs
-assertion_line: 105
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -10,13 +9,13 @@ expression: snapshot
 ┌─ Transcript ───────────────────────────────────────────────┐ ┌─ Shell ───────┐
 │ [user] You                                                 │ │ focus: chat   │
 │   Summarize what Probe owns.                               │ │ stack: 1      │
-│                                                            │ │ turns: 3      │
-│ [tool] Runtime dispatch                                    │ │ active: none  │
-│   Probe accepted the latest composer submission.           │ │ setup: idle   │
-│   prompt_chars: 27                                         │ │               │
-│                                                            │ └───────────────┘
-│ [assistant] Probe                                          │
-│   Probe owns the coding-agent runtime: sessions,           │ ┌─ Apple FM ────┐
+│                                                            │ │ turns: 4      │
+│ [tool] Tool Call: read_file                                │ │ active: none  │
+│   turn: 1                                                  │ │ session: sess │
+│   call_id: call_readme_1                                   │ │ runtime: psio │
+│   arguments                                                │ └───────────────┘
+│   {                                                        │
+│     "path": "README.md"                                    │ ┌─ Apple FM ────┐
 └────────────────────────────────────────────────────────────┘ └───────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐

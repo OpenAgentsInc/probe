@@ -6,7 +6,12 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use probe_core::backend_profiles::psionic_apple_fm_bridge;
+use probe_core::backend_profiles::{
+    psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
+};
+use probe_core::harness::resolve_harness_profile;
+use probe_core::runtime::{current_working_dir, default_probe_home};
+use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout};
@@ -14,11 +19,12 @@ use ratatui::{Frame, Terminal};
 
 use crate::bottom_pane::{BottomPane, BottomPaneState};
 use crate::event::{UiEvent, event_from_key};
-use crate::message::{AppMessage, BackgroundTaskRequest};
+use crate::message::{AppMessage, BackgroundTaskRequest, ProbeRuntimeTurnConfig};
 use crate::screens::{
     ActiveTab, ApprovalOverlay, ChatScreen, HelpScreen, RequestInputOverlay, ScreenAction,
     ScreenCommand, ScreenId, ScreenState, SetupOverlay, TaskPhase,
 };
+use crate::transcript::{ActiveTurn, TranscriptRole};
 use crate::worker::BackgroundWorker;
 
 const TICK_RATE: Duration = Duration::from_millis(250);
@@ -30,11 +36,12 @@ pub struct AppShell {
     should_quit: bool,
     bottom_pane: BottomPane,
     worker: BackgroundWorker,
+    chat_runtime: ProbeRuntimeTurnConfig,
 }
 
 impl Default for AppShell {
     fn default() -> Self {
-        Self::with_autostart(true)
+        Self::with_autostart(true, Self::default_chat_runtime_config())
     }
 }
 
@@ -44,21 +51,41 @@ impl AppShell {
     }
 
     pub fn new_for_tests() -> Self {
-        Self::with_autostart(false)
+        Self::with_autostart(false, Self::default_chat_runtime_config())
     }
 
-    fn with_autostart(autostart_setup: bool) -> Self {
+    pub fn new_for_tests_with_chat_config(chat_runtime: ProbeRuntimeTurnConfig) -> Self {
+        Self::with_autostart(false, chat_runtime)
+    }
+
+    fn with_autostart(autostart_setup: bool, chat_runtime: ProbeRuntimeTurnConfig) -> Self {
         let mut app = Self {
             screens: vec![ScreenState::Chat(ChatScreen::default())],
             last_status: String::from("probe tui launched"),
             should_quit: false,
             bottom_pane: BottomPane::new(),
             worker: BackgroundWorker::new(),
+            chat_runtime,
         };
         if autostart_setup {
             let _ = app.submit_background_task(Self::default_setup_request());
         }
         app
+    }
+
+    fn default_chat_runtime_config() -> ProbeRuntimeTurnConfig {
+        let cwd = current_working_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let harness = resolve_harness_profile(Some("coding_bootstrap"), None, cwd.as_path(), None)
+            .ok()
+            .flatten();
+        ProbeRuntimeTurnConfig {
+            probe_home: default_probe_home().ok(),
+            cwd,
+            profile: psionic_qwen35_2b_q8_registry(),
+            system_prompt: harness.as_ref().map(|resolved| resolved.system_prompt.clone()),
+            harness_profile: harness.map(|resolved| resolved.profile),
+            tool_loop: Some(ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Auto, false)),
+        }
     }
 
     fn default_setup_request() -> BackgroundTaskRequest {
@@ -108,6 +135,10 @@ impl AppShell {
         self.base_screen().worker_events().cloned().collect()
     }
 
+    pub fn runtime_session_id(&self) -> Option<&str> {
+        self.base_screen().runtime_session_id()
+    }
+
     pub fn dispatch(&mut self, event: UiEvent) {
         self.poll_background_messages();
         match event {
@@ -134,17 +165,33 @@ impl AppShell {
             {
                 let pane_state = self.bottom_pane_state();
                 if let Some(submitted) = self.bottom_pane.handle_event(event, &pane_state) {
+                    let preview = submission_preview(&submitted, 48);
+                    let session_label = self.base_screen().runtime_session_label().to_string();
                     self.base_screen_mut().submit_user_turn(&submitted);
-                    self.base_screen_mut().record_event(format!(
-                        "queued assistant demo reply: {}",
-                        submission_preview(&submitted, 48)
-                    ));
+                    self.base_screen_mut()
+                        .record_event(format!("queued Probe runtime turn: {preview}"));
+                    self.apply_message(AppMessage::TranscriptActiveTurnSet {
+                        turn: ActiveTurn::new(
+                            TranscriptRole::Assistant,
+                            "Probe Runtime",
+                            vec![
+                                String::from(
+                                    "Dispatching the submitted prompt through the real Probe runtime.",
+                                ),
+                                format!("prompt_preview: {preview}"),
+                                format!("session: {session_label}"),
+                            ],
+                        ),
+                    });
                     self.last_status = format!(
                         "submitted chat turn ({} chars)",
                         submitted.text.chars().count()
                     );
                     if let Err(error) = self.submit_background_task(
-                        BackgroundTaskRequest::transcript_demo_reply(submitted.text.clone()),
+                        BackgroundTaskRequest::probe_runtime_turn(
+                            submitted.text.clone(),
+                            self.chat_runtime.clone(),
+                        ),
                     ) {
                         self.last_status = error;
                     }
@@ -451,17 +498,70 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use probe_core::backend_profiles::psionic_apple_fm_bridge;
-    use probe_test_support::{FakeAppleFmServer, FakeHttpResponse};
+    use probe_core::backend_profiles::{
+        psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
+    };
+    use probe_core::harness::resolve_harness_profile;
+    use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
+    use probe_test_support::{
+        FakeAppleFmServer, FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment,
+    };
     use serde_json::json;
 
     use super::AppShell;
     use crate::event::UiEvent;
     use crate::message::{
         AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
-        AppleFmUsageSummary, BackgroundTaskRequest,
+        AppleFmUsageSummary, BackgroundTaskRequest, ProbeRuntimeTurnConfig,
     };
     use crate::screens::{ActiveTab, ScreenId, TaskPhase};
+
+    fn runtime_test_config(
+        environment: &ProbeTestEnvironment,
+        base_url: &str,
+    ) -> ProbeRuntimeTurnConfig {
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = base_url.to_string();
+        let harness = resolve_harness_profile(
+            Some("coding_bootstrap"),
+            None,
+            environment.workspace(),
+            None,
+        )
+        .expect("resolve coding bootstrap harness")
+        .expect("coding bootstrap harness should exist");
+        ProbeRuntimeTurnConfig {
+            probe_home: Some(environment.probe_home().to_path_buf()),
+            cwd: environment.workspace().to_path_buf(),
+            profile,
+            system_prompt: Some(harness.system_prompt),
+            harness_profile: Some(harness.profile),
+            tool_loop: Some(ToolLoopConfig::coding_bootstrap(
+                ProbeToolChoice::Auto,
+                false,
+            )),
+        }
+    }
+
+    fn wait_for_app_condition(
+        app: &mut AppShell,
+        timeout: Duration,
+        mut predicate: impl FnMut(&AppShell) -> bool,
+    ) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            app.poll_background_messages();
+            if predicate(app) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!(
+            "timed out waiting for app condition; last_status={}",
+            app.last_status()
+        );
+    }
 
     #[test]
     fn help_modal_takes_focus_and_dismisses_cleanly() {
@@ -515,13 +615,56 @@ mod tests {
         assert!(
             app.recent_events()
                 .iter()
-                .any(|entry| entry.contains("queued assistant demo reply: hi"))
+                .any(|entry| entry.contains("queued Probe runtime turn: hi"))
         );
     }
 
     #[test]
     fn composer_submission_drives_live_active_turn_then_commits_reply() {
-        let mut app = AppShell::new_for_tests();
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let server = FakeOpenAiServer::from_json_responses(vec![
+            json!({
+                "id": "chatcmpl_probe_tui_tool_1",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call_readme_1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\":\"README.md\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            json!({
+                "id": "chatcmpl_probe_tui_final_1",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Probe inspected README.md through the real runtime."
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 21,
+                    "completion_tokens": 9,
+                    "total_tokens": 30
+                }
+            }),
+        ]);
+        let mut app = AppShell::new_for_tests_with_chat_config(runtime_test_config(
+            &environment,
+            server.base_url(),
+        ));
 
         for event in [
             UiEvent::ComposerInsert('h'),
@@ -534,26 +677,119 @@ mod tests {
             app.dispatch(event);
         }
 
-        let deadline = Instant::now() + Duration::from_secs(2);
         let mut saw_active_turn = false;
-        while Instant::now() < deadline {
-            app.poll_background_messages();
+        wait_for_app_condition(&mut app, Duration::from_secs(2), |app| {
             let rendered = app.render_to_string(120, 32);
-            if rendered.contains("[active assistant] Probe") {
+            if rendered.contains("[active assistant] Probe Runtime") {
                 saw_active_turn = true;
             }
-            if app
-                .worker_events()
+            app.worker_events()
                 .iter()
-                .any(|entry| entry.contains("committed assistant turn: Probe"))
-            {
-                assert!(saw_active_turn);
-                return;
-            }
-            thread::sleep(Duration::from_millis(10));
+                .any(|entry| entry.contains("committed tool turn: Tool Call: read_file"))
+                && app
+                    .worker_events()
+                    .iter()
+                    .any(|entry| entry.contains("committed tool turn: Tool Result: read_file"))
+                && app
+                    .worker_events()
+                    .iter()
+                    .any(|entry| entry.contains("committed assistant turn: Probe"))
+                && app.runtime_session_id().is_some()
+        });
+
+        assert!(saw_active_turn);
+        let rendered = app.render_to_string(120, 32);
+        assert!(rendered.contains("Tool Call: read_file"));
+        assert!(rendered.contains("Tool Result: read_file"));
+        assert!(rendered.contains("README.md"));
+        assert!(
+            app.worker_events()
+                .iter()
+                .any(|entry| entry.contains("runtime session ready:"))
+        );
+    }
+
+    #[test]
+    fn later_composer_submissions_reuse_the_same_runtime_session() {
+        let environment = ProbeTestEnvironment::new();
+        let server = FakeOpenAiServer::from_json_responses(vec![
+            json!({
+                "id": "chatcmpl_probe_tui_turn_1",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "First turn complete."
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "total_tokens": 14
+                }
+            }),
+            json!({
+                "id": "chatcmpl_probe_tui_turn_2",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Second turn reused the same session."
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 7,
+                    "total_tokens": 19
+                }
+            }),
+        ]);
+        let mut app = AppShell::new_for_tests_with_chat_config(runtime_test_config(
+            &environment,
+            server.base_url(),
+        ));
+
+        for event in [
+            UiEvent::ComposerInsert('f'),
+            UiEvent::ComposerInsert('i'),
+            UiEvent::ComposerInsert('r'),
+            UiEvent::ComposerInsert('s'),
+            UiEvent::ComposerInsert('t'),
+            UiEvent::ComposerSubmit,
+        ] {
+            app.dispatch(event);
         }
 
-        panic!("timed out waiting for live assistant turn to commit");
+        wait_for_app_condition(&mut app, Duration::from_secs(2), |app| {
+            app.render_to_string(120, 32).contains("First turn complete.")
+        });
+        let session_id = app
+            .runtime_session_id()
+            .expect("runtime session should be set after first turn")
+            .to_string();
+
+        for event in [
+            UiEvent::ComposerInsert('s'),
+            UiEvent::ComposerInsert('e'),
+            UiEvent::ComposerInsert('c'),
+            UiEvent::ComposerInsert('o'),
+            UiEvent::ComposerInsert('n'),
+            UiEvent::ComposerInsert('d'),
+            UiEvent::ComposerSubmit,
+        ] {
+            app.dispatch(event);
+        }
+
+        wait_for_app_condition(&mut app, Duration::from_secs(2), |app| {
+            app.render_to_string(120, 32)
+                .contains("Second turn reused the same session.")
+        });
+
+        assert_eq!(app.runtime_session_id(), Some(session_id.as_str()));
     }
 
     #[test]
