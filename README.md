@@ -7,11 +7,11 @@ Rust-first controller with a CLI, durable local session state, a typed runtime
 protocol, bounded tool execution, and a clean seam to local or remote model
 backends.
 
-The repo currently contains five crates: `probe-protocol`, `probe-core`,
-`probe-provider-openai`, `probe-decisions`, and `probe-cli`. The default local
-backend lane is `psionic-qwen35-2b-q8-registry`, targeting
-`http://127.0.0.1:8080/v1` with the model id
-`qwen3.5-2b-q8_0-registry.gguf`.
+The repo currently contains six crates: `probe-protocol`, `probe-core`,
+`probe-provider-openai`, `probe-decisions`, `probe-optimizer`, and
+`probe-cli`. The default local backend lane is
+`psionic-qwen35-2b-q8-registry`, targeting `http://127.0.0.1:8080/v1` with the
+model id `qwen3.5-2b-q8_0-registry.gguf`.
 
 ## Current State
 
@@ -154,6 +154,23 @@ Offline module evaluation:
 ```bash
 cargo run -p probe-cli -- module-eval \
   --dataset ~/.probe/reports/probe_decision.jsonl
+```
+
+Offline module optimization receipts:
+
+```bash
+cargo run -p probe-cli -- optimize-modules \
+  --dataset ~/.probe/reports/probe_decision.jsonl \
+  --output ~/.probe/reports/probe_module_optimization.json
+```
+
+Harness candidate comparison:
+
+```bash
+cargo run -p probe-cli -- optimize-harness \
+  --baseline-report ~/.probe/reports/probe_acceptance_baseline.json \
+  --candidate-report ~/.probe/reports/probe_acceptance_candidate.json \
+  --output ~/.probe/reports/probe_harness_optimization.json
 ```
 
 Explicit attach mode:

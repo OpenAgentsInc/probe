@@ -1,0 +1,88 @@
+# Offline Optimizer
+
+## Purpose
+
+Probe now has a first offline optimizer lane in `crates/probe-optimizer`.
+
+This is the first honest GEPA-style landing zone in the repo:
+
+- offline
+- bounded
+- scorecard-driven
+- baseline-versus-candidate
+- promotion-gated
+
+## Current CLI Paths
+
+Module candidates over decision datasets:
+
+```bash
+cargo run -p probe-cli -- optimize-modules \
+  --dataset ~/.probe/reports/probe_decision.jsonl \
+  --output ~/.probe/reports/probe_module_optimization.json
+```
+
+Harness candidates over retained acceptance receipts:
+
+```bash
+cargo run -p probe-cli -- optimize-harness \
+  --baseline-report ~/.probe/reports/probe_acceptance_baseline.json \
+  --candidate-report ~/.probe/reports/probe_acceptance_candidate.json \
+  --output ~/.probe/reports/probe_harness_optimization.json
+```
+
+## What The Optimizer Owns
+
+The optimizer crate currently owns:
+
+- generic scorecard types
+- a shared promotion rule
+- baseline-versus-candidate comparison receipts
+
+The CLI currently uses that shared rule in two places:
+
+- decision-module candidates evaluated against exported decision datasets
+- harness candidates evaluated against retained acceptance reports
+
+## Promotion Rule
+
+The current default rule is intentionally strict:
+
+- candidate correctness must be at least as good as baseline
+- candidate latency must stay within the allowed regression budget when both
+  sides have wallclock receipts
+- candidate operator-trust penalty must not increase
+- candidate must beat the baseline on at least one promotion dimension
+
+This is the key line that keeps Probe from turning optimization into churn.
+
+Defaults do not change just because a candidate exists.
+
+Defaults change only when a candidate beats the retained baseline without
+unacceptable regressions.
+
+## What This Is Not
+
+The optimizer lane does not optimize:
+
+- raw tool implementations
+- approval-policy ownership
+- transcript schema
+- backend transport mechanics
+
+Those remain runtime concerns.
+
+The optimizer lane only compares bounded surfaces above the runtime.
+
+## Why This Matters
+
+This gives Probe the minimal honest stack for later GEPA work:
+
+- retained acceptance set
+- replay and decision exports
+- explicit decision modules
+- candidate-versus-baseline scorecards
+- enforced promotion rules
+
+That is enough to start bounded offline optimization without pretending the
+runtime itself is a learned system.

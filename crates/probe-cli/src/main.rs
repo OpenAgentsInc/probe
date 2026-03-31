@@ -24,8 +24,12 @@ use probe_core::tools::{
     ExecutedToolCall, ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig,
 };
 use probe_decisions::{
-    HeuristicPatchReadinessModule, HeuristicToolRouteModule, evaluate_patch_readiness_module,
-    evaluate_tool_route_module,
+    AggressiveToolRouteModule, HeuristicPatchReadinessModule, HeuristicToolRouteModule,
+    StrictPatchReadinessModule, evaluate_patch_readiness_module, evaluate_tool_route_module,
+};
+use probe_optimizer::{
+    CandidateComparisonReport, OptimizationScorecard, OptimizationTargetKind, PromotionRule,
+    compare_candidate,
 };
 use probe_protocol::session::{
     CacheSignal, SessionHarnessProfile, SessionId, SessionTurn, ToolPolicyDecision, ToolRiskClass,
@@ -47,6 +51,8 @@ enum Commands {
     Accept(AcceptArgs),
     Export(ExportArgs),
     ModuleEval(ModuleEvalArgs),
+    OptimizeModules(OptimizeModulesArgs),
+    OptimizeHarness(OptimizeHarnessArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -151,6 +157,24 @@ struct ModuleEvalArgs {
     dataset: PathBuf,
 }
 
+#[derive(clap::Args, Debug)]
+struct OptimizeModulesArgs {
+    #[arg(long)]
+    dataset: PathBuf,
+    #[arg(long)]
+    output: PathBuf,
+}
+
+#[derive(clap::Args, Debug)]
+struct OptimizeHarnessArgs {
+    #[arg(long)]
+    baseline_report: PathBuf,
+    #[arg(long)]
+    candidate_report: PathBuf,
+    #[arg(long)]
+    output: PathBuf,
+}
+
 #[derive(clap::Args, Debug, Clone)]
 struct ServerArgs {
     #[arg(long, default_value = "attach")]
@@ -191,6 +215,8 @@ fn run() -> Result<(), String> {
         Commands::Accept(args) => run_accept(args),
         Commands::Export(args) => run_export(args),
         Commands::ModuleEval(args) => run_module_eval(args),
+        Commands::OptimizeModules(args) => run_optimize_modules(args),
+        Commands::OptimizeHarness(args) => run_optimize_harness(args),
     }
 }
 
@@ -533,6 +559,85 @@ fn run_module_eval(args: ModuleEvalArgs) -> Result<(), String> {
     Ok(())
 }
 
+fn run_optimize_modules(args: OptimizeModulesArgs) -> Result<(), String> {
+    let summaries = read_decision_dataset(args.dataset.as_path())?;
+    let rule = PromotionRule::gepa_default();
+    let tool_route_baseline =
+        evaluate_tool_route_module(&summaries, &HeuristicToolRouteModule);
+    let tool_route_candidate =
+        evaluate_tool_route_module(&summaries, &AggressiveToolRouteModule);
+    let patch_baseline =
+        evaluate_patch_readiness_module(&summaries, &HeuristicPatchReadinessModule);
+    let patch_candidate =
+        evaluate_patch_readiness_module(&summaries, &StrictPatchReadinessModule);
+
+    let reports = vec![
+        compare_candidate(
+            OptimizationTargetKind::DecisionModule,
+            tool_route_baseline.module_id.clone(),
+            tool_route_candidate.module_id.clone(),
+            optimization_scorecard_from_module(&tool_route_baseline),
+            optimization_scorecard_from_module(&tool_route_candidate),
+            rule.clone(),
+        ),
+        compare_candidate(
+            OptimizationTargetKind::DecisionModule,
+            patch_baseline.module_id.clone(),
+            patch_candidate.module_id.clone(),
+            optimization_scorecard_from_module(&patch_baseline),
+            optimization_scorecard_from_module(&patch_candidate),
+            rule,
+        ),
+    ];
+    write_optimizer_report(args.output.as_path(), &reports)?;
+    for report in &reports {
+        eprintln!(
+            "target={} baseline={} candidate={} promoted={} reason={}",
+            render_optimization_target(report.target_kind),
+            report.baseline_id,
+            report.candidate_id,
+            report.promoted,
+            report.reason
+        );
+    }
+    Ok(())
+}
+
+fn run_optimize_harness(args: OptimizeHarnessArgs) -> Result<(), String> {
+    let baseline = read_acceptance_report(args.baseline_report.as_path())?;
+    let candidate = read_acceptance_report(args.candidate_report.as_path())?;
+    let baseline_id = args
+        .baseline_report
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("baseline")
+        .to_string();
+    let candidate_id = args
+        .candidate_report
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("candidate")
+        .to_string();
+    let report = compare_candidate(
+        OptimizationTargetKind::HarnessProfile,
+        baseline_id,
+        candidate_id,
+        optimization_scorecard_from_acceptance(&baseline),
+        optimization_scorecard_from_acceptance(&candidate),
+        PromotionRule::gepa_default(),
+    );
+    write_optimizer_report(args.output.as_path(), &[report.clone()])?;
+    eprintln!(
+        "target={} baseline={} candidate={} promoted={} reason={}",
+        render_optimization_target(report.target_kind),
+        report.baseline_id,
+        report.candidate_id,
+        report.promoted,
+        report.reason
+    );
+    Ok(())
+}
+
 fn read_decision_dataset(path: &Path) -> Result<Vec<DecisionSessionSummary>, String> {
     let body = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     body.lines()
@@ -541,6 +646,74 @@ fn read_decision_dataset(path: &Path) -> Result<Vec<DecisionSessionSummary>, Str
             serde_json::from_str::<DecisionSessionSummary>(line).map_err(|error| error.to_string())
         })
         .collect()
+}
+
+fn read_acceptance_report(path: &Path) -> Result<acceptance::AcceptanceRunReport, String> {
+    let body = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&body).map_err(|error| error.to_string())
+}
+
+fn optimization_scorecard_from_module(
+    scorecard: &probe_decisions::ModuleScorecard,
+) -> OptimizationScorecard {
+    OptimizationScorecard {
+        correctness_numerator: scorecard.matched_cases,
+        correctness_denominator: scorecard.total_cases,
+        median_wallclock_ms: None,
+        operator_trust_penalty: 0,
+    }
+}
+
+fn optimization_scorecard_from_acceptance(
+    report: &acceptance::AcceptanceRunReport,
+) -> OptimizationScorecard {
+    let correctness_numerator = report
+        .results
+        .iter()
+        .flat_map(|case| case.attempts.iter())
+        .filter(|attempt| attempt.passed)
+        .count();
+    let correctness_denominator = report
+        .results
+        .iter()
+        .map(|case| case.attempts.len())
+        .sum();
+    let mut wallclocks = report
+        .results
+        .iter()
+        .flat_map(|case| case.attempts.iter())
+        .filter_map(|attempt| attempt.final_wallclock_ms)
+        .collect::<Vec<_>>();
+    wallclocks.sort_unstable();
+    let median_wallclock_ms = if wallclocks.is_empty() {
+        None
+    } else {
+        Some(wallclocks[wallclocks.len() / 2])
+    };
+    let operator_trust_penalty = report
+        .results
+        .iter()
+        .flat_map(|case| case.attempts.iter())
+        .map(|attempt| (attempt.refused_tool_calls + attempt.paused_tool_calls) as u64)
+        .sum();
+
+    OptimizationScorecard {
+        correctness_numerator,
+        correctness_denominator,
+        median_wallclock_ms,
+        operator_trust_penalty,
+    }
+}
+
+fn write_optimizer_report(
+    path: &Path,
+    reports: &[CandidateComparisonReport],
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let body = serde_json::to_string_pretty(reports).map_err(|error| error.to_string())?;
+    std::fs::write(path, body).map_err(|error| error.to_string())
 }
 
 fn named_profile(name: &str) -> Result<probe_protocol::backend::BackendProfile, String> {
@@ -747,6 +920,13 @@ fn render_tool_risk_class(risk_class: ToolRiskClass) -> &'static str {
         ToolRiskClass::Write => "write",
         ToolRiskClass::Network => "network",
         ToolRiskClass::Destructive => "destructive",
+    }
+}
+
+fn render_optimization_target(kind: OptimizationTargetKind) -> &'static str {
+    match kind {
+        OptimizationTargetKind::HarnessProfile => "harness_profile",
+        OptimizationTargetKind::DecisionModule => "decision_module",
     }
 }
 

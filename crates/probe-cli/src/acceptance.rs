@@ -10,7 +10,7 @@ use probe_protocol::session::{
     CacheSignal, SessionMetadata, ToolPolicyDecision, TranscriptEvent, TranscriptItemKind,
     TurnObservability,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const ACCEPTANCE_REPEAT_RUNS: usize = 2;
 
@@ -21,7 +21,7 @@ pub struct AcceptanceHarnessConfig {
     pub base_profile: BackendProfile,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcceptanceRunReport {
     pub started_at_ms: u64,
     pub finished_at_ms: u64,
@@ -32,7 +32,7 @@ pub struct AcceptanceRunReport {
     pub results: Vec<AcceptanceCaseReport>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcceptanceCaseReport {
     pub case_name: String,
     pub passed: bool,
@@ -45,7 +45,7 @@ pub struct AcceptanceCaseReport {
     pub attempts: Vec<AcceptanceAttemptReport>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcceptanceAttemptReport {
     pub attempt_index: usize,
     pub passed: bool,

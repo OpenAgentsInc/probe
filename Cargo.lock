@@ -698,6 +698,7 @@ dependencies = [
  "clap",
  "probe-core",
  "probe-decisions",
+ "probe-optimizer",
  "probe-protocol",
  "serde",
  "serde_json",
@@ -722,6 +723,14 @@ name = "probe-decisions"
 version = "0.1.0"
 dependencies = [
  "probe-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "probe-optimizer"
+version = "0.1.0"
+dependencies = [
  "serde",
  "serde_json",
 ]

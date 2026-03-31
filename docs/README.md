@@ -50,3 +50,6 @@ This folder holds technical planning docs for the Probe runtime.
 - `16-decision-modules.md`
   - narrow Rust-native decision-module boundary above the runtime, plus the
     first offline-evaluable `ToolRoute` and `PatchReadiness` modules
+- `17-offline-optimizer.md`
+  - GEPA-style offline optimization receipts, shared promotion rules, and the
+    baseline-versus-candidate comparison flow for modules and harness reports

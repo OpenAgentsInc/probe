@@ -3,6 +3,7 @@ members = [
     "crates/probe-cli",
     "crates/probe-core",
     "crates/probe-decisions",
+    "crates/probe-optimizer",
     "crates/probe-protocol",
     "crates/probe-provider-openai",
 ]
@@ -17,6 +18,7 @@ license = "Apache-2.0"
 clap = { version = "4.5", features = ["derive"] }
 probe-core = { path = "crates/probe-core" }
 probe-decisions = { path = "crates/probe-decisions" }
+probe-optimizer = { path = "crates/probe-optimizer" }
 probe-protocol = { path = "crates/probe-protocol" }
 probe-provider-openai = { path = "crates/probe-provider-openai" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

@@ -8,6 +8,7 @@ license.workspace = true
 clap.workspace = true
 probe-core.workspace = true
 probe-decisions.workspace = true
+probe-optimizer.workspace = true
 probe-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true

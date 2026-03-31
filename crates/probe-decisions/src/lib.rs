@@ -50,6 +50,7 @@ pub struct ModuleScorecard {
 }
 
 pub struct HeuristicToolRouteModule;
+pub struct AggressiveToolRouteModule;
 
 impl HeuristicToolRouteModule {
     #[must_use]
@@ -121,7 +122,52 @@ impl DecisionModule<ToolRouteContext, ToolRouteDecision> for HeuristicToolRouteM
     }
 }
 
+impl DecisionModule<ToolRouteContext, ToolRouteDecision> for AggressiveToolRouteModule {
+    fn id(&self) -> &'static str {
+        "aggressive_tool_route_v2"
+    }
+
+    fn decide(&self, input: &ToolRouteContext) -> ToolRouteDecision {
+        let (selected_tool, reason) = if input.files_read > 0 && input.patch_attempts == 0 {
+            (
+                String::from("apply_patch"),
+                String::from("the aggressive route edits as soon as there is read evidence"),
+            )
+        } else if input.files_listed == 0 && input.files_searched == 0 {
+            (
+                String::from("code_search"),
+                String::from("the aggressive route searches before listing directories"),
+            )
+        } else {
+            (
+                String::from("read_file"),
+                String::from("the aggressive route prefers direct file inspection"),
+            )
+        };
+
+        let mut ranked_tools = vec![selected_tool.clone()];
+        for candidate in [
+            "code_search",
+            "read_file",
+            "apply_patch",
+            "list_files",
+            "shell",
+        ] {
+            if !ranked_tools.iter().any(|existing| existing == candidate) {
+                ranked_tools.push(String::from(candidate));
+            }
+        }
+
+        ToolRouteDecision {
+            selected_tool,
+            ranked_tools,
+            reason,
+        }
+    }
+}
+
 pub struct HeuristicPatchReadinessModule;
+pub struct StrictPatchReadinessModule;
 
 impl HeuristicPatchReadinessModule {
     #[must_use]
@@ -182,6 +228,46 @@ impl DecisionModule<PatchReadinessContext, PatchReadinessDecision>
     }
 }
 
+impl DecisionModule<PatchReadinessContext, PatchReadinessDecision>
+    for StrictPatchReadinessModule
+{
+    fn id(&self) -> &'static str {
+        "strict_patch_readiness_v2"
+    }
+
+    fn decide(&self, input: &PatchReadinessContext) -> PatchReadinessDecision {
+        if input.too_many_turns || input.refused_or_paused_tool_calls > 0 {
+            return PatchReadinessDecision {
+                ready: false,
+                confidence_bps: 9700,
+                reason: String::from("the strict policy refuses to edit under instability"),
+                suggested_next_steps: vec![String::from("narrow_scope")],
+            };
+        }
+        if input.files_read == 0 || (input.files_listed == 0 && input.files_searched == 0) {
+            return PatchReadinessDecision {
+                ready: false,
+                confidence_bps: 9000,
+                reason: String::from(
+                    "the strict policy requires both discovery and file evidence",
+                ),
+                suggested_next_steps: vec![String::from("list_files"), String::from("read_file")],
+            };
+        }
+        PatchReadinessDecision {
+            ready: input.verification_step_count > 0 || input.patch_attempts == 0,
+            confidence_bps: 7200,
+            reason: String::from(
+                "the strict policy allows editing only after broader evidence gathering",
+            ),
+            suggested_next_steps: vec![
+                String::from("apply_patch"),
+                String::from("verify_after_edit"),
+            ],
+        }
+    }
+}
+
 pub fn evaluate_tool_route_module(
     summaries: &[DecisionSessionSummary],
     module: &impl DecisionModule<ToolRouteContext, ToolRouteDecision>,
@@ -189,13 +275,8 @@ pub fn evaluate_tool_route_module(
     let matched_cases = summaries
         .iter()
         .filter(|summary| {
-            summary.first_tool_name.as_deref()
-                == Some(
-                    module
-                        .decide(&HeuristicToolRouteModule::context_from_summary(summary))
-                        .selected_tool
-                        .as_str(),
-                )
+            let decision = module.decide(&HeuristicToolRouteModule::context_from_summary(summary));
+            summary.first_tool_name.as_deref() == Some(decision.selected_tool.as_str())
         })
         .count();
     ModuleScorecard {
@@ -230,8 +311,9 @@ mod tests {
     use probe_core::dataset_export::DecisionSessionSummary;
 
     use super::{
-        DecisionModule, HeuristicPatchReadinessModule, HeuristicToolRouteModule,
-        evaluate_patch_readiness_module, evaluate_tool_route_module,
+        AggressiveToolRouteModule, DecisionModule, HeuristicPatchReadinessModule,
+        HeuristicToolRouteModule, StrictPatchReadinessModule, evaluate_patch_readiness_module,
+        evaluate_tool_route_module,
     };
 
     fn sample_summary() -> DecisionSessionSummary {
@@ -291,6 +373,16 @@ mod tests {
         let tool_route = evaluate_tool_route_module(&summaries, &HeuristicToolRouteModule);
         let patch_readiness =
             evaluate_patch_readiness_module(&summaries, &HeuristicPatchReadinessModule);
+        assert_eq!(tool_route.total_cases, 1);
+        assert_eq!(patch_readiness.total_cases, 1);
+    }
+
+    #[test]
+    fn candidate_modules_are_constructible_and_evaluable() {
+        let summaries = vec![sample_summary()];
+        let tool_route = evaluate_tool_route_module(&summaries, &AggressiveToolRouteModule);
+        let patch_readiness =
+            evaluate_patch_readiness_module(&summaries, &StrictPatchReadinessModule);
         assert_eq!(tool_route.total_cases, 1);
         assert_eq!(patch_readiness.total_cases, 1);
     }
