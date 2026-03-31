@@ -20,6 +20,22 @@ fn help_modal_snapshot_is_stable() {
 }
 
 #[test]
+fn setup_overlay_snapshot_is_stable() {
+    let mut app = AppShell::new_for_tests();
+    app.dispatch(UiEvent::OpenSetupOverlay);
+    let snapshot = app.render_to_string(80, 24);
+    assert_snapshot!("hello_demo_setup_overlay", snapshot);
+}
+
+#[test]
+fn approval_overlay_snapshot_is_stable() {
+    let mut app = AppShell::new_for_tests();
+    app.dispatch(UiEvent::OpenApprovalOverlay);
+    let snapshot = app.render_to_string(80, 24);
+    assert_snapshot!("hello_demo_approval_overlay", snapshot);
+}
+
+#[test]
 fn transcript_running_turn_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
     app.apply_message(AppMessage::TranscriptEntryCommitted {

@@ -19,12 +19,26 @@ const MAX_EVENT_LOG: usize = 8;
 pub enum ScreenId {
     Chat,
     Help,
+    SetupOverlay,
+    ApprovalOverlay,
+    RequestInputOverlay,
+}
+
+impl ScreenId {
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Help => "help modal",
+            Self::SetupOverlay => "setup overlay",
+            Self::ApprovalOverlay => "approval overlay",
+            Self::RequestInputOverlay => "request-input overlay",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTab {
     Chat,
-    Setup,
     Events,
 }
 
@@ -32,15 +46,13 @@ impl ActiveTab {
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Chat => "Chat",
-            Self::Setup => "Setup",
             Self::Events => "Events",
         }
     }
 
     fn next(self) -> Self {
         match self {
-            Self::Chat => Self::Setup,
-            Self::Setup => Self::Events,
+            Self::Chat => Self::Events,
             Self::Events => Self::Chat,
         }
     }
@@ -48,8 +60,7 @@ impl ActiveTab {
     fn previous(self) -> Self {
         match self {
             Self::Chat => Self::Events,
-            Self::Setup => Self::Chat,
-            Self::Events => Self::Setup,
+            Self::Events => Self::Chat,
         }
     }
 }
@@ -69,6 +80,9 @@ pub enum TaskPhase {
 pub enum ScreenAction {
     None,
     OpenHelp,
+    OpenSetupOverlay,
+    OpenApprovalOverlay,
+    OpenRequestInputOverlay,
     CloseModal,
 }
 
@@ -82,6 +96,7 @@ pub struct ScreenOutcome {
     pub action: ScreenAction,
     pub status: Option<String>,
     pub command: Option<ScreenCommand>,
+    pub transcript_entry: Option<TranscriptEntry>,
 }
 
 impl ScreenOutcome {
@@ -90,6 +105,7 @@ impl ScreenOutcome {
             action: ScreenAction::None,
             status: None,
             command: None,
+            transcript_entry: None,
         }
     }
 
@@ -98,6 +114,7 @@ impl ScreenOutcome {
             action,
             status: Some(status),
             command: None,
+            transcript_entry: None,
         }
     }
 
@@ -106,6 +123,16 @@ impl ScreenOutcome {
             action: ScreenAction::None,
             status: Some(status),
             command: Some(command),
+            transcript_entry: None,
+        }
+    }
+
+    fn with_entry(action: ScreenAction, status: String, transcript_entry: TranscriptEntry) -> Self {
+        Self {
+            action,
+            status: Some(status),
+            command: None,
+            transcript_entry: Some(transcript_entry),
         }
     }
 }
@@ -114,6 +141,9 @@ impl ScreenOutcome {
 pub enum ScreenState {
     Chat(ChatScreen),
     Help(HelpScreen),
+    Setup(SetupOverlay),
+    Approval(ApprovalOverlay),
+    RequestInput(RequestInputOverlay),
 }
 
 impl ScreenState {
@@ -121,38 +151,57 @@ impl ScreenState {
         match self {
             Self::Chat(_) => ScreenId::Chat,
             Self::Help(_) => ScreenId::Help,
+            Self::Setup(_) => ScreenId::SetupOverlay,
+            Self::Approval(_) => ScreenId::ApprovalOverlay,
+            Self::RequestInput(_) => ScreenId::RequestInputOverlay,
         }
     }
 
     pub const fn is_modal(&self) -> bool {
-        matches!(self, Self::Help(_))
+        !matches!(self, Self::Chat(_))
+    }
+
+    pub const fn replaces_composer(&self) -> bool {
+        matches!(self, Self::Approval(_) | Self::RequestInput(_))
     }
 
     pub fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
         match self {
             Self::Chat(screen) => screen.handle_event(event),
             Self::Help(screen) => screen.handle_event(event),
+            Self::Setup(screen) => screen.handle_event(event),
+            Self::Approval(screen) => screen.handle_event(event),
+            Self::RequestInput(screen) => screen.handle_event(event),
         }
     }
 
-    pub fn render(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
+    pub fn render(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        stack_depth: usize,
+        base_screen: &ChatScreen,
+    ) {
         match self {
             Self::Chat(screen) => screen.render(frame, area, stack_depth),
             Self::Help(screen) => screen.render(frame, area, stack_depth),
+            Self::Setup(screen) => screen.render(frame, area, stack_depth, base_screen),
+            Self::Approval(screen) => screen.render(frame, area, stack_depth),
+            Self::RequestInput(screen) => screen.render(frame, area, stack_depth),
         }
     }
 
     pub fn chat_mut(&mut self) -> Option<&mut ChatScreen> {
         match self {
             Self::Chat(screen) => Some(screen),
-            Self::Help(_) => None,
+            Self::Help(_) | Self::Setup(_) | Self::Approval(_) | Self::RequestInput(_) => None,
         }
     }
 
     pub fn chat(&self) -> Option<&ChatScreen> {
         match self {
             Self::Chat(screen) => Some(screen),
-            Self::Help(_) => None,
+            Self::Help(_) | Self::Setup(_) | Self::Approval(_) | Self::RequestInput(_) => None,
         }
     }
 }
@@ -508,10 +557,22 @@ impl ChatScreen {
             UiEvent::RunBackgroundTask => {
                 self.record_event(String::from("requested Apple FM setup rerun"));
                 ScreenOutcome::with_command(
-                    String::from("queued Apple FM setup rerun"),
+                    String::from("queued Apple FM setup rerun and opened setup overlay"),
                     ScreenCommand::RunAppleFmSetup,
                 )
             }
+            UiEvent::OpenSetupOverlay => ScreenOutcome::with_status(
+                ScreenAction::OpenSetupOverlay,
+                String::from("opened setup overlay"),
+            ),
+            UiEvent::OpenApprovalOverlay => ScreenOutcome::with_status(
+                ScreenAction::OpenApprovalOverlay,
+                String::from("opened approval overlay"),
+            ),
+            UiEvent::OpenRequestInputOverlay => ScreenOutcome::with_status(
+                ScreenAction::OpenRequestInputOverlay,
+                String::from("opened request-input overlay"),
+            ),
             UiEvent::OpenHelp => ScreenOutcome::with_status(
                 ScreenAction::OpenHelp,
                 String::from("opened help modal"),
@@ -539,7 +600,6 @@ impl ChatScreen {
 
         match self.active_tab {
             ActiveTab::Chat => self.render_chat_shell(frame, sections[1], stack_depth),
-            ActiveTab::Setup => self.render_setup(frame, sections[1], stack_depth),
             ActiveTab::Events => self.render_events(frame, sections[1], stack_depth),
         }
     }
@@ -549,7 +609,7 @@ impl ChatScreen {
             .spacing(1)
             .split(area);
         let focus_name = if stack_depth > 1 {
-            "help modal"
+            "overlay"
         } else {
             "chat shell"
         };
@@ -566,32 +626,30 @@ impl ChatScreen {
         SidebarPanel::new("Apple FM", self.render_chat_setup_lines()).render(frame, sidebar[1]);
     }
 
-    fn render_setup(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
-        let columns = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .spacing(1)
-            .split(area);
-        let focus_name = if stack_depth > 1 {
-            "help modal"
-        } else {
-            "setup tab"
-        };
-        InfoPanel::new("Setup Detail", self.render_setup_body()).render(frame, columns[0]);
-
-        let sidebar = Layout::vertical([
-            Constraint::Length(7),
-            Constraint::Length(8),
-            Constraint::Min(0),
-        ])
-        .spacing(1)
-        .split(columns[1]);
-        SidebarPanel::new(
-            "Setup Status",
-            self.render_status_lines(focus_name, stack_depth),
-        )
-        .render(frame, sidebar[0]);
-        SidebarPanel::new("Backend Facts", self.render_backend_lines()).render(frame, sidebar[1]);
-        SidebarPanel::new("Availability", self.render_availability_lines())
-            .render(frame, sidebar[2]);
+    fn render_setup_overlay_text(&self, stack_depth: usize) -> Text<'static> {
+        let mut lines = self
+            .render_setup_body()
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .map(Line::from)
+            .collect::<Vec<_>>();
+        lines.push(Line::from(""));
+        lines.push(Line::from("Setup Status"));
+        for line in self.render_status_lines("setup overlay", stack_depth) {
+            lines.push(Line::from(format!("  {line}")));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from("Backend Facts"));
+        for line in self.render_backend_lines() {
+            lines.push(Line::from(format!("  {line}")));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from("Availability"));
+        for line in self.render_availability_lines() {
+            lines.push(Line::from(format!("  {line}")));
+        }
+        Text::from(lines)
     }
 
     fn render_events(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
@@ -681,7 +739,7 @@ impl ChatScreen {
                 if focus_name == "chat shell" {
                     "chat"
                 } else {
-                    "help"
+                    "overlay"
                 }
             ),
             format!("stack: {stack_depth}"),
@@ -717,7 +775,7 @@ impl ChatScreen {
             format!("backend: {backend}"),
             format!("ready: {availability}"),
             String::from("Ctrl+R reruns"),
-            String::from("Tab -> Setup"),
+            String::from("Ctrl+S opens"),
         ]
     }
 
@@ -969,15 +1027,254 @@ impl HelpScreen {
         let content = Paragraph::new(Text::from(vec![
             Line::from("Probe Chat Shell Keys"),
             Line::from(""),
-            Line::from("Tab / Shift+Tab     switch Chat / Setup / Events"),
+            Line::from("Tab / Shift+Tab     switch Chat / Events"),
             Line::from("Enter / Ctrl+J      submit / newline"),
-            Line::from("Ctrl+R / Ctrl+T     rerun setup / toggle detail"),
+            Line::from("Ctrl+R / Ctrl+S     rerun setup / open setup"),
+            Line::from("Ctrl+A / Ctrl+P     approval / request-input"),
+            Line::from("Ctrl+T              toggle operator notes"),
             Line::from("F1 / Esc            toggle or dismiss help"),
             Line::from("Ctrl+C              quit"),
-            Line::from("Composer only runs while Chat owns focus."),
+            Line::from("Overlays take focus and may disable or replace the composer."),
             Line::from(format!("Current stack depth: {stack_depth}")),
         ]));
         ModalCard::new("Help", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupOverlay;
+
+impl SetupOverlay {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::Dismiss | UiEvent::OpenSetupOverlay => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed setup overlay"),
+            ),
+            UiEvent::RunBackgroundTask => ScreenOutcome::with_command(
+                String::from("queued Apple FM setup rerun"),
+                ScreenCommand::RunAppleFmSetup,
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        stack_depth: usize,
+        base_screen: &ChatScreen,
+    ) {
+        let content = Paragraph::new(base_screen.render_setup_overlay_text(stack_depth));
+        ModalCard::new("Setup", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalChoice {
+    Approve,
+    Reject,
+}
+
+impl ApprovalChoice {
+    fn next(self) -> Self {
+        match self {
+            Self::Approve => Self::Reject,
+            Self::Reject => Self::Approve,
+        }
+    }
+
+    fn previous(self) -> Self {
+        self.next()
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+            Self::Reject => "reject",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalOverlay {
+    selected: ApprovalChoice,
+}
+
+impl ApprovalOverlay {
+    pub fn new() -> Self {
+        Self {
+            selected: ApprovalChoice::Approve,
+        }
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::NextView => {
+                self.selected = self.selected.next();
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!("selected {} in approval overlay", self.selected.label()),
+                )
+            }
+            UiEvent::PreviousView => {
+                self.selected = self.selected.previous();
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!("selected {} in approval overlay", self.selected.label()),
+                )
+            }
+            UiEvent::ComposerSubmit => ScreenOutcome::with_entry(
+                ScreenAction::CloseModal,
+                format!("recorded approval decision: {}", self.selected.label()),
+                TranscriptEntry::new(
+                    TranscriptRole::Status,
+                    "Approval Demo",
+                    vec![
+                        format!("decision: {}", self.selected.label()),
+                        String::from(
+                            "Typed overlays now provide a credible home for future approvals.",
+                        ),
+                    ],
+                ),
+            ),
+            UiEvent::Dismiss | UiEvent::OpenApprovalOverlay => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed approval overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
+        let approve_marker = if self.selected == ApprovalChoice::Approve {
+            ">"
+        } else {
+            " "
+        };
+        let reject_marker = if self.selected == ApprovalChoice::Reject {
+            ">"
+        } else {
+            " "
+        };
+        let content = Paragraph::new(Text::from(vec![
+            Line::from("Approval Demo"),
+            Line::from(""),
+            Line::from("Probe needs approval for a future risky tool action."),
+            Line::from(""),
+            Line::from(format!("{approve_marker} Approve the action")),
+            Line::from(format!("{reject_marker} Reject the action")),
+            Line::from(""),
+            Line::from("Tab/Shift+Tab changes selection. Enter commits. Esc dismisses."),
+            Line::from(format!("Current stack depth: {stack_depth}")),
+        ]));
+        ModalCard::new("Approval", content).render(frame, area);
+    }
+}
+
+const REQUEST_INPUT_OPTIONS: [&str; 3] = [
+    "Commit this later",
+    "Keep iterating in chat",
+    "Return to the shell",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestInputOverlay {
+    selected: usize,
+}
+
+impl RequestInputOverlay {
+    pub fn new() -> Self {
+        Self { selected: 0 }
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::NextView => {
+                self.selected = (self.selected + 1) % REQUEST_INPUT_OPTIONS.len();
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!(
+                        "selected request-input option: {}",
+                        REQUEST_INPUT_OPTIONS[self.selected]
+                    ),
+                )
+            }
+            UiEvent::PreviousView => {
+                self.selected = if self.selected == 0 {
+                    REQUEST_INPUT_OPTIONS.len() - 1
+                } else {
+                    self.selected - 1
+                };
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!(
+                        "selected request-input option: {}",
+                        REQUEST_INPUT_OPTIONS[self.selected]
+                    ),
+                )
+            }
+            UiEvent::ComposerSubmit => ScreenOutcome::with_entry(
+                ScreenAction::CloseModal,
+                format!(
+                    "recorded request-input response: {}",
+                    REQUEST_INPUT_OPTIONS[self.selected]
+                ),
+                TranscriptEntry::new(
+                    TranscriptRole::Status,
+                    "Request Input Demo",
+                    vec![
+                        format!("selected: {}", REQUEST_INPUT_OPTIONS[self.selected]),
+                        String::from(
+                            "Typed overlays now provide a credible home for future request-user-input prompts.",
+                        ),
+                    ],
+                ),
+            ),
+            UiEvent::Dismiss | UiEvent::OpenRequestInputOverlay => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed request-input overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
+        let mut lines = vec![
+            Line::from("Request Input Demo"),
+            Line::from(""),
+            Line::from("The runtime is asking a focused follow-up question."),
+            Line::from(""),
+        ];
+        for (index, option) in REQUEST_INPUT_OPTIONS.iter().enumerate() {
+            let marker = if index == self.selected { ">" } else { " " };
+            lines.push(Line::from(format!("{marker} {option}")));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "Tab/Shift+Tab changes selection. Enter commits. Esc dismisses.",
+        ));
+        lines.push(Line::from(format!("Current stack depth: {stack_depth}")));
+
+        let content = Paragraph::new(Text::from(lines));
+        ModalCard::new("Request Input", content).render(frame, area);
     }
 }
 

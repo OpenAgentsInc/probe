@@ -1,0 +1,88 @@
+# Probe TUI Typed Overlay Stack And Focus Routing
+
+## Summary
+
+Issue #39 promotes Probe's one-off help modal into a typed overlay stack.
+
+Probe now has explicit overlay homes for:
+
+- help
+- setup
+- approvals
+- request-user-input style prompts
+
+The home shell no longer needs a dedicated `Setup` tab to expose those
+surfaces. `Chat` stays primary, `Events` remains secondary, and overlays take
+focus only when needed.
+
+## What Changed
+
+### Typed overlay variants
+
+`probe-tui` now carries explicit overlay state types instead of a single
+special-case help screen:
+
+- `Help`
+- `Setup`
+- `Approval`
+- `RequestInput`
+
+These overlay types live in the existing screen stack so focus ownership stays
+simple and explicit.
+
+### Focus routing
+
+Focus routing is now:
+
+- base shell + composer when no overlay is active
+- disabled composer when a modal-style overlay owns focus
+- replaced composer when an overlay intentionally takes over the bottom
+  interaction lane
+
+In the current implementation:
+
+- help and setup disable the composer while staying above the shell
+- approval and request-input replace the composer entirely
+
+### Setup left the tab row
+
+The old `Setup` tab is gone. Setup now lives in a dedicated overlay opened by
+`Ctrl+S`, and `Ctrl+R` reruns setup while opening that overlay.
+
+This keeps the chat shell structurally stable while still giving the Apple FM
+prove-out a real focused home.
+
+### Demo approval and request-input flows
+
+The first overlay demos are intentionally small but real enough to anchor the
+architecture:
+
+- approval overlay with approve/reject selection
+- request-input overlay with a short option picker
+
+Selections commit visible transcript status entries so the overlays are tied
+back into the shell rather than acting as isolated mock UI.
+
+## Control Model
+
+- `Tab` / `Shift+Tab`: switch `Chat` / `Events`
+- `Ctrl+S`: open setup overlay
+- `Ctrl+A`: open approval overlay
+- `Ctrl+P`: open request-input overlay
+- `F1`: open help overlay
+- `Esc`: dismiss the top overlay
+
+## Tests
+
+Coverage now includes:
+
+- focus and dismissal behavior for help and typed overlays
+- transcript commits driven by approval and request-input overlays
+- snapshot coverage for help, setup overlay, and approval overlay surfaces
+
+Validation commands:
+
+```bash
+cargo test -p probe-tui -- --nocapture
+cargo test -p probe-cli --test cli_regressions -- --nocapture
+```

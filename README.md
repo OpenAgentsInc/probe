@@ -72,10 +72,10 @@ cargo run -p probe-cli -- exec \
 `cargo probe` is the current top-level Probe UI entrypoint. The current shell
 uses a retained in-memory transcript widget with committed user, tool, and
 assistant turns plus one explicit active-turn cell. `Chat` is the home tab,
-while Apple FM setup lives in the secondary `Setup` tab. A dedicated bottom
-pane owns shell status plus the first real composer. On launch Probe checks the
-Apple FM bridge, then runs a short plain-text prove-out when the model is
-ready.
+while setup, help, approvals, and request-input flows now live in a typed
+overlay stack above or in place of the composer. A dedicated bottom pane owns
+shell status plus the first real composer. On launch Probe checks the Apple FM
+bridge, then runs a short plain-text prove-out when the model is ready.
 
 Tabs:
 
@@ -85,10 +85,13 @@ Tabs:
 
 Keys:
 
-- `Tab`, `Shift+Tab`: switch `Chat` / `Setup` / `Events`
+- `Tab`, `Shift+Tab`: switch `Chat` / `Events`
 - `Enter`: submit the composer
 - `Ctrl+J`: insert a newline
 - `Ctrl+R`: rerun setup
+- `Ctrl+S`: open setup overlay
+- `Ctrl+A`: open approval overlay
+- `Ctrl+P`: open request-input overlay
 - `Ctrl+T`: toggle operator notes vs live detail
 - `F1`: help
 - `Esc`: dismiss modal
@@ -129,3 +132,4 @@ Start with:
 - [docs/36-chat-screen-primary-shell-and-setup-secondary.md](docs/36-chat-screen-primary-shell-and-setup-secondary.md)
 - [docs/37-probe-tui-bottom-pane-and-minimal-composer.md](docs/37-probe-tui-bottom-pane-and-minimal-composer.md)
 - [docs/38-probe-tui-transcript-turn-rendering.md](docs/38-probe-tui-transcript-turn-rendering.md)
+- [docs/39-probe-tui-typed-overlay-stack-and-focus-routing.md](docs/39-probe-tui-typed-overlay-stack-and-focus-routing.md)

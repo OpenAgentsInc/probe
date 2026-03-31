@@ -7,6 +7,9 @@ pub enum UiEvent {
     ToggleBody,
     RunBackgroundTask,
     OpenHelp,
+    OpenSetupOverlay,
+    OpenApprovalOverlay,
+    OpenRequestInputOverlay,
     Dismiss,
     Quit,
     ComposerInsert(char),
@@ -42,9 +45,18 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
         KeyCode::Right => Some(UiEvent::ComposerMoveRight),
         KeyCode::Home => Some(UiEvent::ComposerMoveHome),
         KeyCode::End => Some(UiEvent::ComposerMoveEnd),
+        KeyCode::Char('a') if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiEvent::OpenApprovalOverlay)
+        }
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => Some(UiEvent::Quit),
+        KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiEvent::OpenRequestInputOverlay)
+        }
         KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::RunBackgroundTask)
+        }
+        KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiEvent::OpenSetupOverlay)
         }
         KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::ToggleBody)

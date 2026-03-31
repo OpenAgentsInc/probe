@@ -1,29 +1,29 @@
 ---
 source: crates/probe-tui/tests/hello_demo.rs
-assertion_line: 19
+assertion_line: 27
 expression: snapshot
 ---
 
 
 
-           ┌─ Help ─────────────────────────────────────────────────┐
-           │ Probe Chat Shell Keys                                  │
+           ┌─ Setup ────────────────────────────────────────────────┐
+           │ Probe setup surface is ready.                          │
            │                                                        │
-           │ Tab / Shift+Tab     switch Chat / Events               │
-           │ Enter / Ctrl+J      submit / newline                   │
-           │ Ctrl+R / Ctrl+S     rerun setup / open setup           │
-           │ Ctrl+A / Ctrl+P     approval / request-input           │
-           │ Ctrl+T              toggle operator notes              │
-           │ F1 / Esc            toggle or dismiss help             │
+           │ Press Ctrl+R to start or rerun the Apple FM setup      │
+           │ flow.                                                  │
+           │                                                        │
+           │ Setup Status                                           │
+           │   phase: idle                                          │
+           │   calls_done: 0                                        │
            └────────────────────────────────────────────────────────┘
 
 
 
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: opened help modal | Tab/Shift+Tab | Ctrl+R | F1 | Ctrl+C             │
+│ status: opened setup overlay | Tab/Shift+Tab | Ctrl+R | F1 | Ctrl+C          │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer (disabled) ────────────────────────────────────────────────────────┐
-│ Composer disabled while help owns focus. Esc or F1 returns to chat.          │
+│ Composer disabled while setup owns focus. Esc returns to chat.               │
 └──────────────────────────────────────────────────────────────────────────────┘

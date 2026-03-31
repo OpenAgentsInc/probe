@@ -16,8 +16,8 @@ use crate::bottom_pane::{BottomPane, BottomPaneState};
 use crate::event::{UiEvent, event_from_key};
 use crate::message::{AppMessage, BackgroundTaskRequest};
 use crate::screens::{
-    ActiveTab, ChatScreen, HelpScreen, ScreenAction, ScreenCommand, ScreenId, ScreenState,
-    TaskPhase,
+    ActiveTab, ApprovalOverlay, ChatScreen, HelpScreen, RequestInputOverlay, ScreenAction,
+    ScreenCommand, ScreenId, ScreenState, SetupOverlay, TaskPhase,
 };
 use crate::worker::BackgroundWorker;
 
@@ -153,23 +153,56 @@ impl AppShell {
                 if let Some(status) = outcome.status {
                     self.last_status = status;
                 }
+                if let Some(transcript_entry) = outcome.transcript_entry {
+                    self.apply_message(AppMessage::TranscriptEntryCommitted {
+                        entry: transcript_entry,
+                    });
+                }
                 match outcome.action {
                     ScreenAction::None => {}
                     ScreenAction::OpenHelp => {
                         self.base_screen_mut().record_event("help modal took focus");
-                        self.screens.push(ScreenState::Help(HelpScreen::new()));
+                        if self.active_screen_id() != ScreenId::Help {
+                            self.screens.push(ScreenState::Help(HelpScreen::new()));
+                        }
+                    }
+                    ScreenAction::OpenSetupOverlay => {
+                        self.base_screen_mut().record_event("setup overlay took focus");
+                        if self.active_screen_id() != ScreenId::SetupOverlay {
+                            self.screens.push(ScreenState::Setup(SetupOverlay::new()));
+                        }
+                    }
+                    ScreenAction::OpenApprovalOverlay => {
+                        self.base_screen_mut()
+                            .record_event("approval overlay took focus");
+                        if self.active_screen_id() != ScreenId::ApprovalOverlay {
+                            self.screens
+                                .push(ScreenState::Approval(ApprovalOverlay::new()));
+                        }
+                    }
+                    ScreenAction::OpenRequestInputOverlay => {
+                        self.base_screen_mut()
+                            .record_event("request-input overlay took focus");
+                        if self.active_screen_id() != ScreenId::RequestInputOverlay {
+                            self.screens
+                                .push(ScreenState::RequestInput(RequestInputOverlay::new()));
+                        }
                     }
                     ScreenAction::CloseModal => {
                         if self.screens.len() > 1 {
+                            let released = self.active_screen_id().title().to_string();
                             self.screens.pop();
                             self.base_screen_mut()
-                                .record_event("help modal released focus");
+                                .record_event(format!("{released} released focus"));
                         }
                     }
                 }
                 if let Some(command) = outcome.command {
                     match command {
                         ScreenCommand::RunAppleFmSetup => {
+                            if self.active_screen_id() != ScreenId::SetupOverlay {
+                                self.screens.push(ScreenState::Setup(SetupOverlay::new()));
+                            }
                             if let Err(error) =
                                 self.submit_background_task(Self::default_setup_request())
                             {
@@ -216,6 +249,23 @@ impl AppShell {
     pub fn render(&self, frame: &mut Frame<'_>) {
         let area = frame.area();
         let pane_state = self.bottom_pane_state();
+        let base_screen = self.base_screen();
+        let replaces_composer = self
+            .screens
+            .last()
+            .map(ScreenState::replaces_composer)
+            .unwrap_or(false);
+
+        if replaces_composer {
+            self.screens[0].render(frame, area, self.screens.len(), base_screen);
+            for overlay in self.screens.iter().skip(1) {
+                if overlay.is_modal() {
+                    overlay.render(frame, area, self.screens.len(), base_screen);
+                }
+            }
+            return;
+        }
+
         let sections = Layout::vertical([
             Constraint::Min(0),
             Constraint::Length(self.bottom_pane.desired_height()),
@@ -223,10 +273,10 @@ impl AppShell {
         .spacing(1)
         .split(area);
 
-        self.screens[0].render(frame, sections[0], self.screens.len());
+        self.screens[0].render(frame, sections[0], self.screens.len(), base_screen);
         for overlay in self.screens.iter().skip(1) {
             if overlay.is_modal() {
-                overlay.render(frame, sections[0], self.screens.len());
+                overlay.render(frame, sections[0], self.screens.len(), base_screen);
             }
         }
 
@@ -263,10 +313,23 @@ impl AppShell {
     }
 
     fn bottom_pane_state(&self) -> BottomPaneState {
-        if self.active_screen_id() != ScreenId::Chat {
-            return BottomPaneState::Disabled(String::from(
-                "Composer disabled while help owns focus. Esc or F1 returns to chat.",
-            ));
+        match self.active_screen_id() {
+            ScreenId::Help => {
+                return BottomPaneState::Disabled(String::from(
+                    "Composer disabled while help owns focus. Esc or F1 returns to chat.",
+                ));
+            }
+            ScreenId::SetupOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Composer disabled while setup owns focus. Esc returns to chat.",
+                ));
+            }
+            ScreenId::ApprovalOverlay | ScreenId::RequestInputOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Composer replaced by the active overlay.",
+                ));
+            }
+            ScreenId::Chat => {}
         }
 
         if self.active_tab() != ActiveTab::Chat {
@@ -397,13 +460,13 @@ mod tests {
     }
 
     #[test]
-    fn setup_screen_switches_views_and_toggles_copy() {
+    fn events_view_switches_and_copy_toggle_still_work() {
         let mut app = AppShell::new_for_tests();
         assert_eq!(app.active_tab(), ActiveTab::Chat);
         assert!(!app.emphasized_copy());
 
         app.dispatch(UiEvent::NextView);
-        assert_eq!(app.active_tab(), ActiveTab::Setup);
+        assert_eq!(app.active_tab(), ActiveTab::Events);
 
         app.dispatch(UiEvent::ToggleBody);
         assert!(app.emphasized_copy());
@@ -468,6 +531,33 @@ mod tests {
         }
 
         panic!("timed out waiting for live assistant turn to commit");
+    }
+
+    #[test]
+    fn typed_overlays_take_focus_and_can_commit_demo_entries() {
+        let mut app = AppShell::new_for_tests();
+
+        app.dispatch(UiEvent::OpenApprovalOverlay);
+        assert_eq!(app.active_screen_id(), ScreenId::ApprovalOverlay);
+        assert_eq!(app.screen_depth(), 2);
+
+        app.dispatch(UiEvent::NextView);
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
+        assert!(
+            app.render_to_string(120, 32)
+                .contains("Typed overlays now provide a credible home")
+        );
+
+        app.dispatch(UiEvent::OpenRequestInputOverlay);
+        assert_eq!(app.active_screen_id(), ScreenId::RequestInputOverlay);
+        app.dispatch(UiEvent::NextView);
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
+        assert!(
+            app.render_to_string(120, 32)
+                .contains("Request Input Demo")
+        );
     }
 
     #[test]
@@ -558,8 +648,8 @@ mod tests {
 
         assert_eq!(app.task_phase(), TaskPhase::Unavailable);
         assert_eq!(app.active_tab(), ActiveTab::Chat);
-        app.dispatch(UiEvent::NextView);
-        assert_eq!(app.active_tab(), ActiveTab::Setup);
+        app.dispatch(UiEvent::OpenSetupOverlay);
+        assert_eq!(app.active_screen_id(), ScreenId::SetupOverlay);
         assert!(
             app.render_to_string(120, 32)
                 .contains("Foundation model is still preparing")
@@ -613,8 +703,8 @@ mod tests {
 
         assert_eq!(app.task_phase(), TaskPhase::Failed);
         assert_eq!(app.active_tab(), ActiveTab::Chat);
-        app.dispatch(UiEvent::NextView);
-        assert_eq!(app.active_tab(), ActiveTab::Setup);
+        app.dispatch(UiEvent::OpenSetupOverlay);
+        assert_eq!(app.active_screen_id(), ScreenId::SetupOverlay);
         let rendered = app.render_to_string(120, 32);
         assert!(rendered.contains("assets_unavailable"));
         assert!(rendered.contains("Enable Apple Intelligence and retry"));

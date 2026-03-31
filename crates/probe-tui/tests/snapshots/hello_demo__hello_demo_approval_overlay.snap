@@ -1,0 +1,25 @@
+---
+source: crates/probe-tui/tests/hello_demo.rs
+assertion_line: 35
+expression: snapshot
+---
+
+
+
+
+           ┌─ Approval ─────────────────────────────────────────────┐
+           │ Approval Demo                                          │
+           │                                                        │
+           │ Probe needs approval for a future risky tool action.   │
+           │                                                        │
+           │ > Approve the action                                   │
+           │   Reject the action                                    │
+           │                                                        │
+           │ Tab/Shift+Tab changes selection. Enter commits. Esc    │
+           │ dismisses.                                             │
+           │ Current stack depth: 2                                 │
+           │                                                        │
+           │                                                        │
+           │                                                        │
+           │                                                        │
+           └────────────────────────────────────────────────────────┘

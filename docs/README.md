@@ -113,3 +113,7 @@ This folder holds technical planning docs for the Probe runtime.
   - the first real chat transcript turn model for Probe TUI, including visible
     user/tool/assistant entries, a worker-driven active-turn cell, and a more
     transcript-dominant shell layout
+- `39-probe-tui-typed-overlay-stack-and-focus-routing.md`
+  - the first typed overlay stack for Probe TUI, moving setup/help/approval
+    and request-input flows out of the home layout and into explicit focused
+    overlays that can disable or replace the composer

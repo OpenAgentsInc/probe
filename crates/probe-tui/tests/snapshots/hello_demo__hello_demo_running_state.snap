@@ -1,10 +1,10 @@
 ---
 source: crates/probe-tui/tests/hello_demo.rs
-assertion_line: 147
+assertion_line: 163
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  Chat │ Setup │ Events                                                       │
+│  Chat │ Events                                                               │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Transcript ───────────────────────────────────────────────┐ ┌─ Shell ───────┐
