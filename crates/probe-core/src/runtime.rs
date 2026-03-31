@@ -3,7 +3,9 @@ use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
 use probe_protocol::backend::BackendProfile;
-use probe_protocol::session::{SessionBackendTarget, SessionId, SessionMetadata, SessionTurn};
+use probe_protocol::session::{
+    SessionBackendTarget, SessionId, SessionMetadata, SessionTurn, TranscriptItemKind,
+};
 use probe_provider_openai::{
     ChatCompletionUsage, ChatMessage, OpenAiProviderClient, OpenAiProviderConfig,
     OpenAiProviderError,
@@ -20,6 +22,13 @@ pub struct PlainTextExecRequest {
     pub title: Option<String>,
     pub cwd: PathBuf,
     pub system_prompt: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PlainTextResumeRequest {
+    pub session_id: SessionId,
+    pub profile: BackendProfile,
+    pub prompt: String,
 }
 
 #[derive(Clone, Debug)]
@@ -110,10 +119,6 @@ impl ProbeRuntime {
         &self,
         request: PlainTextExecRequest,
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
-        let provider_config = OpenAiProviderConfig::from_backend_profile(&request.profile);
-        let provider =
-            OpenAiProviderClient::new(provider_config).map_err(RuntimeError::ProviderBuild)?;
-
         let session = self.session_store.create_session_with(
             NewSession::new(
                 request
@@ -122,6 +127,7 @@ impl ProbeRuntime {
                     .unwrap_or_else(|| default_session_title(request.prompt.as_str())),
                 request.cwd,
             )
+            .with_system_prompt(request.system_prompt.clone())
             .with_backend(SessionBackendTarget {
                 profile_name: request.profile.name.clone(),
                 base_url: request.profile.base_url.clone(),
@@ -129,71 +135,15 @@ impl ProbeRuntime {
             }),
         )?;
 
-        let mut messages = Vec::new();
-        if let Some(system_prompt) = request.system_prompt {
-            messages.push(ChatMessage::system(system_prompt));
-        }
-        messages.push(ChatMessage::user(request.prompt.clone()));
+        self.run_plain_text_turn(session, request.profile, request.prompt)
+    }
 
-        let response =
-            provider
-                .chat_completion(messages)
-                .map_err(|source| RuntimeError::ProviderRequest {
-                    session_id: session.id.clone(),
-                    source,
-                });
-
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                let _ = self.session_store.append_turn(
-                    &session.id,
-                    &[
-                        NewItem::new(
-                            probe_protocol::session::TranscriptItemKind::UserMessage,
-                            request.prompt,
-                        ),
-                        NewItem::new(
-                            probe_protocol::session::TranscriptItemKind::Note,
-                            error.to_string(),
-                        ),
-                    ],
-                );
-                return Err(error);
-            }
-        };
-
-        let assistant_text = response
-            .first_message_text()
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| RuntimeError::MissingAssistantMessage {
-                session_id: session.id.clone(),
-                response_id: response.id.clone(),
-            })?;
-
-        let turn = self.session_store.append_turn(
-            &session.id,
-            &[
-                NewItem::new(
-                    probe_protocol::session::TranscriptItemKind::UserMessage,
-                    request.prompt,
-                ),
-                NewItem::new(
-                    probe_protocol::session::TranscriptItemKind::AssistantMessage,
-                    assistant_text.clone(),
-                ),
-            ],
-        )?;
-
-        let session = self.session_store.read_metadata(&session.id)?;
-        Ok(PlainTextExecOutcome {
-            session,
-            turn,
-            assistant_text,
-            response_id: response.id,
-            response_model: response.model,
-            usage: response.usage,
-        })
+    pub fn continue_plain_text_session(
+        &self,
+        request: PlainTextResumeRequest,
+    ) -> Result<PlainTextExecOutcome, RuntimeError> {
+        let session = self.session_store.read_metadata(&request.session_id)?;
+        self.run_plain_text_turn(session, request.profile, request.prompt)
     }
 }
 
@@ -226,6 +176,92 @@ fn default_session_title(prompt: &str) -> String {
     }
 }
 
+impl ProbeRuntime {
+    fn run_plain_text_turn(
+        &self,
+        session: SessionMetadata,
+        profile: BackendProfile,
+        prompt: String,
+    ) -> Result<PlainTextExecOutcome, RuntimeError> {
+        let provider_config = OpenAiProviderConfig::from_backend_profile(&profile);
+        let provider =
+            OpenAiProviderClient::new(provider_config).map_err(RuntimeError::ProviderBuild)?;
+        let mut messages = self.replay_messages(&session)?;
+        messages.push(ChatMessage::user(prompt.clone()));
+
+        let response =
+            provider
+                .chat_completion(messages)
+                .map_err(|source| RuntimeError::ProviderRequest {
+                    session_id: session.id.clone(),
+                    source,
+                });
+
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                let _ = self.session_store.append_turn(
+                    &session.id,
+                    &[
+                        NewItem::new(TranscriptItemKind::UserMessage, prompt),
+                        NewItem::new(TranscriptItemKind::Note, error.to_string()),
+                    ],
+                );
+                return Err(error);
+            }
+        };
+
+        let assistant_text = response
+            .first_message_text()
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| RuntimeError::MissingAssistantMessage {
+                session_id: session.id.clone(),
+                response_id: response.id.clone(),
+            })?;
+
+        let turn = self.session_store.append_turn(
+            &session.id,
+            &[
+                NewItem::new(TranscriptItemKind::UserMessage, prompt),
+                NewItem::new(TranscriptItemKind::AssistantMessage, assistant_text.clone()),
+            ],
+        )?;
+
+        let session = self.session_store.read_metadata(&session.id)?;
+        Ok(PlainTextExecOutcome {
+            session,
+            turn,
+            assistant_text,
+            response_id: response.id,
+            response_model: response.model,
+            usage: response.usage,
+        })
+    }
+
+    fn replay_messages(&self, session: &SessionMetadata) -> Result<Vec<ChatMessage>, RuntimeError> {
+        let mut messages = Vec::new();
+        if let Some(system_prompt) = &session.system_prompt {
+            messages.push(ChatMessage::system(system_prompt.clone()));
+        }
+
+        for event in self.session_store.read_transcript(&session.id)? {
+            for item in event.turn.items {
+                match item.kind {
+                    TranscriptItemKind::UserMessage => messages.push(ChatMessage::user(item.text)),
+                    TranscriptItemKind::AssistantMessage => {
+                        messages.push(ChatMessage::assistant(item.text))
+                    }
+                    TranscriptItemKind::ToolCall
+                    | TranscriptItemKind::ToolResult
+                    | TranscriptItemKind::Note => {}
+                }
+            }
+        }
+
+        Ok(messages)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -234,7 +270,9 @@ mod tests {
 
     use crate::backend_profiles::psionic_qwen35_2b_q8_registry;
 
-    use super::{PlainTextExecRequest, ProbeRuntime, default_session_title};
+    use super::{
+        PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, default_session_title,
+    };
 
     #[test]
     fn default_title_is_trimmed_for_exec_prompts() {
@@ -314,6 +352,93 @@ mod tests {
         assert_eq!(transcript.len(), 1);
         assert_eq!(transcript[0].turn.items[0].text, "say hello");
         assert_eq!(transcript[0].turn.items[1].text, "hello from probe exec");
+
+        handle.join().expect("server thread should exit cleanly");
+    }
+
+    #[test]
+    fn continue_plain_text_session_replays_prior_context() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let address = listener.local_addr().expect("listener addr");
+        let handle = thread::spawn(move || {
+            for expected_response in ["first answer", "second answer"] {
+                let (mut stream, _) = listener.accept().expect("accept connection");
+                let mut buffer = [0_u8; 8192];
+                let bytes = stream.read(&mut buffer).expect("read request");
+                let request_body = String::from_utf8_lossy(&buffer[..bytes]);
+                if expected_response == "second answer" {
+                    assert!(request_body.contains("first prompt"));
+                    assert!(request_body.contains("first answer"));
+                    assert!(request_body.contains("second prompt"));
+                }
+                let body = serde_json::json!({
+                    "id": format!("chatcmpl_{expected_response}"),
+                    "model": "qwen3.5-2b-q8_0-registry.gguf",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": expected_response},
+                            "finish_reason": "stop"
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 4,
+                        "total_tokens": 14
+                    }
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let runtime = ProbeRuntime::new(temp.path().join(".probe"));
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = format!("http://{address}/v1");
+
+        let first = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile: profile.clone(),
+                prompt: String::from("first prompt"),
+                title: Some(String::from("Interactive Test")),
+                cwd: temp.path().to_path_buf(),
+                system_prompt: Some(String::from("You are helpful")),
+            })
+            .expect("first turn should succeed");
+
+        let second = runtime
+            .continue_plain_text_session(PlainTextResumeRequest {
+                session_id: first.session.id.clone(),
+                profile,
+                prompt: String::from("second prompt"),
+            })
+            .expect("second turn should succeed");
+
+        assert_eq!(second.assistant_text, "second answer");
+        assert_eq!(second.turn.index, 1);
+        assert_eq!(
+            second
+                .session
+                .system_prompt
+                .as_deref()
+                .expect("system prompt should be persisted"),
+            "You are helpful"
+        );
+
+        let transcript = runtime
+            .session_store()
+            .read_transcript(&first.session.id)
+            .expect("read transcript");
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[1].turn.items[0].text, "second prompt");
 
         handle.join().expect("server thread should exit cleanly");
     }

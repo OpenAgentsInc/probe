@@ -697,6 +697,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "probe-core",
+ "probe-protocol",
 ]
 
 [[package]]

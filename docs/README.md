@@ -23,3 +23,5 @@ This folder holds technical planning docs for the Probe runtime.
 - `07-probe-exec.md`
   - the first non-interactive end-to-end Probe controller lane with local
     transcript persistence
+- `08-interactive-cli-and-resume.md`
+  - the first interactive session loop and transcript-backed resume flow

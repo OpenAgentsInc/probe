@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 clap.workspace = true
 probe-core.workspace = true
+probe-protocol.workspace = true

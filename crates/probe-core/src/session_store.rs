@@ -68,6 +68,7 @@ impl NewItem {
 pub struct NewSession {
     pub title: String,
     pub cwd: PathBuf,
+    pub system_prompt: Option<String>,
     pub backend: Option<SessionBackendTarget>,
 }
 
@@ -77,8 +78,15 @@ impl NewSession {
         Self {
             title: title.into(),
             cwd: cwd.into(),
+            system_prompt: None,
             backend: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_system_prompt(mut self, system_prompt: Option<String>) -> Self {
+        self.system_prompt = system_prompt;
+        self
     }
 
     #[must_use]
@@ -134,6 +142,7 @@ impl FilesystemSessionStore {
             id: session_id,
             title: session.title,
             cwd: session.cwd,
+            system_prompt: session.system_prompt,
             created_at_ms,
             updated_at_ms: created_at_ms,
             state: SessionState::Active,

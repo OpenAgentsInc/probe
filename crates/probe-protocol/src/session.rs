@@ -79,6 +79,7 @@ pub struct SessionMetadata {
     pub id: SessionId,
     pub title: String,
     pub cwd: PathBuf,
+    pub system_prompt: Option<String>,
     pub created_at_ms: TimestampMs,
     pub updated_at_ms: TimestampMs,
     pub state: SessionState,

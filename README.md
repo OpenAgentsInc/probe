@@ -53,6 +53,12 @@ The first end-to-end CLI lane is `probe exec`, which:
 - prints the assistant answer to the terminal
 - persists the resulting session transcript under `PROBE_HOME` or `~/.probe`
 
+The first interactive lane is `probe chat`, which:
+
+- starts a local REPL on top of the same runtime objects used by `probe exec`
+- supports resuming a prior session by id
+- rebuilds conversation context from the persisted transcript before each turn
+
 ## Non-Goals For The First Milestone
 
 - a large plugin marketplace
