@@ -124,6 +124,9 @@ pub struct DecisionSessionSummary {
     pub approved_tool_calls: usize,
     pub refused_tool_calls: usize,
     pub paused_tool_calls: usize,
+    pub oracle_calls: usize,
+    pub long_context_calls: usize,
+    pub repo_analysis_files: Vec<String>,
     pub likely_warm_turns: usize,
     pub cache_reuse_improved_latency: bool,
     pub cache_reuse_improved_throughput: bool,
@@ -237,6 +240,9 @@ pub fn build_decision_summary(
     let mut approved_tool_calls = 0_usize;
     let mut refused_tool_calls = 0_usize;
     let mut paused_tool_calls = 0_usize;
+    let mut oracle_calls = 0_usize;
+    let mut long_context_calls = 0_usize;
+    let mut repo_analysis_files = Vec::new();
     let mut likely_warm_turns = 0_usize;
     let mut cache_reuse_improved_throughput = false;
     let mut previous_tps = None;
@@ -341,6 +347,17 @@ pub fn build_decision_summary(
                             patch_needs_verification = true;
                             saw_verification_after_patch = false;
                         }
+                        "consult_oracle" => {
+                            oracle_calls += 1;
+                        }
+                        "analyze_repository" => {
+                            long_context_calls += 1;
+                            if let Some(tool_execution) = item.tool_execution.as_ref() {
+                                for path in &tool_execution.files_touched {
+                                    push_unique(&mut repo_analysis_files, path.clone());
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -377,6 +394,9 @@ pub fn build_decision_summary(
         approved_tool_calls,
         refused_tool_calls,
         paused_tool_calls,
+        oracle_calls,
+        long_context_calls,
+        repo_analysis_files,
         likely_warm_turns,
         cache_reuse_improved_latency: likely_warm_turns > 0,
         cache_reuse_improved_throughput,
@@ -640,5 +660,8 @@ mod tests {
         assert_eq!(value["too_many_turns"], true);
         assert_eq!(value["approved_tool_calls"], 1);
         assert_eq!(value["auto_allowed_tool_calls"], 3);
+        assert_eq!(value["oracle_calls"], 0);
+        assert_eq!(value["long_context_calls"], 0);
+        assert_eq!(value["repo_analysis_files"], serde_json::json!([]));
     }
 }

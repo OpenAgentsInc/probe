@@ -2,6 +2,7 @@ use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, Serv
 
 pub const PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE: &str = "psionic-qwen35-2b-q8-registry";
 pub const PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE: &str = "psionic-qwen35-2b-q8-oracle";
+pub const PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE: &str = "psionic-qwen35-2b-q8-long-context";
 pub const PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL: &str = "qwen3.5-2b-q8_0-registry.gguf";
 
 #[must_use]
@@ -9,6 +10,7 @@ pub fn named_backend_profile(name: &str) -> Option<BackendProfile> {
     match name {
         PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE => Some(psionic_qwen35_2b_q8_registry()),
         PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE => Some(psionic_qwen35_2b_q8_oracle()),
+        PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE => Some(psionic_qwen35_2b_q8_long_context()),
         _ => None,
     }
 }
@@ -41,13 +43,28 @@ pub fn psionic_qwen35_2b_q8_oracle() -> BackendProfile {
     }
 }
 
+#[must_use]
+pub fn psionic_qwen35_2b_q8_long_context() -> BackendProfile {
+    BackendProfile {
+        name: String::from(PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE),
+        kind: BackendKind::OpenAiChatCompletions,
+        base_url: String::from("http://127.0.0.1:8080/v1"),
+        model: String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL),
+        api_key_env: String::from("PROBE_OPENAI_API_KEY"),
+        timeout_secs: 60,
+        attach_mode: ServerAttachMode::AttachToExisting,
+        prefix_cache_mode: PrefixCacheMode::BackendDefault,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use probe_protocol::backend::{PrefixCacheMode, ServerAttachMode};
 
     use super::{
-        PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE, PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL,
-        PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE, named_backend_profile, psionic_qwen35_2b_q8_oracle,
+        PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE, PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE,
+        PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
+        named_backend_profile, psionic_qwen35_2b_q8_long_context, psionic_qwen35_2b_q8_oracle,
         psionic_qwen35_2b_q8_registry,
     };
 
@@ -82,6 +99,21 @@ mod tests {
             named_backend_profile(PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE).expect("oracle profile");
         assert_eq!(profile.model, PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL);
         assert_eq!(profile.timeout_secs, 30);
-        assert_eq!(psionic_qwen35_2b_q8_oracle().name, PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE);
+        assert_eq!(
+            psionic_qwen35_2b_q8_oracle().name,
+            PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE
+        );
+    }
+
+    #[test]
+    fn long_context_profile_is_available_by_name() {
+        let profile = named_backend_profile(PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE)
+            .expect("long-context profile");
+        assert_eq!(profile.model, PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL);
+        assert_eq!(profile.timeout_secs, 60);
+        assert_eq!(
+            psionic_qwen35_2b_q8_long_context().name,
+            PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE
+        );
     }
 }

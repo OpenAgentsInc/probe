@@ -1,6 +1,7 @@
 pub mod backend_profiles;
 pub mod dataset_export;
 pub mod harness;
+pub mod long_context;
 pub mod runtime;
 pub mod server_control;
 pub mod session_store;

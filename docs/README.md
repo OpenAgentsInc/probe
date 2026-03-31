@@ -55,3 +55,6 @@ This folder holds technical planning docs for the Probe runtime.
     baseline-versus-candidate comparison flow for modules and harness reports
 - `18-oracle-consultation.md`
   - typed bounded oracle consultation as an auxiliary tool and backend role
+- `19-long-context-repo-analysis.md`
+  - opt-in bounded repo-analysis escalation with explicit evidence pointers,
+    budgets, and transcript-visible provenance

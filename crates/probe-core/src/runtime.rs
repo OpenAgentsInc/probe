@@ -13,8 +13,12 @@ use probe_provider_openai::{
     OpenAiProviderConfig, OpenAiProviderError,
 };
 
+use crate::dataset_export::build_decision_summary;
 use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionStoreError};
-use crate::tools::{ExecutedToolCall, ToolExecutionContext, ToolLoopConfig, ToolOracleContext};
+use crate::tools::{
+    ExecutedToolCall, ToolExecutionContext, ToolLongContextContext, ToolLoopConfig,
+    ToolOracleContext,
+};
 
 const DEFAULT_PROBE_HOME_DIR: &str = ".probe";
 const LIKELY_WARM_WALLCLOCK_RATIO_NUMERATOR: u64 = 80;
@@ -245,7 +249,7 @@ impl ProbeRuntime {
 
         for _ in 0..max_round_trips {
             let next_user_prompt = pending_user_prompt.as_ref().cloned();
-            if let Some(user_prompt) = next_user_prompt {
+            if let Some(user_prompt) = next_user_prompt.as_ref() {
                 messages.push(ChatMessage::user(user_prompt));
             }
 
@@ -301,15 +305,33 @@ impl ProbeRuntime {
                         response_id: response.id,
                     });
                 };
-                let oracle_calls_used =
-                    self.count_tool_results_named(&session.id, "consult_oracle")?;
+                let transcript = self.session_store.read_transcript(&session.id)?;
+                let session_summary = build_decision_summary(&session, transcript.as_slice());
                 let mut execution_context = ToolExecutionContext::new(session.cwd.clone());
                 if let Some(oracle) = tool_loop.oracle.as_ref() {
                     execution_context = execution_context.with_oracle(ToolOracleContext::new(
                         oracle.profile.clone(),
                         oracle.max_calls,
-                        oracle_calls_used,
+                        session_summary.oracle_calls,
                     ));
+                }
+                if let Some(long_context) = tool_loop.long_context.as_ref() {
+                    execution_context =
+                        execution_context.with_long_context(ToolLongContextContext::new(
+                            long_context.profile.clone(),
+                            long_context.max_calls,
+                            session_summary.long_context_calls,
+                            long_context.max_evidence_files,
+                            long_context.max_lines_per_file,
+                            next_user_prompt
+                                .as_ref()
+                                .map_or(0, |prompt| prompt.chars().count()),
+                            session_summary.files_listed.len(),
+                            session_summary.files_searched.len(),
+                            session_summary.files_read.len(),
+                            session_summary.too_many_turns,
+                            session_summary.oracle_calls,
+                        ));
                 }
                 let executed = tool_loop.registry.execute_batch(
                     &execution_context,
@@ -582,33 +604,6 @@ impl ProbeRuntime {
             let observability = event.turn.observability?;
             observability.prompt_tokens.map(|_| observability)
         }))
-    }
-
-    fn count_tool_results_named(
-        &self,
-        session_id: &SessionId,
-        tool_name: &str,
-    ) -> Result<usize, RuntimeError> {
-        let transcript = self.session_store.read_transcript(session_id)?;
-        Ok(transcript
-            .into_iter()
-            .flat_map(|event| event.turn.items.into_iter())
-            .filter(|item| {
-                item.kind == TranscriptItemKind::ToolResult
-                    && item.name.as_deref() == Some(tool_name)
-                    && item
-                        .tool_execution
-                        .as_ref()
-                        .map(|execution| {
-                            matches!(
-                                execution.policy_decision,
-                                probe_protocol::session::ToolPolicyDecision::AutoAllow
-                                    | probe_protocol::session::ToolPolicyDecision::Approved
-                            )
-                        })
-                        .unwrap_or(false)
-            })
-            .count())
     }
 }
 

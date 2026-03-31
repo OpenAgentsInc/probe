@@ -1,4 +1,7 @@
 use probe_core::dataset_export::DecisionSessionSummary;
+use probe_core::long_context::{
+    LongContextEscalationContext, LongContextEscalationDecision, heuristic_long_context_escalation,
+};
 use serde::{Deserialize, Serialize};
 
 pub trait DecisionModule<Input, Output> {
@@ -51,6 +54,7 @@ pub struct ModuleScorecard {
 
 pub struct HeuristicToolRouteModule;
 pub struct AggressiveToolRouteModule;
+pub struct HeuristicLongContextEscalationModule;
 
 impl HeuristicToolRouteModule {
     #[must_use]
@@ -228,9 +232,7 @@ impl DecisionModule<PatchReadinessContext, PatchReadinessDecision>
     }
 }
 
-impl DecisionModule<PatchReadinessContext, PatchReadinessDecision>
-    for StrictPatchReadinessModule
-{
+impl DecisionModule<PatchReadinessContext, PatchReadinessDecision> for StrictPatchReadinessModule {
     fn id(&self) -> &'static str {
         "strict_patch_readiness_v2"
     }
@@ -248,9 +250,7 @@ impl DecisionModule<PatchReadinessContext, PatchReadinessDecision>
             return PatchReadinessDecision {
                 ready: false,
                 confidence_bps: 9000,
-                reason: String::from(
-                    "the strict policy requires both discovery and file evidence",
-                ),
+                reason: String::from("the strict policy requires both discovery and file evidence"),
                 suggested_next_steps: vec![String::from("list_files"), String::from("read_file")],
             };
         }
@@ -265,6 +265,35 @@ impl DecisionModule<PatchReadinessContext, PatchReadinessDecision>
                 String::from("verify_after_edit"),
             ],
         }
+    }
+}
+
+impl HeuristicLongContextEscalationModule {
+    #[must_use]
+    pub fn context_from_summary(
+        summary: &DecisionSessionSummary,
+        prompt_char_count: usize,
+        requested_task_kind: impl Into<String>,
+        requested_evidence_files: usize,
+    ) -> LongContextEscalationContext {
+        LongContextEscalationContext::from_summary(
+            summary,
+            prompt_char_count,
+            requested_task_kind,
+            requested_evidence_files,
+        )
+    }
+}
+
+impl DecisionModule<LongContextEscalationContext, LongContextEscalationDecision>
+    for HeuristicLongContextEscalationModule
+{
+    fn id(&self) -> &'static str {
+        "heuristic_long_context_escalation_v1"
+    }
+
+    fn decide(&self, input: &LongContextEscalationContext) -> LongContextEscalationDecision {
+        heuristic_long_context_escalation(input)
     }
 }
 
@@ -306,14 +335,52 @@ pub fn evaluate_patch_readiness_module(
     }
 }
 
+pub fn evaluate_long_context_module(
+    summaries: &[DecisionSessionSummary],
+    module: &impl DecisionModule<LongContextEscalationContext, LongContextEscalationDecision>,
+) -> ModuleScorecard {
+    let matched_cases = summaries
+        .iter()
+        .filter(|summary| {
+            let requested_evidence_files = if summary.repo_analysis_files.is_empty() {
+                summary.files_read.len().max(summary.files_searched.len())
+            } else {
+                summary.repo_analysis_files.len()
+            };
+            let prompt_char_count = summary
+                .final_assistant_text
+                .as_ref()
+                .map_or(0, |value| value.chars().count());
+            let task_kind = if summary.long_context_calls > 0 {
+                "repo_analysis"
+            } else {
+                "change_impact"
+            };
+            let predicted =
+                module.decide(&HeuristicLongContextEscalationModule::context_from_summary(
+                    summary,
+                    prompt_char_count,
+                    task_kind,
+                    requested_evidence_files,
+                ));
+            predicted.should_escalate == (summary.long_context_calls > 0)
+        })
+        .count();
+    ModuleScorecard {
+        module_id: String::from(module.id()),
+        total_cases: summaries.len(),
+        matched_cases,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use probe_core::dataset_export::DecisionSessionSummary;
 
     use super::{
-        AggressiveToolRouteModule, DecisionModule, HeuristicPatchReadinessModule,
-        HeuristicToolRouteModule, StrictPatchReadinessModule, evaluate_patch_readiness_module,
-        evaluate_tool_route_module,
+        AggressiveToolRouteModule, DecisionModule, HeuristicLongContextEscalationModule,
+        HeuristicPatchReadinessModule, HeuristicToolRouteModule, StrictPatchReadinessModule,
+        evaluate_long_context_module, evaluate_patch_readiness_module, evaluate_tool_route_module,
     };
 
     fn sample_summary() -> DecisionSessionSummary {
@@ -339,6 +406,9 @@ mod tests {
             approved_tool_calls: 1,
             refused_tool_calls: 0,
             paused_tool_calls: 0,
+            oracle_calls: 1,
+            long_context_calls: 0,
+            repo_analysis_files: Vec::new(),
             likely_warm_turns: 0,
             cache_reuse_improved_latency: false,
             cache_reuse_improved_throughput: false,
@@ -385,5 +455,33 @@ mod tests {
             evaluate_patch_readiness_module(&summaries, &StrictPatchReadinessModule);
         assert_eq!(tool_route.total_cases, 1);
         assert_eq!(patch_readiness.total_cases, 1);
+    }
+
+    #[test]
+    fn long_context_module_prefers_escalation_for_multi_file_analysis() {
+        let module = HeuristicLongContextEscalationModule;
+        let mut summary = sample_summary();
+        summary.files_read.push(String::from("README.md"));
+        let decision = module.decide(&HeuristicLongContextEscalationModule::context_from_summary(
+            &summary,
+            280,
+            "repo_analysis",
+            3,
+        ));
+        assert!(decision.should_escalate);
+    }
+
+    #[test]
+    fn long_context_module_evaluator_returns_scorecard() {
+        let mut summary = sample_summary();
+        summary.long_context_calls = 1;
+        summary.repo_analysis_files = vec![
+            String::from("src/main.rs"),
+            String::from("README.md"),
+            String::from("Cargo.toml"),
+        ];
+        let scorecard =
+            evaluate_long_context_module(&[summary], &HeuristicLongContextEscalationModule);
+        assert_eq!(scorecard.total_cases, 1);
     }
 }

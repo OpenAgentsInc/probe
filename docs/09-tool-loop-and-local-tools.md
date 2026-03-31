@@ -34,6 +34,9 @@ It declares:
 - `consult_oracle`
   - when configured, consults a bounded auxiliary model for planning,
     checking, or research guidance
+- `analyze_repository`
+  - when configured, runs a bounded long-context repo-analysis pass over
+    explicit evidence files for architecture, synthesis, or change-impact work
 
 This is the first honest coding-tool bundle for Probe.
 
@@ -60,7 +63,7 @@ Both `probe exec` and `probe chat` now accept:
 
 - `--tool-set weather`
 - `--tool-set coding_bootstrap`
-- `--tool-choice <none|auto|required|named:lookup_weather>`
+- `--tool-choice <none|auto|required|named:<tool>>`
 - `--parallel-tool-calls`
 - `--approve-write-tools`
 - `--approve-network-shell`
@@ -68,6 +71,10 @@ Both `probe exec` and `probe chat` now accept:
 - `--pause-for-approval`
 - `--oracle-profile <name>`
 - `--oracle-max-calls <n>`
+- `--long-context-profile <name>`
+- `--long-context-max-calls <n>`
+- `--long-context-max-evidence-files <n>`
+- `--long-context-max-lines-per-file <n>`
 
 Example:
 
@@ -95,6 +102,8 @@ cargo run -p probe-cli -- exec \
 3. If the backend returns assistant tool calls:
    - persist a `tool_call` turn
    - classify each requested tool call against the local approval policy
+   - for `analyze_repository`, also enforce the long-context escalation gate
+     based on task shape, explicit evidence paths, and session context pressure
    - auto-allow, approve, refuse, or pause each tool call
    - execute only the calls allowed by policy
    - persist a `tool_result` turn
@@ -125,6 +134,13 @@ The `tool_execution` record carries fields such as:
 - `files_touched`
 - `reason`
 
+For long-context repo-analysis calls, the tool result body also carries:
+
+- the selected analysis profile and model
+- the bounded evidence file list
+- per-file truncation and line metadata
+- the analysis text returned by the auxiliary lane
+
 That lets Probe reconstruct:
 
 - assistant tool-call messages
@@ -139,6 +155,7 @@ The current built-in tool lanes intentionally do not try to solve everything:
 - no arbitrary external executors
 - no streaming tool deltas
 - no unbounded multi-agent planner
+- no default long-context fallback for ordinary coding turns
 
 It is the smallest honest tool-backed controller loop that:
 

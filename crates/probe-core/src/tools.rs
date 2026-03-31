@@ -11,11 +11,14 @@ use probe_protocol::session::{
     ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
 };
 use probe_provider_openai::{
-    ChatMessage, ChatNamedToolChoice, ChatNamedToolChoiceFunction, ChatToolCall,
-    ChatToolChoice, ChatToolDefinition, ChatToolDefinitionEnvelope, OpenAiProviderClient,
-    OpenAiProviderConfig,
+    ChatMessage, ChatNamedToolChoice, ChatNamedToolChoiceFunction, ChatToolCall, ChatToolChoice,
+    ChatToolDefinition, ChatToolDefinitionEnvelope, OpenAiProviderClient, OpenAiProviderConfig,
 };
 use wait_timeout::ChildExt;
+
+use crate::long_context::{
+    LongContextEscalationContext, heuristic_long_context_escalation, is_long_context_task_kind,
+};
 
 const READ_FILE_DEFAULT_MAX_LINES: u64 = 200;
 const LIST_FILES_DEFAULT_MAX_DEPTH: u64 = 4;
@@ -23,6 +26,8 @@ const LIST_FILES_DEFAULT_MAX_ENTRIES: usize = 200;
 const CODE_SEARCH_DEFAULT_MAX_MATCHES: usize = 50;
 const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 5;
 const SHELL_MAX_OUTPUT_CHARS: usize = 4_000;
+const LONG_CONTEXT_DEFAULT_MAX_LINES_PER_FILE: u64 = 160;
+const LONG_CONTEXT_DEFAULT_MAX_EVIDENCE_FILES: usize = 6;
 
 pub type ToolHandler = fn(
     &ToolExecutionContext,
@@ -52,6 +57,7 @@ pub struct ToolRegistry {
 pub struct ToolExecutionContext {
     cwd: PathBuf,
     oracle: Option<ToolOracleContext>,
+    long_context: Option<ToolLongContextContext>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +76,7 @@ pub struct ToolLoopConfig {
     pub max_model_round_trips: usize,
     pub approval: ToolApprovalConfig,
     pub oracle: Option<ToolOracleConfig>,
+    pub long_context: Option<ToolLongContextConfig>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,6 +116,29 @@ pub struct ToolOracleContext {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolLongContextConfig {
+    pub profile: BackendProfile,
+    pub max_calls: usize,
+    pub max_evidence_files: usize,
+    pub max_lines_per_file: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolLongContextContext {
+    profile: BackendProfile,
+    max_calls: usize,
+    calls_used: usize,
+    max_evidence_files: usize,
+    max_lines_per_file: u64,
+    prompt_char_count: usize,
+    files_listed: usize,
+    files_searched: usize,
+    files_read: usize,
+    too_many_turns: bool,
+    oracle_calls: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolInvocationOutcome {
     pub output: serde_json::Value,
     pub command: Option<String>,
@@ -142,6 +172,7 @@ impl ToolExecutionContext {
         Self {
             cwd: cwd.into(),
             oracle: None,
+            long_context: None,
         }
     }
 
@@ -170,6 +201,17 @@ impl ToolExecutionContext {
     #[must_use]
     pub fn oracle(&self) -> Option<&ToolOracleContext> {
         self.oracle.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_long_context(mut self, long_context: ToolLongContextContext) -> Self {
+        self.long_context = Some(long_context);
+        self
+    }
+
+    #[must_use]
+    pub fn long_context(&self) -> Option<&ToolLongContextContext> {
+        self.long_context.as_ref()
     }
 }
 
@@ -218,6 +260,93 @@ impl ToolOracleContext {
     #[must_use]
     pub fn calls_used(&self) -> usize {
         self.calls_used
+    }
+}
+
+impl ToolLongContextConfig {
+    #[must_use]
+    pub fn bounded(profile: BackendProfile, max_calls: usize) -> Self {
+        Self {
+            profile,
+            max_calls,
+            max_evidence_files: LONG_CONTEXT_DEFAULT_MAX_EVIDENCE_FILES,
+            max_lines_per_file: LONG_CONTEXT_DEFAULT_MAX_LINES_PER_FILE,
+        }
+    }
+}
+
+impl ToolLongContextContext {
+    #[must_use]
+    pub fn new(
+        profile: BackendProfile,
+        max_calls: usize,
+        calls_used: usize,
+        max_evidence_files: usize,
+        max_lines_per_file: u64,
+        prompt_char_count: usize,
+        files_listed: usize,
+        files_searched: usize,
+        files_read: usize,
+        too_many_turns: bool,
+        oracle_calls: usize,
+    ) -> Self {
+        Self {
+            profile,
+            max_calls,
+            calls_used,
+            max_evidence_files,
+            max_lines_per_file,
+            prompt_char_count,
+            files_listed,
+            files_searched,
+            files_read,
+            too_many_turns,
+            oracle_calls,
+        }
+    }
+
+    #[must_use]
+    pub fn profile(&self) -> &BackendProfile {
+        &self.profile
+    }
+
+    #[must_use]
+    pub fn max_calls(&self) -> usize {
+        self.max_calls
+    }
+
+    #[must_use]
+    pub fn calls_used(&self) -> usize {
+        self.calls_used
+    }
+
+    #[must_use]
+    pub fn max_evidence_files(&self) -> usize {
+        self.max_evidence_files
+    }
+
+    #[must_use]
+    pub fn max_lines_per_file(&self) -> u64 {
+        self.max_lines_per_file
+    }
+
+    #[must_use]
+    pub fn escalation_context(
+        &self,
+        requested_task_kind: impl Into<String>,
+        requested_evidence_files: usize,
+    ) -> LongContextEscalationContext {
+        LongContextEscalationContext {
+            prompt_char_count: self.prompt_char_count,
+            files_listed: self.files_listed,
+            files_searched: self.files_searched,
+            files_read: self.files_read,
+            too_many_turns: self.too_many_turns,
+            oracle_calls: self.oracle_calls,
+            long_context_calls: self.calls_used,
+            requested_task_kind: requested_task_kind.into(),
+            requested_evidence_files,
+        }
     }
 }
 
@@ -295,26 +424,42 @@ impl ToolLoopConfig {
             max_model_round_trips: 4,
             approval: ToolApprovalConfig::allow_all(),
             oracle: None,
+            long_context: None,
         }
     }
 
     #[must_use]
     pub fn coding_bootstrap(tool_choice: ProbeToolChoice, parallel_tool_calls: bool) -> Self {
         Self {
-            registry: ToolRegistry::coding_bootstrap(false),
+            registry: ToolRegistry::coding_bootstrap(false, false),
             tool_choice,
             parallel_tool_calls,
             max_model_round_trips: 8,
             approval: ToolApprovalConfig::conservative(),
             oracle: None,
+            long_context: None,
         }
     }
 
     #[must_use]
     pub fn with_oracle(mut self, oracle: ToolOracleConfig) -> Self {
-        self.registry = ToolRegistry::coding_bootstrap(true);
         self.oracle = Some(oracle);
+        self.refresh_registry();
         self
+    }
+
+    #[must_use]
+    pub fn with_long_context(mut self, long_context: ToolLongContextConfig) -> Self {
+        self.long_context = Some(long_context);
+        self.refresh_registry();
+        self
+    }
+
+    fn refresh_registry(&mut self) {
+        if self.registry.name() == "coding_bootstrap" {
+            self.registry =
+                ToolRegistry::coding_bootstrap(self.oracle.is_some(), self.long_context.is_some());
+        }
     }
 }
 
@@ -353,7 +498,7 @@ impl ToolRegistry {
     }
 
     #[must_use]
-    pub fn coding_bootstrap(include_oracle: bool) -> Self {
+    pub fn coding_bootstrap(include_oracle: bool, include_long_context: bool) -> Self {
         let registry = Self::new("coding_bootstrap")
             .register(
                 String::from("read_file"),
@@ -401,7 +546,7 @@ impl ToolRegistry {
                 apply_patch,
             );
 
-        if include_oracle {
+        let registry = if include_oracle {
             registry.register(
                 String::from("consult_oracle"),
                 Some(String::from(
@@ -410,6 +555,19 @@ impl ToolRegistry {
                 Some(consult_oracle_parameters()),
                 RegisteredToolRisk::Fixed(ToolRiskClass::ReadOnly),
                 consult_oracle,
+            )
+        } else {
+            registry
+        };
+        if include_long_context {
+            registry.register(
+                String::from("analyze_repository"),
+                Some(String::from(
+                    "Run a bounded long-context repo-analysis pass over explicit evidence files for architecture, synthesis, or change-impact questions.",
+                )),
+                Some(analyze_repository_parameters()),
+                RegisteredToolRisk::Fixed(ToolRiskClass::ReadOnly),
+                analyze_repository,
             )
         } else {
             registry
@@ -471,6 +629,14 @@ impl ToolRegistry {
             .oracle()
             .map(|oracle| oracle.max_calls().saturating_sub(oracle.calls_used()))
             .unwrap_or(0);
+        let mut long_context_calls_remaining = context
+            .long_context()
+            .map(|long_context| {
+                long_context
+                    .max_calls()
+                    .saturating_sub(long_context.calls_used())
+            })
+            .unwrap_or(0);
         tool_calls
             .iter()
             .map(|tool_call| {
@@ -488,31 +654,39 @@ impl ToolRegistry {
                         let reason = Some(String::from(
                             "oracle call budget exhausted for this session",
                         ));
-                        let invocation = denied_tool_invocation(
+                        return refused_tool_call(
                             context,
-                            tool_call.function.name.as_str(),
-                            &parsed_arguments,
+                            tool_call,
+                            parsed_arguments,
                             ToolRiskClass::ReadOnly,
-                            &reason,
+                            reason,
                         );
-                        return ExecutedToolCall {
-                            call_id: tool_call.id.clone(),
-                            name: tool_call.function.name.clone(),
-                            arguments: parsed_arguments,
-                            output: invocation.output.clone(),
-                            tool_execution: ToolExecutionRecord {
-                                risk_class: ToolRiskClass::ReadOnly,
-                                policy_decision: ToolPolicyDecision::Refused,
-                                approval_state: ToolApprovalState::Refused,
-                                command: invocation.command,
-                                exit_code: invocation.exit_code,
-                                timed_out: invocation.timed_out,
-                                truncated: invocation.truncated,
-                                bytes_returned: invocation.bytes_returned,
-                                files_touched: invocation.files_touched,
-                                reason,
-                            },
-                        };
+                    }
+                    if tool_call.function.name == "analyze_repository"
+                        && long_context_calls_remaining == 0
+                    {
+                        let reason = Some(String::from(
+                            "long-context repo-analysis budget exhausted for this session",
+                        ));
+                        return refused_tool_call(
+                            context,
+                            tool_call,
+                            parsed_arguments,
+                            ToolRiskClass::ReadOnly,
+                            reason,
+                        );
+                    }
+                    if tool_call.function.name == "analyze_repository"
+                        && let Some(decision) =
+                            long_context_refusal_decision(context, &parsed_arguments)
+                    {
+                        return refused_tool_call(
+                            context,
+                            tool_call,
+                            parsed_arguments,
+                            ToolRiskClass::ReadOnly,
+                            Some(decision.reason),
+                        );
                     }
 
                     let risk_class = match tool.risk {
@@ -550,6 +724,15 @@ impl ToolRegistry {
                         && oracle_calls_remaining > 0
                     {
                         oracle_calls_remaining -= 1;
+                    }
+                    if tool_call.function.name == "analyze_repository"
+                        && matches!(
+                            policy_decision,
+                            ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved
+                        )
+                        && long_context_calls_remaining > 0
+                    {
+                        long_context_calls_remaining -= 1;
                     }
 
                     ExecutedToolCall {
@@ -1067,6 +1250,218 @@ fn consult_oracle(
     })
 }
 
+fn analyze_repository(
+    context: &ToolExecutionContext,
+    arguments: &serde_json::Value,
+) -> Result<ToolInvocationOutcome, ToolInvocationError> {
+    let long_context = context.long_context().ok_or_else(|| {
+        ToolInvocationError::ExecutionFailed(String::from(
+            "analyze_repository requires a long-context profile in the active tool loop",
+        ))
+    })?;
+    let task_kind = expect_string(arguments, "task_kind", "analyze_repository")?;
+    if !is_long_context_task_kind(task_kind) {
+        return Err(ToolInvocationError::InvalidArguments(String::from(
+            "analyze_repository requires task_kind to be one of: repo_analysis, architecture_summary, change_impact, synthesis",
+        )));
+    }
+    let question = expect_string(arguments, "question", "analyze_repository")?;
+    let evidence_paths = expect_string_array(arguments, "evidence_paths", "analyze_repository")?;
+    if evidence_paths.is_empty() {
+        return Err(ToolInvocationError::InvalidArguments(String::from(
+            "analyze_repository requires at least one evidence_paths entry",
+        )));
+    }
+    if evidence_paths.len() > long_context.max_evidence_files() {
+        return Err(ToolInvocationError::InvalidArguments(format!(
+            "analyze_repository allows at most {} evidence paths per call",
+            long_context.max_evidence_files()
+        )));
+    }
+
+    let decision = heuristic_long_context_escalation(
+        &long_context.escalation_context(task_kind, evidence_paths.len()),
+    );
+    if !decision.should_escalate {
+        return Err(ToolInvocationError::ExecutionFailed(format!(
+            "long-context escalation denied: {}",
+            decision.reason
+        )));
+    }
+
+    let mut evidence = Vec::new();
+    let mut evidence_blocks = Vec::new();
+    let mut files_touched = Vec::new();
+    let mut evidence_bytes = 0_u64;
+    for path in &evidence_paths {
+        let (record, block) =
+            build_long_context_evidence(context.cwd(), path, long_context.max_lines_per_file())?;
+        evidence_bytes += record
+            .get("bytes_loaded")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        evidence.push(record);
+        evidence_blocks.push(block);
+        files_touched.push(path.clone());
+    }
+
+    let provider_config = OpenAiProviderConfig::from_backend_profile(long_context.profile());
+    let provider = OpenAiProviderClient::new(provider_config.clone()).map_err(|error| {
+        ToolInvocationError::ExecutionFailed(format!(
+            "failed to build long-context analysis client: {error}"
+        ))
+    })?;
+    let response = provider
+        .chat_completion(vec![
+            ChatMessage::system(format!(
+                "You are Probe's bounded long-context repo-analysis lane. Only answer {} tasks. Use only the provided evidence. Cite the relevant file paths in your answer. Do not claim edits, commands, or repo facts that are not present in the evidence.",
+                task_kind
+            )),
+            ChatMessage::user(format!(
+                "Question:\n{}\n\nEvidence:\n\n{}",
+                question,
+                evidence_blocks.join("\n\n")
+            )),
+        ])
+        .map_err(|error| {
+            ToolInvocationError::ExecutionFailed(format!(
+                "long-context analysis request failed: {error}"
+            ))
+        })?;
+    let analysis = response
+        .first_message_text()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            ToolInvocationError::ExecutionFailed(String::from(
+                "long-context analysis response did not include assistant text",
+            ))
+        })?;
+
+    Ok(ToolInvocationOutcome {
+        output: serde_json::json!({
+            "task_kind": task_kind,
+            "question": question,
+            "analysis_profile": long_context.profile().name,
+            "analysis_model": long_context.profile().model,
+            "analysis": analysis,
+            "calls_used_after": long_context.calls_used() + 1,
+            "max_calls": long_context.max_calls(),
+            "decision_reason": decision.reason,
+            "evidence": evidence,
+        }),
+        command: None,
+        exit_code: None,
+        timed_out: Some(false),
+        truncated: Some(false),
+        bytes_returned: Some(analysis.len() as u64 + evidence_bytes),
+        files_touched,
+    })
+}
+
+fn build_long_context_evidence(
+    base: &Path,
+    requested_path: &str,
+    max_lines: u64,
+) -> Result<(serde_json::Value, String), ToolInvocationError> {
+    let resolved_path = resolve_workspace_path(base, requested_path)?;
+    let metadata = fs::metadata(&resolved_path).map_err(|error| {
+        ToolInvocationError::ExecutionFailed(format!(
+            "failed to stat evidence file `{requested_path}`: {error}"
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(ToolInvocationError::InvalidArguments(format!(
+            "analyze_repository evidence path `{requested_path}` must be a file",
+        )));
+    }
+
+    let content = fs::read_to_string(&resolved_path).map_err(|error| {
+        ToolInvocationError::ExecutionFailed(format!(
+            "failed to read evidence file `{requested_path}`: {error}"
+        ))
+    })?;
+    let lines = content.lines().collect::<Vec<_>>();
+    let end_index = (max_lines as usize).min(lines.len());
+    let excerpt = lines[..end_index].join("\n");
+    let relative_path = display_relative_path(base, &resolved_path);
+    let record = serde_json::json!({
+        "path": relative_path,
+        "start_line": 1,
+        "end_line": end_index,
+        "total_lines": lines.len(),
+        "truncated": end_index < lines.len(),
+        "bytes_loaded": excerpt.len(),
+    });
+    let block = format!(
+        "### FILE {} lines 1-{} truncated={}\n{}",
+        record
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(requested_path),
+        end_index,
+        record
+            .get("truncated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        excerpt
+    );
+    Ok((record, block))
+}
+
+fn long_context_refusal_decision(
+    context: &ToolExecutionContext,
+    arguments: &serde_json::Value,
+) -> Option<crate::long_context::LongContextEscalationDecision> {
+    let long_context = context.long_context()?;
+    let task_kind = arguments
+        .get("task_kind")
+        .and_then(serde_json::Value::as_str)?;
+    if !is_long_context_task_kind(task_kind) {
+        return None;
+    }
+    let evidence_paths = arguments
+        .get("evidence_paths")
+        .and_then(serde_json::Value::as_array)?;
+    let decision = heuristic_long_context_escalation(
+        &long_context.escalation_context(task_kind, evidence_paths.len()),
+    );
+    (!decision.should_escalate).then_some(decision)
+}
+
+fn refused_tool_call(
+    context: &ToolExecutionContext,
+    tool_call: &ChatToolCall,
+    arguments: serde_json::Value,
+    risk_class: ToolRiskClass,
+    reason: Option<String>,
+) -> ExecutedToolCall {
+    let invocation = denied_tool_invocation(
+        context,
+        tool_call.function.name.as_str(),
+        &arguments,
+        risk_class,
+        &reason,
+    );
+    ExecutedToolCall {
+        call_id: tool_call.id.clone(),
+        name: tool_call.function.name.clone(),
+        arguments,
+        output: invocation.output.clone(),
+        tool_execution: ToolExecutionRecord {
+            risk_class,
+            policy_decision: ToolPolicyDecision::Refused,
+            approval_state: ToolApprovalState::Refused,
+            command: invocation.command,
+            exit_code: invocation.exit_code,
+            timed_out: invocation.timed_out,
+            truncated: invocation.truncated,
+            bytes_returned: invocation.bytes_returned,
+            files_touched: invocation.files_touched,
+            reason,
+        },
+    }
+}
+
 fn classify_shell_command(arguments: &serde_json::Value) -> ToolRiskClass {
     let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str) else {
         return ToolRiskClass::Write;
@@ -1373,6 +1768,24 @@ fn consult_oracle_parameters() -> serde_json::Value {
     })
 }
 
+fn analyze_repository_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "task_kind": { "type": "string", "description": "Repo-analysis task type: repo_analysis, architecture_summary, change_impact, or synthesis." },
+            "question": { "type": "string", "description": "Bounded repo-analysis question to answer from the evidence files." },
+            "evidence_paths": {
+                "type": "array",
+                "description": "Relative file paths that provide the evidence for the analysis.",
+                "items": { "type": "string" },
+                "minItems": 1
+            }
+        },
+        "required": ["task_kind", "question", "evidence_paths"],
+        "additionalProperties": false
+    })
+}
+
 fn expect_string<'a>(
     arguments: &'a serde_json::Value,
     key: &str,
@@ -1390,6 +1803,33 @@ fn expect_string<'a>(
 
 fn expect_u64(arguments: &serde_json::Value, key: &str) -> Option<u64> {
     arguments.get(key).and_then(serde_json::Value::as_u64)
+}
+
+fn expect_string_array(
+    arguments: &serde_json::Value,
+    key: &str,
+    tool_name: &str,
+) -> Result<Vec<String>, ToolInvocationError> {
+    arguments
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            ToolInvocationError::InvalidArguments(format!(
+                "{tool_name} requires an array `{key}` argument"
+            ))
+        })
+        .and_then(|values| {
+            values
+                .iter()
+                .map(|value| {
+                    value.as_str().map(String::from).ok_or_else(|| {
+                        ToolInvocationError::InvalidArguments(format!(
+                            "{tool_name} requires every `{key}` entry to be a string"
+                        ))
+                    })
+                })
+                .collect()
+        })
 }
 
 fn resolve_workspace_path(
@@ -1564,11 +2004,12 @@ mod tests {
     use probe_provider_openai::{ChatToolCall, ChatToolCallFunction};
     use tempfile::tempdir;
 
-    use crate::backend_profiles::psionic_qwen35_2b_q8_oracle;
+    use crate::backend_profiles::{psionic_qwen35_2b_q8_long_context, psionic_qwen35_2b_q8_oracle};
 
     use super::{
         ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolExecutionContext,
-        ToolLoopConfig, ToolOracleConfig, ToolOracleContext, ToolRegistry,
+        ToolLongContextConfig, ToolLongContextContext, ToolLoopConfig, ToolOracleConfig,
+        ToolOracleContext, ToolRegistry,
     };
 
     #[test]
@@ -1604,7 +2045,7 @@ mod tests {
 
     #[test]
     fn coding_bootstrap_registry_declares_all_tools() {
-        let registry = ToolRegistry::coding_bootstrap(false);
+        let registry = ToolRegistry::coding_bootstrap(false, false);
         let tools = registry
             .declared_tools()
             .into_iter()
@@ -1631,7 +2072,7 @@ mod tests {
             "one\ntwo\nthree\nfour\nfive\n",
         )
         .expect("write notes");
-        let registry = ToolRegistry::coding_bootstrap(false);
+        let registry = ToolRegistry::coding_bootstrap(false, false);
         let context = ToolExecutionContext::new(tempdir.path());
         let results = registry.execute_batch(
             &context,
@@ -1658,7 +2099,7 @@ mod tests {
         let tempdir = tempdir().expect("tempdir");
         fs::create_dir_all(tempdir.path().join("src/bin")).expect("mkdirs");
         fs::write(tempdir.path().join("src/main.rs"), "fn main() {}").expect("write main");
-        let registry = ToolRegistry::coding_bootstrap(false);
+        let registry = ToolRegistry::coding_bootstrap(false, false);
         let context = ToolExecutionContext::new(tempdir.path());
         let results = registry.execute_batch(
             &context,
@@ -1695,7 +2136,7 @@ mod tests {
         let tempdir = tempdir().expect("tempdir");
         let path = tempdir.path().join("hello.txt");
         fs::write(&path, "hello world\n").expect("write file");
-        let registry = ToolRegistry::coding_bootstrap(false);
+        let registry = ToolRegistry::coding_bootstrap(false, false);
         let context = ToolExecutionContext::new(tempdir.path());
         let results = registry.execute_batch(
             &context,
@@ -1732,7 +2173,7 @@ mod tests {
             "fn alpha() {}\nfn beta() {}\n",
         )
         .expect("write file");
-        let registry = ToolRegistry::coding_bootstrap(false);
+        let registry = ToolRegistry::coding_bootstrap(false, false);
         let context = ToolExecutionContext::new(tempdir.path());
         let results = registry.execute_batch(
             &context,
@@ -1764,7 +2205,7 @@ mod tests {
     #[test]
     fn coding_bootstrap_runs_bounded_shell_command() {
         let tempdir = tempdir().expect("tempdir");
-        let registry = ToolRegistry::coding_bootstrap(false);
+        let registry = ToolRegistry::coding_bootstrap(false, false);
         let context = ToolExecutionContext::new(tempdir.path());
         let results = registry.execute_batch(
             &context,
@@ -1796,7 +2237,7 @@ mod tests {
         let tempdir = tempdir().expect("tempdir");
         let path = tempdir.path().join("hello.txt");
         fs::write(&path, "hello world\n").expect("write file");
-        let registry = ToolRegistry::coding_bootstrap(false);
+        let registry = ToolRegistry::coding_bootstrap(false, false);
         let context = ToolExecutionContext::new(tempdir.path());
         let results = registry.execute_batch(
             &context,
@@ -1827,7 +2268,7 @@ mod tests {
     #[test]
     fn coding_bootstrap_can_pause_on_destructive_shell_requests() {
         let tempdir = tempdir().expect("tempdir");
-        let registry = ToolRegistry::coding_bootstrap(false);
+        let registry = ToolRegistry::coding_bootstrap(false, false);
         let context = ToolExecutionContext::new(tempdir.path());
         let results = registry.execute_batch(
             &context,
@@ -1899,11 +2340,8 @@ mod tests {
                 max_calls: 1,
             },
         );
-        let context = ToolExecutionContext::new(tempdir.path()).with_oracle(ToolOracleContext::new(
-            oracle_profile,
-            1,
-            0,
-        ));
+        let context = ToolExecutionContext::new(tempdir.path())
+            .with_oracle(ToolOracleContext::new(oracle_profile, 1, 0));
         let results = tool_loop.registry.execute_batch(
             &context,
             &[
@@ -1949,6 +2387,151 @@ mod tests {
         );
 
         handle.join().expect("oracle server should exit cleanly");
+    }
+
+    #[test]
+    fn coding_bootstrap_can_analyze_repository_with_provenance() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let address = listener.local_addr().expect("listener addr");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut buffer = [0_u8; 8192];
+            let _ = stream.read(&mut buffer);
+            let body = serde_json::json!({
+                "id": "repo_analysis_tool_test",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "The repo uses a small Rust workspace. `src/main.rs` is the binary entrypoint and `README.md` describes the operator flow."
+                        },
+                        "finish_reason": "stop"
+                    }
+                ]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        let tempdir = tempdir().expect("tempdir");
+        fs::create_dir_all(tempdir.path().join("src")).expect("create src");
+        fs::write(
+            tempdir.path().join("src/main.rs"),
+            "fn main() {\n    println!(\"probe\");\n}\n",
+        )
+        .expect("write main");
+        fs::write(
+            tempdir.path().join("README.md"),
+            "# Probe\n\nA coding-agent runtime.\n",
+        )
+        .expect("write readme");
+
+        let mut analysis_profile = psionic_qwen35_2b_q8_long_context();
+        analysis_profile.base_url = format!("http://{address}/v1");
+        let tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Auto, false)
+            .with_long_context(ToolLongContextConfig {
+                profile: analysis_profile.clone(),
+                max_calls: 1,
+                max_evidence_files: 6,
+                max_lines_per_file: 120,
+            });
+        let context = ToolExecutionContext::new(tempdir.path()).with_long_context(
+            ToolLongContextContext::new(analysis_profile, 1, 0, 6, 120, 280, 1, 1, 3, false, 1),
+        );
+        let results = tool_loop.registry.execute_batch(
+            &context,
+            &[ChatToolCall {
+                id: String::from("call_repo_analysis"),
+                kind: String::from("function"),
+                function: ChatToolCallFunction {
+                    name: String::from("analyze_repository"),
+                    arguments: String::from(
+                        "{\"task_kind\":\"repo_analysis\",\"question\":\"Summarize the repo structure.\",\"evidence_paths\":[\"src/main.rs\",\"README.md\"]}",
+                    ),
+                },
+            }],
+            &ToolApprovalConfig::conservative(),
+        );
+
+        assert_eq!(
+            results[0].tool_execution.policy_decision,
+            ToolPolicyDecision::AutoAllow
+        );
+        assert!(
+            results[0].output["analysis"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Rust workspace")
+        );
+        assert_eq!(results[0].output["calls_used_after"], 1);
+        let evidence = results[0].output["evidence"]
+            .as_array()
+            .expect("evidence array");
+        assert_eq!(evidence.len(), 2);
+        assert_eq!(evidence[0]["path"], "src/main.rs");
+        assert_eq!(evidence[1]["path"], "README.md");
+
+        handle.join().expect("analysis server should exit cleanly");
+    }
+
+    #[test]
+    fn coding_bootstrap_refuses_repo_analysis_without_enough_evidence() {
+        let tempdir = tempdir().expect("tempdir");
+        let tool_loop =
+            ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Auto, false).with_long_context(
+                ToolLongContextConfig::bounded(psionic_qwen35_2b_q8_long_context(), 1),
+            );
+        let context = ToolExecutionContext::new(tempdir.path()).with_long_context(
+            ToolLongContextContext::new(
+                psionic_qwen35_2b_q8_long_context(),
+                1,
+                0,
+                6,
+                120,
+                64,
+                0,
+                0,
+                0,
+                false,
+                0,
+            ),
+        );
+        let results = tool_loop.registry.execute_batch(
+            &context,
+            &[ChatToolCall {
+                id: String::from("call_repo_analysis"),
+                kind: String::from("function"),
+                function: ChatToolCallFunction {
+                    name: String::from("analyze_repository"),
+                    arguments: String::from(
+                        "{\"task_kind\":\"repo_analysis\",\"question\":\"Summarize the repo structure.\",\"evidence_paths\":[\"README.md\"]}",
+                    ),
+                },
+            }],
+            &ToolApprovalConfig::conservative(),
+        );
+
+        assert_eq!(
+            results[0].tool_execution.policy_decision,
+            ToolPolicyDecision::Refused
+        );
+        assert!(
+            results[0]
+                .tool_execution
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("repository structure")
+        );
     }
 
     #[test]

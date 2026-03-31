@@ -31,6 +31,8 @@ first real built-in coding tools:
 - `apply_patch`
 - `consult_oracle`
   - only when an auxiliary oracle profile is configured
+- `analyze_repository`
+  - only when an auxiliary long-context profile is configured
 
 The retained `weather` tool set remains available as a tiny regression fixture.
 
@@ -53,11 +55,16 @@ bytes returned, and touched paths when known.
 
 Above that runtime lane, Probe now has a narrow Rust-native decision-module
 crate for offline module evaluation. The first module families are
-`ToolRoute` and `PatchReadiness`.
+`ToolRoute`, `PatchReadiness`, and `LongContextEscalation`.
 
 Probe also now supports a bounded auxiliary oracle lane through a typed
 `consult_oracle` tool. Oracle calls stay inside the main controller loop as
 tool invocations rather than becoming a second controller.
+
+Probe also now supports a bounded long-context repo-analysis lane through a
+typed `analyze_repository` tool. This path is opt-in, budgeted, and only
+allowed for explicit repo-analysis tasks once the session has enough evidence
+or obvious context pressure.
 
 Probe can either attach to an already-running local backend or launch
 `psionic-openai-server` as a supervised child process. It also records basic
@@ -187,6 +194,18 @@ cargo run -p probe-cli -- exec \
   --oracle-profile psionic-qwen35-2b-q8-oracle \
   --oracle-max-calls 1 \
   "Ask the oracle for a checking recommendation before editing."
+```
+
+Long-context repo-analysis session:
+
+```bash
+cargo run -p probe-cli -- exec \
+  --tool-set coding_bootstrap \
+  --long-context-profile psionic-qwen35-2b-q8-long-context \
+  --long-context-max-calls 1 \
+  --long-context-max-evidence-files 6 \
+  --long-context-max-lines-per-file 160 \
+  "If this turns into a repo-analysis task, use analyze_repository with explicit evidence paths."
 ```
 
 Explicit attach mode:

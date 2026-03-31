@@ -9,8 +9,8 @@ use std::time::Duration;
 use acceptance::{AcceptanceHarnessConfig, default_report_path, run_acceptance_harness};
 use clap::{Parser, Subcommand};
 use probe_core::backend_profiles::{
-    PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
-    named_backend_profile,
+    PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE, PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE,
+    PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE, named_backend_profile,
 };
 use probe_core::dataset_export::{
     DatasetExportConfig, DatasetKind, DecisionSessionSummary, export_dataset,
@@ -24,12 +24,13 @@ use probe_core::server_control::{
     PsionicServerConfig, PsionicServerMode, ServerConfigOverrides, ServerProcessGuard,
 };
 use probe_core::tools::{
-    ExecutedToolCall, ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig,
-    ToolOracleConfig,
+    ExecutedToolCall, ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLongContextConfig,
+    ToolLoopConfig, ToolOracleConfig,
 };
 use probe_decisions::{
-    AggressiveToolRouteModule, HeuristicPatchReadinessModule, HeuristicToolRouteModule,
-    StrictPatchReadinessModule, evaluate_patch_readiness_module, evaluate_tool_route_module,
+    AggressiveToolRouteModule, HeuristicLongContextEscalationModule, HeuristicPatchReadinessModule,
+    HeuristicToolRouteModule, StrictPatchReadinessModule, evaluate_long_context_module,
+    evaluate_patch_readiness_module, evaluate_tool_route_module,
 };
 use probe_optimizer::{
     CandidateComparisonReport, OptimizationScorecard, OptimizationTargetKind, PromotionRule,
@@ -91,6 +92,14 @@ struct ExecArgs {
     oracle_profile: Option<String>,
     #[arg(long, default_value_t = 1)]
     oracle_max_calls: usize,
+    #[arg(long)]
+    long_context_profile: Option<String>,
+    #[arg(long, default_value_t = 1)]
+    long_context_max_calls: usize,
+    #[arg(long, default_value_t = 6)]
+    long_context_max_evidence_files: usize,
+    #[arg(long, default_value_t = 160)]
+    long_context_max_lines_per_file: u64,
     #[command(flatten)]
     server: ServerArgs,
     #[arg(required = true)]
@@ -131,6 +140,14 @@ struct ChatArgs {
     oracle_profile: Option<String>,
     #[arg(long, default_value_t = 1)]
     oracle_max_calls: usize,
+    #[arg(long)]
+    long_context_profile: Option<String>,
+    #[arg(long, default_value_t = 1)]
+    long_context_max_calls: usize,
+    #[arg(long, default_value_t = 6)]
+    long_context_max_evidence_files: usize,
+    #[arg(long, default_value_t = 160)]
+    long_context_max_lines_per_file: u64,
     #[command(flatten)]
     server: ServerArgs,
 }
@@ -262,6 +279,15 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
         args.oracle_max_calls,
         &server_guard,
     )?;
+    let tool_loop = attach_long_context_config(
+        tool_loop,
+        args.tool_set.as_deref(),
+        args.long_context_profile.as_deref(),
+        args.long_context_max_calls,
+        args.long_context_max_evidence_files,
+        args.long_context_max_lines_per_file,
+        &server_guard,
+    )?;
     let (system_prompt, harness_profile) = resolve_prompt_config(
         args.tool_set.as_deref(),
         args.harness_profile.as_deref(),
@@ -303,6 +329,15 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
         eprintln!(
             "oracle_profile={} oracle_max_calls={}",
             oracle_profile, args.oracle_max_calls
+        );
+    }
+    if let Some(long_context_profile) = args.long_context_profile.as_deref() {
+        eprintln!(
+            "long_context_profile={} long_context_max_calls={} long_context_max_evidence_files={} long_context_max_lines_per_file={}",
+            long_context_profile,
+            args.long_context_max_calls,
+            args.long_context_max_evidence_files,
+            args.long_context_max_lines_per_file,
         );
     }
     print_turn_observability(&outcome.turn);
@@ -349,6 +384,15 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
         args.tool_set.as_deref(),
         args.oracle_profile.as_deref(),
         args.oracle_max_calls,
+        &server_guard,
+    )?;
+    let tool_loop = attach_long_context_config(
+        tool_loop,
+        args.tool_set.as_deref(),
+        args.long_context_profile.as_deref(),
+        args.long_context_max_calls,
+        args.long_context_max_evidence_files,
+        args.long_context_max_lines_per_file,
         &server_guard,
     )?;
     let cwd = args
@@ -406,6 +450,15 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
             eprintln!(
                 "oracle_profile={} oracle_max_calls={}",
                 oracle_profile, args.oracle_max_calls
+            );
+        }
+        if let Some(long_context_profile) = args.long_context_profile.as_deref() {
+            eprintln!(
+                "long_context_profile={} long_context_max_calls={} long_context_max_evidence_files={} long_context_max_lines_per_file={}",
+                long_context_profile,
+                args.long_context_max_calls,
+                args.long_context_max_evidence_files,
+                args.long_context_max_lines_per_file,
             );
         }
     }
@@ -586,6 +639,8 @@ fn run_module_eval(args: ModuleEvalArgs) -> Result<(), String> {
     let tool_route = evaluate_tool_route_module(&summaries, &HeuristicToolRouteModule);
     let patch_readiness =
         evaluate_patch_readiness_module(&summaries, &HeuristicPatchReadinessModule);
+    let long_context =
+        evaluate_long_context_module(&summaries, &HeuristicLongContextEscalationModule);
     eprintln!(
         "module={} matched={} total={}",
         tool_route.module_id, tool_route.matched_cases, tool_route.total_cases
@@ -594,20 +649,21 @@ fn run_module_eval(args: ModuleEvalArgs) -> Result<(), String> {
         "module={} matched={} total={}",
         patch_readiness.module_id, patch_readiness.matched_cases, patch_readiness.total_cases
     );
+    eprintln!(
+        "module={} matched={} total={}",
+        long_context.module_id, long_context.matched_cases, long_context.total_cases
+    );
     Ok(())
 }
 
 fn run_optimize_modules(args: OptimizeModulesArgs) -> Result<(), String> {
     let summaries = read_decision_dataset(args.dataset.as_path())?;
     let rule = PromotionRule::gepa_default();
-    let tool_route_baseline =
-        evaluate_tool_route_module(&summaries, &HeuristicToolRouteModule);
-    let tool_route_candidate =
-        evaluate_tool_route_module(&summaries, &AggressiveToolRouteModule);
+    let tool_route_baseline = evaluate_tool_route_module(&summaries, &HeuristicToolRouteModule);
+    let tool_route_candidate = evaluate_tool_route_module(&summaries, &AggressiveToolRouteModule);
     let patch_baseline =
         evaluate_patch_readiness_module(&summaries, &HeuristicPatchReadinessModule);
-    let patch_candidate =
-        evaluate_patch_readiness_module(&summaries, &StrictPatchReadinessModule);
+    let patch_candidate = evaluate_patch_readiness_module(&summaries, &StrictPatchReadinessModule);
 
     let reports = vec![
         compare_candidate(
@@ -711,11 +767,7 @@ fn optimization_scorecard_from_acceptance(
         .flat_map(|case| case.attempts.iter())
         .filter(|attempt| attempt.passed)
         .count();
-    let correctness_denominator = report
-        .results
-        .iter()
-        .map(|case| case.attempts.len())
-        .sum();
+    let correctness_denominator = report.results.iter().map(|case| case.attempts.len()).sum();
     let mut wallclocks = report
         .results
         .iter()
@@ -877,6 +929,51 @@ fn attach_oracle_config(
     Ok(Some(tool_loop.with_oracle(oracle)))
 }
 
+fn attach_long_context_config(
+    tool_loop: Option<ToolLoopConfig>,
+    tool_set: Option<&str>,
+    long_context_profile: Option<&str>,
+    long_context_max_calls: usize,
+    long_context_max_evidence_files: usize,
+    long_context_max_lines_per_file: u64,
+    server_guard: &ServerProcessGuard,
+) -> Result<Option<ToolLoopConfig>, String> {
+    let Some(long_context_profile) = long_context_profile else {
+        return Ok(tool_loop);
+    };
+    if tool_set != Some("coding_bootstrap") {
+        return Err(String::from(
+            "long-context flags are only available for the `coding_bootstrap` tool set",
+        ));
+    }
+    if long_context_max_calls == 0 {
+        return Err(String::from("long_context_max_calls must be at least 1"));
+    }
+    if long_context_max_evidence_files == 0 {
+        return Err(String::from(
+            "long_context_max_evidence_files must be at least 1",
+        ));
+    }
+    if long_context_max_lines_per_file == 0 {
+        return Err(String::from(
+            "long_context_max_lines_per_file must be at least 1",
+        ));
+    }
+    let Some(tool_loop) = tool_loop else {
+        return Err(String::from(
+            "long-context configuration requires --tool-set coding_bootstrap",
+        ));
+    };
+    let long_context = resolve_long_context_config(
+        long_context_profile,
+        long_context_max_calls,
+        long_context_max_evidence_files,
+        long_context_max_lines_per_file,
+        server_guard,
+    )?;
+    Ok(Some(tool_loop.with_long_context(long_context)))
+}
+
 fn resolve_oracle_config(
     profile_name: &str,
     max_calls: usize,
@@ -893,6 +990,28 @@ fn resolve_oracle_config(
         }
     }
     Ok(ToolOracleConfig { profile, max_calls })
+}
+
+fn resolve_long_context_config(
+    profile_name: &str,
+    max_calls: usize,
+    max_evidence_files: usize,
+    max_lines_per_file: u64,
+    server_guard: &ServerProcessGuard,
+) -> Result<ToolLongContextConfig, String> {
+    let mut config = ToolLongContextConfig::bounded(named_profile(profile_name)?, max_calls);
+    if matches!(
+        profile_name,
+        PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE | PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE
+    ) {
+        config.profile.base_url = server_guard.base_url();
+        if let Some(model_id) = server_guard.model_id() {
+            config.profile.model = model_id;
+        }
+    }
+    config.max_evidence_files = max_evidence_files;
+    config.max_lines_per_file = max_lines_per_file;
+    Ok(config)
 }
 
 fn print_tool_policy_summary(tool_results: &[ExecutedToolCall]) {

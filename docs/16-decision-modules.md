@@ -32,6 +32,9 @@ The first shipped module families are:
   - ranks or selects the next tool family to use
 - `PatchReadiness`
   - decides whether the session has enough evidence to justify editing
+- `LongContextEscalation`
+  - decides whether a bounded repo-analysis escalation is justified or whether
+    the session should stay on the normal coding lane
 
 Both modules currently ship as simple heuristic baselines rather than learned
 artifacts.
@@ -62,6 +65,7 @@ The current CLI prints simple scorecards for:
 
 - `heuristic_tool_route_v1`
 - `heuristic_patch_readiness_v1`
+- `heuristic_long_context_escalation_v1`
 
 ## Why This Matters
 
@@ -73,6 +77,7 @@ Probe should optimize:
 - patch readiness
 - verification planning
 - later oracle escalation
+- later long-context escalation thresholds and evidence gating
 
 Probe should not optimize by turning:
 

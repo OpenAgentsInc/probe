@@ -69,6 +69,9 @@ Each JSONL record currently includes fields such as:
 - `verification_caught_problem`
 - `too_many_turns`
 - auto-allowed, approved, refused, and paused tool-call counts
+- `oracle_calls`
+- `long_context_calls`
+- `repo_analysis_files`
 - likely-warm turn count
 - cache-reuse latency and throughput improvement booleans
 - final assistant text when present
