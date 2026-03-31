@@ -12,3 +12,6 @@ This folder holds technical planning docs for the Probe runtime.
     from the backend substrate
 - `03-workspace-map.md`
   - initial crate map for the Probe Rust workspace
+- `04-session-turn-item-and-transcript-model.md`
+  - the first durable local truth model for sessions, turns, items, and
+    append-only transcript storage

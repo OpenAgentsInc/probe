@@ -1,3 +1,5 @@
+pub mod session_store;
+
 use probe_protocol::ProtocolDescriptor;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,6 +19,7 @@ pub fn runtime_bootstrap() -> RuntimeBootstrap {
 #[cfg(test)]
 mod tests {
     use super::runtime_bootstrap;
+    use crate::session_store::FilesystemSessionStore;
 
     #[test]
     fn bootstrap_mentions_all_initial_crates() {
@@ -24,5 +27,11 @@ mod tests {
         assert_eq!(bootstrap.protocol.version, 1);
         assert_eq!(bootstrap.crate_boundaries.len(), 4);
         assert!(bootstrap.crate_boundaries.contains(&"probe-cli"));
+    }
+
+    #[test]
+    fn filesystem_session_store_is_constructible() {
+        let store = FilesystemSessionStore::new("/tmp/probe-test");
+        assert!(store.root().ends_with("probe-test"));
     }
 }

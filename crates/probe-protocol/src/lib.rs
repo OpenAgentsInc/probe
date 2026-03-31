@@ -1,3 +1,5 @@
+pub mod session;
+
 pub const PROBE_PROTOCOL_VERSION: u32 = 1;
 pub const PROBE_RUNTIME_NAME: &str = "probe";
 
@@ -20,11 +22,22 @@ impl ProtocolDescriptor {
 #[cfg(test)]
 mod tests {
     use super::ProtocolDescriptor;
+    use super::session::{SessionId, SessionState, TurnId};
 
     #[test]
     fn current_descriptor_is_stable() {
         let descriptor = ProtocolDescriptor::current();
         assert_eq!(descriptor.runtime_name, "probe");
         assert_eq!(descriptor.version, 1);
+    }
+
+    #[test]
+    fn session_types_are_constructible() {
+        let session_id = SessionId::new("session-1");
+        let turn_id = TurnId(0);
+        let state = SessionState::Active;
+        assert_eq!(session_id.as_str(), "session-1");
+        assert_eq!(turn_id.0, 0);
+        assert!(matches!(state, SessionState::Active));
     }
 }
