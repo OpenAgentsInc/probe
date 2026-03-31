@@ -6,11 +6,15 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use acceptance::{AcceptanceHarnessConfig, default_report_path, run_acceptance_harness};
+use acceptance::{
+    AcceptanceComparisonConfig, AcceptanceHarnessConfig, default_comparison_report_path,
+    default_report_path, run_acceptance_comparison, run_acceptance_harness,
+};
 use clap::{Parser, Subcommand};
 use probe_core::backend_profiles::{
-    PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE, PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE,
-    PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE, named_backend_profile,
+    PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE,
+    PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
+    named_backend_profile,
 };
 use probe_core::dataset_export::{
     DatasetExportConfig, DatasetKind, DecisionSessionSummary, export_dataset,
@@ -56,6 +60,7 @@ enum Commands {
     Exec(ExecArgs),
     Chat(ChatArgs),
     Accept(AcceptArgs),
+    AcceptCompare(AcceptCompareArgs),
     Export(ExportArgs),
     ModuleEval(ModuleEvalArgs),
     OptimizeModules(OptimizeModulesArgs),
@@ -156,6 +161,8 @@ struct ChatArgs {
 
 #[derive(clap::Args, Debug)]
 struct AcceptArgs {
+    #[arg(long, default_value = PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE)]
+    profile: String,
     #[arg(long)]
     base_url: Option<String>,
     #[arg(long)]
@@ -166,6 +173,26 @@ struct AcceptArgs {
     report_path: Option<PathBuf>,
     #[command(flatten)]
     server: ServerArgs,
+}
+
+#[derive(clap::Args, Debug)]
+struct AcceptCompareArgs {
+    #[arg(long, default_value = PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE)]
+    qwen_profile: String,
+    #[arg(long, default_value = PSIONIC_APPLE_FM_BRIDGE_PROFILE)]
+    apple_profile: String,
+    #[arg(long)]
+    qwen_base_url: Option<String>,
+    #[arg(long)]
+    qwen_model: Option<String>,
+    #[arg(long)]
+    apple_base_url: Option<String>,
+    #[arg(long)]
+    apple_model: Option<String>,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[arg(long)]
+    report_path: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -244,6 +271,7 @@ fn run() -> Result<(), String> {
         Commands::Exec(args) => run_exec(args),
         Commands::Chat(args) => run_chat(args),
         Commands::Accept(args) => run_accept(args),
+        Commands::AcceptCompare(args) => run_accept_compare(args),
         Commands::Export(args) => run_export(args),
         Commands::ModuleEval(args) => run_module_eval(args),
         Commands::OptimizeModules(args) => run_optimize_modules(args),
@@ -562,12 +590,8 @@ fn run_accept(args: AcceptArgs) -> Result<(), String> {
     let probe_home = args
         .probe_home
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
-    let server_guard = prepare_server(
-        probe_home.as_path(),
-        &args.server,
-        BackendKind::OpenAiChatCompletions,
-    )?;
-    let mut profile = named_profile(PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE)?;
+    let mut profile = named_profile(args.profile.as_str())?;
+    let server_guard = prepare_server(probe_home.as_path(), &args.server, profile.kind)?;
     profile.base_url = server_guard.base_url();
     if let Some(model_id) = server_guard.model_id() {
         profile.model = model_id;
@@ -633,6 +657,73 @@ fn run_accept(args: AcceptArgs) -> Result<(), String> {
     } else {
         Err(format!(
             "one or more acceptance cases failed; see {}",
+            report_path.display()
+        ))
+    }
+}
+
+fn run_accept_compare(args: AcceptCompareArgs) -> Result<(), String> {
+    let probe_home = args
+        .probe_home
+        .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
+    let mut qwen_profile = named_profile(args.qwen_profile.as_str())?;
+    let mut apple_profile = named_profile(args.apple_profile.as_str())?;
+    if qwen_profile.kind != BackendKind::OpenAiChatCompletions {
+        return Err(String::from(
+            "`accept-compare` requires an OpenAI-compatible Qwen profile for `--qwen-profile`",
+        ));
+    }
+    if apple_profile.kind != BackendKind::AppleFmBridge {
+        return Err(String::from(
+            "`accept-compare` requires an Apple FM bridge profile for `--apple-profile`",
+        ));
+    }
+    if let Some(base_url) = args.qwen_base_url {
+        qwen_profile.base_url = base_url;
+    }
+    if let Some(model) = args.qwen_model {
+        qwen_profile.model = model;
+    }
+    if let Some(base_url) = args.apple_base_url {
+        apple_profile.base_url = base_url;
+    }
+    if let Some(model) = args.apple_model {
+        apple_profile.model = model;
+    }
+    let report_path = args
+        .report_path
+        .unwrap_or_else(|| default_comparison_report_path(probe_home.as_path()));
+    let report = run_acceptance_comparison(AcceptanceComparisonConfig {
+        probe_home,
+        report_path: report_path.clone(),
+        qwen_profile,
+        apple_fm_profile: apple_profile,
+    })?;
+
+    eprintln!(
+        "acceptance_compare run_id={} report={} comparable_cases={}/{} qwen_report={} apple_report={}",
+        report.run.run_id,
+        report_path.display(),
+        report.counts.comparable_passed_cases,
+        report.counts.comparable_cases,
+        report.qwen_report_path.display(),
+        report.apple_fm_report_path.display(),
+    );
+    for case in &report.cases {
+        eprintln!(
+            "case={} status={} qwen_status={} apple_status={}",
+            case.case_name,
+            render_acceptance_comparison_status(case.status),
+            render_acceptance_comparison_backend_case_status(case.qwen.status),
+            render_acceptance_comparison_backend_case_status(case.apple_fm.status),
+        );
+    }
+
+    if report.counts.comparable_failed_cases == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "acceptance comparison reported comparable failures; see {}",
             report_path.display()
         ))
     }
@@ -1267,6 +1358,26 @@ fn render_acceptance_failure_category(
         acceptance::AcceptanceFailureCategory::VerificationFailure => "verification_failure",
         acceptance::AcceptanceFailureCategory::ConfigurationFailure => "configuration_failure",
         acceptance::AcceptanceFailureCategory::UnknownFailure => "unknown_failure",
+    }
+}
+
+fn render_acceptance_comparison_status(
+    status: acceptance::AcceptanceComparisonStatus,
+) -> &'static str {
+    match status {
+        acceptance::AcceptanceComparisonStatus::ComparablePass => "comparable_pass",
+        acceptance::AcceptanceComparisonStatus::ComparableFail => "comparable_fail",
+        acceptance::AcceptanceComparisonStatus::Unsupported => "unsupported",
+    }
+}
+
+fn render_acceptance_comparison_backend_case_status(
+    status: acceptance::AcceptanceComparisonBackendCaseStatus,
+) -> &'static str {
+    match status {
+        acceptance::AcceptanceComparisonBackendCaseStatus::Passed => "passed",
+        acceptance::AcceptanceComparisonBackendCaseStatus::Failed => "failed",
+        acceptance::AcceptanceComparisonBackendCaseStatus::Unsupported => "unsupported",
     }
 }
 

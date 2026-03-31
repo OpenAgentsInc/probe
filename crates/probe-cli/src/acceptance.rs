@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -6,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use probe_core::harness::resolve_harness_profile;
 use probe_core::runtime::{PlainTextExecOutcome, PlainTextExecRequest, ProbeRuntime, RuntimeError};
 use probe_core::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig};
-use probe_protocol::backend::BackendProfile;
+use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_protocol::session::{
     BackendTurnReceipt, CacheSignal, SessionMetadata, ToolPolicyDecision, TranscriptEvent,
     TranscriptItemKind, TurnObservability, UsageMeasurement,
@@ -15,15 +16,32 @@ use serde::{Deserialize, Serialize};
 
 const ACCEPTANCE_REPEAT_RUNS: usize = 2;
 const ACCEPTANCE_REPORT_SCHEMA_VERSION: &str = "v3";
+const ACCEPTANCE_COMPARISON_REPORT_SCHEMA_VERSION: &str = "v1";
 const ACCEPTANCE_TOOL_SET: &str = "coding_bootstrap";
 const ACCEPTANCE_HARNESS_PROFILE_NAME: &str = "coding_bootstrap_default";
 const ACCEPTANCE_HARNESS_PROFILE_VERSION: &str = "v1";
+const ACCEPTANCE_CASE_NAMES: [&str; 6] = [
+    "read_file_answer",
+    "list_then_read",
+    "search_then_read",
+    "shell_then_summarize",
+    "patch_then_verify",
+    "approval_pause_or_refusal",
+];
 
 #[derive(Clone, Debug)]
 pub struct AcceptanceHarnessConfig {
     pub probe_home: PathBuf,
     pub report_path: PathBuf,
     pub base_profile: BackendProfile,
+}
+
+#[derive(Clone, Debug)]
+pub struct AcceptanceComparisonConfig {
+    pub probe_home: PathBuf,
+    pub report_path: PathBuf,
+    pub qwen_profile: BackendProfile,
+    pub apple_fm_profile: BackendProfile,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -37,6 +55,21 @@ pub struct AcceptanceRunReport {
     pub overall_pass: bool,
     pub counts: AcceptanceRunCounts,
     pub results: Vec<AcceptanceCaseReport>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcceptanceComparisonReport {
+    pub run: AcceptanceRunIdentity,
+    pub qwen_backend: AcceptanceBackendSummary,
+    pub apple_fm_backend: AcceptanceBackendSummary,
+    pub harness: AcceptanceHarnessSummary,
+    pub started_at_ms: u64,
+    pub finished_at_ms: u64,
+    pub duration_ms: u64,
+    pub counts: AcceptanceComparisonCounts,
+    pub qwen_report_path: PathBuf,
+    pub apple_fm_report_path: PathBuf,
+    pub cases: Vec<AcceptanceComparisonCaseReport>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,6 +104,15 @@ pub struct AcceptanceRunCounts {
     pub total_attempts: usize,
     pub passed_attempts: usize,
     pub failed_attempts: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcceptanceComparisonCounts {
+    pub total_cases: usize,
+    pub comparable_cases: usize,
+    pub comparable_passed_cases: usize,
+    pub comparable_failed_cases: usize,
+    pub unsupported_backend_results: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -113,6 +155,14 @@ pub struct AcceptanceCaseReport {
     pub failure_category: Option<AcceptanceFailureCategory>,
     pub error: Option<String>,
     pub attempts: Vec<AcceptanceAttemptReport>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcceptanceComparisonCaseReport {
+    pub case_name: String,
+    pub status: AcceptanceComparisonStatus,
+    pub qwen: AcceptanceComparisonBackendCaseReport,
+    pub apple_fm: AcceptanceComparisonBackendCaseReport,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -177,6 +227,16 @@ pub struct AcceptanceBackendReceiptSummary {
     pub transcript_payload_bytes: Option<usize>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcceptanceComparisonBackendCaseReport {
+    pub backend_profile_name: String,
+    pub status: AcceptanceComparisonBackendCaseStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case: Option<AcceptanceCaseReport>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AcceptanceFailureCategory {
@@ -187,6 +247,27 @@ pub enum AcceptanceFailureCategory {
     VerificationFailure,
     ConfigurationFailure,
     UnknownFailure,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptanceComparisonBackendCaseStatus {
+    Passed,
+    Failed,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptanceComparisonStatus {
+    ComparablePass,
+    ComparableFail,
+    Unsupported,
+}
+
+#[derive(Clone, Debug)]
+struct AcceptanceCaseSupport {
+    unsupported_reason: Option<String>,
 }
 
 #[derive(Debug)]
@@ -204,8 +285,49 @@ impl std::fmt::Display for AcceptanceExecutionError {
     }
 }
 
+impl AcceptanceCaseSupport {
+    fn supported() -> Self {
+        Self {
+            unsupported_reason: None,
+        }
+    }
+
+    fn unsupported(reason: impl Into<String>) -> Self {
+        Self {
+            unsupported_reason: Some(reason.into()),
+        }
+    }
+
+    fn is_supported(&self) -> bool {
+        self.unsupported_reason.is_none()
+    }
+}
+
 pub fn run_acceptance_harness(
     config: AcceptanceHarnessConfig,
+) -> Result<AcceptanceRunReport, String> {
+    run_acceptance_harness_for_case_names(config, retained_acceptance_case_names())
+}
+
+pub fn run_acceptance_comparison(
+    config: AcceptanceComparisonConfig,
+) -> Result<AcceptanceComparisonReport, String> {
+    run_acceptance_comparison_for_case_names(config, retained_acceptance_case_names())
+}
+
+pub fn default_comparison_report_path(probe_home: &Path) -> PathBuf {
+    probe_home
+        .join("reports")
+        .join(format!("probe_acceptance_compare_{}.json", now_ms()))
+}
+
+fn retained_acceptance_case_names() -> &'static [&'static str] {
+    &ACCEPTANCE_CASE_NAMES
+}
+
+fn run_acceptance_harness_for_case_names(
+    config: AcceptanceHarnessConfig,
+    case_names: &[&str],
 ) -> Result<AcceptanceRunReport, String> {
     let started_at_ms = now_ms();
     fs::create_dir_all(config.probe_home.as_path()).map_err(|error| error.to_string())?;
@@ -214,18 +336,17 @@ pub fn run_acceptance_harness(
     }
 
     let runtime = ProbeRuntime::new(config.probe_home.clone());
-    let mut results = vec![
-        run_case_read_file_answer(&runtime, &config.base_profile, config.probe_home.as_path()),
-        run_case_list_then_read(&runtime, &config.base_profile, config.probe_home.as_path()),
-        run_case_search_then_read(&runtime, &config.base_profile, config.probe_home.as_path()),
-        run_case_shell_then_summarize(&runtime, &config.base_profile, config.probe_home.as_path()),
-        run_case_patch_then_verify(&runtime, &config.base_profile, config.probe_home.as_path()),
-        run_case_approval_pause_or_refusal(
-            &runtime,
-            &config.base_profile,
-            config.probe_home.as_path(),
-        ),
-    ];
+    let mut results = case_names
+        .iter()
+        .map(|case_name| {
+            run_named_case(
+                case_name,
+                &runtime,
+                &config.base_profile,
+                config.probe_home.as_path(),
+            )
+        })
+        .collect::<Vec<_>>();
     for (case_index, result) in results.iter_mut().enumerate() {
         result.case_index = case_index;
     }
@@ -267,10 +388,150 @@ pub fn run_acceptance_harness(
     Ok(report)
 }
 
+fn run_acceptance_comparison_for_case_names(
+    config: AcceptanceComparisonConfig,
+    case_names: &[&str],
+) -> Result<AcceptanceComparisonReport, String> {
+    let started_at_ms = now_ms();
+    fs::create_dir_all(config.probe_home.as_path()).map_err(|error| error.to_string())?;
+    if let Some(parent) = config.report_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let run_id = format!(
+        "acceptance_compare_{}_{}",
+        started_at_ms,
+        std::process::id()
+    );
+    let comparison_root = config
+        .probe_home
+        .join("comparison_runs")
+        .join(run_id.as_str());
+    let qwen_probe_home = comparison_root.join("qwen_probe_home");
+    let apple_probe_home = comparison_root.join("apple_fm_probe_home");
+    let qwen_report_path = comparison_root.join("qwen_acceptance.json");
+    let apple_report_path = comparison_root.join("apple_fm_acceptance.json");
+    let qwen_case_names = case_names
+        .iter()
+        .copied()
+        .filter(|case_name| {
+            comparison_case_support(*case_name, config.qwen_profile.kind).is_supported()
+        })
+        .collect::<Vec<_>>();
+    let apple_case_names = case_names
+        .iter()
+        .copied()
+        .filter(|case_name| {
+            comparison_case_support(*case_name, config.apple_fm_profile.kind).is_supported()
+        })
+        .collect::<Vec<_>>();
+
+    let qwen_report = run_acceptance_harness_for_case_names(
+        AcceptanceHarnessConfig {
+            probe_home: qwen_probe_home,
+            report_path: qwen_report_path.clone(),
+            base_profile: config.qwen_profile.clone(),
+        },
+        qwen_case_names.as_slice(),
+    )?;
+    let apple_report = run_acceptance_harness_for_case_names(
+        AcceptanceHarnessConfig {
+            probe_home: apple_probe_home,
+            report_path: apple_report_path.clone(),
+            base_profile: config.apple_fm_profile.clone(),
+        },
+        apple_case_names.as_slice(),
+    )?;
+    let qwen_cases = qwen_report
+        .results
+        .iter()
+        .map(|case| (case.case_name.clone(), case.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let apple_cases = apple_report
+        .results
+        .iter()
+        .map(|case| (case.case_name.clone(), case.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    let cases = case_names
+        .iter()
+        .map(|case_name| {
+            let qwen = comparison_backend_case_report(
+                case_name,
+                &config.qwen_profile,
+                qwen_cases.get(*case_name).cloned(),
+            );
+            let apple_fm = comparison_backend_case_report(
+                case_name,
+                &config.apple_fm_profile,
+                apple_cases.get(*case_name).cloned(),
+            );
+            let status = comparison_case_status(&qwen, &apple_fm);
+            AcceptanceComparisonCaseReport {
+                case_name: (*case_name).to_string(),
+                status,
+                qwen,
+                apple_fm,
+            }
+        })
+        .collect::<Vec<_>>();
+    let finished_at_ms = now_ms();
+    let counts = build_comparison_counts(cases.as_slice());
+    let git_state = current_probe_git_state();
+    let report = AcceptanceComparisonReport {
+        run: AcceptanceRunIdentity {
+            run_id: run_id.clone(),
+            schema_version: String::from(ACCEPTANCE_COMPARISON_REPORT_SCHEMA_VERSION),
+            probe_version: String::from(env!("CARGO_PKG_VERSION")),
+            git_commit_sha: git_state.git_commit_sha,
+            git_dirty: git_state.git_dirty,
+        },
+        qwen_backend: AcceptanceBackendSummary {
+            profile_name: qwen_report.backend.profile_name.clone(),
+            base_url: qwen_report.backend.base_url.clone(),
+            model: qwen_report.backend.model.clone(),
+        },
+        apple_fm_backend: AcceptanceBackendSummary {
+            profile_name: apple_report.backend.profile_name.clone(),
+            base_url: apple_report.backend.base_url.clone(),
+            model: apple_report.backend.model.clone(),
+        },
+        harness: qwen_report.harness.clone(),
+        started_at_ms,
+        finished_at_ms,
+        duration_ms: finished_at_ms.saturating_sub(started_at_ms),
+        counts,
+        qwen_report_path,
+        apple_fm_report_path: apple_report_path,
+        cases,
+    };
+    let report_json =
+        serde_json::to_string_pretty(&report).map_err(|error| format!("json error: {error}"))?;
+    fs::write(config.report_path, report_json).map_err(|error| error.to_string())?;
+    Ok(report)
+}
+
 pub fn default_report_path(probe_home: &Path) -> PathBuf {
     probe_home
         .join("reports")
         .join(format!("probe_acceptance_{}.json", now_ms()))
+}
+
+fn comparison_case_support(case_name: &str, backend_kind: BackendKind) -> AcceptanceCaseSupport {
+    match (case_name, backend_kind) {
+        (
+            "read_file_answer"
+            | "list_then_read"
+            | "search_then_read"
+            | "shell_then_summarize"
+            | "patch_then_verify"
+            | "approval_pause_or_refusal",
+            BackendKind::OpenAiChatCompletions | BackendKind::AppleFmBridge,
+        ) => AcceptanceCaseSupport::supported(),
+        (unknown_case, _) => AcceptanceCaseSupport::unsupported(format!(
+            "case `{unknown_case}` is not part of the retained comparison set"
+        )),
+    }
 }
 
 fn run_case_read_file_answer(
@@ -450,6 +711,25 @@ fn run_case_approval_pause_or_refusal(
                     .unwrap_or(false)
         },
     )
+}
+
+fn run_named_case(
+    case_name: &str,
+    runtime: &ProbeRuntime,
+    base_profile: &BackendProfile,
+    probe_home: &Path,
+) -> AcceptanceCaseReport {
+    match case_name {
+        "read_file_answer" => run_case_read_file_answer(runtime, base_profile, probe_home),
+        "list_then_read" => run_case_list_then_read(runtime, base_profile, probe_home),
+        "search_then_read" => run_case_search_then_read(runtime, base_profile, probe_home),
+        "shell_then_summarize" => run_case_shell_then_summarize(runtime, base_profile, probe_home),
+        "patch_then_verify" => run_case_patch_then_verify(runtime, base_profile, probe_home),
+        "approval_pause_or_refusal" => {
+            run_case_approval_pause_or_refusal(runtime, base_profile, probe_home)
+        }
+        other => panic!("unknown acceptance case `{other}`"),
+    }
 }
 
 fn run_repeated_case<F, G>(
@@ -687,6 +967,87 @@ fn build_run_counts(results: &[AcceptanceCaseReport]) -> AcceptanceRunCounts {
         total_attempts,
         passed_attempts,
         failed_attempts,
+    }
+}
+
+fn comparison_backend_case_report(
+    case_name: &str,
+    profile: &BackendProfile,
+    case: Option<AcceptanceCaseReport>,
+) -> AcceptanceComparisonBackendCaseReport {
+    let support = comparison_case_support(case_name, profile.kind);
+    let status = if !support.is_supported() {
+        AcceptanceComparisonBackendCaseStatus::Unsupported
+    } else if case.as_ref().is_some_and(|case| case.passed) {
+        AcceptanceComparisonBackendCaseStatus::Passed
+    } else {
+        AcceptanceComparisonBackendCaseStatus::Failed
+    };
+    AcceptanceComparisonBackendCaseReport {
+        backend_profile_name: profile.name.clone(),
+        status,
+        unsupported_reason: support.unsupported_reason,
+        case,
+    }
+}
+
+fn comparison_case_status(
+    qwen: &AcceptanceComparisonBackendCaseReport,
+    apple_fm: &AcceptanceComparisonBackendCaseReport,
+) -> AcceptanceComparisonStatus {
+    if matches!(
+        qwen.status,
+        AcceptanceComparisonBackendCaseStatus::Unsupported
+    ) || matches!(
+        apple_fm.status,
+        AcceptanceComparisonBackendCaseStatus::Unsupported
+    ) {
+        AcceptanceComparisonStatus::Unsupported
+    } else if matches!(qwen.status, AcceptanceComparisonBackendCaseStatus::Passed)
+        && matches!(
+            apple_fm.status,
+            AcceptanceComparisonBackendCaseStatus::Passed
+        )
+    {
+        AcceptanceComparisonStatus::ComparablePass
+    } else {
+        AcceptanceComparisonStatus::ComparableFail
+    }
+}
+
+fn build_comparison_counts(cases: &[AcceptanceComparisonCaseReport]) -> AcceptanceComparisonCounts {
+    let total_cases = cases.len();
+    let comparable_cases = cases
+        .iter()
+        .filter(|case| !matches!(case.status, AcceptanceComparisonStatus::Unsupported))
+        .count();
+    let comparable_passed_cases = cases
+        .iter()
+        .filter(|case| matches!(case.status, AcceptanceComparisonStatus::ComparablePass))
+        .count();
+    let comparable_failed_cases = cases
+        .iter()
+        .filter(|case| matches!(case.status, AcceptanceComparisonStatus::ComparableFail))
+        .count();
+    let unsupported_backend_results = cases
+        .iter()
+        .map(|case| {
+            usize::from(matches!(
+                case.qwen.status,
+                AcceptanceComparisonBackendCaseStatus::Unsupported
+            )) + usize::from(matches!(
+                case.apple_fm.status,
+                AcceptanceComparisonBackendCaseStatus::Unsupported
+            ))
+        })
+        .sum();
+
+    AcceptanceComparisonCounts {
+        total_cases,
+        comparable_cases,
+        comparable_passed_cases,
+        comparable_failed_cases,
+        unsupported_backend_results,
     }
 }
 
@@ -977,12 +1338,138 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
     use std::thread;
 
-    use probe_core::backend_profiles::psionic_qwen35_2b_q8_registry;
+    use probe_core::backend_profiles::{psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry};
+    use probe_test_support::{
+        FakeAppleFmServer, FakeHttpRequest, FakeHttpResponse, FakeOpenAiServer,
+    };
+    use serde_json::json;
 
-    use super::{AcceptanceHarnessConfig, default_report_path, run_acceptance_harness};
+    use super::{
+        AcceptanceComparisonBackendCaseStatus, AcceptanceComparisonConfig,
+        AcceptanceComparisonStatus, AcceptanceHarnessConfig, default_comparison_report_path,
+        default_report_path, run_acceptance_comparison_for_case_names, run_acceptance_harness,
+    };
+
+    #[derive(Default)]
+    struct AppleComparisonBridgeState {
+        callback_url: String,
+        session_token: String,
+        next_session_index: usize,
+    }
+
+    struct ToolCallbackResponse {
+        status_code: u16,
+        body: String,
+    }
+
+    fn record_apple_comparison_session(
+        state: &Arc<Mutex<AppleComparisonBridgeState>>,
+        request: &FakeHttpRequest,
+    ) -> FakeHttpResponse {
+        let request_json: serde_json::Value =
+            serde_json::from_str(request.body.as_str()).expect("session create json");
+        let callback_url = request_json["tool_callback"]["url"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let session_token = request_json["tool_callback"]["session_token"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let session_id = {
+            let mut guard = state.lock().expect("apple comparison state lock");
+            guard.callback_url = callback_url;
+            guard.session_token = session_token;
+            guard.next_session_index += 1;
+            format!("sess-apple-compare-{}", guard.next_session_index)
+        };
+        FakeHttpResponse::json_ok(json!({
+            "session": {
+                "id": session_id,
+                "instructions": request_json["instructions"],
+                "model": {
+                    "id": "apple-foundation-model",
+                    "use_case": "general",
+                    "guardrails": "default"
+                },
+                "tools": request_json["tools"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|tool| json!({
+                        "name": tool["name"],
+                        "description": tool["description"]
+                    }))
+                    .collect::<Vec<_>>(),
+                "is_responding": false,
+                "transcript_json": serde_json::to_string(&request_json["transcript"])
+                    .unwrap_or_else(|_| String::from("{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"))
+            }
+        }))
+    }
+
+    fn invoke_tool_callback(
+        state: &Arc<Mutex<AppleComparisonBridgeState>>,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> ToolCallbackResponse {
+        let (callback_url, session_token) = {
+            let guard = state.lock().expect("apple comparison state lock");
+            (guard.callback_url.clone(), guard.session_token.clone())
+        };
+        let url = callback_url
+            .strip_prefix("http://")
+            .expect("callback url should be http");
+        let (authority, path) = url
+            .split_once('/')
+            .expect("callback url should include path");
+        let body = json!({
+            "session_token": session_token,
+            "tool_name": tool_name,
+            "arguments": {
+                "content": arguments,
+                "is_complete": true
+            }
+        })
+        .to_string();
+        let mut stream = TcpStream::connect(authority).expect("connect tool callback");
+        let request = format!(
+            "POST /{} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            path,
+            authority,
+            body.len(),
+            body
+        );
+        stream
+            .write_all(request.as_bytes())
+            .expect("write tool callback request");
+        stream.flush().expect("flush tool callback request");
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("close tool callback request writer");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read tool callback response");
+        let (head, body) = response
+            .split_once("\r\n\r\n")
+            .expect("tool callback response should include body");
+        let status_code = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u16>().ok())
+            .expect("tool callback status code");
+        ToolCallbackResponse {
+            status_code,
+            body: body.to_string(),
+        }
+    }
 
     #[test]
     fn acceptance_harness_writes_report_against_mock_server() {
@@ -1130,5 +1617,130 @@ mod tests {
         assert!(report_path.exists());
 
         handle.join().expect("server thread should exit cleanly");
+    }
+
+    #[test]
+    fn acceptance_comparison_writes_report_against_mock_qwen_and_apple_backends() {
+        let qwen_server = FakeOpenAiServer::from_json_responses(vec![
+            json!({
+                "id": "qwen_read_file_tool_1",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": "call_readme_1", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"README.md\"}"}}]}, "finish_reason": "tool_calls"}]
+            }),
+            json!({
+                "id": "qwen_read_file_final_1",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "READ_FILE_OK"}, "finish_reason": "stop"}]
+            }),
+            json!({
+                "id": "qwen_read_file_tool_2",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": "call_readme_2", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"README.md\"}"}}]}, "finish_reason": "tool_calls"}]
+            }),
+            json!({
+                "id": "qwen_read_file_final_2",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "READ_FILE_OK"}, "finish_reason": "stop"}]
+            }),
+        ]);
+        let apple_state = Arc::new(Mutex::new(AppleComparisonBridgeState::default()));
+        let captured_state = Arc::clone(&apple_state);
+        let apple_server = FakeAppleFmServer::from_handler(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/v1/sessions") => {
+                    record_apple_comparison_session(&captured_state, &request)
+                }
+                ("POST", path) if path.starts_with("/v1/sessions/sess-apple-compare-") => {
+                    let callback_response = invoke_tool_callback(
+                        &captured_state,
+                        "read_file",
+                        json!({
+                            "path": "README.md",
+                            "start_line": 1,
+                            "max_lines": 10
+                        }),
+                    );
+                    assert_eq!(callback_response.status_code, 200);
+                    let callback_json: serde_json::Value =
+                        serde_json::from_str(callback_response.body.as_str())
+                            .expect("callback json");
+                    assert!(
+                        callback_json["output"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .contains("Probe acceptance fixture")
+                    );
+                    FakeHttpResponse::json_ok(json!({
+                        "session": {
+                            "id": path
+                                .trim_start_matches("/v1/sessions/")
+                                .trim_end_matches("/responses"),
+                            "instructions": "coding_bootstrap acceptance harness profile v1",
+                            "model": {
+                                "id": "apple-foundation-model",
+                                "use_case": "general",
+                                "guardrails": "default"
+                            },
+                            "tools": [{"name": "read_file"}],
+                            "is_responding": false,
+                            "transcript_json": "{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"
+                        },
+                        "model": "apple-foundation-model",
+                        "output": "READ_FILE_OK",
+                        "usage": {
+                            "total_tokens_detail": {"value": 11, "truth": "estimated"}
+                        }
+                    }))
+                }
+                ("DELETE", path) if path.starts_with("/v1/sessions/sess-apple-compare-") => {
+                    FakeHttpResponse::json_ok(json!({}))
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+        });
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let probe_home = temp.path().join(".probe");
+        let report_path = default_comparison_report_path(probe_home.as_path());
+        let mut qwen_profile = psionic_qwen35_2b_q8_registry();
+        qwen_profile.base_url = qwen_server.base_url().to_string();
+        let mut apple_profile = psionic_apple_fm_bridge();
+        apple_profile.base_url = apple_server.base_url().to_string();
+
+        let report = run_acceptance_comparison_for_case_names(
+            AcceptanceComparisonConfig {
+                probe_home,
+                report_path: report_path.clone(),
+                qwen_profile,
+                apple_fm_profile: apple_profile,
+            },
+            &["read_file_answer"],
+        )
+        .expect("comparison should succeed");
+
+        assert_eq!(report.run.schema_version, "v1");
+        assert_eq!(report.cases.len(), 1);
+        assert_eq!(report.counts.comparable_cases, 1);
+        assert_eq!(report.counts.comparable_passed_cases, 1);
+        assert_eq!(report.counts.comparable_failed_cases, 0);
+        assert_eq!(
+            report.cases[0].status,
+            AcceptanceComparisonStatus::ComparablePass
+        );
+        assert_eq!(
+            report.cases[0].qwen.status,
+            AcceptanceComparisonBackendCaseStatus::Passed
+        );
+        assert_eq!(
+            report.cases[0].apple_fm.status,
+            AcceptanceComparisonBackendCaseStatus::Passed
+        );
+        assert!(report.qwen_report_path.exists());
+        assert!(report.apple_fm_report_path.exists());
+        assert!(report_path.exists());
+        let qwen_requests = qwen_server.finish();
+        assert_eq!(qwen_requests.len(), 4);
+        let apple_requests = apple_server.finish();
+        assert_eq!(apple_requests.len(), 6);
     }
 }

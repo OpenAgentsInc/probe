@@ -45,6 +45,13 @@ This lane is intentionally separate from `pr-fast` because it depends on a
 reachable backend and produces heavier live receipts. It is the local coding
 acceptance lane, not the fast merge-safe lane.
 
+The Apple FM admitted-Mac paths live here too:
+
+- `cargo run -p probe-cli -- accept --profile psionic-apple-fm-bridge`
+- `cargo run -p probe-cli -- accept-compare`
+
+Those commands are explicit operator lanes, not merge-safe defaults.
+
 ## Tier 4: Offline Eval And Optimization Paths
 
 Use the wrappers for the existing Probe eval commands:

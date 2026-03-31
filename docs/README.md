@@ -80,6 +80,9 @@ This folder holds technical planning docs for the Probe runtime.
   - widened `u64` usage handling, exact-versus-estimated observability truth,
     and adjunct backend receipts such as Apple FM transcript exports or typed
     availability and refusal facts
+- `27-apple-fm-qwen-comparison-suite.md`
+  - admitted-Mac Apple FM acceptance runs, the retained overlapping case set,
+    and the Probe-owned comparison artifact for Apple FM versus Psionic Qwen
 - `30-textual-inspired-rust-tui-shell.md`
   - first Rust-native TUI bootstrap issue for a Textual-inspired Probe screen
     shell, proving basic app/screen/widget structure, keyboard-driven state

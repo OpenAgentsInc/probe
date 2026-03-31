@@ -136,6 +136,11 @@ and harness metadata, aggregate counts, typed failure categories, transcript
 references, and final-turn observability truth summaries so it can serve as a
 real local eval receipt.
 
+Probe now also has an admitted-Mac comparison lane for the overlapping Apple
+FM and Psionic Qwen coding cases. That lane produces one Probe-owned artifact
+with explicit per-backend pass, fail, or unsupported posture instead of
+assuming silent parity.
+
 The repo-local operator split is now explicit: use `./probe-dev pr-fast` for
 the fast merge-safe lane, `./probe-dev cli-regressions` for binary output and
 snapshot work, and `./probe-dev accept-live` plus the eval wrappers for the
@@ -212,6 +217,8 @@ Acceptance harness:
 
 ```bash
 cargo run -p probe-cli -- accept
+cargo run -p probe-cli -- accept --profile psionic-apple-fm-bridge
+cargo run -p probe-cli -- accept-compare
 ```
 
 The acceptance runner now targets retained `coding_bootstrap` cases instead of
@@ -219,6 +226,14 @@ only the old weather demo. Its JSON report includes repeat-run receipts,
 median wallclock, per-attempt tool-policy counts, and final-turn
 observability fields, including exact-versus-estimated usage detail when the
 backend reports it.
+
+`probe accept` still defaults to the retained Qwen lane, but it can now target
+Apple FM intentionally through `--profile psionic-apple-fm-bridge`.
+
+`probe accept-compare` runs the retained overlapping case set against both the
+Qwen profile and the Apple FM profile, writes backend-specific acceptance
+reports for each side, and emits one comparison artifact that keeps
+unsupported posture explicit.
 
 Dataset export:
 
@@ -332,3 +347,7 @@ estimated usage truth when available, surface backend-receipt summaries when a
 turn carries one, and print the active harness profile when one is selected.
 Tool-backed runs also emit a policy summary for auto-allowed, approved,
 refused, and paused tool calls.
+
+`probe accept-compare` is intentionally an attach-only admitted-Mac lane for
+now. It expects both the local Psionic Qwen endpoint and the Apple FM bridge
+to already be reachable at the configured profile URLs.
