@@ -15,3 +15,5 @@ This folder holds technical planning docs for the Probe runtime.
 - `04-session-turn-item-and-transcript-model.md`
   - the first durable local truth model for sessions, turns, items, and
     append-only transcript storage
+- `05-openai-compatible-provider-client.md`
+  - the first typed backend client seam for local OpenAI-compatible endpoints
