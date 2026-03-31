@@ -1,7 +1,10 @@
+mod acceptance;
+
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use acceptance::{AcceptanceHarnessConfig, default_report_path, run_acceptance_harness};
 use clap::{Parser, Subcommand};
 use probe_core::backend_profiles::{PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE, named_backend_profile};
 use probe_core::runtime::{
@@ -24,6 +27,7 @@ struct Cli {
 enum Commands {
     Exec(ExecArgs),
     Chat(ChatArgs),
+    Accept(AcceptArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -70,6 +74,18 @@ struct ChatArgs {
     parallel_tool_calls: bool,
 }
 
+#[derive(clap::Args, Debug)]
+struct AcceptArgs {
+    #[arg(long)]
+    base_url: Option<String>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[arg(long)]
+    report_path: Option<PathBuf>,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -85,6 +101,7 @@ fn run() -> Result<(), String> {
     match cli.command {
         Commands::Exec(args) => run_exec(args),
         Commands::Chat(args) => run_chat(args),
+        Commands::Accept(args) => run_accept(args),
     }
 }
 
@@ -244,6 +261,52 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn run_accept(args: AcceptArgs) -> Result<(), String> {
+    let probe_home = args
+        .probe_home
+        .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
+    let mut profile = named_profile(PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE)?;
+    if let Some(base_url) = args.base_url {
+        profile.base_url = base_url;
+    }
+    if let Some(model) = args.model {
+        profile.model = model;
+    }
+    let report_path = args
+        .report_path
+        .unwrap_or_else(|| default_report_path(probe_home.as_path()));
+    let report = run_acceptance_harness(AcceptanceHarnessConfig {
+        probe_home,
+        report_path: report_path.clone(),
+        base_profile: profile,
+    })?;
+
+    eprintln!(
+        "acceptance overall_pass={} report={}",
+        report.overall_pass,
+        report_path.display()
+    );
+    for result in &report.results {
+        eprintln!(
+            "case={} passed={} tool_calls={} session={} error={}",
+            result.case_name,
+            result.passed,
+            result.executed_tool_calls,
+            result.session_id.as_deref().unwrap_or("-"),
+            result.error.as_deref().unwrap_or("-")
+        );
+    }
+
+    if report.overall_pass {
+        Ok(())
+    } else {
+        Err(format!(
+            "one or more acceptance cases failed; see {}",
+            report_path.display()
+        ))
+    }
 }
 
 fn named_profile(name: &str) -> Result<probe_protocol::backend::BackendProfile, String> {

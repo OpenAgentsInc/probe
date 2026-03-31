@@ -65,6 +65,12 @@ The first tool-enabled lane now exists on both `probe exec` and `probe chat`:
 - control tool policy with `--tool-choice`
 - enable same-turn batches with `--parallel-tool-calls`
 
+Probe also has a retained acceptance runner:
+
+- `probe accept`
+- writes a JSON report for the current local backend target
+- is designed to hit a local Psionic-served Qwen lane when one is available
+
 ## Non-Goals For The First Milestone
 
 - a large plugin marketplace

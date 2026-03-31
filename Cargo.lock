@@ -698,6 +698,9 @@ dependencies = [
  "clap",
  "probe-core",
  "probe-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

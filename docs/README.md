@@ -28,3 +28,6 @@ This folder holds technical planning docs for the Probe runtime.
 - `09-tool-loop-and-local-tools.md`
   - the first bounded local tool runtime, batch execution path, and replay
     contract
+- `10-acceptance-harness.md`
+  - the retained local acceptance runner for plain and tool-backed controller
+    cases
