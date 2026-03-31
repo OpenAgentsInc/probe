@@ -1,0 +1,332 @@
+---
+source: crates/probe-cli/tests/cli_regressions.rs
+expression: report
+---
+{
+  "base_url": "<base-url>",
+  "finished_at_ms": "<ms>",
+  "model": "tiny-qwen35",
+  "overall_pass": true,
+  "repeat_runs_per_case": 2,
+  "results": [
+    {
+      "assistant_text": "READ_FILE_OK",
+      "attempts": [
+        {
+          "approved_tool_calls": 0,
+          "assistant_text": "READ_FILE_OK",
+          "attempt_index": 0,
+          "auto_allowed_tool_calls": 1,
+          "cache_signal": "unknown",
+          "completion_tokens": null,
+          "error": null,
+          "executed_tool_calls": 1,
+          "final_wallclock_ms": "<ms>",
+          "passed": true,
+          "paused_tool_calls": 0,
+          "prompt_tokens": null,
+          "refused_tool_calls": 0,
+          "session_id": "<session-id>",
+          "tool_names": [
+            "read_file"
+          ],
+          "total_tokens": null
+        },
+        {
+          "approved_tool_calls": 0,
+          "assistant_text": "READ_FILE_OK",
+          "attempt_index": 1,
+          "auto_allowed_tool_calls": 1,
+          "cache_signal": "unknown",
+          "completion_tokens": null,
+          "error": null,
+          "executed_tool_calls": 1,
+          "final_wallclock_ms": "<ms>",
+          "passed": true,
+          "paused_tool_calls": 0,
+          "prompt_tokens": null,
+          "refused_tool_calls": 0,
+          "session_id": "<session-id>",
+          "tool_names": [
+            "read_file"
+          ],
+          "total_tokens": null
+        }
+      ],
+      "case_name": "read_file_answer",
+      "error": null,
+      "executed_tool_calls": 1,
+      "median_wallclock_ms": "<ms>",
+      "passed": true,
+      "repeat_runs": 2,
+      "session_id": "<session-id>"
+    },
+    {
+      "assistant_text": "LIST_READ_OK",
+      "attempts": [
+        {
+          "approved_tool_calls": 0,
+          "assistant_text": "LIST_READ_OK",
+          "attempt_index": 0,
+          "auto_allowed_tool_calls": 2,
+          "cache_signal": "unknown",
+          "completion_tokens": null,
+          "error": null,
+          "executed_tool_calls": 2,
+          "final_wallclock_ms": "<ms>",
+          "passed": true,
+          "paused_tool_calls": 0,
+          "prompt_tokens": null,
+          "refused_tool_calls": 0,
+          "session_id": "<session-id>",
+          "tool_names": [
+            "list_files",
+            "read_file"
+          ],
+          "total_tokens": null
+        },
+        {
+          "approved_tool_calls": 0,
+          "assistant_text": "LIST_READ_OK",
+          "attempt_index": 1,
+          "auto_allowed_tool_calls": 2,
+          "cache_signal": "unknown",
+          "completion_tokens": null,
+          "error": null,
+          "executed_tool_calls": 2,
+          "final_wallclock_ms": "<ms>",
+          "passed": true,
+          "paused_tool_calls": 0,
+          "prompt_tokens": null,
+          "refused_tool_calls": 0,
+          "session_id": "<session-id>",
+          "tool_names": [
+            "list_files",
+            "read_file"
+          ],
+          "total_tokens": null
+        }
+      ],
+      "case_name": "list_then_read",
+      "error": null,
+      "executed_tool_calls": 2,
+      "median_wallclock_ms": "<ms>",
+      "passed": true,
+      "repeat_runs": 2,
+      "session_id": "<session-id>"
+    },
+    {
+      "assistant_text": "SEARCH_READ_OK",
+      "attempts": [
+        {
+          "approved_tool_calls": 0,
+          "assistant_text": "SEARCH_READ_OK",
+          "attempt_index": 0,
+          "auto_allowed_tool_calls": 2,
+          "cache_signal": "unknown",
+          "completion_tokens": null,
+          "error": null,
+          "executed_tool_calls": 2,
+          "final_wallclock_ms": "<ms>",
+          "passed": true,
+          "paused_tool_calls": 0,
+          "prompt_tokens": null,
+          "refused_tool_calls": 0,
+          "session_id": "<session-id>",
+          "tool_names": [
+            "code_search",
+            "read_file"
+          ],
+          "total_tokens": null
+        },
+        {
+          "approved_tool_calls": 0,
+          "assistant_text": "SEARCH_READ_OK",
+          "attempt_index": 1,
+          "auto_allowed_tool_calls": 2,
+          "cache_signal": "unknown",
+          "completion_tokens": null,
+          "error": null,
+          "executed_tool_calls": 2,
+          "final_wallclock_ms": "<ms>",
+          "passed": true,
+          "paused_tool_calls": 0,
+          "prompt_tokens": null,
+          "refused_tool_calls": 0,
+          "session_id": "<session-id>",
+          "tool_names": [
+            "code_search",
+            "read_file"
+          ],
+          "total_tokens": null
+        }
+      ],
+      "case_name": "search_then_read",
+      "error": null,
+      "executed_tool_calls": 2,
+      "median_wallclock_ms": "<ms>",
+      "passed": true,
+      "repeat_runs": 2,
+      "session_id": "<session-id>"
+    },
+    {
+      "assistant_text": "SHELL_OK",
+      "attempts": [
+        {
+          "approved_tool_calls": 0,
+          "assistant_text": "SHELL_OK",
+          "attempt_index": 0,
+          "auto_allowed_tool_calls": 1,
+          "cache_signal": "unknown",
+          "completion_tokens": null,
+          "error": null,
+          "executed_tool_calls": 1,
+          "final_wallclock_ms": "<ms>",
+          "passed": true,
+          "paused_tool_calls": 0,
+          "prompt_tokens": null,
+          "refused_tool_calls": 0,
+          "session_id": "<session-id>",
+          "tool_names": [
+            "shell"
+          ],
+          "total_tokens": null
+        },
+        {
+          "approved_tool_calls": 0,
+          "assistant_text": "SHELL_OK",
+          "attempt_index": 1,
+          "auto_allowed_tool_calls": 1,
+          "cache_signal": "unknown",
+          "completion_tokens": null,
+          "error": null,
+          "executed_tool_calls": 1,
+          "final_wallclock_ms": "<ms>",
+          "passed": true,
+          "paused_tool_calls": 0,
+          "prompt_tokens": null,
+          "refused_tool_calls": 0,
+          "session_id": "<session-id>",
+          "tool_names": [
+            "shell"
+          ],
+          "total_tokens": null
+        }
+      ],
+      "case_name": "shell_then_summarize",
+      "error": null,
+      "executed_tool_calls": 1,
+      "median_wallclock_ms": "<ms>",
+      "passed": true,
+      "repeat_runs": 2,
+      "session_id": "<session-id>"
+    },
+    {
+      "assistant_text": "PATCH_OK",
+      "attempts": [
+        {
+          "approved_tool_calls": 1,
+          "assistant_text": "PATCH_OK",
+          "attempt_index": 0,
+          "auto_allowed_tool_calls": 1,
+          "cache_signal": "unknown",
+          "completion_tokens": null,
+          "error": null,
+          "executed_tool_calls": 2,
+          "final_wallclock_ms": "<ms>",
+          "passed": true,
+          "paused_tool_calls": 0,
+          "prompt_tokens": null,
+          "refused_tool_calls": 0,
+          "session_id": "<session-id>",
+          "tool_names": [
+            "apply_patch",
+            "read_file"
+          ],
+          "total_tokens": null
+        },
+        {
+          "approved_tool_calls": 1,
+          "assistant_text": "PATCH_OK",
+          "attempt_index": 1,
+          "auto_allowed_tool_calls": 1,
+          "cache_signal": "unknown",
+          "completion_tokens": null,
+          "error": null,
+          "executed_tool_calls": 2,
+          "final_wallclock_ms": "<ms>",
+          "passed": true,
+          "paused_tool_calls": 0,
+          "prompt_tokens": null,
+          "refused_tool_calls": 0,
+          "session_id": "<session-id>",
+          "tool_names": [
+            "apply_patch",
+            "read_file"
+          ],
+          "total_tokens": null
+        }
+      ],
+      "case_name": "patch_then_verify",
+      "error": null,
+      "executed_tool_calls": 2,
+      "median_wallclock_ms": "<ms>",
+      "passed": true,
+      "repeat_runs": 2,
+      "session_id": "<session-id>"
+    },
+    {
+      "assistant_text": null,
+      "attempts": [
+        {
+          "approved_tool_calls": 0,
+          "assistant_text": null,
+          "attempt_index": 0,
+          "auto_allowed_tool_calls": 0,
+          "cache_signal": "cold_start",
+          "completion_tokens": null,
+          "error": "session <session-id> paused for approval on tool `apply_patch` (call_blocked_patch_1): tool `apply_patch` requires write approval under the active local policy",
+          "executed_tool_calls": 0,
+          "final_wallclock_ms": "<ms>",
+          "passed": true,
+          "paused_tool_calls": 1,
+          "prompt_tokens": null,
+          "refused_tool_calls": 0,
+          "session_id": "<session-id>",
+          "tool_names": [
+            "apply_patch"
+          ],
+          "total_tokens": null
+        },
+        {
+          "approved_tool_calls": 0,
+          "assistant_text": null,
+          "attempt_index": 1,
+          "auto_allowed_tool_calls": 0,
+          "cache_signal": "cold_start",
+          "completion_tokens": null,
+          "error": "session <session-id> paused for approval on tool `apply_patch` (call_blocked_patch_2): tool `apply_patch` requires write approval under the active local policy",
+          "executed_tool_calls": 0,
+          "final_wallclock_ms": "<ms>",
+          "passed": true,
+          "paused_tool_calls": 1,
+          "prompt_tokens": null,
+          "refused_tool_calls": 0,
+          "session_id": "<session-id>",
+          "tool_names": [
+            "apply_patch"
+          ],
+          "total_tokens": null
+        }
+      ],
+      "case_name": "approval_pause_or_refusal",
+      "error": "session <session-id> paused for approval on tool `apply_patch` (call_blocked_patch_1): tool `apply_patch` requires write approval under the active local policy",
+      "executed_tool_calls": 0,
+      "median_wallclock_ms": "<ms>",
+      "passed": true,
+      "repeat_runs": 2,
+      "session_id": "<session-id>"
+    }
+  ],
+  "started_at_ms": "<ms>"
+}

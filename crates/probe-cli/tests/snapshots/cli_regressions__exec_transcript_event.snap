@@ -1,0 +1,27 @@
+---
+source: crates/probe-cli/tests/cli_regressions.rs
+expression: transcript_event
+---
+{
+  "items": [
+    {
+      "kind": "user_message",
+      "name": null,
+      "text": "Reply with exactly EXEC_OK.",
+      "tool_execution": null
+    },
+    {
+      "kind": "assistant_message",
+      "name": null,
+      "text": "EXEC_OK",
+      "tool_execution": null
+    }
+  ],
+  "observability": {
+    "cache_signal": "cold_start",
+    "completion_tokens": 3,
+    "prompt_tokens": 42,
+    "total_tokens": 45
+  },
+  "turn_index": 0
+}

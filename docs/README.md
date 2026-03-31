@@ -61,3 +61,6 @@ This folder holds technical planning docs for the Probe runtime.
 - `20-testing-and-local-runner.md`
   - shared test-support helpers, canonical local validation commands, and the
     `nextest`-first runner contract
+- `21-cli-regression-and-snapshots.md`
+  - process-level binary tests, narrow snapshot coverage, and the normalized
+    receipt boundary for the CLI surface

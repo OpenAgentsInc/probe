@@ -14,5 +14,8 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+assert_cmd.workspace = true
+insta.workspace = true
+predicates.workspace = true
 probe-test-support.workspace = true
 tempfile.workspace = true

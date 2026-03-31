@@ -108,6 +108,10 @@ root: `./probe-dev fmt`, `./probe-dev check`, `./probe-dev test`, and
 --no-fail-fast` when `cargo nextest` is installed and falls back to
 `cargo test --workspace` otherwise.
 
+Probe now also has binary-level CLI regression tests and narrow normalized
+snapshots for `exec` stderr, selected transcript receipts, and the acceptance
+report shape.
+
 ## Commands
 
 Build and validation:
