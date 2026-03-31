@@ -27,6 +27,15 @@ The Apple FM provider now creates a session with:
 The bridge then calls back into Probe for each Apple FM tool use instead of
 forcing the OpenAI `tool_calls` wire shape onto the backend.
 
+The provider now also hardens two backend-specific compatibility edges:
+
+- Probe normalizes the root tool-argument schema for Apple FM before session
+  registration so strict bridge/runtime schema decoding does not fail on
+  missing root `title`, `x-order`, or `required` fields
+- Probe retries `create_session` once without transcript restore when Apple FM
+  returns a typed `invalid_request` / `Invalid JSON` error for the replay
+  payload
+
 ## Controller Truth
 
 Probe transcript storage remains authoritative.
@@ -89,3 +98,5 @@ Probe now has retained Rust coverage for the Apple FM tool lane across:
 - explicit refusal receipts
 - approval-pause receipts
 - resume replay through reconstructed Apple transcript state
+- tool-schema normalization for Apple FM session tools
+- one-shot transcriptless retry on narrow invalid-JSON restore failures

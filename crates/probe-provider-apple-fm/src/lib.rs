@@ -9,11 +9,12 @@ use std::{thread, thread::JoinHandle};
 use probe_protocol::backend::BackendProfile;
 use psionic_apple_fm::{
     AppleFmBridgeClient, AppleFmBridgeClientError, AppleFmChatCompletionRequest,
-    AppleFmChatMessage, AppleFmChatMessageRole, AppleFmChatUsage, AppleFmFoundationModelsError,
-    AppleFmGenerationSchema, AppleFmSessionCreateRequest, AppleFmSessionRespondRequest,
-    AppleFmSystemLanguageModel, AppleFmSystemLanguageModelAvailability, AppleFmToolCallError,
-    AppleFmToolCallRequest, AppleFmToolCallResponse, AppleFmToolCallbackConfiguration,
-    AppleFmToolDefinition, AppleFmTranscript,
+    AppleFmChatMessage, AppleFmChatMessageRole, AppleFmChatUsage, AppleFmErrorCode,
+    AppleFmFoundationModelsError, AppleFmGenerationSchema, AppleFmSession,
+    AppleFmSessionCreateRequest, AppleFmSessionRespondRequest, AppleFmSystemLanguageModel,
+    AppleFmSystemLanguageModelAvailability, AppleFmToolCallError, AppleFmToolCallRequest,
+    AppleFmToolCallResponse, AppleFmToolCallbackConfiguration, AppleFmToolDefinition,
+    AppleFmTranscript,
 };
 use reqwest::blocking::Client;
 
@@ -277,17 +278,16 @@ impl AppleFmProviderClient {
             .map(provider_tool_definition)
             .collect::<Result<Vec<_>, _>>()?;
         let callback_server = AppleFmProviderToolCallbackServer::new(callback)?;
-        let session = self
-            .client
-            .create_session(&AppleFmSessionCreateRequest {
-                instructions: system_prompt.map(ToOwned::to_owned),
-                model: Some(model),
-                tools: tool_definitions,
-                adapter: None,
-                tool_callback: Some(callback_server.configuration()),
-                transcript_json: None,
-                transcript: Some(transcript),
-            })
+        let session_request = AppleFmSessionCreateRequest {
+            instructions: system_prompt.map(ToOwned::to_owned),
+            model: Some(model),
+            tools: tool_definitions,
+            adapter: None,
+            tool_callback: Some(callback_server.configuration()),
+            transcript_json: None,
+            transcript: Some(transcript),
+        };
+        let session = create_session_with_transcript_fallback(&self.client, &session_request)
             .map_err(AppleFmProviderError::Request)?;
         let response = self.client.respond_in_session(
             session.id.as_str(),
@@ -318,20 +318,67 @@ fn provider_tool_definition(
     definition: AppleFmProviderToolDefinition,
 ) -> Result<AppleFmToolDefinition, AppleFmProviderError> {
     let tool_name = definition.name.clone();
-    let schema = AppleFmGenerationSchema::new(
+    let schema = apple_fm_generation_schema_for_tool(
         definition
             .parameters
             .unwrap_or_else(default_empty_tool_schema),
-    )
-    .map_err(|error| AppleFmProviderError::ToolSchema {
-        tool_name: tool_name.clone(),
-        message: error.to_string(),
-    })?;
+        tool_name.as_str(),
+    )?;
     Ok(AppleFmToolDefinition::new(
         tool_name,
         definition.description,
         schema,
     ))
+}
+
+fn apple_fm_generation_schema_for_tool(
+    schema: serde_json::Value,
+    tool_name: &str,
+) -> Result<AppleFmGenerationSchema, AppleFmProviderError> {
+    let tool_name = tool_name.to_string();
+    let normalized = normalize_tool_schema_for_apple_fm(schema, tool_name.as_str());
+    let schema: AppleFmGenerationSchema =
+        serde_json::from_value(normalized).map_err(|error| AppleFmProviderError::ToolSchema {
+            tool_name: tool_name.clone(),
+            message: error.to_string(),
+        })?;
+    schema
+        .validate()
+        .map_err(|error| AppleFmProviderError::ToolSchema {
+            tool_name,
+            message: error.to_string(),
+        })?;
+    Ok(schema)
+}
+
+fn normalize_tool_schema_for_apple_fm(
+    mut schema: serde_json::Value,
+    tool_name: &str,
+) -> serde_json::Value {
+    let Some(schema_object) = schema.as_object_mut() else {
+        return schema;
+    };
+    schema_object.remove("$schema");
+    let property_order = schema_object
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .map(|properties| {
+            properties
+                .keys()
+                .map(|key| serde_json::Value::String(key.clone()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    schema_object
+        .entry("title".to_string())
+        .or_insert(serde_json::Value::String(format!("{tool_name}_arguments")));
+    schema_object
+        .entry("x-order".to_string())
+        .or_insert(serde_json::Value::Array(property_order));
+    schema_object
+        .entry("required".to_string())
+        .or_insert(serde_json::Value::Array(Vec::new()));
+    schema
 }
 
 fn default_empty_tool_schema() -> serde_json::Value {
@@ -340,6 +387,39 @@ fn default_empty_tool_schema() -> serde_json::Value {
         "properties": {},
         "additionalProperties": false
     })
+}
+
+fn create_session_with_transcript_fallback(
+    client: &AppleFmBridgeClient,
+    request: &AppleFmSessionCreateRequest,
+) -> Result<AppleFmSession, AppleFmBridgeClientError> {
+    match client.create_session(request) {
+        Ok(session) => Ok(session),
+        Err(error)
+            if request_has_transcript(request) && should_retry_without_transcript(&error) =>
+        {
+            let mut retry_request = request.clone();
+            retry_request.transcript = None;
+            retry_request.transcript_json = None;
+            match client.create_session(&retry_request) {
+                Ok(session) => Ok(session),
+                Err(_) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn request_has_transcript(request: &AppleFmSessionCreateRequest) -> bool {
+    request.transcript.is_some() || request.transcript_json.is_some()
+}
+
+fn should_retry_without_transcript(error: &AppleFmBridgeClientError) -> bool {
+    let Some(error) = error.foundation_models_error() else {
+        return false;
+    };
+    error.kind == AppleFmErrorCode::InvalidRequest
+        && error.message.to_ascii_lowercase().contains("invalid json")
 }
 
 impl AppleFmProviderToolCallbackServer {
@@ -593,11 +673,12 @@ mod tests {
 
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
     use probe_test_support::{FakeAppleFmServer, FakeHttpResponse};
+    use psionic_apple_fm::AppleFmTranscript;
     use serde_json::json;
 
     use super::{
         AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError, AppleFmProviderMessage,
-        AppleFmProviderToolCall, AppleFmProviderToolDefinition,
+        AppleFmProviderToolCall, AppleFmProviderToolDefinition, provider_tool_definition,
     };
 
     struct ToolCallbackResponse {
@@ -927,5 +1008,150 @@ mod tests {
         assert!(requests[0].contains("POST /v1/sessions HTTP/1.1"));
         assert!(requests[1].contains("POST /v1/sessions/sess-tool-1/responses HTTP/1.1"));
         assert!(requests[2].contains("DELETE /v1/sessions/sess-tool-1 HTTP/1.1"));
+    }
+
+    #[test]
+    fn tool_schema_normalization_adds_root_title_and_order_without_property_titles() {
+        let tool_definition = provider_tool_definition(AppleFmProviderToolDefinition {
+            name: String::from("lookup_secret"),
+            description: Some(String::from("Look up a secret value.")),
+            parameters: Some(json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "namespace": {"type": "string"}
+                },
+                "additionalProperties": false
+            })),
+        })
+        .expect("tool definition should normalize");
+
+        let schema_json = tool_definition.arguments_schema.clone_json_value();
+        assert_eq!(schema_json["title"], "lookup_secret_arguments");
+        assert_eq!(
+            schema_json["x-order"],
+            json!(["key", "namespace"])
+        );
+        assert_eq!(schema_json["required"], json!([]));
+        assert!(schema_json.get("$schema").is_none());
+        assert!(schema_json["properties"]["key"].get("title").is_none());
+        assert!(schema_json["properties"]["namespace"].get("title").is_none());
+    }
+
+    #[test]
+    fn session_create_retries_once_without_transcript_on_invalid_json() {
+        let create_request_bodies = Arc::new(Mutex::new(Vec::new()));
+        let captured_create_request_bodies = Arc::clone(&create_request_bodies);
+        let server = FakeAppleFmServer::from_handler(move |request| match (
+            request.method.as_str(),
+            request.path.as_str(),
+        ) {
+            ("POST", "/v1/sessions") => {
+                let request_json: serde_json::Value =
+                    serde_json::from_str(request.body.as_str()).expect("session create json");
+                captured_create_request_bodies
+                    .lock()
+                    .expect("request body lock")
+                    .push(request_json.clone());
+                if request_json.get("transcript").is_some() {
+                    FakeHttpResponse::json_status(
+                        400,
+                        json!({
+                            "error": {
+                                "message": "Invalid JSON in transcript restore payload",
+                                "type": "invalid_request",
+                                "code": "invalid_request"
+                            }
+                        }),
+                    )
+                } else {
+                    FakeHttpResponse::json_ok(json!({
+                        "session": {
+                            "id": "sess-retry-1",
+                            "instructions": request_json["instructions"],
+                            "model": {
+                                "id": "apple-foundation-model",
+                                "use_case": "general",
+                                "guardrails": "default"
+                            },
+                            "tools": [{"name": "read_file"}],
+                            "is_responding": false,
+                            "transcript_json": "{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"
+                        }
+                    }))
+                }
+            }
+            ("POST", "/v1/sessions/sess-retry-1/responses") => FakeHttpResponse::json_ok(json!({
+                "session": {
+                    "id": "sess-retry-1",
+                    "instructions": "You are a helper",
+                    "model": {
+                        "id": "apple-foundation-model",
+                        "use_case": "general",
+                        "guardrails": "default"
+                    },
+                    "tools": [{"name": "read_file"}],
+                    "is_responding": false,
+                    "transcript_json": "{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"
+                },
+                "model": "apple-foundation-model",
+                "output": "tool-backed answer after retry",
+                "usage": {
+                    "total_tokens_detail": {"value": 18, "truth": "estimated"}
+                }
+            })),
+            ("DELETE", "/v1/sessions/sess-retry-1") => FakeHttpResponse::json_ok(json!({})),
+            other => panic!("unexpected request: {other:?}"),
+        });
+
+        let client = AppleFmProviderClient::new(AppleFmProviderConfig {
+            base_url: server.base_url().to_string(),
+            model: String::from("apple-foundation-model"),
+            timeout: Duration::from_secs(5),
+        })
+        .expect("client");
+        let response = client
+            .respond_in_session_with_tools(
+                Some("You are a helper"),
+                AppleFmTranscript::default(),
+                "read hello.txt",
+                vec![AppleFmProviderToolDefinition {
+                    name: String::from("read_file"),
+                    description: Some(String::from("Read a file.")),
+                    parameters: Some(json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"}
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    })),
+                }],
+                Arc::new(|tool_call: AppleFmProviderToolCall| {
+                    Ok(json!({
+                        "tool": tool_call.name,
+                        "arguments": tool_call.arguments
+                    })
+                    .to_string())
+                }),
+            )
+            .expect("tool session response");
+
+        assert_eq!(response.session_id, "sess-retry-1");
+        assert_eq!(response.assistant_text, "tool-backed answer after retry");
+
+        let create_request_bodies = create_request_bodies.lock().expect("request body lock");
+        assert_eq!(create_request_bodies.len(), 2);
+        assert!(create_request_bodies[0].get("transcript").is_some());
+        assert!(create_request_bodies[1].get("transcript").is_none());
+        assert!(create_request_bodies[1].get("transcript_json").is_none());
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0].contains("POST /v1/sessions HTTP/1.1"));
+        assert!(requests[1].contains("POST /v1/sessions HTTP/1.1"));
+        assert!(requests[2].contains("POST /v1/sessions/sess-retry-1/responses HTTP/1.1"));
+        assert!(requests[3].contains("DELETE /v1/sessions/sess-retry-1 HTTP/1.1"));
     }
 }
