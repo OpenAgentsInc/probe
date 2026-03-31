@@ -84,17 +84,105 @@ Probe now records first-pass controller observability on model-generated turns:
 - derived completion throughput and a conservative cache-signal heuristic
 - operator-readable observability lines on both `probe exec` and `probe chat`
 
+## Status
+
+Probe now has a working first local controller stack.
+
+What is possible now:
+
+- run one-shot plain-text turns against a local OpenAI-compatible backend
+- run interactive multi-turn chat sessions and resume them by session id
+- persist append-only transcripts plus indexed session metadata under
+  `PROBE_HOME` or `~/.probe`
+- drive a bounded local tool loop with a retained demo tool set
+- exercise same-turn parallel tool-call batches
+- run a local acceptance harness against the configured backend lane
+- attach to an already-running local backend or launch
+  `psionic-openai-server` as a supervised child process
+- inspect basic controller-side performance signals for model-generated turns
+
+## Relevant Commands
+
+Build and test:
+
+```bash
+cargo test -p probe-provider-openai -p probe-core -p probe-cli
+cargo check
+```
+
+Run a one-shot turn against an already-running local backend:
+
+```bash
+cargo run -p probe-cli -- exec "Explain what this repository does."
+```
+
+Start an interactive session:
+
+```bash
+cargo run -p probe-cli -- chat
+```
+
+Resume an existing interactive session:
+
+```bash
+cargo run -p probe-cli -- chat --resume <session-id>
+```
+
+Run with the retained demo tool set:
+
+```bash
+cargo run -p probe-cli -- exec \
+  --tool-set weather \
+  --tool-choice required \
+  "Use the weather tool for Paris and answer with the result."
+```
+
+Enable same-turn parallel tool calls:
+
+```bash
+cargo run -p probe-cli -- exec \
+  --tool-set weather \
+  --tool-choice required \
+  --parallel-tool-calls \
+  "Use the weather tool for Paris and Tokyo in the same turn."
+```
+
+Run the local acceptance harness:
+
+```bash
+cargo run -p probe-cli -- accept
+```
+
+Attach to an already-running local backend explicitly:
+
+```bash
+cargo run -p probe-cli -- exec \
+  --server-mode attach \
+  "Reply with exactly ATTACHED_OK."
+```
+
+Launch `psionic-openai-server` as a supervised child process:
+
+```bash
+cargo run -p probe-cli -- exec \
+  --server-mode launch \
+  --server-binary /path/to/psionic-openai-server \
+  --server-model-path /path/to/model.gguf \
+  --server-model-id qwen3.5-2b-q8_0-registry.gguf \
+  "Reply with exactly LAUNCHED_OK."
+```
+
+Operator notes:
+
+- the default backend profile is `psionic-qwen35-2b-q8-registry`
+- the default server mode is `attach`
+- session transcripts and reports live under the Probe home directory
+- `probe exec` and `probe chat` emit observability lines on stderr for
+  model-generated turns
+
 ## Non-Goals For The First Milestone
 
 - a large plugin marketplace
 - broad cloud control-plane features
 - multiple overlapping runtime implementations
 - product-shell concerns that belong in client applications
-
-## Status
-
-This repository is in bootstrap stage.
-
-The near-term objective is to establish the Rust workspace, define the runtime
-boundary, and build the first end-to-end session loop on a clean protocol and
-persistence foundation.
