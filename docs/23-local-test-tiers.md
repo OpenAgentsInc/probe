@@ -49,6 +49,7 @@ The Apple FM admitted-Mac paths live here too:
 
 - `cargo run -p probe-cli -- accept --profile psionic-apple-fm-bridge`
 - `cargo run -p probe-cli -- accept-compare`
+- `.github/workflows/apple-fm-qwen-compare.yml`
 
 Those commands are explicit operator lanes, not merge-safe defaults.
 

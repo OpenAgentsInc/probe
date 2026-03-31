@@ -1,0 +1,130 @@
+name: Apple FM Qwen Compare
+
+on:
+  workflow_dispatch:
+    inputs:
+      qwen_profile:
+        description: Optional Qwen backend profile override
+        required: false
+        type: string
+      qwen_base_url:
+        description: Optional Qwen base URL override
+        required: false
+        type: string
+      qwen_model:
+        description: Optional Qwen model override
+        required: false
+        type: string
+      apple_profile:
+        description: Optional Apple FM backend profile override
+        required: false
+        type: string
+      apple_base_url:
+        description: Optional Apple FM base URL override
+        required: false
+        type: string
+      apple_model:
+        description: Optional Apple FM model override
+        required: false
+        type: string
+  schedule:
+    - cron: "23 9 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: Apple FM vs Qwen Compare
+    runs-on:
+      - self-hosted
+      - macOS
+      - apple-silicon
+      - admitted-mac
+    timeout-minutes: 90
+    env:
+      PROBE_COMPARE_ROOT: ${{ runner.temp }}/probe-acceptance-compare
+      QWEN_PROFILE_INPUT: ${{ inputs.qwen_profile }}
+      QWEN_BASE_URL_INPUT: ${{ inputs.qwen_base_url }}
+      QWEN_MODEL_INPUT: ${{ inputs.qwen_model }}
+      APPLE_PROFILE_INPUT: ${{ inputs.apple_profile }}
+      APPLE_BASE_URL_INPUT: ${{ inputs.apple_base_url }}
+      APPLE_MODEL_INPUT: ${{ inputs.apple_model }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Prepare compare root
+        shell: bash
+        run: |
+          rm -rf "$PROBE_COMPARE_ROOT"
+          mkdir -p "$PROBE_COMPARE_ROOT"
+
+      - name: Run Apple FM vs Qwen comparison
+        id: compare
+        shell: bash
+        run: |
+          set -uo pipefail
+          args=(
+            --probe-home "$PROBE_COMPARE_ROOT/probe-home"
+            --report-path "$PROBE_COMPARE_ROOT/probe_acceptance_compare.json"
+          )
+
+          if [[ -n "${QWEN_PROFILE_INPUT:-}" ]]; then
+            args+=(--qwen-profile "$QWEN_PROFILE_INPUT")
+          fi
+          if [[ -n "${QWEN_BASE_URL_INPUT:-}" ]]; then
+            args+=(--qwen-base-url "$QWEN_BASE_URL_INPUT")
+          fi
+          if [[ -n "${QWEN_MODEL_INPUT:-}" ]]; then
+            args+=(--qwen-model "$QWEN_MODEL_INPUT")
+          fi
+          if [[ -n "${APPLE_PROFILE_INPUT:-}" ]]; then
+            args+=(--apple-profile "$APPLE_PROFILE_INPUT")
+          fi
+          if [[ -n "${APPLE_BASE_URL_INPUT:-}" ]]; then
+            args+=(--apple-base-url "$APPLE_BASE_URL_INPUT")
+          fi
+          if [[ -n "${APPLE_MODEL_INPUT:-}" ]]; then
+            args+=(--apple-model "$APPLE_MODEL_INPUT")
+          fi
+
+          set +e
+          ./probe-dev accept-compare "${args[@]}" 2>&1 | tee "$PROBE_COMPARE_ROOT/accept-compare.log"
+          status=${PIPESTATUS[0]}
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload comparison artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-apple-fm-qwen-compare-${{ github.run_id }}
+          path: ${{ env.PROBE_COMPARE_ROOT }}
+          if-no-files-found: warn
+
+      - name: Write workflow summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Apple FM vs Qwen comparison"
+            echo
+            echo "- workflow lane: manual or scheduled only"
+            echo "- runner labels: \`self-hosted, macOS, apple-silicon, admitted-mac\`"
+            echo "- comparison report: \`$PROBE_COMPARE_ROOT/probe_acceptance_compare.json\`"
+            echo "- backend artifact root: \`$PROBE_COMPARE_ROOT\`"
+            echo "- compare exit code: \`${{ steps.compare.outputs.exit_code }}\`"
+            echo "- merge-blocking PR lane: no"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mark comparison failure
+        if: steps.compare.outputs.exit_code != '0'
+        shell: bash
+        run: exit 1

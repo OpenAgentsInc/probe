@@ -143,8 +143,14 @@ assuming silent parity.
 
 The repo-local operator split is now explicit: use `./probe-dev pr-fast` for
 the fast merge-safe lane, `./probe-dev cli-regressions` for binary output and
-snapshot work, and `./probe-dev accept-live` plus the eval wrappers for the
-heavier local acceptance and research lanes.
+snapshot work, `./probe-dev accept-live` for one backend, `./probe-dev
+accept-compare` for the admitted-Mac Apple FM versus Qwen comparison lane, and
+the eval wrappers for the heavier local acceptance and research lanes.
+
+The repo now also has a separate GitHub Actions workflow for the heavy Apple
+FM versus Qwen comparison path. It is manual or scheduled on admitted
+self-hosted Apple hardware and uploads the retained comparison artifacts even
+when the comparison run fails.
 
 ## Commands
 

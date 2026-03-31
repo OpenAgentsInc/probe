@@ -40,6 +40,7 @@ Primary commands:
 ./probe-dev check
 ./probe-dev test
 ./probe-dev accept-live
+./probe-dev accept-compare
 ```
 
 `./probe-dev test` is `nextest`-first. If `cargo nextest` is installed, Probe uses
@@ -57,6 +58,8 @@ The runner now also exposes explicit local tiers:
   - targeted binary-level Probe CLI regression and snapshot lane
 - `./probe-dev accept-live`
   - heavier live-backend acceptance lane
+- `./probe-dev accept-compare`
+  - heavier admitted-Mac Apple FM versus Qwen comparison lane
 - `./probe-dev decision-export`, `./probe-dev module-eval`,
   `./probe-dev optimize-modules`, and `./probe-dev optimize-harness`
   - explicit local eval and optimization lanes that stay out of the fast path
