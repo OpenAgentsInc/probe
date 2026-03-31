@@ -20,8 +20,20 @@ expression: transcript_event
   "observability": {
     "cache_signal": "cold_start",
     "completion_tokens": 3,
+    "completion_tokens_detail": {
+      "truth": "exact",
+      "value": 3
+    },
     "prompt_tokens": 42,
-    "total_tokens": 45
+    "prompt_tokens_detail": {
+      "truth": "exact",
+      "value": 42
+    },
+    "total_tokens": 45,
+    "total_tokens_detail": {
+      "truth": "exact",
+      "value": 45
+    }
   },
   "turn_index": 0
 }

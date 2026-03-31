@@ -103,9 +103,11 @@ or obvious context pressure.
 Probe can either attach to an already-running local backend or launch
 `psionic-openai-server` as a supervised child process. It also records basic
 controller-side observability on model-generated turns, including wallclock,
-usage when available, derived completion throughput, and a conservative
-cache-signal heuristic. More detailed design and implementation notes live
-under `docs/`.
+best-effort usage, exact-versus-estimated usage truth when the backend can say,
+derived completion throughput, and a conservative cache-signal heuristic.
+Probe now also has a typed backend-receipt slot for adjunct evidence such as
+Apple FM transcript exports or typed refusal and availability facts. More
+detailed design and implementation notes live under `docs/`.
 
 The Apple FM lane now overlaps honestly with the Qwen coding lane, but it is
 still not identical:
@@ -130,8 +132,9 @@ snapshots for `exec` stderr, selected transcript receipts, and the acceptance
 report shape.
 
 The acceptance report itself now carries run identity, git provenance, backend
-and harness metadata, aggregate counts, typed failure categories, and
-transcript references so it can serve as a real local eval receipt.
+and harness metadata, aggregate counts, typed failure categories, transcript
+references, and final-turn observability truth summaries so it can serve as a
+real local eval receipt.
 
 The repo-local operator split is now explicit: use `./probe-dev pr-fast` for
 the fast merge-safe lane, `./probe-dev cli-regressions` for binary output and
@@ -214,7 +217,8 @@ cargo run -p probe-cli -- accept
 The acceptance runner now targets retained `coding_bootstrap` cases instead of
 only the old weather demo. Its JSON report includes repeat-run receipts,
 median wallclock, per-attempt tool-policy counts, and final-turn
-observability fields.
+observability fields, including exact-versus-estimated usage detail when the
+backend reports it.
 
 Dataset export:
 
@@ -323,6 +327,8 @@ cargo run -p probe-cli -- exec \
 By default, Probe uses the `psionic-qwen35-2b-q8-registry` profile and
 `attach` server mode. Session transcripts, server config, and acceptance
 reports live under the Probe home directory. `probe exec` and `probe chat`
-emit observability lines on stderr for model-generated turns and print the
-active harness profile when one is selected. Tool-backed runs also emit a
-policy summary for auto-allowed, approved, refused, and paused tool calls.
+emit observability lines on stderr for model-generated turns, print exact or
+estimated usage truth when available, surface backend-receipt summaries when a
+turn carries one, and print the active harness profile when one is selected.
+Tool-backed runs also emit a policy summary for auto-allowed, approved,
+refused, and paused tool calls.

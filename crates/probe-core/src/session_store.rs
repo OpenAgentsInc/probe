@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use probe_protocol::session::{
-    ItemId, SessionBackendTarget, SessionHarnessProfile, SessionId, SessionIndex, SessionMetadata,
-    SessionState, SessionTurn, TimestampMs, ToolExecutionRecord, TranscriptEvent, TranscriptItem,
-    TranscriptItemKind, TurnId, TurnObservability,
+    BackendTurnReceipt, ItemId, SessionBackendTarget, SessionHarnessProfile, SessionId,
+    SessionIndex, SessionMetadata, SessionState, SessionTurn, TimestampMs, ToolExecutionRecord,
+    TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnId, TurnObservability,
 };
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -212,7 +212,7 @@ impl FilesystemSessionStore {
         session_id: &SessionId,
         items: &[NewItem],
     ) -> Result<SessionTurn, SessionStoreError> {
-        self.append_turn_with_observability(session_id, items, None)
+        self.append_turn_with_details(session_id, items, None, None)
     }
 
     pub fn append_turn_with_observability(
@@ -220,6 +220,16 @@ impl FilesystemSessionStore {
         session_id: &SessionId,
         items: &[NewItem],
         observability: Option<TurnObservability>,
+    ) -> Result<SessionTurn, SessionStoreError> {
+        self.append_turn_with_details(session_id, items, observability, None)
+    }
+
+    pub fn append_turn_with_details(
+        &self,
+        session_id: &SessionId,
+        items: &[NewItem],
+        observability: Option<TurnObservability>,
+        backend_receipt: Option<BackendTurnReceipt>,
     ) -> Result<SessionTurn, SessionStoreError> {
         let mut metadata = self.read_metadata(session_id)?;
         let turn_id = TurnId(metadata.next_turn_index);
@@ -245,6 +255,7 @@ impl FilesystemSessionStore {
             started_at_ms,
             completed_at_ms: Some(now_ms()),
             observability,
+            backend_receipt,
             items: transcript_items,
         };
         let event = TranscriptEvent {
@@ -364,9 +375,9 @@ fn now_ms() -> TimestampMs {
 mod tests {
     use super::{FilesystemSessionStore, NewItem, NewSession};
     use probe_protocol::session::{
-        CacheSignal, SessionBackendTarget, SessionHarnessProfile, ToolApprovalState,
-        ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass, TranscriptItemKind,
-        TurnObservability,
+        BackendTranscriptReceipt, BackendTurnReceipt, CacheSignal, SessionBackendTarget,
+        SessionHarnessProfile, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision,
+        ToolRiskClass, TranscriptItemKind, TurnObservability, UsageMeasurement, UsageTruth,
     };
 
     #[test]
@@ -519,8 +530,20 @@ mod tests {
                     wallclock_ms: 42,
                     model_output_ms: Some(42),
                     prompt_tokens: Some(12),
+                    prompt_tokens_detail: Some(UsageMeasurement {
+                        value: 12,
+                        truth: UsageTruth::Estimated,
+                    }),
                     completion_tokens: Some(6),
+                    completion_tokens_detail: Some(UsageMeasurement {
+                        value: 6,
+                        truth: UsageTruth::Exact,
+                    }),
                     total_tokens: Some(18),
+                    total_tokens_detail: Some(UsageMeasurement {
+                        value: 18,
+                        truth: UsageTruth::Estimated,
+                    }),
                     completion_tokens_per_second_x1000: Some(142_857),
                     cache_signal: CacheSignal::ColdStart,
                 }),
@@ -539,9 +562,62 @@ mod tests {
         assert_eq!(observability.wallclock_ms, 42);
         assert_eq!(observability.model_output_ms, Some(42));
         assert_eq!(
+            observability
+                .prompt_tokens_detail
+                .as_ref()
+                .expect("prompt token detail should persist")
+                .truth,
+            UsageTruth::Estimated
+        );
+        assert_eq!(
             observability.completion_tokens_per_second_x1000,
             Some(142_857)
         );
         assert!(matches!(observability.cache_signal, CacheSignal::ColdStart));
+    }
+
+    #[test]
+    fn append_turn_with_details_persists_backend_receipt() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = FilesystemSessionStore::new(temp.path());
+        let metadata = store
+            .create_session("backend-receipt", temp.path())
+            .expect("create session");
+
+        store
+            .append_turn_with_details(
+                &metadata.id,
+                &[NewItem::new(
+                    TranscriptItemKind::AssistantMessage,
+                    "receipt",
+                )],
+                None,
+                Some(BackendTurnReceipt {
+                    failure: None,
+                    availability: None,
+                    transcript: Some(BackendTranscriptReceipt {
+                        format: String::from("foundation_models.transcript.v1"),
+                        payload: String::from("{\"version\":1}"),
+                    }),
+                }),
+            )
+            .expect("append turn");
+
+        let transcript = store
+            .read_transcript(&metadata.id)
+            .expect("read transcript");
+        let receipt = transcript[0]
+            .turn
+            .backend_receipt
+            .as_ref()
+            .expect("backend receipt should persist");
+        assert_eq!(
+            receipt
+                .transcript
+                .as_ref()
+                .expect("transcript receipt should persist")
+                .format,
+            "foundation_models.transcript.v1"
+        );
     }
 }

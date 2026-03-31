@@ -3,6 +3,8 @@
 Probe's acceptance report is now a first-class eval artifact rather than a
 thin pass/fail receipt.
 
+The current schema version is `v3`.
+
 ## Run-Level Structure
 
 The report now carries four top-level groups:
@@ -44,6 +46,7 @@ Each case now records:
 - latest tool-name set
 - latest policy-count summary
 - latest observability summary
+- latest backend-receipt summary when the final turn carried one
 - first relevant failure category when a case truly fails
 - retained attempt list
 
@@ -60,7 +63,29 @@ Each attempt now records:
 - tool-name list
 - policy-count summary
 - observability summary when available
+- backend-receipt summary when available
 - error text when the attempt emitted one
+
+## Observability And Receipts
+
+The observability summary now preserves both:
+
+- best-effort scalar token counts
+- optional per-field `value` plus `truth`, where truth is `exact` or
+  `estimated`
+
+That matters for Apple FM because the bridge may only be able to offer
+estimated usage.
+
+The backend-receipt summary is intentionally narrower than the raw stored
+receipt. It keeps comparison-safe facts such as:
+
+- typed failure family, code, retryability, refusal text, or tool name
+- availability readiness plus reason code when the backend surfaced one
+- transcript receipt format plus payload byte count
+
+The report does not inline full backend transcript payloads. Probe's own
+stored transcript remains the authoritative runtime record.
 
 ## Failure Categories
 

@@ -515,7 +515,7 @@ expression: report
     "git_dirty": "<git-dirty>",
     "probe_version": "0.1.0",
     "run_id": "<run-id>",
-    "schema_version": "v2"
+    "schema_version": "v3"
   },
   "started_at_ms": "<ms>"
 }

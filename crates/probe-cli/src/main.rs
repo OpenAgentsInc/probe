@@ -38,7 +38,8 @@ use probe_optimizer::{
 };
 use probe_protocol::backend::BackendKind;
 use probe_protocol::session::{
-    CacheSignal, SessionHarnessProfile, SessionId, SessionTurn, ToolPolicyDecision, ToolRiskClass,
+    BackendTurnReceipt, CacheSignal, SessionHarnessProfile, SessionId, SessionTurn,
+    ToolPolicyDecision, ToolRiskClass, UsageMeasurement, UsageTruth,
 };
 
 #[derive(Parser, Debug)]
@@ -342,6 +343,7 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
         );
     }
     print_turn_observability(&outcome.turn);
+    print_turn_backend_receipt(&outcome.turn);
     if outcome.turn.observability.is_none()
         && let Some(usage) = outcome.usage
     {
@@ -534,6 +536,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
             outcome.turn.index
         );
         print_turn_observability(&outcome.turn);
+        print_turn_backend_receipt(&outcome.turn);
         if outcome.executed_tool_calls > 0 {
             eprintln!("tool_calls executed={}", outcome.executed_tool_calls);
         }
@@ -1100,6 +1103,12 @@ fn print_turn_observability(turn: &SessionTurn) {
     }
 }
 
+fn print_turn_backend_receipt(turn: &SessionTurn) {
+    if let Some(line) = render_turn_backend_receipt(turn) {
+        eprintln!("{line}");
+    }
+}
+
 fn render_turn_observability(turn: &SessionTurn) -> Option<String> {
     let observability = turn.observability.as_ref()?;
     let mut fields = vec![
@@ -1112,15 +1121,24 @@ fn render_turn_observability(turn: &SessionTurn) -> Option<String> {
     if let Some(model_output_ms) = observability.model_output_ms {
         fields.push(format!("model_output_ms={model_output_ms}"));
     }
-    if let Some(prompt_tokens) = observability.prompt_tokens {
-        fields.push(format!("prompt_tokens={prompt_tokens}"));
-    }
-    if let Some(completion_tokens) = observability.completion_tokens {
-        fields.push(format!("completion_tokens={completion_tokens}"));
-    }
-    if let Some(total_tokens) = observability.total_tokens {
-        fields.push(format!("total_tokens={total_tokens}"));
-    }
+    push_usage_field(
+        &mut fields,
+        "prompt_tokens",
+        observability.prompt_tokens,
+        observability.prompt_tokens_detail.as_ref(),
+    );
+    push_usage_field(
+        &mut fields,
+        "completion_tokens",
+        observability.completion_tokens,
+        observability.completion_tokens_detail.as_ref(),
+    );
+    push_usage_field(
+        &mut fields,
+        "total_tokens",
+        observability.total_tokens,
+        observability.total_tokens_detail.as_ref(),
+    );
     if let Some(completion_tokens_per_second_x1000) =
         observability.completion_tokens_per_second_x1000
     {
@@ -1130,6 +1148,84 @@ fn render_turn_observability(turn: &SessionTurn) -> Option<String> {
         ));
     }
     Some(format!("observability {}", fields.join(" ")))
+}
+
+fn render_turn_backend_receipt(turn: &SessionTurn) -> Option<String> {
+    let receipt = turn.backend_receipt.as_ref()?;
+    let mut fields = Vec::new();
+    append_backend_receipt_fields(&mut fields, receipt);
+    if fields.is_empty() {
+        None
+    } else {
+        Some(format!("backend_receipt {}", fields.join(" ")))
+    }
+}
+
+fn append_backend_receipt_fields(fields: &mut Vec<String>, receipt: &BackendTurnReceipt) {
+    if let Some(failure) = receipt.failure.as_ref() {
+        fields.push(format!("failure_family={}", failure.family));
+        if let Some(code) = failure.code.as_deref() {
+            fields.push(format!("failure_code={code}"));
+        }
+        if let Some(retryable) = failure.retryable {
+            fields.push(format!("failure_retryable={retryable}"));
+        }
+        if let Some(reason) = failure.failure_reason.as_deref() {
+            fields.push(format!("failure_reason={}", reason.replace(' ', "_")));
+        }
+        if let Some(tool_name) = failure.tool_name.as_deref() {
+            fields.push(format!("failure_tool={tool_name}"));
+        }
+    }
+    if let Some(availability) = receipt.availability.as_ref() {
+        fields.push(format!("availability_ready={}", availability.ready));
+        if let Some(reason_code) = availability.reason_code.as_deref() {
+            fields.push(format!("availability_reason_code={reason_code}"));
+        }
+        if let Some(platform) = availability.platform.as_deref() {
+            fields.push(format!("availability_platform={platform}"));
+        }
+    }
+    if let Some(transcript) = receipt.transcript.as_ref() {
+        fields.push(format!("transcript_format={}", transcript.format));
+        fields.push(format!(
+            "transcript_payload_bytes={}",
+            transcript.payload.len()
+        ));
+    }
+}
+
+fn push_usage_field(
+    fields: &mut Vec<String>,
+    name: &str,
+    value: Option<u64>,
+    detail: Option<&UsageMeasurement>,
+) {
+    if let Some(rendered) = render_usage_measurement(value, detail) {
+        fields.push(format!("{name}={rendered}"));
+    }
+}
+
+fn render_usage_measurement(
+    value: Option<u64>,
+    detail: Option<&UsageMeasurement>,
+) -> Option<String> {
+    match (detail, value) {
+        (Some(detail), _) => Some(format!(
+            "{}({})",
+            detail.value,
+            render_usage_truth(detail.truth)
+        )),
+        (None, Some(value)) => Some(value.to_string()),
+        (None, None) => None,
+    }
+}
+
+fn render_usage_truth(truth: UsageTruth) -> &'static str {
+    match truth {
+        UsageTruth::Exact => "exact",
+        UsageTruth::Estimated => "estimated",
+    }
 }
 
 fn render_cache_signal(signal: CacheSignal) -> &'static str {
@@ -1194,10 +1290,11 @@ fn render_usage_value(value: Option<u64>) -> String {
 #[cfg(test)]
 mod tests {
     use probe_protocol::session::{
-        CacheSignal, SessionTurn, TranscriptItem, TurnId, TurnObservability,
+        BackendTurnReceipt, CacheSignal, SessionTurn, TranscriptItem, TurnId, TurnObservability,
+        UsageMeasurement, UsageTruth,
     };
 
-    use super::render_turn_observability;
+    use super::{render_turn_backend_receipt, render_turn_observability};
 
     #[test]
     fn render_turn_observability_includes_metrics_and_cache_signal() {
@@ -1210,20 +1307,33 @@ mod tests {
                 wallclock_ms: 120,
                 model_output_ms: Some(120),
                 prompt_tokens: Some(24),
+                prompt_tokens_detail: Some(UsageMeasurement {
+                    value: 24,
+                    truth: UsageTruth::Exact,
+                }),
                 completion_tokens: Some(12),
+                completion_tokens_detail: Some(UsageMeasurement {
+                    value: 12,
+                    truth: UsageTruth::Estimated,
+                }),
                 total_tokens: Some(36),
+                total_tokens_detail: Some(UsageMeasurement {
+                    value: 36,
+                    truth: UsageTruth::Exact,
+                }),
                 completion_tokens_per_second_x1000: Some(100_000),
                 cache_signal: CacheSignal::LikelyWarm,
             }),
+            backend_receipt: None,
             items: Vec::<TranscriptItem>::new(),
         };
 
         let rendered = render_turn_observability(&turn).expect("line should exist");
         assert!(rendered.contains("wallclock_ms=120"));
         assert!(rendered.contains("model_output_ms=120"));
-        assert!(rendered.contains("prompt_tokens=24"));
-        assert!(rendered.contains("completion_tokens=12"));
-        assert!(rendered.contains("total_tokens=36"));
+        assert!(rendered.contains("prompt_tokens=24(exact)"));
+        assert!(rendered.contains("completion_tokens=12(estimated)"));
+        assert!(rendered.contains("total_tokens=36(exact)"));
         assert!(rendered.contains("completion_tps=100.000"));
         assert!(rendered.contains("cache_signal=likely_warm"));
     }
@@ -1236,9 +1346,34 @@ mod tests {
             started_at_ms: 1,
             completed_at_ms: Some(2),
             observability: None,
+            backend_receipt: None,
             items: Vec::<TranscriptItem>::new(),
         };
 
         assert!(render_turn_observability(&turn).is_none());
+    }
+
+    #[test]
+    fn render_turn_backend_receipt_summarizes_typed_receipts() {
+        let turn = SessionTurn {
+            id: TurnId(0),
+            index: 0,
+            started_at_ms: 1,
+            completed_at_ms: Some(2),
+            observability: None,
+            backend_receipt: Some(BackendTurnReceipt {
+                failure: None,
+                availability: None,
+                transcript: Some(probe_protocol::session::BackendTranscriptReceipt {
+                    format: String::from("foundation_models.transcript.v1"),
+                    payload: String::from("{\"version\":1}"),
+                }),
+            }),
+            items: Vec::<TranscriptItem>::new(),
+        };
+
+        let rendered = render_turn_backend_receipt(&turn).expect("line should exist");
+        assert!(rendered.contains("transcript_format=foundation_models.transcript.v1"));
+        assert!(rendered.contains("transcript_payload_bytes=13"));
     }
 }

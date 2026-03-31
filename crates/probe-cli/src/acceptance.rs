@@ -8,13 +8,13 @@ use probe_core::runtime::{PlainTextExecOutcome, PlainTextExecRequest, ProbeRunti
 use probe_core::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig};
 use probe_protocol::backend::BackendProfile;
 use probe_protocol::session::{
-    CacheSignal, SessionMetadata, ToolPolicyDecision, TranscriptEvent, TranscriptItemKind,
-    TurnObservability,
+    BackendTurnReceipt, CacheSignal, SessionMetadata, ToolPolicyDecision, TranscriptEvent,
+    TranscriptItemKind, TurnObservability, UsageMeasurement,
 };
 use serde::{Deserialize, Serialize};
 
 const ACCEPTANCE_REPEAT_RUNS: usize = 2;
-const ACCEPTANCE_REPORT_SCHEMA_VERSION: &str = "v2";
+const ACCEPTANCE_REPORT_SCHEMA_VERSION: &str = "v3";
 const ACCEPTANCE_TOOL_SET: &str = "coding_bootstrap";
 const ACCEPTANCE_HARNESS_PROFILE_NAME: &str = "coding_bootstrap_default";
 const ACCEPTANCE_HARNESS_PROFILE_VERSION: &str = "v1";
@@ -84,7 +84,10 @@ pub struct AcceptanceAttemptReport {
     pub executed_tool_calls: usize,
     pub tool_names: Vec<String>,
     pub policy_counts: AcceptancePolicyCounts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observability: Option<AcceptanceObservabilitySummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_receipt: Option<AcceptanceBackendReceiptSummary>,
     pub error: Option<String>,
 }
 
@@ -103,7 +106,10 @@ pub struct AcceptanceCaseReport {
     pub latest_executed_tool_calls: usize,
     pub latest_tool_names: Vec<String>,
     pub latest_policy_counts: AcceptancePolicyCounts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_observability: Option<AcceptanceObservabilitySummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_backend_receipt: Option<AcceptanceBackendReceiptSummary>,
     pub failure_category: Option<AcceptanceFailureCategory>,
     pub error: Option<String>,
     pub attempts: Vec<AcceptanceAttemptReport>,
@@ -123,14 +129,52 @@ pub struct AcceptanceObservabilitySummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_output_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_tokens: Option<u32>,
+    pub prompt_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completion_tokens: Option<u32>,
+    pub prompt_tokens_detail: Option<UsageMeasurement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_tokens: Option<u32>,
+    pub completion_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_detail: Option<UsageMeasurement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens_detail: Option<UsageMeasurement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_tokens_per_second_x1000: Option<u64>,
     pub cache_signal: CacheSignal,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcceptanceBackendReceiptSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_retryable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_suggestion: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_explanation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_ready: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_payload_bytes: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -557,6 +601,9 @@ fn capture_attempt_report(
         observability: transcript_summary
             .as_ref()
             .and_then(|summary| summary.final_observability.clone()),
+        backend_receipt: transcript_summary
+            .as_ref()
+            .and_then(|summary| summary.final_backend_receipt.clone()),
         error,
     }
 }
@@ -609,6 +656,9 @@ fn build_case_report(
         latest_observability: summary_attempt
             .as_ref()
             .and_then(|attempt| attempt.observability.clone()),
+        latest_backend_receipt: summary_attempt
+            .as_ref()
+            .and_then(|attempt| attempt.backend_receipt.clone()),
         failure_category: attempts
             .iter()
             .find(|attempt| !attempt.passed)
@@ -694,6 +744,7 @@ struct TranscriptSummary {
     tool_names: Vec<String>,
     policy_counts: AcceptancePolicyCounts,
     final_observability: Option<AcceptanceObservabilitySummary>,
+    final_backend_receipt: Option<AcceptanceBackendReceiptSummary>,
 }
 
 fn summarize_transcript(events: &[TranscriptEvent]) -> TranscriptSummary {
@@ -701,6 +752,9 @@ fn summarize_transcript(events: &[TranscriptEvent]) -> TranscriptSummary {
     for event in events {
         if let Some(observability) = event.turn.observability.clone() {
             summary.final_observability = Some(observability_summary(&observability));
+        }
+        if let Some(receipt) = event.turn.backend_receipt.as_ref() {
+            summary.final_backend_receipt = Some(backend_receipt_summary(receipt));
         }
         for item in &event.turn.items {
             if item.kind != TranscriptItemKind::ToolResult {
@@ -842,10 +896,74 @@ fn observability_summary(observability: &TurnObservability) -> AcceptanceObserva
         wallclock_ms: observability.wallclock_ms,
         model_output_ms: observability.model_output_ms,
         prompt_tokens: observability.prompt_tokens,
+        prompt_tokens_detail: observability.prompt_tokens_detail.clone(),
         completion_tokens: observability.completion_tokens,
+        completion_tokens_detail: observability.completion_tokens_detail.clone(),
         total_tokens: observability.total_tokens,
+        total_tokens_detail: observability.total_tokens_detail.clone(),
         completion_tokens_per_second_x1000: observability.completion_tokens_per_second_x1000,
         cache_signal: observability.cache_signal,
+    }
+}
+
+fn backend_receipt_summary(receipt: &BackendTurnReceipt) -> AcceptanceBackendReceiptSummary {
+    AcceptanceBackendReceiptSummary {
+        failure_family: receipt
+            .failure
+            .as_ref()
+            .map(|failure| failure.family.clone()),
+        failure_code: receipt
+            .failure
+            .as_ref()
+            .and_then(|failure| failure.code.clone()),
+        failure_message: receipt
+            .failure
+            .as_ref()
+            .map(|failure| failure.message.clone()),
+        failure_retryable: receipt
+            .failure
+            .as_ref()
+            .and_then(|failure| failure.retryable),
+        failure_reason: receipt
+            .failure
+            .as_ref()
+            .and_then(|failure| failure.failure_reason.clone()),
+        recovery_suggestion: receipt
+            .failure
+            .as_ref()
+            .and_then(|failure| failure.recovery_suggestion.clone()),
+        refusal_explanation: receipt
+            .failure
+            .as_ref()
+            .and_then(|failure| failure.refusal_explanation.clone()),
+        tool_name: receipt
+            .failure
+            .as_ref()
+            .and_then(|failure| failure.tool_name.clone()),
+        availability_ready: receipt
+            .availability
+            .as_ref()
+            .map(|availability| availability.ready),
+        availability_reason_code: receipt
+            .availability
+            .as_ref()
+            .and_then(|availability| availability.reason_code.clone()),
+        availability_message: receipt
+            .availability
+            .as_ref()
+            .and_then(|availability| availability.message.clone()),
+        availability_platform: receipt
+            .availability
+            .as_ref()
+            .and_then(|availability| availability.platform.clone()),
+        transcript_format: receipt
+            .transcript
+            .as_ref()
+            .map(|transcript| transcript.format.clone()),
+        transcript_payload_bytes: receipt
+            .transcript
+            .as_ref()
+            .map(|transcript| transcript.payload.len()),
     }
 }
 
@@ -999,7 +1117,7 @@ mod tests {
         assert_eq!(report.counts.failed_cases, 0);
         assert_eq!(report.backend.profile_name, "psionic-qwen35-2b-q8-registry");
         assert_eq!(report.harness.tool_set, "coding_bootstrap");
-        assert_eq!(report.run.schema_version, "v2");
+        assert_eq!(report.run.schema_version, "v3");
         assert_eq!(report.results[5].failure_category, None);
         assert_eq!(report.results[5].latest_policy_counts.paused_tool_calls, 1);
         assert!(report.results[0].latest_transcript_path.is_some());

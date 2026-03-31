@@ -258,8 +258,11 @@ fn selected_transcript_event(probe_home: &Path) -> Value {
         "observability": {
             "cache_signal": event["turn"]["observability"]["cache_signal"],
             "prompt_tokens": event["turn"]["observability"]["prompt_tokens"],
+            "prompt_tokens_detail": event["turn"]["observability"]["prompt_tokens_detail"],
             "completion_tokens": event["turn"]["observability"]["completion_tokens"],
-            "total_tokens": event["turn"]["observability"]["total_tokens"]
+            "completion_tokens_detail": event["turn"]["observability"]["completion_tokens_detail"],
+            "total_tokens": event["turn"]["observability"]["total_tokens"],
+            "total_tokens_detail": event["turn"]["observability"]["total_tokens_detail"]
         },
         "items": event["turn"]["items"]
             .as_array()

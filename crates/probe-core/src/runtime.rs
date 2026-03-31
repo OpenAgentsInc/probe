@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_protocol::session::{
-    CacheSignal, SessionBackendTarget, SessionHarnessProfile, SessionId, SessionMetadata,
-    SessionTurn, TranscriptItemKind, TurnObservability,
+    BackendTurnReceipt, CacheSignal, SessionBackendTarget, SessionHarnessProfile, SessionId,
+    SessionMetadata, SessionTurn, TranscriptItemKind, TurnObservability,
 };
 use probe_provider_openai::{ChatMessage, ChatToolCall};
 use psionic_apple_fm::{
@@ -19,7 +19,7 @@ use psionic_apple_fm::{
 use crate::dataset_export::build_decision_summary;
 use crate::provider::{
     PlainTextMessage, ProviderError, ProviderUsage, apple_fm_tool_loop_response,
-    complete_plain_text, openai_tool_loop_response,
+    complete_plain_text, observability_usage_measurement, openai_tool_loop_response,
 };
 use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionStoreError};
 use crate::tools::{
@@ -176,6 +176,23 @@ impl Display for RuntimeError {
 }
 
 impl std::error::Error for RuntimeError {}
+
+impl RuntimeError {
+    #[must_use]
+    fn backend_turn_receipt(&self) -> Option<BackendTurnReceipt> {
+        match self {
+            Self::ProviderRequest { source, .. } => source.backend_turn_receipt(),
+            Self::ProbeHomeUnavailable
+            | Self::CurrentDir(_)
+            | Self::SessionStore(_)
+            | Self::MissingAssistantMessage { .. }
+            | Self::UnsupportedBackendFeature { .. }
+            | Self::ToolApprovalPending { .. }
+            | Self::MaxToolRoundTrips { .. }
+            | Self::MalformedTranscript(_) => None,
+        }
+    }
+}
 
 impl From<SessionStoreError> for RuntimeError {
     fn from(value: SessionStoreError) -> Self {
@@ -336,14 +353,19 @@ impl ProbeRuntime {
                         items.push(NewItem::new(TranscriptItemKind::UserMessage, user_prompt));
                     }
                     items.push(NewItem::new(TranscriptItemKind::Note, error.to_string()));
-                    let _ = self.session_store.append_turn(&session.id, &items);
+                    let _ = self.session_store.append_turn_with_details(
+                        &session.id,
+                        &items,
+                        None,
+                        error.backend_turn_receipt(),
+                    );
                     return Err(error);
                 }
             };
             let observability =
-                self.build_turn_observability(&session.id, wallclock_ms, response.2.as_ref())?;
+                self.build_turn_observability(&session.id, wallclock_ms, response.usage.as_ref())?;
 
-            if let Some(tool_calls) = response.4.as_ref()
+            if let Some(tool_calls) = response.tool_calls.as_ref()
                 && !tool_calls.is_empty()
             {
                 let tool_calls = tool_calls.clone();
@@ -352,6 +374,7 @@ impl ProbeRuntime {
                     pending_user_prompt.take(),
                     &tool_calls,
                     Some(observability),
+                    response.backend_receipt.clone(),
                 )?;
 
                 let execution_context = self.build_tool_execution_context(
@@ -389,28 +412,27 @@ impl ProbeRuntime {
                 continue;
             }
 
-            let assistant_text =
-                response
-                    .3
-                    .clone()
-                    .ok_or_else(|| RuntimeError::MissingAssistantMessage {
-                        session_id: session.id.clone(),
-                        response_id: response.0.clone(),
-                    })?;
+            let assistant_text = response.assistant_text.clone().ok_or_else(|| {
+                RuntimeError::MissingAssistantMessage {
+                    session_id: session.id.clone(),
+                    response_id: response.response_id.clone(),
+                }
+            })?;
             let turn = self.append_assistant_turn(
                 &session.id,
                 pending_user_prompt.take(),
                 assistant_text.clone(),
                 Some(observability),
+                response.backend_receipt,
             )?;
             let session = self.session_store.read_metadata(&session.id)?;
             return Ok(PlainTextExecOutcome {
                 session,
                 turn,
                 assistant_text,
-                response_id: response.0,
-                response_model: response.1,
-                usage: response.2,
+                response_id: response.response_id,
+                response_model: response.response_model,
+                usage: response.usage,
                 executed_tool_calls,
                 tool_results,
             });
@@ -500,6 +522,7 @@ impl ProbeRuntime {
                         Some(prompt.clone()),
                         &tool_results,
                         None,
+                        None,
                     );
                     let _ = self.append_tool_result_turn(&session.id, &tool_results);
                 } else if matches!(
@@ -550,7 +573,12 @@ impl ProbeRuntime {
                             items.push(NewItem::new(TranscriptItemKind::UserMessage, prompt));
                         }
                         items.push(NewItem::new(TranscriptItemKind::Note, error.to_string()));
-                        let _ = self.session_store.append_turn(&session.id, &items);
+                        let _ = self.session_store.append_turn_with_details(
+                            &session.id,
+                            &items,
+                            None,
+                            error.backend_turn_receipt(),
+                        );
                         Err(error)
                     }
                 };
@@ -564,6 +592,7 @@ impl ProbeRuntime {
                 Some(prompt),
                 &tool_results,
                 None,
+                None,
             )?;
             let _ = self.append_tool_result_turn(&session.id, &tool_results)?;
             let turn = self.append_assistant_turn(
@@ -576,6 +605,7 @@ impl ProbeRuntime {
                     }
                 })?,
                 Some(observability),
+                response.backend_receipt,
             )?;
             let session = self.session_store.read_metadata(&session.id)?;
             return Ok(PlainTextExecOutcome {
@@ -601,6 +631,7 @@ impl ProbeRuntime {
             Some(prompt),
             assistant_text.clone(),
             Some(observability),
+            response.backend_receipt,
         )?;
         let session = self.session_store.read_metadata(&session.id)?;
         Ok(PlainTextExecOutcome {
@@ -636,12 +667,14 @@ impl ProbeRuntime {
         let response = match response {
             Ok(response) => response,
             Err(error) => {
-                let _ = self.session_store.append_turn(
+                let _ = self.session_store.append_turn_with_details(
                     &session.id,
                     &[
                         NewItem::new(TranscriptItemKind::UserMessage, prompt),
                         NewItem::new(TranscriptItemKind::Note, error.to_string()),
                     ],
+                    None,
+                    error.backend_turn_receipt(),
                 );
                 return Err(error);
             }
@@ -655,13 +688,12 @@ impl ProbeRuntime {
             }
         })?;
 
-        let turn = self.session_store.append_turn_with_observability(
+        let turn = self.append_assistant_turn(
             &session.id,
-            &[
-                NewItem::new(TranscriptItemKind::UserMessage, prompt),
-                NewItem::new(TranscriptItemKind::AssistantMessage, assistant_text.clone()),
-            ],
+            Some(prompt),
+            assistant_text.clone(),
             Some(observability),
+            response.backend_receipt,
         )?;
         let session = self.session_store.read_metadata(&session.id)?;
         Ok(PlainTextExecOutcome {
@@ -939,6 +971,7 @@ impl ProbeRuntime {
         user_prompt: Option<String>,
         tool_calls: &[ChatToolCall],
         observability: Option<TurnObservability>,
+        backend_receipt: Option<BackendTurnReceipt>,
     ) -> Result<SessionTurn, RuntimeError> {
         let mut items = Vec::new();
         if let Some(user_prompt) = user_prompt {
@@ -960,7 +993,7 @@ impl ProbeRuntime {
             ));
         }
         self.session_store
-            .append_turn_with_observability(session_id, &items, observability)
+            .append_turn_with_details(session_id, &items, observability, backend_receipt)
             .map_err(RuntimeError::from)
     }
 
@@ -993,6 +1026,7 @@ impl ProbeRuntime {
         user_prompt: Option<String>,
         executed_tool_calls: &[ExecutedToolCall],
         observability: Option<TurnObservability>,
+        backend_receipt: Option<BackendTurnReceipt>,
     ) -> Result<SessionTurn, RuntimeError> {
         let mut items = Vec::new();
         if let Some(user_prompt) = user_prompt {
@@ -1006,7 +1040,7 @@ impl ProbeRuntime {
             ));
         }
         self.session_store
-            .append_turn_with_observability(session_id, &items, observability)
+            .append_turn_with_details(session_id, &items, observability, backend_receipt)
             .map_err(RuntimeError::from)
     }
 
@@ -1016,6 +1050,7 @@ impl ProbeRuntime {
         user_prompt: Option<String>,
         assistant_text: String,
         observability: Option<TurnObservability>,
+        backend_receipt: Option<BackendTurnReceipt>,
     ) -> Result<SessionTurn, RuntimeError> {
         let mut items = Vec::new();
         if let Some(user_prompt) = user_prompt {
@@ -1026,7 +1061,7 @@ impl ProbeRuntime {
             assistant_text,
         ));
         self.session_store
-            .append_turn_with_observability(session_id, &items, observability)
+            .append_turn_with_details(session_id, &items, observability, backend_receipt)
             .map_err(RuntimeError::from)
     }
 
@@ -1036,7 +1071,7 @@ impl ProbeRuntime {
         wallclock_ms: u64,
         usage: Option<&ProviderUsage>,
     ) -> Result<TurnObservability, RuntimeError> {
-        let prompt_tokens = usage.and_then(ProviderUsage::prompt_tokens_u32);
+        let prompt_tokens = usage.and_then(|usage| usage.prompt_tokens);
         let previous = if prompt_tokens.is_some() {
             self.last_prompt_bearing_observability(session_id)?
         } else {
@@ -1047,10 +1082,19 @@ impl ProbeRuntime {
             wallclock_ms,
             model_output_ms: Some(wallclock_ms),
             prompt_tokens,
-            completion_tokens: usage.and_then(ProviderUsage::completion_tokens_u32),
-            total_tokens: usage.and_then(ProviderUsage::total_tokens_u32),
+            prompt_tokens_detail: usage.and_then(|usage| {
+                observability_usage_measurement(usage.prompt_tokens_detail.as_ref())
+            }),
+            completion_tokens: usage.and_then(|usage| usage.completion_tokens),
+            completion_tokens_detail: usage.and_then(|usage| {
+                observability_usage_measurement(usage.completion_tokens_detail.as_ref())
+            }),
+            total_tokens: usage.and_then(|usage| usage.total_tokens),
+            total_tokens_detail: usage.and_then(|usage| {
+                observability_usage_measurement(usage.total_tokens_detail.as_ref())
+            }),
             completion_tokens_per_second_x1000: usage.and_then(|usage| {
-                usage.completion_tokens_u32().and_then(|completion_tokens| {
+                usage.completion_tokens.and_then(|completion_tokens| {
                     completion_tokens_per_second_x1000(completion_tokens, wallclock_ms)
                 })
             }),
@@ -1183,7 +1227,7 @@ fn flush_apple_pending_tool_calls(
 
 fn infer_cache_signal(
     previous: Option<&TurnObservability>,
-    current_prompt_tokens: Option<u32>,
+    current_prompt_tokens: Option<u64>,
     current_wallclock_ms: u64,
 ) -> CacheSignal {
     let Some(previous) = previous else {
@@ -1209,11 +1253,11 @@ fn infer_cache_signal(
     }
 }
 
-fn completion_tokens_per_second_x1000(completion_tokens: u32, model_output_ms: u64) -> Option<u64> {
+fn completion_tokens_per_second_x1000(completion_tokens: u64, model_output_ms: u64) -> Option<u64> {
     if completion_tokens == 0 || model_output_ms == 0 {
         return None;
     }
-    Some((u64::from(completion_tokens) * 1_000_000) / model_output_ms)
+    Some(completion_tokens.saturating_mul(1_000_000) / model_output_ms)
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -1233,7 +1277,7 @@ mod tests {
     use crate::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig};
     use probe_protocol::session::{
         CacheSignal, SessionHarnessProfile, ToolApprovalState, ToolPolicyDecision,
-        TranscriptItemKind,
+        TranscriptItemKind, UsageTruth,
     };
     use probe_test_support::{
         FakeAppleFmServer, FakeHttpRequest, FakeHttpResponse, FakeOpenAiServer,
@@ -1435,6 +1479,14 @@ mod tests {
             Some(observability.wallclock_ms)
         );
         assert_eq!(observability.prompt_tokens, Some(6));
+        assert_eq!(
+            observability
+                .prompt_tokens_detail
+                .as_ref()
+                .expect("prompt token detail should exist")
+                .truth,
+            UsageTruth::Exact
+        );
         assert_eq!(observability.completion_tokens, Some(5));
         assert_eq!(observability.total_tokens, Some(11));
         assert!(
@@ -1539,6 +1591,14 @@ mod tests {
             .as_ref()
             .expect("observability should exist");
         assert_eq!(observability.prompt_tokens, Some(9));
+        assert_eq!(
+            observability
+                .prompt_tokens_detail
+                .as_ref()
+                .expect("prompt token detail should exist")
+                .truth,
+            UsageTruth::Estimated
+        );
         assert_eq!(observability.completion_tokens, Some(4));
         assert_eq!(observability.total_tokens, Some(13));
 
@@ -1827,6 +1887,24 @@ mod tests {
             transcript[2].turn.items[0].kind,
             TranscriptItemKind::AssistantMessage
         ));
+        assert_eq!(
+            transcript[2]
+                .turn
+                .observability
+                .as_ref()
+                .and_then(|observability| observability.total_tokens_detail.as_ref())
+                .map(|detail| detail.truth),
+            Some(UsageTruth::Estimated)
+        );
+        assert_eq!(
+            transcript[2]
+                .turn
+                .backend_receipt
+                .as_ref()
+                .and_then(|receipt| receipt.transcript.as_ref())
+                .map(|transcript| transcript.format.as_str()),
+            Some("foundation_models.transcript.v1")
+        );
         let requests = server.finish();
         assert_eq!(requests.len(), 3);
     }
@@ -2158,6 +2236,72 @@ mod tests {
         drop(bridge_state);
         let requests = server.finish();
         assert_eq!(requests.len(), 6);
+    }
+
+    #[test]
+    fn apple_fm_plain_text_provider_failure_persists_typed_backend_receipt() {
+        let environment = ProbeTestEnvironment::new();
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let server = FakeAppleFmServer::from_responses(vec![FakeHttpResponse::json_status(
+            503,
+            json!({
+                "error": {
+                    "message": "Apple Intelligence is not enabled",
+                    "type": "assets_unavailable",
+                    "code": "assets_unavailable",
+                    "failure_reason": "Apple Intelligence is disabled",
+                    "recovery_suggestion": "Enable Apple Intelligence and retry"
+                }
+            }),
+        )]);
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = server.base_url().to_string();
+
+        let error = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile,
+                prompt: String::from("say hello"),
+                title: Some(String::from("Apple FM Failure Receipt")),
+                cwd: environment.workspace().to_path_buf(),
+                system_prompt: None,
+                harness_profile: None,
+                tool_loop: None,
+            })
+            .expect_err("apple fm request should fail");
+
+        assert!(matches!(error, super::RuntimeError::ProviderRequest { .. }));
+        let sessions = runtime
+            .session_store()
+            .list_sessions()
+            .expect("list sessions");
+        let transcript = runtime
+            .session_store()
+            .read_transcript(&sessions[0].id)
+            .expect("read transcript");
+        let receipt = transcript[0]
+            .turn
+            .backend_receipt
+            .as_ref()
+            .expect("backend receipt should persist");
+        assert_eq!(
+            receipt
+                .failure
+                .as_ref()
+                .expect("failure receipt should exist")
+                .code
+                .as_deref(),
+            Some("assets_unavailable")
+        );
+        assert_eq!(
+            receipt
+                .availability
+                .as_ref()
+                .expect("availability receipt should exist")
+                .ready,
+            false
+        );
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
     }
 
     #[test]

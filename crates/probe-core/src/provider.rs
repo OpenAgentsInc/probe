@@ -2,6 +2,10 @@ use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
 use probe_protocol::backend::{BackendKind, BackendProfile};
+use probe_protocol::session::{
+    BackendAvailabilityReceipt, BackendFailureReceipt, BackendTranscriptReceipt,
+    BackendTurnReceipt, UsageMeasurement, UsageTruth,
+};
 use probe_provider_apple_fm::{
     AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError, AppleFmProviderMessage,
     AppleFmProviderSessionResponse, AppleFmProviderToolCall, AppleFmProviderToolDefinition,
@@ -11,8 +15,8 @@ use probe_provider_openai::{
     OpenAiProviderConfig, OpenAiProviderError,
 };
 use psionic_apple_fm::{
-    AppleFmChatUsage, AppleFmToolCallError, AppleFmTranscript, AppleFmUsageMeasurement,
-    AppleFmUsageTruth,
+    AppleFmChatUsage, AppleFmErrorCode, AppleFmToolCallError, AppleFmTranscript,
+    AppleFmUsageMeasurement, AppleFmUsageTruth,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,32 +100,23 @@ pub struct ProviderUsage {
     pub total_tokens_detail: Option<ProviderUsageMeasurement>,
 }
 
-impl ProviderUsage {
-    #[must_use]
-    pub fn prompt_tokens_u32(&self) -> Option<u32> {
-        self.prompt_tokens
-            .and_then(|value| u32::try_from(value).ok())
-    }
-
-    #[must_use]
-    pub fn completion_tokens_u32(&self) -> Option<u32> {
-        self.completion_tokens
-            .and_then(|value| u32::try_from(value).ok())
-    }
-
-    #[must_use]
-    pub fn total_tokens_u32(&self) -> Option<u32> {
-        self.total_tokens
-            .and_then(|value| u32::try_from(value).ok())
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlainTextProviderResponse {
     pub response_id: String,
     pub response_model: String,
     pub assistant_text: Option<String>,
     pub usage: Option<ProviderUsage>,
+    pub backend_receipt: Option<BackendTurnReceipt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolLoopProviderResponse {
+    pub response_id: String,
+    pub response_model: String,
+    pub usage: Option<ProviderUsage>,
+    pub assistant_text: Option<String>,
+    pub tool_calls: Option<Vec<ChatToolCall>>,
+    pub backend_receipt: Option<BackendTurnReceipt>,
 }
 
 #[derive(Debug)]
@@ -147,6 +142,42 @@ impl Display for ProviderError {
 }
 
 impl std::error::Error for ProviderError {}
+
+impl ProviderError {
+    #[must_use]
+    pub fn backend_turn_receipt(&self) -> Option<BackendTurnReceipt> {
+        match self {
+            Self::AppleFm(error) => {
+                error
+                    .foundation_models_error()
+                    .map(|typed| BackendTurnReceipt {
+                        failure: Some(BackendFailureReceipt {
+                            family: String::from("apple_foundation_models"),
+                            message: typed.message.clone(),
+                            code: Some(typed.kind.label().to_string()),
+                            retryable: Some(typed.is_retryable()),
+                            failure_reason: typed.failure_reason.clone(),
+                            recovery_suggestion: typed.recovery_suggestion.clone(),
+                            refusal_explanation: typed.refusal_explanation.clone(),
+                            tool_name: typed.tool_name.clone(),
+                        }),
+                        availability: matches!(typed.kind, AppleFmErrorCode::AssetsUnavailable)
+                            .then(|| BackendAvailabilityReceipt {
+                                ready: false,
+                                reason_code: Some(typed.kind.label().to_string()),
+                                message: typed
+                                    .failure_reason
+                                    .clone()
+                                    .or_else(|| Some(typed.message.clone())),
+                                platform: None,
+                            }),
+                        transcript: None,
+                    })
+            }
+            Self::OpenAi(_) | Self::UnsupportedFeature { .. } => None,
+        }
+    }
+}
 
 pub fn complete_plain_text(
     profile: &BackendProfile,
@@ -194,6 +225,7 @@ fn complete_openai_plain_text(
                 truth: ProviderUsageTruth::Exact,
             }),
         }),
+        backend_receipt: None,
     })
 }
 
@@ -216,6 +248,7 @@ fn complete_apple_fm_plain_text(
         response_model: response.model,
         assistant_text: response.assistant_text,
         usage: response.usage.as_ref().map(provider_usage_from_apple),
+        backend_receipt: None,
     })
 }
 
@@ -259,6 +292,18 @@ fn usage_measurement(
     }
 }
 
+pub fn observability_usage_measurement(
+    detail: Option<&ProviderUsageMeasurement>,
+) -> Option<UsageMeasurement> {
+    detail.map(|detail| UsageMeasurement {
+        value: detail.value,
+        truth: match detail.truth {
+            ProviderUsageTruth::Exact => UsageTruth::Exact,
+            ProviderUsageTruth::Estimated => UsageTruth::Estimated,
+        },
+    })
+}
+
 pub fn openai_tool_messages_from_plain_text(messages: &[PlainTextMessage]) -> Vec<ChatMessage> {
     messages
         .iter()
@@ -272,16 +317,7 @@ pub fn openai_tool_loop_response(
     tools: Vec<ChatToolDefinitionEnvelope>,
     tool_choice: Option<probe_provider_openai::ChatToolChoice>,
     parallel_tool_calls: Option<bool>,
-) -> Result<
-    (
-        String,
-        String,
-        Option<ProviderUsage>,
-        Option<String>,
-        Option<Vec<ChatToolCall>>,
-    ),
-    ProviderError,
-> {
+) -> Result<ToolLoopProviderResponse, ProviderError> {
     if profile.kind != BackendKind::OpenAiChatCompletions {
         return Err(ProviderError::UnsupportedFeature {
             backend: profile.kind,
@@ -300,10 +336,10 @@ pub fn openai_tool_loop_response(
         .map_err(ProviderError::OpenAi)?;
     let tool_calls = response.first_tool_calls().map(ToOwned::to_owned);
     let assistant_text = response.first_message_text().map(ToOwned::to_owned);
-    Ok((
-        response.id,
-        response.model,
-        response.usage.map(|usage| ProviderUsage {
+    Ok(ToolLoopProviderResponse {
+        response_id: response.id,
+        response_model: response.model,
+        usage: response.usage.map(|usage| ProviderUsage {
             prompt_tokens: Some(u64::from(usage.prompt_tokens)),
             completion_tokens: Some(u64::from(usage.completion_tokens)),
             total_tokens: Some(u64::from(usage.total_tokens)),
@@ -322,7 +358,8 @@ pub fn openai_tool_loop_response(
         }),
         assistant_text,
         tool_calls,
-    ))
+        backend_receipt: None,
+    })
 }
 
 pub fn apple_fm_tool_loop_response(
@@ -358,5 +395,18 @@ fn plain_text_provider_response_from_apple_session(
         response_model: response.model,
         assistant_text: Some(response.assistant_text),
         usage: response.usage.as_ref().map(provider_usage_from_apple),
+        backend_receipt: response.transcript.and_then(|transcript| {
+            transcript
+                .to_json_string()
+                .ok()
+                .map(|payload| BackendTurnReceipt {
+                    failure: None,
+                    availability: None,
+                    transcript: Some(BackendTranscriptReceipt {
+                        format: String::from("foundation_models.transcript.v1"),
+                        payload,
+                    }),
+                })
+        }),
     }
 }

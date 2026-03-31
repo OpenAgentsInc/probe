@@ -59,20 +59,84 @@ pub enum CacheSignal {
     NoClearSignal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageTruth {
+    Exact,
+    Estimated,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageMeasurement {
+    pub value: u64,
+    pub truth: UsageTruth,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnObservability {
     pub wallclock_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_output_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_tokens: Option<u32>,
+    pub prompt_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completion_tokens: Option<u32>,
+    pub prompt_tokens_detail: Option<UsageMeasurement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_tokens: Option<u32>,
+    pub completion_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_detail: Option<UsageMeasurement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens_detail: Option<UsageMeasurement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_tokens_per_second_x1000: Option<u64>,
     pub cache_signal: CacheSignal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendFailureReceipt {
+    pub family: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_suggestion: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_explanation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendAvailabilityReceipt {
+    pub ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendTranscriptReceipt {
+    pub format: String,
+    pub payload: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendTurnReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<BackendFailureReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability: Option<BackendAvailabilityReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<BackendTranscriptReceipt>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +213,8 @@ pub struct SessionTurn {
     pub completed_at_ms: Option<TimestampMs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observability: Option<TurnObservability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_receipt: Option<BackendTurnReceipt>,
     pub items: Vec<TranscriptItem>,
 }
 
