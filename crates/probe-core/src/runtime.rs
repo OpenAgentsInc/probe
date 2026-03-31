@@ -660,6 +660,7 @@ mod tests {
         CacheSignal, SessionHarnessProfile, ToolApprovalState, ToolPolicyDecision,
         TranscriptItemKind,
     };
+    use probe_test_support::{FakeOpenAiServer, ProbeTestEnvironment};
 
     use super::{
         PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, default_session_title,
@@ -673,50 +674,34 @@ mod tests {
 
     #[test]
     fn exec_plain_text_persists_session_and_transcript() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
-        let address = listener.local_addr().expect("listener addr");
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept connection");
-            let mut buffer = [0_u8; 4096];
-            let _ = stream.read(&mut buffer);
-            let body = serde_json::json!({
-                "id": "chatcmpl_exec_test",
-                "model": "qwen3.5-2b-q8_0-registry.gguf",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": "hello from probe exec"},
-                        "finish_reason": "stop"
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 6,
-                    "completion_tokens": 5,
-                    "total_tokens": 11
+        let server = FakeOpenAiServer::from_json_responses(vec![serde_json::json!({
+            "id": "chatcmpl_exec_test",
+            "model": "qwen3.5-2b-q8_0-registry.gguf",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello from probe exec"},
+                    "finish_reason": "stop"
                 }
-            })
-            .to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write response");
-        });
+            ],
+            "usage": {
+                "prompt_tokens": 6,
+                "completion_tokens": 5,
+                "total_tokens": 11
+            }
+        })]);
 
-        let temp = tempfile::tempdir().expect("temp dir");
-        let runtime = ProbeRuntime::new(temp.path().join(".probe"));
+        let environment = ProbeTestEnvironment::new();
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
         let mut profile = psionic_qwen35_2b_q8_registry();
-        profile.base_url = format!("http://{address}/v1");
+        profile.base_url = String::from(server.base_url());
 
         let outcome = runtime
             .exec_plain_text(PlainTextExecRequest {
                 profile,
                 prompt: String::from("say hello"),
                 title: Some(String::from("Exec Test")),
-                cwd: temp.path().to_path_buf(),
+                cwd: environment.workspace().to_path_buf(),
                 system_prompt: None,
                 harness_profile: Some(SessionHarnessProfile {
                     name: String::from("coding_bootstrap_default"),
@@ -786,8 +771,9 @@ mod tests {
                 .prompt_tokens,
             Some(6)
         );
-
-        handle.join().expect("server thread should exit cleanly");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("say hello"));
     }
 
     #[test]
@@ -1037,51 +1023,35 @@ mod tests {
 
     #[test]
     fn tool_loop_can_pause_for_approval() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
-        let address = listener.local_addr().expect("listener addr");
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept connection");
-            let mut buffer = [0_u8; 4096];
-            let _ = stream.read(&mut buffer);
-            let body = serde_json::json!({
-                "id": "chatcmpl_pause_test",
-                "model": "qwen3.5-2b-q8_0-registry.gguf",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "tool_calls": [
-                                {
-                                    "id": "call_patch_1",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "apply_patch",
-                                        "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"
-                                    }
+        let server = FakeOpenAiServer::from_json_responses(vec![serde_json::json!({
+            "id": "chatcmpl_pause_test",
+            "model": "qwen3.5-2b-q8_0-registry.gguf",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call_patch_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "apply_patch",
+                                    "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"
                                 }
-                            ]
-                        },
-                        "finish_reason": "tool_calls"
-                    }
-                ]
-            })
-            .to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write response");
-        });
+                            }
+                        ]
+                    },
+                    "finish_reason": "tool_calls"
+                }
+            ]
+        })]);
 
-        let temp = tempfile::tempdir().expect("temp dir");
-        std::fs::write(temp.path().join("hello.txt"), "hello world\n").expect("write hello");
-        let runtime = ProbeRuntime::new(temp.path().join(".probe"));
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
         let mut profile = psionic_qwen35_2b_q8_registry();
-        profile.base_url = format!("http://{address}/v1");
+        profile.base_url = String::from(server.base_url());
         let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Required, false);
         tool_loop.approval = ToolApprovalConfig {
             allow_write_tools: false,
@@ -1095,7 +1065,7 @@ mod tests {
                 profile,
                 prompt: String::from("patch hello.txt"),
                 title: Some(String::from("Pause Test")),
-                cwd: temp.path().to_path_buf(),
+                cwd: environment.workspace().to_path_buf(),
                 system_prompt: None,
                 harness_profile: None,
                 tool_loop: Some(tool_loop),
@@ -1125,8 +1095,9 @@ mod tests {
                 .policy_decision,
             ToolPolicyDecision::Paused
         );
-
-        handle.join().expect("server thread should exit cleanly");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("\"tool_choice\":\"required\""));
     }
 
     #[test]

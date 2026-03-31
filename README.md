@@ -102,6 +102,12 @@ usage when available, derived completion throughput, and a conservative
 cache-signal heuristic. More detailed design and implementation notes live
 under `docs/`.
 
+For local validation, Probe now has a canonical runner script at the repo
+root: `./probe-dev fmt`, `./probe-dev check`, `./probe-dev test`, and
+`./probe-dev accept`. The test command prefers `cargo nextest run
+--no-fail-fast` when `cargo nextest` is installed and falls back to
+`cargo test --workspace` otherwise.
+
 ## Commands
 
 Build and validation:

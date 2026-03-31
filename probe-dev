@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ./probe-dev <command> [args...]
+
+Commands:
+  fmt               Run cargo fmt across the workspace.
+  check             Run cargo check across the workspace.
+  test              Prefer cargo nextest; fall back to cargo test.
+  accept [args...]  Run probe accept with any extra CLI args forwarded through.
+EOF
+}
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "error: missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+command_name="${1:-}"
+if [[ -z "$command_name" ]]; then
+  usage
+  exit 1
+fi
+shift
+
+require_command cargo
+
+case "$command_name" in
+  fmt)
+    cargo fmt --all
+    ;;
+  check)
+    cargo check --workspace
+    ;;
+  test)
+    if cargo nextest --version >/dev/null 2>&1; then
+      cargo nextest run --no-fail-fast "$@"
+    else
+      cargo test --workspace "$@"
+    fi
+    ;;
+  accept)
+    cargo run -p probe-cli -- accept "$@"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    echo "error: unknown command: $command_name" >&2
+    usage
+    exit 1
+    ;;
+esac

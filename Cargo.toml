@@ -6,6 +6,7 @@ members = [
     "crates/probe-optimizer",
     "crates/probe-protocol",
     "crates/probe-provider-openai",
+    "crates/probe-test-support",
 ]
 resolver = "2"
 
@@ -21,6 +22,7 @@ probe-decisions = { path = "crates/probe-decisions" }
 probe-optimizer = { path = "crates/probe-optimizer" }
 probe-protocol = { path = "crates/probe-protocol" }
 probe-provider-openai = { path = "crates/probe-provider-openai" }
+probe-test-support = { path = "crates/probe-test-support" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -700,6 +700,7 @@ dependencies = [
  "probe-decisions",
  "probe-optimizer",
  "probe-protocol",
+ "probe-test-support",
  "serde",
  "serde_json",
  "tempfile",
@@ -711,6 +712,7 @@ version = "0.1.0"
 dependencies = [
  "probe-protocol",
  "probe-provider-openai",
+ "probe-test-support",
  "reqwest",
  "serde",
  "serde_json",
@@ -748,9 +750,19 @@ name = "probe-provider-openai"
 version = "0.1.0"
 dependencies = [
  "probe-protocol",
+ "probe-test-support",
  "reqwest",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "probe-test-support"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -336,12 +336,10 @@ impl OpenAiProviderClient {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::thread;
     use std::time::Duration;
 
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
+    use probe_test_support::{FakeHttpResponse, FakeOpenAiServer};
 
     use super::{
         ChatCompletionResponse, ChatMessage, ChatToolCall, ChatToolCallFunction,
@@ -380,41 +378,25 @@ mod tests {
 
     #[test]
     fn client_executes_plain_text_chat_completion_against_local_endpoint() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
-        let address = listener.local_addr().expect("listener addr");
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept connection");
-            let mut buffer = [0_u8; 4096];
-            let _ = stream.read(&mut buffer);
-            let body = serde_json::json!({
-                "id": "chatcmpl_test",
-                "model": "tiny-qwen35",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": "hello from backend"},
-                        "finish_reason": "stop"
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 3,
-                    "completion_tokens": 4,
-                    "total_tokens": 7
+        let server = FakeOpenAiServer::from_json_responses(vec![serde_json::json!({
+            "id": "chatcmpl_test",
+            "model": "tiny-qwen35",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello from backend"},
+                    "finish_reason": "stop"
                 }
-            })
-            .to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write response");
-        });
+            ],
+            "usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 4,
+                "total_tokens": 7
+            }
+        })]);
 
         let config = OpenAiProviderConfig {
-            base_url: format!("http://{address}/v1"),
+            base_url: String::from(server.base_url()),
             model: String::from("tiny-qwen35"),
             api_key: String::from("dummy"),
             timeout: std::time::Duration::from_secs(5),
@@ -426,53 +408,39 @@ mod tests {
             .expect("chat completion");
 
         assert_eq!(response.first_message_text(), Some("hello from backend"));
-        handle.join().expect("server thread");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("POST /v1/chat/completions"));
     }
 
     #[test]
     fn client_decodes_tool_call_responses() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
-        let address = listener.local_addr().expect("listener addr");
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept connection");
-            let mut buffer = [0_u8; 4096];
-            let _ = stream.read(&mut buffer);
-            let body = serde_json::json!({
-                "id": "chatcmpl_tools",
-                "model": "tiny-qwen35",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "tool_calls": [
-                                {
-                                    "id": "call_1",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "lookup_weather",
-                                        "arguments": "{\"city\":\"Paris\"}"
-                                    }
+        let server = FakeOpenAiServer::from_json_responses(vec![serde_json::json!({
+            "id": "chatcmpl_tools",
+            "model": "tiny-qwen35",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "lookup_weather",
+                                    "arguments": "{\"city\":\"Paris\"}"
                                 }
-                            ]
-                        },
-                        "finish_reason": "tool_calls"
-                    }
-                ]
-            })
-            .to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write response");
-        });
+                            }
+                        ]
+                    },
+                    "finish_reason": "tool_calls"
+                }
+            ]
+        })]);
 
         let config = OpenAiProviderConfig {
-            base_url: format!("http://{address}/v1"),
+            base_url: String::from(server.base_url()),
             model: String::from("tiny-qwen35"),
             api_key: String::from("dummy"),
             timeout: Duration::from_secs(5),
@@ -487,7 +455,9 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "lookup_weather");
         assert_eq!(tool_calls[0].function.arguments, "{\"city\":\"Paris\"}");
-        handle.join().expect("server thread");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("weather in Paris"));
     }
 
     #[test]
@@ -513,25 +483,13 @@ mod tests {
 
     #[test]
     fn http_status_errors_surface_response_body() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
-        let address = listener.local_addr().expect("listener addr");
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept connection");
-            let mut buffer = [0_u8; 4096];
-            let _ = stream.read(&mut buffer);
-            let body = String::from("{\"error\":\"bad request\"}");
-            let response = format!(
-                "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write response");
-        });
+        let server = FakeOpenAiServer::from_responses(vec![FakeHttpResponse::json_status(
+            400,
+            serde_json::json!({"error": "bad request"}),
+        )]);
 
         let config = OpenAiProviderConfig {
-            base_url: format!("http://{address}/v1"),
+            base_url: String::from(server.base_url()),
             model: String::from("tiny-qwen35"),
             api_key: String::from("dummy"),
             timeout: std::time::Duration::from_secs(5),
@@ -549,8 +507,9 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
-
-        handle.join().expect("server thread");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("\"fail\""));
     }
 
     #[test]

@@ -58,3 +58,6 @@ This folder holds technical planning docs for the Probe runtime.
 - `19-long-context-repo-analysis.md`
   - opt-in bounded repo-analysis escalation with explicit evidence pointers,
     budgets, and transcript-visible provenance
+- `20-testing-and-local-runner.md`
+  - shared test-support helpers, canonical local validation commands, and the
+    `nextest`-first runner contract
