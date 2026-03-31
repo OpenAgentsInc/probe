@@ -518,6 +518,29 @@ impl ChatScreen {
                 ));
                 String::from("assistant delta received")
             }
+            RuntimeEvent::AssistantSnapshot {
+                session_id,
+                round_trip,
+                snapshot,
+            } => {
+                self.runtime.session_id = Some(session_id.as_str().to_string());
+                self.runtime.phase = Some(String::from("assistant_snapshot"));
+                self.runtime.round_trip = Some(round_trip);
+                self.transcript.set_active_turn(ActiveTurn::new(
+                    TranscriptRole::Assistant,
+                    "Assistant Snapshot",
+                    vec![
+                        format!("round_trip: {round_trip}"),
+                        preview(snapshot.as_str(), 96),
+                    ],
+                ));
+                self.snap_transcript_to_latest();
+                self.record_worker_event(format!(
+                    "assistant snapshot received: {}",
+                    preview(snapshot.as_str(), 32)
+                ));
+                String::from("assistant snapshot received")
+            }
             RuntimeEvent::ToolCallDelta {
                 session_id,
                 round_trip,

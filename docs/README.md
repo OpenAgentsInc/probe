@@ -142,3 +142,7 @@ This folder holds technical planning docs for the Probe runtime.
     delta events for streamed assistant or tool-call progression, and JSON
     fallback for backends that still answer a streaming request with blocking
     chat-completion output
+- `48-apple-fm-streaming-and-snapshot-events.md`
+  - Apple FM session-response streaming in `probe-provider-apple-fm`, explicit
+    snapshot semantics instead of fake token deltas, and runtime snapshot
+    events that preserve the local Probe tool and approval contract

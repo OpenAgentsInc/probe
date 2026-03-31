@@ -15,12 +15,14 @@ use probe_provider_openai::{ChatCompletionChunk, ChatMessage, ChatToolCall};
 use psionic_apple_fm::{
     APPLE_FM_TRANSCRIPT_TYPE, APPLE_FM_TRANSCRIPT_VERSION, AppleFmToolCallError, AppleFmTranscript,
     AppleFmTranscriptContent, AppleFmTranscriptEntry, AppleFmTranscriptPayload,
+    AppleFmTextStreamEvent,
 };
 use serde_json::Value;
 
 use crate::dataset_export::build_decision_summary;
 use crate::provider::{
     PlainTextMessage, ProviderError, ProviderUsage, apple_fm_tool_loop_response,
+    apple_fm_tool_loop_response_with_callback, complete_apple_fm_plain_text_with_callback,
     complete_openai_plain_text_with_callback, complete_plain_text,
     observability_usage_measurement, openai_tool_loop_response,
     openai_tool_loop_response_with_callback,
@@ -144,6 +146,11 @@ pub enum RuntimeEvent {
         session_id: SessionId,
         round_trip: usize,
         delta: String,
+    },
+    AssistantSnapshot {
+        session_id: SessionId,
+        round_trip: usize,
+        snapshot: String,
     },
     ToolCallDelta {
         session_id: SessionId,
@@ -699,6 +706,68 @@ fn emit_model_request_failed(
     );
 }
 
+#[derive(Default)]
+struct AppleFmStreamRuntimeState {
+    stream_started: bool,
+    ttft_recorded: bool,
+    stream_finished: bool,
+}
+
+fn emit_apple_fm_stream_events(
+    event_sink: Option<&Arc<dyn RuntimeEventSink>>,
+    session_id: &SessionId,
+    round_trip: usize,
+    response_id: &str,
+    request_started: Instant,
+    state: &mut AppleFmStreamRuntimeState,
+    event: &AppleFmTextStreamEvent,
+) {
+    if !state.stream_started {
+        emit_runtime_event(
+            event_sink,
+            RuntimeEvent::AssistantStreamStarted {
+                session_id: session_id.clone(),
+                round_trip,
+                response_id: response_id.to_string(),
+                response_model: event.model.clone(),
+            },
+        );
+        state.stream_started = true;
+    }
+    if !state.ttft_recorded {
+        emit_runtime_event(
+            event_sink,
+            RuntimeEvent::TimeToFirstTokenObserved {
+                session_id: session_id.clone(),
+                round_trip,
+                milliseconds: elapsed_ms(request_started),
+            },
+        );
+        state.ttft_recorded = true;
+    }
+    emit_runtime_event(
+        event_sink,
+        RuntimeEvent::AssistantSnapshot {
+            session_id: session_id.clone(),
+            round_trip,
+            snapshot: event.output.clone(),
+        },
+    );
+    if event.is_terminal() && !state.stream_finished {
+        emit_runtime_event(
+            event_sink,
+            RuntimeEvent::AssistantStreamFinished {
+                session_id: session_id.clone(),
+                round_trip,
+                response_id: response_id.to_string(),
+                response_model: event.model.clone(),
+                finish_reason: Some(String::from("snapshot_completed")),
+            },
+        );
+        state.stream_finished = true;
+    }
+}
+
 fn render_tool_approval_resolution(value: ToolApprovalResolution) -> &'static str {
     match value {
         ToolApprovalResolution::Approved => "approved",
@@ -1079,19 +1148,50 @@ impl ProbeRuntime {
             },
         );
         let request_started = Instant::now();
-        let response = apple_fm_tool_loop_response(
-            &profile,
-            session.system_prompt.as_deref(),
-            transcript,
-            prompt_text.as_str(),
-            tool_definitions,
-            Arc::new(move |tool_call| {
-                callback_recorder
-                    .lock()
-                    .expect("apple fm tool recorder lock")
-                    .handle_call(tool_call)
-            }),
-        )
+        let response = {
+            let mut stream_state = AppleFmStreamRuntimeState::default();
+            let mut stream_callback = |event: &AppleFmTextStreamEvent| {
+                emit_apple_fm_stream_events(
+                    event_sink.as_ref(),
+                    &session.id,
+                    1,
+                    session.id.as_str(),
+                    request_started,
+                    &mut stream_state,
+                    event,
+                );
+            };
+            if event_sink.is_some() {
+                apple_fm_tool_loop_response_with_callback(
+                    &profile,
+                    session.system_prompt.as_deref(),
+                    transcript,
+                    prompt_text.as_str(),
+                    tool_definitions,
+                    Arc::new(move |tool_call| {
+                        callback_recorder
+                            .lock()
+                            .expect("apple fm tool recorder lock")
+                            .handle_call(tool_call)
+                    }),
+                    Some(&mut stream_callback),
+                )
+            } else {
+                apple_fm_tool_loop_response(
+                    &profile,
+                    session.system_prompt.as_deref(),
+                    transcript,
+                    prompt_text.as_str(),
+                    tool_definitions,
+                    Arc::new(move |tool_call| {
+                        callback_recorder
+                            .lock()
+                            .expect("apple fm tool recorder lock")
+                            .handle_call(tool_call)
+                    }),
+                )
+            }
+        }
         .map_err(|source| RuntimeError::ProviderRequest {
             session_id: session.id.clone(),
             source,
@@ -1169,6 +1269,13 @@ impl ProbeRuntime {
                         })
                     }
                     None => {
+                        emit_model_request_failed(
+                            event_sink.as_ref(),
+                            &session.id,
+                            1,
+                            profile.kind,
+                            &error,
+                        );
                         let mut items = Vec::new();
                         if tool_results.is_empty() && let Some(prompt) = prompt.clone() {
                             items.push(NewItem::new(TranscriptItemKind::UserMessage, prompt));
@@ -1304,6 +1411,21 @@ impl ProbeRuntime {
                     );
                 };
                 complete_openai_plain_text_with_callback(&profile, messages, Some(&mut callback))
+            }
+            BackendKind::AppleFmBridge if event_sink.is_some() => {
+                let mut stream_state = AppleFmStreamRuntimeState::default();
+                let mut callback = |event: &AppleFmTextStreamEvent| {
+                emit_apple_fm_stream_events(
+                    event_sink.as_ref(),
+                    &session.id,
+                    1,
+                    session.id.as_str(),
+                    request_started,
+                    &mut stream_state,
+                    event,
+                );
+                };
+                complete_apple_fm_plain_text_with_callback(&profile, messages, Some(&mut callback))
             }
             _ => complete_plain_text(&profile, messages),
         }
@@ -2467,6 +2589,76 @@ mod tests {
     }
 
     #[test]
+    fn eventful_apple_fm_plain_turn_emits_snapshot_events_when_backend_supports_streaming() {
+        let environment = ProbeTestEnvironment::new();
+        let server = FakeAppleFmServer::from_handler(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/v1/sessions") => FakeHttpResponse::json_ok(json!({
+                    "session": {
+                        "id": "sess-apple-stream-plain-1",
+                        "model": {
+                            "id": "apple-foundation-model",
+                            "use_case": "general",
+                            "guardrails": "default"
+                        },
+                        "tools": [],
+                        "is_responding": false,
+                        "transcript_json": "{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"
+                    }
+                })),
+                ("POST", "/v1/sessions/sess-apple-stream-plain-1/responses/stream") => {
+                    FakeHttpResponse::text_event_stream(
+                        200,
+                        concat!(
+                            "event: snapshot\n",
+                            "data: {\"kind\":\"snapshot\",\"model\":\"apple-foundation-model\",\"output\":\"hello\"}\n\n",
+                            "event: completed\n",
+                            "data: {\"kind\":\"completed\",\"model\":\"apple-foundation-model\",\"output\":\"hello world\",\"session\":{\"id\":\"sess-apple-stream-plain-1\",\"model\":{\"id\":\"apple-foundation-model\",\"use_case\":\"general\",\"guardrails\":\"default\"},\"tools\":[],\"is_responding\":false,\"transcript_json\":\"{\\\"version\\\":1,\\\"type\\\":\\\"FoundationModels.Transcript\\\",\\\"transcript\\\":{\\\"entries\\\":[]}}\"},\"usage\":{\"total_tokens_detail\":{\"value\":13,\"truth\":\"estimated\"}}}\n\n",
+                        ),
+                    )
+                }
+                ("DELETE", "/v1/sessions/sess-apple-stream-plain-1") => {
+                    FakeHttpResponse::json_ok(json!({}))
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+        });
+
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = server.base_url().to_string();
+        let collector = Arc::new(TestRuntimeEventCollector::default());
+
+        let outcome = runtime
+            .exec_plain_text_with_events(
+                PlainTextExecRequest {
+                    profile,
+                    prompt: String::from("say hello"),
+                    title: Some(String::from("Apple FM Streamed Plain Turn")),
+                    cwd: environment.workspace().to_path_buf(),
+                    system_prompt: Some(String::from("You are helpful")),
+                    harness_profile: None,
+                    tool_loop: None,
+                },
+                collector.clone(),
+            )
+            .expect("apple fm streamed plain turn should succeed");
+
+        assert_eq!(outcome.assistant_text, "hello world");
+        let events = collector.snapshot();
+        let session_id = outcome.session.id.clone();
+        assert_eq!(events.len(), 8);
+        assert!(matches!(&events[0], RuntimeEvent::TurnStarted { session_id: event_session, .. } if event_session == &session_id));
+        assert!(matches!(&events[1], RuntimeEvent::ModelRequestStarted { session_id: event_session, round_trip: 1, backend_kind: probe_protocol::backend::BackendKind::AppleFmBridge } if event_session == &session_id));
+        assert!(matches!(&events[2], RuntimeEvent::AssistantStreamStarted { session_id: event_session, round_trip: 1, response_id, .. } if event_session == &session_id && response_id == session_id.as_str()));
+        assert!(matches!(&events[3], RuntimeEvent::TimeToFirstTokenObserved { session_id: event_session, round_trip: 1, .. } if event_session == &session_id));
+        assert!(matches!(&events[4], RuntimeEvent::AssistantSnapshot { session_id: event_session, round_trip: 1, snapshot } if event_session == &session_id && snapshot == "hello"));
+        assert!(matches!(&events[5], RuntimeEvent::AssistantSnapshot { session_id: event_session, round_trip: 1, snapshot } if event_session == &session_id && snapshot == "hello world"));
+        assert!(matches!(&events[6], RuntimeEvent::AssistantStreamFinished { session_id: event_session, round_trip: 1, finish_reason, .. } if event_session == &session_id && finish_reason.as_deref() == Some("snapshot_completed")));
+        assert!(matches!(&events[7], RuntimeEvent::AssistantTurnCommitted { session_id: event_session, assistant_text, .. } if event_session == &session_id && assistant_text == "hello world"));
+    }
+
+    #[test]
     fn continue_plain_text_session_replays_prior_context() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let address = listener.local_addr().expect("listener addr");
@@ -3615,6 +3807,85 @@ mod tests {
         assert!(matches!(&events[12], RuntimeEvent::AssistantDelta { session_id: event_session, round_trip: 2, delta } if event_session == &session_id && delta == "README inspected."));
         assert!(matches!(&events[13], RuntimeEvent::AssistantStreamFinished { session_id: event_session, round_trip: 2, finish_reason, .. } if event_session == &session_id && finish_reason.as_deref() == Some("stop")));
         assert!(matches!(&events[14], RuntimeEvent::AssistantTurnCommitted { session_id: event_session, assistant_text, .. } if event_session == &session_id && assistant_text == "README inspected."));
+    }
+
+    #[test]
+    fn eventful_apple_fm_tool_loop_emits_snapshot_events_and_local_tool_lifecycle() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let bridge_state = Arc::new(Mutex::new(AppleFmSessionBridgeState::default()));
+        let captured_state = Arc::clone(&bridge_state);
+        let server = FakeAppleFmServer::from_handler(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/v1/sessions") => {
+                    record_apple_session_create(&captured_state, &request, "sess-apple-stream-tool-1")
+                }
+                ("POST", "/v1/sessions/sess-apple-stream-tool-1/responses/stream") => {
+                    let callback_response = invoke_apple_tool_callback(
+                        &captured_state,
+                        "read_file",
+                        json!({
+                            "path": "README.md",
+                            "start_line": 1,
+                            "max_lines": 8
+                        }),
+                    );
+                    assert_eq!(callback_response.status_code, 200);
+                    FakeHttpResponse::text_event_stream(
+                        200,
+                        concat!(
+                            "event: snapshot\n",
+                            "data: {\"kind\":\"snapshot\",\"model\":\"apple-foundation-model\",\"output\":\"reading README.md\"}\n\n",
+                            "event: completed\n",
+                            "data: {\"kind\":\"completed\",\"model\":\"apple-foundation-model\",\"output\":\"README inspected.\",\"session\":{\"id\":\"sess-apple-stream-tool-1\",\"instructions\":\"You are helpful\",\"model\":{\"id\":\"apple-foundation-model\",\"use_case\":\"general\",\"guardrails\":\"default\"},\"tools\":[{\"name\":\"read_file\"}],\"is_responding\":false,\"transcript_json\":\"{\\\"version\\\":1,\\\"type\\\":\\\"FoundationModels.Transcript\\\",\\\"transcript\\\":{\\\"entries\\\":[]}}\"},\"usage\":{\"total_tokens_detail\":{\"value\":21,\"truth\":\"estimated\"}}}\n\n",
+                        ),
+                    )
+                }
+                ("DELETE", "/v1/sessions/sess-apple-stream-tool-1") => {
+                    FakeHttpResponse::json_ok(json!({}))
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+        });
+
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = server.base_url().to_string();
+        let collector = Arc::new(TestRuntimeEventCollector::default());
+
+        let outcome = runtime
+            .exec_plain_text_with_events(
+                PlainTextExecRequest {
+                    profile,
+                    prompt: String::from("Inspect README.md"),
+                    title: Some(String::from("Apple FM Streamed Tool Loop")),
+                    cwd: environment.workspace().to_path_buf(),
+                    system_prompt: Some(String::from("You are helpful")),
+                    harness_profile: None,
+                    tool_loop: Some(ToolLoopConfig::coding_bootstrap(
+                        ProbeToolChoice::Required,
+                        false,
+                    )),
+                },
+                collector.clone(),
+            )
+            .expect("apple fm streamed tool loop should succeed");
+
+        assert_eq!(outcome.assistant_text, "README inspected.");
+        assert_eq!(outcome.tool_results.len(), 1);
+        let events = collector.snapshot();
+        let session_id = outcome.session.id.clone();
+        assert!(matches!(&events[0], RuntimeEvent::TurnStarted { session_id: event_session, .. } if event_session == &session_id));
+        assert!(matches!(&events[1], RuntimeEvent::ModelRequestStarted { session_id: event_session, round_trip: 1, backend_kind: probe_protocol::backend::BackendKind::AppleFmBridge } if event_session == &session_id));
+        assert!(matches!(&events[2], RuntimeEvent::ToolCallRequested { session_id: event_session, round_trip: 1, call_id, tool_name, .. } if event_session == &session_id && call_id == "apple_fm_call_1" && tool_name == "read_file"));
+        assert!(matches!(&events[3], RuntimeEvent::ToolExecutionStarted { session_id: event_session, round_trip: 1, call_id, tool_name, .. } if event_session == &session_id && call_id == "apple_fm_call_1" && tool_name == "read_file"));
+        assert!(matches!(&events[4], RuntimeEvent::ToolExecutionCompleted { session_id: event_session, round_trip: 1, tool } if event_session == &session_id && tool.name == "read_file"));
+        assert!(matches!(&events[5], RuntimeEvent::AssistantStreamStarted { session_id: event_session, round_trip: 1, response_id, .. } if event_session == &session_id && response_id == session_id.as_str()));
+        assert!(matches!(&events[6], RuntimeEvent::TimeToFirstTokenObserved { session_id: event_session, round_trip: 1, .. } if event_session == &session_id));
+        assert!(matches!(&events[7], RuntimeEvent::AssistantSnapshot { session_id: event_session, round_trip: 1, snapshot } if event_session == &session_id && snapshot == "reading README.md"));
+        assert!(matches!(&events[8], RuntimeEvent::AssistantSnapshot { session_id: event_session, round_trip: 1, snapshot } if event_session == &session_id && snapshot == "README inspected."));
+        assert!(matches!(&events[9], RuntimeEvent::AssistantStreamFinished { session_id: event_session, round_trip: 1, finish_reason, .. } if event_session == &session_id && finish_reason.as_deref() == Some("snapshot_completed")));
+        assert!(matches!(&events[10], RuntimeEvent::AssistantTurnCommitted { session_id: event_session, assistant_text, .. } if event_session == &session_id && assistant_text == "README inspected."));
     }
 
     #[test]

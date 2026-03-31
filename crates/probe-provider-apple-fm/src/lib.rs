@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -8,15 +9,18 @@ use std::{thread, thread::JoinHandle};
 
 use probe_protocol::backend::BackendProfile;
 use psionic_apple_fm::{
-    AppleFmBridgeClient, AppleFmBridgeClientError, AppleFmChatCompletionRequest,
+    AppleFmAsyncBridgeClient, AppleFmBridgeClient, AppleFmBridgeClientError,
+    AppleFmBridgeStreamError, AppleFmChatCompletionRequest,
     AppleFmChatMessage, AppleFmChatMessageRole, AppleFmChatUsage, AppleFmErrorCode,
     AppleFmFoundationModelsError, AppleFmGenerationSchema, AppleFmSession,
     AppleFmSessionCreateRequest, AppleFmSessionRespondRequest, AppleFmSystemLanguageModel,
-    AppleFmSystemLanguageModelAvailability, AppleFmToolCallError, AppleFmToolCallRequest,
-    AppleFmToolCallResponse, AppleFmToolCallbackConfiguration, AppleFmToolDefinition,
-    AppleFmTranscript,
+    AppleFmSystemLanguageModelAvailability, AppleFmTextStreamEvent, AppleFmToolCallError,
+    AppleFmToolCallRequest, AppleFmToolCallResponse, AppleFmToolCallbackConfiguration,
+    AppleFmToolDefinition, AppleFmTranscript, AppleFmTranscriptContent,
+    AppleFmTranscriptEntry, AppleFmTranscriptPayload,
 };
 use reqwest::blocking::Client;
+use tokio_stream::StreamExt;
 
 static NEXT_TOOL_CALLBACK_TOKEN: AtomicU64 = AtomicU64::new(1);
 
@@ -128,12 +132,16 @@ pub struct AppleFmProviderSessionResponse {
     pub transcript: Option<AppleFmTranscript>,
 }
 
+pub type AppleFmProviderStreamCallback<'a> = dyn FnMut(&AppleFmTextStreamEvent) + 'a;
+
 #[derive(Debug)]
 pub enum AppleFmProviderError {
     Build(String),
     ToolSchema { tool_name: String, message: String },
     Transcript(String),
     Request(AppleFmBridgeClientError),
+    Stream(AppleFmBridgeStreamError),
+    StreamProtocol(String),
 }
 
 impl AppleFmProviderError {
@@ -141,7 +149,12 @@ impl AppleFmProviderError {
     pub fn foundation_models_error(&self) -> Option<&AppleFmFoundationModelsError> {
         match self {
             Self::Request(error) => error.foundation_models_error(),
-            Self::Build(_) | Self::ToolSchema { .. } | Self::Transcript(_) => None,
+            Self::Stream(AppleFmBridgeStreamError::FoundationModels { error }) => Some(error),
+            Self::Build(_)
+            | Self::ToolSchema { .. }
+            | Self::Transcript(_)
+            | Self::Stream(_)
+            | Self::StreamProtocol(_) => None,
         }
     }
 }
@@ -164,6 +177,10 @@ impl Display for AppleFmProviderError {
                     f,
                     "failed to decode Apple FM transcript snapshot: {message}"
                 )
+            }
+            Self::Stream(error) => write!(f, "{error}"),
+            Self::StreamProtocol(message) => {
+                write!(f, "Apple FM stream ended without a terminal response: {message}")
             }
             Self::Request(error) => {
                 write!(f, "{error}")?;
@@ -232,6 +249,18 @@ impl AppleFmProviderClient {
         &self,
         messages: Vec<AppleFmProviderMessage>,
     ) -> Result<AppleFmProviderResponse, AppleFmProviderError> {
+        self.chat_completion_with_callback(messages, None)
+    }
+
+    pub fn chat_completion_with_callback(
+        &self,
+        messages: Vec<AppleFmProviderMessage>,
+        callback: Option<&mut AppleFmProviderStreamCallback<'_>>,
+    ) -> Result<AppleFmProviderResponse, AppleFmProviderError> {
+        if let Some(callback) = callback {
+            return self.stream_plain_text_session(messages, callback);
+        }
+
         let request = AppleFmChatCompletionRequest {
             model: Some(self.config.model.clone()),
             messages: messages
@@ -269,6 +298,27 @@ impl AppleFmProviderClient {
             dyn Fn(AppleFmProviderToolCall) -> Result<String, AppleFmToolCallError> + Send + Sync,
         >,
     ) -> Result<AppleFmProviderSessionResponse, AppleFmProviderError> {
+        self.respond_in_session_with_tools_and_callback(
+            system_prompt,
+            transcript,
+            prompt,
+            tools,
+            callback,
+            None,
+        )
+    }
+
+    pub fn respond_in_session_with_tools_and_callback(
+        &self,
+        system_prompt: Option<&str>,
+        transcript: AppleFmTranscript,
+        prompt: &str,
+        tools: Vec<AppleFmProviderToolDefinition>,
+        callback: Arc<
+            dyn Fn(AppleFmProviderToolCall) -> Result<String, AppleFmToolCallError> + Send + Sync,
+        >,
+        stream_callback: Option<&mut AppleFmProviderStreamCallback<'_>>,
+    ) -> Result<AppleFmProviderSessionResponse, AppleFmProviderError> {
         let model = AppleFmSystemLanguageModel {
             id: self.config.model.clone(),
             ..Default::default()
@@ -289,28 +339,216 @@ impl AppleFmProviderClient {
         };
         let session = create_session_with_transcript_fallback(&self.client, &session_request)
             .map_err(AppleFmProviderError::Request)?;
-        let response = self.client.respond_in_session(
+        let respond_request = AppleFmSessionRespondRequest {
+            prompt: prompt.to_string(),
+            options: None,
+            adapter: None,
+        };
+        let response = match stream_callback {
+            Some(callback) => self
+                .stream_session_response(session.id.as_str(), &respond_request, callback)
+                .and_then(plain_text_provider_session_from_stream),
+            None => self
+                .client
+                .respond_in_session(session.id.as_str(), &respond_request)
+                .map_err(AppleFmProviderError::Request)
+                .and_then(|response| {
+                    Ok(AppleFmProviderSessionResponse {
+                        id: response.session.id.clone(),
+                        session_id: response.session.id.clone(),
+                        model: response.model,
+                        assistant_text: response.output,
+                        usage: response.usage,
+                        transcript: response
+                            .session
+                            .transcript()
+                            .map_err(|error| AppleFmProviderError::Transcript(error.to_string()))?,
+                    })
+                }),
+        };
+        let _ = self.client.delete_session(session.id.as_str());
+        drop(callback_server);
+        response
+    }
+
+    fn stream_plain_text_session(
+        &self,
+        messages: Vec<AppleFmProviderMessage>,
+        callback: &mut AppleFmProviderStreamCallback<'_>,
+    ) -> Result<AppleFmProviderResponse, AppleFmProviderError> {
+        let seed = apple_fm_stream_seed_from_messages(messages);
+        let session_request = AppleFmSessionCreateRequest {
+            instructions: seed.instructions,
+            model: Some(AppleFmSystemLanguageModel {
+                id: self.config.model.clone(),
+                ..Default::default()
+            }),
+            tools: Vec::new(),
+            adapter: None,
+            tool_callback: None,
+            transcript_json: None,
+            transcript: Some(seed.transcript),
+        };
+        let session = create_session_with_transcript_fallback(&self.client, &session_request)
+            .map_err(AppleFmProviderError::Request)?;
+        let terminal = self.stream_session_response(
             session.id.as_str(),
             &AppleFmSessionRespondRequest {
-                prompt: prompt.to_string(),
+                prompt: seed.prompt,
                 options: None,
                 adapter: None,
             },
+            callback,
         );
         let _ = self.client.delete_session(session.id.as_str());
-        drop(callback_server);
-        let response = response.map_err(AppleFmProviderError::Request)?;
-        Ok(AppleFmProviderSessionResponse {
-            id: response.session.id.clone(),
-            session_id: response.session.id.clone(),
-            model: response.model,
-            assistant_text: response.output,
-            usage: response.usage,
-            transcript: response
+        let terminal = terminal?;
+        Ok(AppleFmProviderResponse {
+            id: terminal
                 .session
-                .transcript()
-                .map_err(|error| AppleFmProviderError::Transcript(error.to_string()))?,
+                .as_ref()
+                .map(|session| session.id.clone())
+                .unwrap_or_else(|| session.id.clone()),
+            model: terminal.model,
+            assistant_text: Some(terminal.output),
+            usage: terminal.usage,
         })
+    }
+
+    fn stream_session_response(
+        &self,
+        session_id: &str,
+        request: &AppleFmSessionRespondRequest,
+        callback: &mut AppleFmProviderStreamCallback<'_>,
+    ) -> Result<AppleFmTextStreamEvent, AppleFmProviderError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| AppleFmProviderError::Build(error.to_string()))?;
+        let base_url = self.config.base_url.clone();
+        runtime.block_on(async {
+            let client =
+                AppleFmAsyncBridgeClient::new(base_url).map_err(AppleFmProviderError::Request)?;
+            let mut stream = client
+                .stream_session_response(session_id, request)
+                .await
+                .map_err(AppleFmProviderError::Request)?;
+            let mut terminal = None;
+            while let Some(event) = stream.next().await {
+                let event = event.map_err(AppleFmProviderError::Stream)?;
+                callback(&event);
+                if event.is_terminal() {
+                    terminal = Some(event);
+                }
+            }
+            terminal.ok_or_else(|| {
+                AppleFmProviderError::StreamProtocol(format!(
+                    "session `{session_id}` stream ended before a terminal snapshot"
+                ))
+            })
+        })
+    }
+}
+
+fn plain_text_provider_session_from_stream(
+    terminal: AppleFmTextStreamEvent,
+) -> Result<AppleFmProviderSessionResponse, AppleFmProviderError> {
+    let session = terminal.session.ok_or_else(|| {
+        AppleFmProviderError::StreamProtocol(String::from(
+            "terminal stream event did not include final session state",
+        ))
+    })?;
+    let transcript = session
+        .transcript()
+        .map_err(|error| AppleFmProviderError::Transcript(error.to_string()))?;
+    Ok(AppleFmProviderSessionResponse {
+        id: session.id.clone(),
+        session_id: session.id.clone(),
+        model: terminal.model,
+        assistant_text: terminal.output,
+        usage: terminal.usage,
+        transcript,
+    })
+}
+
+struct AppleFmStreamPlainTextSeed {
+    instructions: Option<String>,
+    transcript: AppleFmTranscript,
+    prompt: String,
+}
+
+fn apple_fm_stream_seed_from_messages(
+    messages: Vec<AppleFmProviderMessage>,
+) -> AppleFmStreamPlainTextSeed {
+    let mut instructions = Vec::new();
+    let mut conversation = Vec::new();
+    for message in messages {
+        match message.role {
+            AppleFmProviderMessageRole::System => instructions.push(message.content),
+            AppleFmProviderMessageRole::User | AppleFmProviderMessageRole::Assistant => {
+                conversation.push(message)
+            }
+        }
+    }
+
+    let prompt = if conversation
+        .last()
+        .is_some_and(|message| message.role == AppleFmProviderMessageRole::User)
+    {
+        conversation
+            .pop()
+            .map(|message| message.content)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    AppleFmStreamPlainTextSeed {
+        instructions: (!instructions.is_empty()).then(|| instructions.join("\n\n")),
+        transcript: build_apple_fm_provider_transcript(conversation),
+        prompt,
+    }
+}
+
+fn build_apple_fm_provider_transcript(
+    messages: Vec<AppleFmProviderMessage>,
+) -> AppleFmTranscript {
+    AppleFmTranscript {
+        version: AppleFmTranscript::default().version,
+        transcript_type: AppleFmTranscript::default().transcript_type,
+        transcript: AppleFmTranscriptPayload {
+            entries: messages
+                .into_iter()
+                .enumerate()
+                .map(|(index, message)| {
+                    apple_fm_provider_text_entry(
+                        format!("probe-message-{index}"),
+                        match message.role {
+                            AppleFmProviderMessageRole::System => "system",
+                            AppleFmProviderMessageRole::User => "user",
+                            AppleFmProviderMessageRole::Assistant => "assistant",
+                        },
+                        message.content,
+                    )
+                })
+                .collect(),
+        },
+    }
+}
+
+fn apple_fm_provider_text_entry(
+    id: String,
+    role: &str,
+    text: String,
+) -> AppleFmTranscriptEntry {
+    AppleFmTranscriptEntry {
+        id: Some(id.clone()),
+        role: role.to_string(),
+        contents: vec![AppleFmTranscriptContent {
+            content_type: String::from("text"),
+            id: Some(format!("{id}-content")),
+            extra: BTreeMap::from([(String::from("text"), serde_json::Value::String(text))]),
+        }],
+        extra: BTreeMap::new(),
     }
 }
 
@@ -804,6 +1042,70 @@ mod tests {
     }
 
     #[test]
+    fn client_streams_plain_text_completion_through_session_snapshots() {
+        let server = FakeAppleFmServer::from_handler(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/v1/sessions") => FakeHttpResponse::json_ok(json!({
+                    "session": {
+                        "id": "sess-stream-plain-1",
+                        "instructions": request.body,
+                        "model": {
+                            "id": "apple-foundation-model",
+                            "use_case": "general",
+                            "guardrails": "default"
+                        },
+                        "tools": [],
+                        "is_responding": false,
+                        "transcript_json": "{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"
+                    }
+                })),
+                ("POST", "/v1/sessions/sess-stream-plain-1/responses/stream") => {
+                    FakeHttpResponse::text_event_stream(
+                        200,
+                        concat!(
+                            "event: snapshot\n",
+                            "data: {\"kind\":\"snapshot\",\"model\":\"apple-foundation-model\",\"output\":\"hello\"}\n\n",
+                            "event: completed\n",
+                            "data: {\"kind\":\"completed\",\"model\":\"apple-foundation-model\",\"output\":\"hello world\",\"session\":{\"id\":\"sess-stream-plain-1\",\"model\":{\"id\":\"apple-foundation-model\",\"use_case\":\"general\",\"guardrails\":\"default\"},\"tools\":[],\"is_responding\":false,\"transcript_json\":\"{\\\"version\\\":1,\\\"type\\\":\\\"FoundationModels.Transcript\\\",\\\"transcript\\\":{\\\"entries\\\":[]}}\"},\"usage\":{\"total_tokens_detail\":{\"value\":11,\"truth\":\"estimated\"}}}\n\n",
+                        ),
+                    )
+                }
+                ("DELETE", "/v1/sessions/sess-stream-plain-1") => FakeHttpResponse::json_ok(json!({})),
+                other => panic!("unexpected request: {other:?}"),
+            }
+        });
+
+        let client = AppleFmProviderClient::new(AppleFmProviderConfig {
+            base_url: server.base_url().to_string(),
+            model: String::from("apple-foundation-model"),
+            timeout: Duration::from_secs(5),
+        })
+        .expect("client");
+        let mut seen = Vec::new();
+        let response = client
+            .chat_completion_with_callback(
+                vec![AppleFmProviderMessage::user("hello")],
+                Some(&mut |event| seen.push(event.output.clone())),
+            )
+            .expect("streamed completion");
+
+        assert_eq!(seen, vec![String::from("hello"), String::from("hello world")]);
+        assert_eq!(response.id, "sess-stream-plain-1");
+        assert_eq!(response.assistant_text.as_deref(), Some("hello world"));
+        assert_eq!(
+            response
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.total_tokens_detail.as_ref())
+                .map(|detail| detail.value),
+            Some(11)
+        );
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].contains("/responses/stream"));
+    }
+
+    #[test]
     fn client_surfaces_typed_foundation_models_errors() {
         let server = FakeAppleFmServer::from_responses(vec![FakeHttpResponse::json_status(
             503,
@@ -1008,6 +1310,133 @@ mod tests {
         assert!(requests[0].contains("POST /v1/sessions HTTP/1.1"));
         assert!(requests[1].contains("POST /v1/sessions/sess-tool-1/responses HTTP/1.1"));
         assert!(requests[2].contains("DELETE /v1/sessions/sess-tool-1 HTTP/1.1"));
+    }
+
+    #[test]
+    fn client_streams_tool_backed_session_responses_with_snapshot_semantics() {
+        let callback_payloads = Arc::new(Mutex::new(Vec::new()));
+        let captured_payloads = Arc::clone(&callback_payloads);
+        let bridge_state = Arc::new(Mutex::new((String::new(), String::new())));
+        let captured_state = Arc::clone(&bridge_state);
+        let server = FakeAppleFmServer::from_handler(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/v1/sessions") => {
+                    let request_json: serde_json::Value =
+                        serde_json::from_str(request.body.as_str()).expect("session create json");
+                    let callback = request_json["tool_callback"]["url"]
+                        .as_str()
+                        .expect("callback url")
+                        .to_string();
+                    let session_token = request_json["tool_callback"]["session_token"]
+                        .as_str()
+                        .expect("session token")
+                        .to_string();
+                    let mut state = captured_state.lock().expect("bridge state lock");
+                    state.0 = callback;
+                    state.1 = session_token;
+                    FakeHttpResponse::json_ok(json!({
+                        "session": {
+                            "id": "sess-stream-tool-1",
+                            "instructions": request_json["instructions"],
+                            "model": {
+                                "id": "apple-foundation-model",
+                                "use_case": "general",
+                                "guardrails": "default"
+                            },
+                            "tools": [{"name": "read_file"}],
+                            "is_responding": false,
+                            "transcript_json": "{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"
+                        }
+                    }))
+                }
+                ("POST", "/v1/sessions/sess-stream-tool-1/responses/stream") => {
+                    let (callback, session_token) = {
+                        let state = bridge_state.lock().expect("bridge state lock");
+                        (state.0.clone(), state.1.clone())
+                    };
+                    let callback_response = invoke_tool_callback(
+                        callback.as_str(),
+                        session_token.as_str(),
+                        "read_file",
+                        json!({
+                            "path": "hello.txt",
+                            "start_line": 1,
+                            "max_lines": 10
+                        }),
+                    );
+                    assert_eq!(callback_response.status_code, 200);
+                    let callback_json: serde_json::Value =
+                        serde_json::from_str(callback_response.body.as_str())
+                            .expect("callback json");
+                    captured_payloads
+                        .lock()
+                        .expect("callback payload lock")
+                        .push(
+                            callback_json["output"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        );
+                    FakeHttpResponse::text_event_stream(
+                        200,
+                        concat!(
+                            "event: snapshot\n",
+                            "data: {\"kind\":\"snapshot\",\"model\":\"apple-foundation-model\",\"output\":\"reading hello.txt\"}\n\n",
+                            "event: completed\n",
+                            "data: {\"kind\":\"completed\",\"model\":\"apple-foundation-model\",\"output\":\"tool-backed answer\",\"session\":{\"id\":\"sess-stream-tool-1\",\"instructions\":\"You are a helper\",\"model\":{\"id\":\"apple-foundation-model\",\"use_case\":\"general\",\"guardrails\":\"default\"},\"tools\":[{\"name\":\"read_file\"}],\"is_responding\":false,\"transcript_json\":\"{\\\"version\\\":1,\\\"type\\\":\\\"FoundationModels.Transcript\\\",\\\"transcript\\\":{\\\"entries\\\":[]}}\"},\"usage\":{\"total_tokens_detail\":{\"value\":21,\"truth\":\"estimated\"}}}\n\n",
+                        ),
+                    )
+                }
+                ("DELETE", "/v1/sessions/sess-stream-tool-1") => FakeHttpResponse::json_ok(json!({})),
+                other => panic!("unexpected request: {other:?}"),
+            }
+        });
+
+        let client = AppleFmProviderClient::new(AppleFmProviderConfig {
+            base_url: server.base_url().to_string(),
+            model: String::from("apple-foundation-model"),
+            timeout: Duration::from_secs(5),
+        })
+        .expect("client");
+        let mut snapshots = Vec::new();
+        let response = client
+            .respond_in_session_with_tools_and_callback(
+                Some("You are a helper"),
+                AppleFmTranscript::default(),
+                "read hello.txt",
+                vec![AppleFmProviderToolDefinition {
+                    name: String::from("read_file"),
+                    description: Some(String::from("Read a file.")),
+                    parameters: Some(json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"}
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    })),
+                }],
+                Arc::new(|tool_call: AppleFmProviderToolCall| {
+                    Ok(json!({
+                        "tool": tool_call.name,
+                        "arguments": tool_call.arguments
+                    })
+                    .to_string())
+                }),
+                Some(&mut |event| snapshots.push(event.output.clone())),
+            )
+            .expect("streamed tool session response");
+
+        assert_eq!(
+            snapshots,
+            vec![String::from("reading hello.txt"), String::from("tool-backed answer")]
+        );
+        assert_eq!(response.session_id, "sess-stream-tool-1");
+        assert_eq!(response.assistant_text, "tool-backed answer");
+        assert_eq!(callback_payloads.lock().expect("callback payload lock").len(), 1);
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].contains("/responses/stream"));
     }
 
     #[test]

@@ -15,8 +15,8 @@ use probe_provider_openai::{
     OpenAiProviderClient, OpenAiProviderConfig, OpenAiProviderError,
 };
 use psionic_apple_fm::{
-    AppleFmChatUsage, AppleFmErrorCode, AppleFmToolCallError, AppleFmTranscript,
-    AppleFmUsageMeasurement, AppleFmUsageTruth,
+    AppleFmChatUsage, AppleFmErrorCode, AppleFmTextStreamEvent, AppleFmToolCallError,
+    AppleFmTranscript, AppleFmUsageMeasurement, AppleFmUsageTruth,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +120,7 @@ pub struct ToolLoopProviderResponse {
 }
 
 pub type OpenAiStreamChunkCallback<'a> = dyn FnMut(&ChatCompletionChunk) + 'a;
+pub type AppleFmStreamEventCallback<'a> = dyn FnMut(&AppleFmTextStreamEvent) + 'a;
 
 #[derive(Debug)]
 pub enum ProviderError {
@@ -237,14 +238,23 @@ fn complete_apple_fm_plain_text(
     profile: &BackendProfile,
     messages: Vec<PlainTextMessage>,
 ) -> Result<PlainTextProviderResponse, ProviderError> {
+    complete_apple_fm_plain_text_with_callback(profile, messages, None)
+}
+
+pub fn complete_apple_fm_plain_text_with_callback(
+    profile: &BackendProfile,
+    messages: Vec<PlainTextMessage>,
+    callback: Option<&mut AppleFmStreamEventCallback<'_>>,
+) -> Result<PlainTextProviderResponse, ProviderError> {
     let provider_config = AppleFmProviderConfig::from_backend_profile(profile);
     let provider = AppleFmProviderClient::new(provider_config).map_err(ProviderError::AppleFm)?;
     let response = provider
-        .chat_completion(
+        .chat_completion_with_callback(
             messages
                 .iter()
                 .map(PlainTextMessage::to_apple_fm_message)
                 .collect(),
+            callback,
         )
         .map_err(ProviderError::AppleFm)?;
     Ok(PlainTextProviderResponse {
@@ -386,6 +396,28 @@ pub fn apple_fm_tool_loop_response(
         dyn Fn(AppleFmProviderToolCall) -> Result<String, AppleFmToolCallError> + Send + Sync,
     >,
 ) -> Result<PlainTextProviderResponse, ProviderError> {
+    apple_fm_tool_loop_response_with_callback(
+        profile,
+        system_prompt,
+        transcript,
+        prompt,
+        tools,
+        callback,
+        None,
+    )
+}
+
+pub fn apple_fm_tool_loop_response_with_callback(
+    profile: &BackendProfile,
+    system_prompt: Option<&str>,
+    transcript: AppleFmTranscript,
+    prompt: &str,
+    tools: Vec<AppleFmProviderToolDefinition>,
+    callback: Arc<
+        dyn Fn(AppleFmProviderToolCall) -> Result<String, AppleFmToolCallError> + Send + Sync,
+    >,
+    stream_callback: Option<&mut AppleFmStreamEventCallback<'_>>,
+) -> Result<PlainTextProviderResponse, ProviderError> {
     if profile.kind != BackendKind::AppleFmBridge {
         return Err(ProviderError::UnsupportedFeature {
             backend: profile.kind,
@@ -396,7 +428,14 @@ pub fn apple_fm_tool_loop_response(
     let provider_config = AppleFmProviderConfig::from_backend_profile(profile);
     let provider = AppleFmProviderClient::new(provider_config).map_err(ProviderError::AppleFm)?;
     let response = provider
-        .respond_in_session_with_tools(system_prompt, transcript, prompt, tools, callback)
+        .respond_in_session_with_tools_and_callback(
+            system_prompt,
+            transcript,
+            prompt,
+            tools,
+            callback,
+            stream_callback,
+        )
         .map_err(ProviderError::AppleFm)?;
     Ok(plain_text_provider_response_from_apple_session(response))
 }

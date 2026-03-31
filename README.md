@@ -83,6 +83,10 @@ Persisted tool activity renders as first-class transcript rows such as
 `[tool call]`, `[tool result]`, and `[approval pending]` rather than generic
 notes.
 
+At the runtime layer, Probe now distinguishes backend streaming truth
+explicitly: OpenAI-compatible backends stream assistant deltas, while Apple FM
+streams full session snapshots rather than fake token deltas.
+
 Setup, help, and approval flows live in a typed overlay stack above or in
 place of the composer. A background Apple FM availability/setup check still
 runs on launch, and the full setup detail can be opened on demand from the
@@ -155,3 +159,4 @@ Start with:
 - [docs/44-probe-tui-tool-call-and-tool-result-rows.md](docs/44-probe-tui-tool-call-and-tool-result-rows.md)
 - [docs/45-probe-tui-resumable-approval-broker.md](docs/45-probe-tui-resumable-approval-broker.md)
 - [docs/47-openai-streaming-runtime-delta-events.md](docs/47-openai-streaming-runtime-delta-events.md)
+- [docs/48-apple-fm-streaming-and-snapshot-events.md](docs/48-apple-fm-streaming-and-snapshot-events.md)
