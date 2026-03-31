@@ -30,6 +30,17 @@ The first versions of Probe should focus on:
 - a typed tool runtime
 - clear policy boundaries around approvals, execution, and sandboxing
 
+## Repo Layout
+
+The repository now includes a Rust workspace with:
+
+- `probe-protocol`
+- `probe-core`
+- `probe-provider-openai`
+- `probe-cli`
+
+Planning docs live under `docs/`.
+
 ## Non-Goals For The First Milestone
 
 - a large plugin marketplace
@@ -41,8 +52,6 @@ The first versions of Probe should focus on:
 
 This repository is in bootstrap stage.
 
-The near-term objective is to establish the repo, define the runtime boundary,
-and build the first end-to-end session loop on a clean protocol and persistence
-foundation.
-
-Technical planning docs live under `docs/`.
+The near-term objective is to establish the Rust workspace, define the runtime
+boundary, and build the first end-to-end session loop on a clean protocol and
+persistence foundation.

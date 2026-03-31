@@ -1,0 +1,9 @@
+[package]
+name = "probe-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+probe-core.workspace = true
+probe-provider-openai.workspace = true

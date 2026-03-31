@@ -38,5 +38,7 @@ This repo should not quietly absorb unrelated product-shell concerns.
 ## Start Here
 
 - `README.md`
+- `docs/02-runtime-ownership-and-boundaries.md`
+- `docs/03-workspace-map.md`
 
 Add more canonical docs here as the repo grows.
