@@ -78,6 +78,57 @@ fn running_state_snapshot_is_stable() {
 }
 
 #[test]
+fn running_state_keeps_completed_reply_visible_while_next_call_waits() {
+    let mut app = AppShell::new_for_tests();
+    let backend = AppleFmBackendSummary {
+        profile_name: String::from("psionic-apple-fm-bridge"),
+        base_url: String::from("http://127.0.0.1:11435"),
+        model_id: String::from("apple-foundation-model"),
+    };
+    app.apply_message(AppMessage::AppleFmAvailabilityReady {
+        backend: backend.clone(),
+        availability: AppleFmAvailabilitySummary {
+            ready: true,
+            unavailable_reason: None,
+            availability_message: Some(String::from("ready")),
+            version: Some(String::from("1.0")),
+            platform: Some(String::from("macOS")),
+            apple_silicon_required: Some(true),
+            apple_intelligence_required: Some(true),
+        },
+    });
+    app.apply_message(AppMessage::AppleFmCallCompleted {
+        backend: backend.clone(),
+        index: 1,
+        total_calls: 3,
+        call: AppleFmCallRecord {
+            title: String::from("Sanity Check"),
+            prompt: String::from("Reply with exactly READY."),
+            response_text: String::from("READY"),
+            response_id: String::from("resp-1"),
+            response_model: String::from("apple-foundation-model"),
+            usage: AppleFmUsageSummary {
+                total_tokens: Some(15),
+                total_truth: Some(String::from("exact")),
+                ..AppleFmUsageSummary::default()
+            },
+        },
+    });
+    app.apply_message(AppMessage::AppleFmCallStarted {
+        backend,
+        index: 2,
+        total_calls: 3,
+        title: String::from("Runtime Boundary"),
+        prompt: String::from("In one sentence, summarize what Probe owns."),
+    });
+
+    let rendered = app.render_to_string(80, 24);
+    assert!(rendered.contains("READY"));
+    assert!(rendered.contains("[waiting for Apple FM reply]"));
+    assert!(rendered.contains("Completed calls: 1"));
+}
+
+#[test]
 fn completed_state_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
     let backend = AppleFmBackendSummary {

@@ -597,10 +597,10 @@ mod tests {
 
         assert_eq!(app.task_phase(), TaskPhase::Completed);
         assert_eq!(app.call_count(), 3);
-        assert!(
-            app.render_to_string(120, 32)
-                .contains("The TUI should now prove live Apple FM setup truth on startup.")
-        );
+        let rendered = app.render_to_string(120, 32);
+        assert!(rendered.contains("Completed calls: 3"));
+        assert!(rendered.contains("3. Next Step"));
+        assert!(rendered.contains("last_response_id: resp-3"));
         let requests = server.finish();
         assert_eq!(requests.len(), 4);
     }

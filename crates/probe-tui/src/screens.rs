@@ -525,35 +525,11 @@ impl HelloScreen {
         }
 
         if let Some(active_call) = &self.setup.active_call {
-            return Text::from(vec![
-                Line::from(format!(
-                    "Running call {}/{}: {}",
-                    active_call.index, active_call.total_calls, active_call.title
-                )),
-                Line::from(""),
-                Line::from("Prompt"),
-                Line::from(active_call.prompt.clone()),
-                Line::from(""),
-                Line::from("Response"),
-                Line::from("[waiting for Apple FM reply]"),
-            ]);
+            return Text::from(self.render_running_detail_lines(active_call));
         }
 
         if let Some(last_call) = self.setup.calls.last() {
-            let mut lines = vec![
-                Line::from(format!("Last completed call: {}", last_call.title)),
-                Line::from(""),
-                Line::from("Prompt"),
-                Line::from(last_call.prompt.clone()),
-                Line::from(""),
-                Line::from("Response"),
-                Line::from(last_call.response_text.clone()),
-                Line::from(""),
-                Line::from(format!("response_id: {}", last_call.response_id)),
-                Line::from(format!("model: {}", last_call.response_model)),
-            ];
-            lines.extend(last_call.usage.render_lines());
-            return Text::from(lines);
+            return Text::from(self.render_completed_detail_lines(last_call));
         }
 
         match self.setup.phase {
@@ -696,6 +672,52 @@ impl HelloScreen {
             ),
         ]
     }
+
+    fn render_running_detail_lines(&self, active_call: &ActiveCall) -> Vec<Line<'static>> {
+        let mut lines = self.render_completed_call_history_lines();
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(format!(
+            "Running call {}/{}: {}",
+            active_call.index, active_call.total_calls, active_call.title
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from("Prompt"));
+        lines.push(Line::from(active_call.prompt.clone()));
+        lines.push(Line::from(""));
+        lines.push(Line::from("Response"));
+        lines.push(Line::from("[waiting for Apple FM reply]"));
+        lines
+    }
+
+    fn render_completed_detail_lines(&self, last_call: &AppleFmCallRecord) -> Vec<Line<'static>> {
+        let mut lines = self.render_completed_call_history_lines();
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!("last_response_id: {}", last_call.response_id)));
+        lines.push(Line::from(format!("model: {}", last_call.response_model)));
+        lines.extend(last_call.usage.render_lines());
+        lines
+    }
+
+    fn render_completed_call_history_lines(&self) -> Vec<Line<'static>> {
+        if self.setup.calls.is_empty() {
+            return Vec::new();
+        }
+
+        let mut lines = vec![Line::from(format!(
+            "Completed calls: {}",
+            self.setup.calls.len()
+        ))];
+        for (index, call) in self.setup.calls.iter().enumerate() {
+            lines.push(Line::from(format!("{:>2}. {}", index + 1, call.title)));
+            lines.push(Line::from(format!(
+                "    {}",
+                compact_preview(call.response_text.as_str(), 44)
+            )));
+        }
+        lines
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -774,4 +796,9 @@ fn preview(value: &str, max_chars: usize) -> String {
     } else {
         preview
     }
+}
+
+fn compact_preview(value: &str, max_chars: usize) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    preview(compact.as_str(), max_chars)
 }
