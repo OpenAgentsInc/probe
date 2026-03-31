@@ -90,3 +90,7 @@ This folder holds technical planning docs for the Probe runtime.
   - first Rust-native TUI bootstrap issue for a Textual-inspired Probe screen
     shell, proving basic app/screen/widget structure, keyboard-driven state
     changes, and a visible hello-world terminal UI target
+- `31-probe-tui-background-task-and-app-message-bridge.md`
+  - narrow retained worker thread and typed app-message seam for the Probe TUI,
+    so screens can request bounded background work without freezing the render
+    loop

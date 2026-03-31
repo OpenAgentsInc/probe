@@ -1,5 +1,6 @@
 ---
 source: crates/probe-tui/tests/hello_demo.rs
+assertion_line: 16
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -12,17 +13,17 @@ expression: snapshot
            │Probe TUI Hello Keys                                    │
            │                                                        │
            │Tab / Left / Right  switch views                        │
+           │r                   run retained background task        │
            │t                   toggle body copy                    │
            │? or F1             open or dismiss this modal          │
            │Esc                 dismiss this modal                  │
            │q or Ctrl+C         quit                                │
            │                                                        │
            │Current stack depth: 2                                  │
-           │                                                        │
            └────────────────────────────────────────────────────────┘
 
 
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│Tab/Arrow switch view | t toggle body | ? help | q quit                       │
+│Tab/Arrow switch view | r run task | t toggle body | ? help | q quit          │
 └──────────────────────────────────────────────────────────────────────────────┘

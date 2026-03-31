@@ -12,8 +12,10 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::{Frame, Terminal};
 
 use crate::event::{UiEvent, event_from_key};
-use crate::screens::{ActiveTab, HelloScreen, HelpScreen, ScreenAction, ScreenId, ScreenState};
+use crate::message::{AppMessage, BackgroundTaskKind, BackgroundTaskRequest};
+use crate::screens::{ActiveTab, HelloScreen, HelpScreen, ScreenAction, ScreenId, ScreenState, TaskPhase};
 use crate::widgets::{FooterBar, HeaderBar};
+use crate::worker::BackgroundWorker;
 
 const TICK_RATE: Duration = Duration::from_millis(250);
 
@@ -22,6 +24,7 @@ pub struct AppShell {
     screens: Vec<ScreenState>,
     last_status: String,
     should_quit: bool,
+    worker: BackgroundWorker,
 }
 
 impl Default for AppShell {
@@ -30,6 +33,7 @@ impl Default for AppShell {
             screens: vec![ScreenState::Hello(HelloScreen::default())],
             last_status: String::from("hello demo launched"),
             should_quit: false,
+            worker: BackgroundWorker::new(),
         }
     }
 }
@@ -58,6 +62,10 @@ impl AppShell {
         self.base_screen().emphasized_copy()
     }
 
+    pub fn task_phase(&self) -> TaskPhase {
+        self.base_screen().task_phase()
+    }
+
     pub fn screen_depth(&self) -> usize {
         self.screens.len()
     }
@@ -70,7 +78,12 @@ impl AppShell {
         self.base_screen().recent_events().cloned().collect()
     }
 
+    pub fn worker_events(&self) -> Vec<String> {
+        self.base_screen().worker_events().cloned().collect()
+    }
+
     pub fn dispatch(&mut self, event: UiEvent) {
+        self.poll_background_messages();
         match event {
             UiEvent::Quit => {
                 self.base_screen_mut().record_event("quit requested");
@@ -101,8 +114,55 @@ impl AppShell {
                         }
                     }
                 }
+                if let Some(request) = outcome.task_request {
+                    if let Err(error) = self.worker.submit(request) {
+                        self.apply_message(AppMessage::TaskFailed {
+                            kind: request.kind(),
+                            title: request.title().to_string(),
+                            detail: error,
+                        });
+                    }
+                }
             }
         }
+        self.poll_background_messages();
+    }
+
+    pub fn submit_background_task(
+        &mut self,
+        request: BackgroundTaskRequest,
+    ) -> Result<(), String> {
+        self.base_screen_mut().queue_task(request);
+        self.last_status = format!("queued {}", request.kind().label());
+        self.worker.submit(request)
+    }
+
+    pub fn poll_background_messages(&mut self) -> usize {
+        let mut applied = 0;
+        loop {
+            match self.worker.try_recv() {
+                Ok(Some(message)) => {
+                    self.apply_message(message);
+                    applied += 1;
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    self.apply_message(AppMessage::TaskFailed {
+                        kind: BackgroundTaskKind::ProbeSetupDemo,
+                        title: String::from("Probe setup demo"),
+                        detail: error,
+                    });
+                    applied += 1;
+                    break;
+                }
+            }
+        }
+        applied
+    }
+
+    pub fn apply_message(&mut self, message: AppMessage) {
+        let status = self.base_screen_mut().apply_message(message);
+        self.last_status = status;
     }
 
     pub fn render(&self, frame: &mut Frame<'_>) {
@@ -177,6 +237,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()>
     let mut app = AppShell::new();
 
     while !app.should_quit() {
+        app.poll_background_messages();
         terminal.draw(|frame| app.render(frame))?;
         if event::poll(TICK_RATE)? {
             if let CrosstermEvent::Key(key) = event::read()?
@@ -216,9 +277,13 @@ fn buffer_to_string(buffer: &Buffer) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
     use super::AppShell;
     use crate::event::UiEvent;
-    use crate::screens::{ActiveTab, ScreenId};
+    use crate::message::{AppMessage, BackgroundTaskKind, BackgroundTaskRequest};
+    use crate::screens::{ActiveTab, ScreenId, TaskPhase};
 
     #[test]
     fn help_modal_takes_focus_and_dismisses_cleanly() {
@@ -253,5 +318,74 @@ mod tests {
 
         app.dispatch(UiEvent::PreviousView);
         assert_eq!(app.active_tab(), ActiveTab::Overview);
+    }
+
+    #[test]
+    fn applying_worker_messages_updates_visible_task_state() {
+        let mut app = AppShell::new();
+        app.apply_message(AppMessage::TaskStarted {
+            kind: BackgroundTaskKind::ProbeSetupDemo,
+            title: String::from("Probe setup demo"),
+        });
+        assert_eq!(app.task_phase(), TaskPhase::Running);
+
+        app.apply_message(AppMessage::TaskSucceeded {
+            kind: BackgroundTaskKind::ProbeSetupDemo,
+            title: String::from("Probe setup demo"),
+            lines: vec![String::from("task finished")],
+        });
+        assert_eq!(app.task_phase(), TaskPhase::Succeeded);
+        assert!(
+            app.worker_events()
+                .iter()
+                .any(|entry| entry.contains("completed successfully"))
+        );
+    }
+
+    #[test]
+    fn background_task_completes_without_blocking_repaint() {
+        let mut app = AppShell::new();
+        app.submit_background_task(BackgroundTaskRequest::DemoSuccess)
+            .expect("demo task should queue");
+        assert_eq!(app.task_phase(), TaskPhase::Queued);
+        assert!(app.render_to_string(80, 24).contains("State: queued"));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            app.poll_background_messages();
+            if app.task_phase() == TaskPhase::Succeeded {
+                break;
+            }
+            let _ = app.render_to_string(80, 24);
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(app.task_phase(), TaskPhase::Succeeded);
+        assert!(app.render_to_string(80, 24).contains("State: completed"));
+        assert!(
+            app.worker_events()
+                .iter()
+                .any(|entry| entry.contains("completed successfully"))
+        );
+    }
+
+    #[test]
+    fn background_task_failure_surfaces_error_detail() {
+        let mut app = AppShell::new();
+        app.submit_background_task(BackgroundTaskRequest::DemoFailure)
+            .expect("failing task should queue");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            app.poll_background_messages();
+            if app.task_phase() == TaskPhase::Failed {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(app.task_phase(), TaskPhase::Failed);
+        assert!(app.render_to_string(80, 24).contains("State: failed"));
+        assert!(app.worker_events().iter().any(|entry| entry.contains("failed")));
     }
 }

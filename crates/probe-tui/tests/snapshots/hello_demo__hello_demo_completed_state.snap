@@ -1,6 +1,6 @@
 ---
 source: crates/probe-tui/tests/hello_demo.rs
-assertion_line: 8
+assertion_line: 49
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -15,14 +15,14 @@ Textual-inspired Rust shell with a screen stack, app messages, and worker owners
 │                                                ││focus: hello screen         │
 │Use r to start a background task.               │└────────────────────────────┘
 │Use Tab or Left/Right to switch views.          │┌Task Status─────────────────┐
-│Use ? to open the focused help modal.           ││No background task is       │
-│                                                ││running.                    │
+│Use ? to open the focused help modal.           ││Probe setup demo            │
 │                                                ││                            │
-│                                                ││Press r to start the        │
-│                                                ││retained probe setup demo   │
-│                                                ││task.                       │
-│                                                ││The app shell will keep     │
-│                                                ││repainting while the worker │
+│                                                ││State: completed            │
+│                                                ││Background task finished    │
+│                                                ││without blocking the UI     │
+│                                                ││loop.                       │
+│                                                ││The app shell can now ingest│
+│                                                ││typed worker messages on    │
 └────────────────────────────────────────────────┘└────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │Tab/Arrow switch view | r run task | t toggle body | ? help | q quit          │

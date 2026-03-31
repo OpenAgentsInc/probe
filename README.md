@@ -32,8 +32,9 @@ Shipped now:
 - Apple FM plain-text `exec`/`chat` turns, Apple-FM-backed `consult_oracle`,
   and session-backed Apple FM coding turns through the Probe approval layer
 - `probe tui`, the first Textual-inspired Rust TUI shell proving a small
-  app/screen/widget seam, screen stack, help modal, and visible keyboard-driven
-  state changes, with `cargo probe` as the repo-local shortcut
+  app/screen/widget seam, screen stack, help modal, typed app-message worker
+  lane, and visible keyboard-driven state changes, with `cargo probe` as the
+  repo-local shortcut
 
 Current posture:
 
@@ -195,6 +196,8 @@ Probe TUI rather than stay as a forever-separate demo path.
 
 Keys:
 
+- `r`
+  - queue the retained background-task demo and watch the worker state update
 - `Tab`, `Left`, `Right`
   - switch between the overview and event-log views
 - `t`
@@ -205,6 +208,10 @@ Keys:
   - dismiss the help modal
 - `q` or `Ctrl+C`
   - quit cleanly and restore the terminal
+
+The current TUI is still intentionally narrow, but it now has a real worker
+thread and typed app-message seam. The shell keeps repainting while the worker
+reports queued, running, completed, or failed task state back into the screen.
 
 Resume a prior session:
 

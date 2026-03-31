@@ -58,7 +58,7 @@ impl<'a> FooterBar<'a> {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let lines = vec![
-            Line::from("Tab/Arrow switch view | t toggle body | ? help | q quit"),
+            Line::from("Tab/Arrow switch view | r run task | t toggle body | ? help | q quit"),
             Line::styled(
                 self.status,
                 Style::default().fg(Color::Rgb(0xf1, 0xc4, 0x53)),
