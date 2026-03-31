@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use probe_protocol::session::{
     ItemId, SessionBackendTarget, SessionId, SessionIndex, SessionMetadata, SessionState,
     SessionTurn, TimestampMs, TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnId,
+    TurnObservability,
 };
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -197,6 +198,15 @@ impl FilesystemSessionStore {
         session_id: &SessionId,
         items: &[NewItem],
     ) -> Result<SessionTurn, SessionStoreError> {
+        self.append_turn_with_observability(session_id, items, None)
+    }
+
+    pub fn append_turn_with_observability(
+        &self,
+        session_id: &SessionId,
+        items: &[NewItem],
+        observability: Option<TurnObservability>,
+    ) -> Result<SessionTurn, SessionStoreError> {
         let mut metadata = self.read_metadata(session_id)?;
         let turn_id = TurnId(metadata.next_turn_index);
         let started_at_ms = now_ms();
@@ -219,6 +229,7 @@ impl FilesystemSessionStore {
             index: metadata.next_turn_index,
             started_at_ms,
             completed_at_ms: Some(now_ms()),
+            observability,
             items: transcript_items,
         };
         let event = TranscriptEvent {
@@ -337,7 +348,9 @@ fn now_ms() -> TimestampMs {
 #[cfg(test)]
 mod tests {
     use super::{FilesystemSessionStore, NewItem, NewSession};
-    use probe_protocol::session::{SessionBackendTarget, TranscriptItemKind};
+    use probe_protocol::session::{
+        CacheSignal, SessionBackendTarget, TranscriptItemKind, TurnObservability,
+    };
 
     #[test]
     fn create_session_persists_metadata_and_index() {
@@ -396,5 +409,50 @@ mod tests {
 
         let listed = store.list_sessions().expect("list sessions");
         assert_eq!(listed[0].next_turn_index, 1);
+    }
+
+    #[test]
+    fn append_turn_with_observability_persists_metrics() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = FilesystemSessionStore::new(temp.path());
+        let metadata = store
+            .create_session("metrics", temp.path())
+            .expect("create session");
+
+        store
+            .append_turn_with_observability(
+                &metadata.id,
+                &[NewItem::new(
+                    TranscriptItemKind::AssistantMessage,
+                    "metrics",
+                )],
+                Some(TurnObservability {
+                    wallclock_ms: 42,
+                    model_output_ms: Some(42),
+                    prompt_tokens: Some(12),
+                    completion_tokens: Some(6),
+                    total_tokens: Some(18),
+                    completion_tokens_per_second_x1000: Some(142_857),
+                    cache_signal: CacheSignal::ColdStart,
+                }),
+            )
+            .expect("append turn");
+
+        let transcript = store
+            .read_transcript(&metadata.id)
+            .expect("read transcript");
+        assert_eq!(transcript.len(), 1);
+        let observability = transcript[0]
+            .turn
+            .observability
+            .as_ref()
+            .expect("observability should persist");
+        assert_eq!(observability.wallclock_ms, 42);
+        assert_eq!(observability.model_output_ms, Some(42));
+        assert_eq!(
+            observability.completion_tokens_per_second_x1000,
+            Some(142_857)
+        );
+        assert!(matches!(observability.cache_signal, CacheSignal::ColdStart));
     }
 }

@@ -17,7 +17,7 @@ use probe_core::server_control::{
     PsionicServerConfig, PsionicServerMode, ServerConfigOverrides, ServerProcessGuard,
 };
 use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
-use probe_protocol::session::SessionId;
+use probe_protocol::session::{CacheSignal, SessionId, SessionTurn};
 
 #[derive(Parser, Debug)]
 #[command(name = "probe")]
@@ -180,7 +180,10 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
         outcome.response_model,
         outcome.session.transcript_path.display()
     );
-    if let Some(usage) = outcome.usage {
+    print_turn_observability(&outcome.turn);
+    if outcome.turn.observability.is_none()
+        && let Some(usage) = outcome.usage
+    {
         eprintln!(
             "usage prompt_tokens={} completion_tokens={} total_tokens={}",
             usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
@@ -304,6 +307,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
             outcome.session.id.as_str(),
             outcome.turn.index
         );
+        print_turn_observability(&outcome.turn);
         if outcome.executed_tool_calls > 0 {
             eprintln!("tool_calls executed={}", outcome.executed_tool_calls);
         }
@@ -432,5 +436,108 @@ fn parse_server_mode(value: &str) -> Result<PsionicServerMode, String> {
         other => Err(format!(
             "invalid server mode `{other}`; expected `attach` or `launch`"
         )),
+    }
+}
+
+fn print_turn_observability(turn: &SessionTurn) {
+    if let Some(line) = render_turn_observability(turn) {
+        eprintln!("{line}");
+    }
+}
+
+fn render_turn_observability(turn: &SessionTurn) -> Option<String> {
+    let observability = turn.observability.as_ref()?;
+    let mut fields = vec![
+        format!("wallclock_ms={}", observability.wallclock_ms),
+        format!(
+            "cache_signal={}",
+            render_cache_signal(observability.cache_signal)
+        ),
+    ];
+    if let Some(model_output_ms) = observability.model_output_ms {
+        fields.push(format!("model_output_ms={model_output_ms}"));
+    }
+    if let Some(prompt_tokens) = observability.prompt_tokens {
+        fields.push(format!("prompt_tokens={prompt_tokens}"));
+    }
+    if let Some(completion_tokens) = observability.completion_tokens {
+        fields.push(format!("completion_tokens={completion_tokens}"));
+    }
+    if let Some(total_tokens) = observability.total_tokens {
+        fields.push(format!("total_tokens={total_tokens}"));
+    }
+    if let Some(completion_tokens_per_second_x1000) =
+        observability.completion_tokens_per_second_x1000
+    {
+        fields.push(format!(
+            "completion_tps={}",
+            format_rate_x1000(completion_tokens_per_second_x1000)
+        ));
+    }
+    Some(format!("observability {}", fields.join(" ")))
+}
+
+fn render_cache_signal(signal: CacheSignal) -> &'static str {
+    match signal {
+        CacheSignal::Unknown => "unknown",
+        CacheSignal::ColdStart => "cold_start",
+        CacheSignal::LikelyWarm => "likely_warm",
+        CacheSignal::NoClearSignal => "no_clear_signal",
+    }
+}
+
+fn format_rate_x1000(value: u64) -> String {
+    format!("{}.{:03}", value / 1000, value % 1000)
+}
+
+#[cfg(test)]
+mod tests {
+    use probe_protocol::session::{
+        CacheSignal, SessionTurn, TranscriptItem, TurnId, TurnObservability,
+    };
+
+    use super::render_turn_observability;
+
+    #[test]
+    fn render_turn_observability_includes_metrics_and_cache_signal() {
+        let turn = SessionTurn {
+            id: TurnId(0),
+            index: 0,
+            started_at_ms: 1,
+            completed_at_ms: Some(2),
+            observability: Some(TurnObservability {
+                wallclock_ms: 120,
+                model_output_ms: Some(120),
+                prompt_tokens: Some(24),
+                completion_tokens: Some(12),
+                total_tokens: Some(36),
+                completion_tokens_per_second_x1000: Some(100_000),
+                cache_signal: CacheSignal::LikelyWarm,
+            }),
+            items: Vec::<TranscriptItem>::new(),
+        };
+
+        let rendered = render_turn_observability(&turn).expect("line should exist");
+        assert!(rendered.contains("wallclock_ms=120"));
+        assert!(rendered.contains("model_output_ms=120"));
+        assert!(rendered.contains("prompt_tokens=24"));
+        assert!(rendered.contains("completion_tokens=12"));
+        assert!(rendered.contains("total_tokens=36"));
+        assert!(rendered.contains("completion_tps=100.000"));
+        assert!(rendered.contains("cache_signal=likely_warm"));
+    }
+
+    #[test]
+    fn render_turn_observability_returns_none_without_metrics() {
+        let turn = SessionTurn {
+            id: TurnId(0),
+            index: 0,
+            started_at_ms: 1,
+            completed_at_ms: Some(2),
+            observability: None,
+            items: Vec::<TranscriptItem>::new(),
+        };
+
+        assert!(render_turn_observability(&turn).is_none());
     }
 }

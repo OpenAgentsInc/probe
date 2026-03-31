@@ -1,10 +1,12 @@
 use std::env;
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use probe_protocol::backend::BackendProfile;
 use probe_protocol::session::{
-    SessionBackendTarget, SessionId, SessionMetadata, SessionTurn, TranscriptItemKind,
+    CacheSignal, SessionBackendTarget, SessionId, SessionMetadata, SessionTurn, TranscriptItemKind,
+    TurnObservability,
 };
 use probe_provider_openai::{
     ChatCompletionRequest, ChatCompletionUsage, ChatMessage, ChatToolCall, OpenAiProviderClient,
@@ -15,6 +17,8 @@ use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionS
 use crate::tools::ToolLoopConfig;
 
 const DEFAULT_PROBE_HOME_DIR: &str = ".probe";
+const LIKELY_WARM_WALLCLOCK_RATIO_NUMERATOR: u64 = 80;
+const LIKELY_WARM_WALLCLOCK_RATIO_DENOMINATOR: u64 = 100;
 
 #[derive(Clone, Debug)]
 pub struct PlainTextExecRequest {
@@ -221,6 +225,7 @@ impl ProbeRuntime {
                 messages.push(ChatMessage::user(user_prompt));
             }
 
+            let request_started = Instant::now();
             let response = if let Some(tool_loop) = tool_loop.as_ref() {
                 let request =
                     ChatCompletionRequest::from_config(&provider_config, messages.clone())
@@ -237,6 +242,7 @@ impl ProbeRuntime {
                 session_id: session.id.clone(),
                 source,
             });
+            let wallclock_ms = elapsed_ms(request_started);
 
             let response = match response {
                 Ok(response) => response,
@@ -250,6 +256,8 @@ impl ProbeRuntime {
                     return Err(error);
                 }
             };
+            let observability =
+                self.build_turn_observability(&session.id, wallclock_ms, response.usage.as_ref())?;
 
             if let Some(tool_calls) = response.first_tool_calls()
                 && !tool_calls.is_empty()
@@ -259,6 +267,7 @@ impl ProbeRuntime {
                     &session.id,
                     pending_user_prompt.take(),
                     &tool_calls,
+                    Some(observability),
                 )?;
                 let _ = tool_call_turn;
 
@@ -302,7 +311,11 @@ impl ProbeRuntime {
                 TranscriptItemKind::AssistantMessage,
                 assistant_text.clone(),
             ));
-            let turn = self.session_store.append_turn(&session.id, &items)?;
+            let turn = self.session_store.append_turn_with_observability(
+                &session.id,
+                &items,
+                Some(observability),
+            )?;
             let session = self.session_store.read_metadata(&session.id)?;
             return Ok(PlainTextExecOutcome {
                 session,
@@ -416,6 +429,7 @@ impl ProbeRuntime {
         session_id: &SessionId,
         user_prompt: Option<String>,
         tool_calls: &[ChatToolCall],
+        observability: Option<TurnObservability>,
     ) -> Result<SessionTurn, RuntimeError> {
         let mut items = Vec::new();
         if let Some(user_prompt) = user_prompt {
@@ -437,7 +451,7 @@ impl ProbeRuntime {
             ));
         }
         self.session_store
-            .append_turn(session_id, &items)
+            .append_turn_with_observability(session_id, &items, observability)
             .map_err(RuntimeError::from)
     }
 
@@ -462,6 +476,94 @@ impl ProbeRuntime {
             .append_turn(session_id, &items)
             .map_err(RuntimeError::from)
     }
+
+    fn build_turn_observability(
+        &self,
+        session_id: &SessionId,
+        wallclock_ms: u64,
+        usage: Option<&ChatCompletionUsage>,
+    ) -> Result<TurnObservability, RuntimeError> {
+        let prompt_tokens = usage.map(|usage| usage.prompt_tokens);
+        let previous = if prompt_tokens.is_some() {
+            self.last_prompt_bearing_observability(session_id)?
+        } else {
+            self.last_turn_observability(session_id)?
+        };
+
+        Ok(TurnObservability {
+            wallclock_ms,
+            model_output_ms: Some(wallclock_ms),
+            prompt_tokens,
+            completion_tokens: usage.map(|usage| usage.completion_tokens),
+            total_tokens: usage.map(|usage| usage.total_tokens),
+            completion_tokens_per_second_x1000: usage.and_then(|usage| {
+                completion_tokens_per_second_x1000(usage.completion_tokens, wallclock_ms)
+            }),
+            cache_signal: infer_cache_signal(previous.as_ref(), prompt_tokens, wallclock_ms),
+        })
+    }
+
+    fn last_turn_observability(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<TurnObservability>, RuntimeError> {
+        let transcript = self.session_store.read_transcript(session_id)?;
+        Ok(transcript
+            .into_iter()
+            .rev()
+            .find_map(|event| event.turn.observability))
+    }
+
+    fn last_prompt_bearing_observability(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<TurnObservability>, RuntimeError> {
+        let transcript = self.session_store.read_transcript(session_id)?;
+        Ok(transcript.into_iter().rev().find_map(|event| {
+            let observability = event.turn.observability?;
+            observability.prompt_tokens.map(|_| observability)
+        }))
+    }
+}
+
+fn infer_cache_signal(
+    previous: Option<&TurnObservability>,
+    current_prompt_tokens: Option<u32>,
+    current_wallclock_ms: u64,
+) -> CacheSignal {
+    let Some(previous) = previous else {
+        return CacheSignal::ColdStart;
+    };
+    let Some(current_prompt_tokens) = current_prompt_tokens else {
+        return CacheSignal::Unknown;
+    };
+    let Some(previous_prompt_tokens) = previous.prompt_tokens else {
+        return CacheSignal::Unknown;
+    };
+    if previous.wallclock_ms == 0 || current_prompt_tokens < previous_prompt_tokens {
+        return CacheSignal::NoClearSignal;
+    }
+    if current_wallclock_ms.saturating_mul(LIKELY_WARM_WALLCLOCK_RATIO_DENOMINATOR)
+        <= previous
+            .wallclock_ms
+            .saturating_mul(LIKELY_WARM_WALLCLOCK_RATIO_NUMERATOR)
+    {
+        CacheSignal::LikelyWarm
+    } else {
+        CacheSignal::NoClearSignal
+    }
+}
+
+fn completion_tokens_per_second_x1000(completion_tokens: u32, model_output_ms: u64) -> Option<u64> {
+    if completion_tokens == 0 || model_output_ms == 0 {
+        return None;
+    }
+    Some((u64::from(completion_tokens) * 1_000_000) / model_output_ms)
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    let elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    elapsed_ms.max(1)
 }
 
 #[cfg(test)]
@@ -469,10 +571,11 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+    use std::time::Duration;
 
     use crate::backend_profiles::psionic_qwen35_2b_q8_registry;
     use crate::tools::{ProbeToolChoice, ToolLoopConfig};
-    use probe_protocol::session::TranscriptItemKind;
+    use probe_protocol::session::{CacheSignal, TranscriptItemKind};
 
     use super::{
         PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, default_session_title,
@@ -540,6 +643,26 @@ mod tests {
         assert_eq!(outcome.response_model, "qwen3.5-2b-q8_0-registry.gguf");
         assert_eq!(outcome.turn.items.len(), 2);
         assert_eq!(outcome.session.title, "Exec Test");
+        let observability = outcome
+            .turn
+            .observability
+            .as_ref()
+            .expect("observability should be recorded");
+        assert!(observability.wallclock_ms > 0);
+        assert_eq!(
+            observability.model_output_ms,
+            Some(observability.wallclock_ms)
+        );
+        assert_eq!(observability.prompt_tokens, Some(6));
+        assert_eq!(observability.completion_tokens, Some(5));
+        assert_eq!(observability.total_tokens, Some(11));
+        assert!(
+            observability
+                .completion_tokens_per_second_x1000
+                .expect("throughput should be computed")
+                > 0
+        );
+        assert!(matches!(observability.cache_signal, CacheSignal::ColdStart));
         assert_eq!(
             outcome
                 .session
@@ -557,6 +680,15 @@ mod tests {
         assert_eq!(transcript.len(), 1);
         assert_eq!(transcript[0].turn.items[0].text, "say hello");
         assert_eq!(transcript[0].turn.items[1].text, "hello from probe exec");
+        assert_eq!(
+            transcript[0]
+                .turn
+                .observability
+                .as_ref()
+                .expect("observability should persist")
+                .prompt_tokens,
+            Some(6)
+        );
 
         handle.join().expect("server thread should exit cleanly");
     }
@@ -575,6 +707,9 @@ mod tests {
                     assert!(request_body.contains("first prompt"));
                     assert!(request_body.contains("first answer"));
                     assert!(request_body.contains("second prompt"));
+                    thread::sleep(Duration::from_millis(5));
+                } else {
+                    thread::sleep(Duration::from_millis(60));
                 }
                 let body = serde_json::json!({
                     "id": format!("chatcmpl_{expected_response}"),
@@ -646,6 +781,24 @@ mod tests {
             .expect("read transcript");
         assert_eq!(transcript.len(), 2);
         assert_eq!(transcript[1].turn.items[0].text, "second prompt");
+        assert!(matches!(
+            transcript[0]
+                .turn
+                .observability
+                .as_ref()
+                .expect("first turn observability should exist")
+                .cache_signal,
+            CacheSignal::ColdStart
+        ));
+        assert!(matches!(
+            transcript[1]
+                .turn
+                .observability
+                .as_ref()
+                .expect("second turn observability should exist")
+                .cache_signal,
+            CacheSignal::LikelyWarm
+        ));
 
         handle.join().expect("server thread should exit cleanly");
     }
@@ -754,6 +907,9 @@ mod tests {
             .read_transcript(&outcome.session.id)
             .expect("read transcript");
         assert_eq!(transcript.len(), 3);
+        assert!(transcript[0].turn.observability.is_some());
+        assert!(transcript[1].turn.observability.is_none());
+        assert!(transcript[2].turn.observability.is_some());
         assert!(matches!(
             transcript[0].turn.items[1].kind,
             TranscriptItemKind::ToolCall
@@ -876,6 +1032,9 @@ mod tests {
         assert_eq!(transcript.len(), 3);
         assert_eq!(transcript[0].turn.items.len(), 3);
         assert_eq!(transcript[1].turn.items.len(), 2);
+        assert!(transcript[0].turn.observability.is_some());
+        assert!(transcript[1].turn.observability.is_none());
+        assert!(transcript[2].turn.observability.is_some());
 
         handle.join().expect("server thread should exit cleanly");
     }

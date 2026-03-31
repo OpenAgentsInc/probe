@@ -50,6 +50,31 @@ pub enum TranscriptItemKind {
     Note,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheSignal {
+    Unknown,
+    ColdStart,
+    LikelyWarm,
+    NoClearSignal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnObservability {
+    pub wallclock_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_output_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_per_second_x1000: Option<u64>,
+    pub cache_signal: CacheSignal,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptItem {
     pub id: ItemId,
@@ -71,6 +96,8 @@ pub struct SessionTurn {
     pub index: u64,
     pub started_at_ms: TimestampMs,
     pub completed_at_ms: Option<TimestampMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observability: Option<TurnObservability>,
     pub items: Vec<TranscriptItem>,
 }
 

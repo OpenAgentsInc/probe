@@ -34,3 +34,6 @@ This folder holds technical planning docs for the Probe runtime.
 - `11-server-attach-and-launch.md`
   - local server config, attach mode, and supervised launch behavior for
     `psionic-openai-server`
+- `12-observability-and-cache-signals.md`
+  - per-turn wallclock, token usage, throughput, and cache-signal behavior for
+    the first local controller lane

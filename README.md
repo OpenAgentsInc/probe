@@ -77,6 +77,13 @@ Probe now supports both local server attachment and supervised launch:
 - launch `psionic-openai-server` as a child process with `--server-mode launch`
 - persist the effective local server config under the Probe home
 
+Probe now records first-pass controller observability on model-generated turns:
+
+- per-turn request wallclock and model-output timing
+- prompt, completion, and total token counts when the backend returns usage
+- derived completion throughput and a conservative cache-signal heuristic
+- operator-readable observability lines on both `probe exec` and `probe chat`
+
 ## Non-Goals For The First Milestone
 
 - a large plugin marketplace
