@@ -108,6 +108,17 @@ fn chat_resume_rejects_prompt_overrides() {
 }
 
 #[test]
+fn tui_hello_help_is_available() {
+    probe_command()
+        .args(["tui", "hello", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Launch the hello-world Probe TUI demo",
+        ));
+}
+
+#[test]
 fn accept_process_emits_stable_report_shape() {
     let environment = ProbeTestEnvironment::new();
     let report_path = environment.probe_home().join("reports/acceptance.json");

@@ -45,6 +45,7 @@ use probe_protocol::session::{
     BackendTurnReceipt, CacheSignal, SessionHarnessProfile, SessionId, SessionTurn,
     ToolPolicyDecision, ToolRiskClass, UsageMeasurement, UsageTruth,
 };
+use probe_tui::run_hello_demo;
 
 #[derive(Parser, Debug)]
 #[command(name = "probe")]
@@ -59,12 +60,25 @@ struct Cli {
 enum Commands {
     Exec(ExecArgs),
     Chat(ChatArgs),
+    Tui(TuiArgs),
     Accept(AcceptArgs),
     AcceptCompare(AcceptCompareArgs),
     Export(ExportArgs),
     ModuleEval(ModuleEvalArgs),
     OptimizeModules(OptimizeModulesArgs),
     OptimizeHarness(OptimizeHarnessArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct TuiArgs {
+    #[command(subcommand)]
+    command: TuiCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum TuiCommands {
+    #[command(about = "Launch the hello-world Probe TUI demo")]
+    Hello,
 }
 
 #[derive(clap::Args, Debug)]
@@ -270,12 +284,19 @@ fn run() -> Result<(), String> {
     match cli.command {
         Commands::Exec(args) => run_exec(args),
         Commands::Chat(args) => run_chat(args),
+        Commands::Tui(args) => run_tui(args),
         Commands::Accept(args) => run_accept(args),
         Commands::AcceptCompare(args) => run_accept_compare(args),
         Commands::Export(args) => run_export(args),
         Commands::ModuleEval(args) => run_module_eval(args),
         Commands::OptimizeModules(args) => run_optimize_modules(args),
         Commands::OptimizeHarness(args) => run_optimize_harness(args),
+    }
+}
+
+fn run_tui(args: TuiArgs) -> Result<(), String> {
+    match args.command {
+        TuiCommands::Hello => run_hello_demo().map_err(|error| error.to_string()),
     }
 }
 

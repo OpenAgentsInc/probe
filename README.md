@@ -7,12 +7,12 @@ Rust-first controller with a CLI, durable local session state, a typed runtime
 protocol, bounded tool execution, and a clean seam to local or remote model
 backends.
 
-The repo currently contains seven crates: `probe-protocol`, `probe-core`,
+The repo currently contains eight crates: `probe-protocol`, `probe-core`,
 `probe-provider-openai`, `probe-provider-apple-fm`, `probe-decisions`,
-`probe-optimizer`, and `probe-cli`. The default local backend lane is
-`psionic-qwen35-2b-q8-registry`, targeting `http://127.0.0.1:8080/v1` with the
-model id `qwen3.5-2b-q8_0-registry.gguf`. Probe now also ships the first real
-Apple FM backend lane through `psionic-apple-fm-bridge`, targeting
+`probe-optimizer`, `probe-cli`, and `probe-tui`. The default local backend
+lane is `psionic-qwen35-2b-q8-registry`, targeting `http://127.0.0.1:8080/v1`
+with the model id `qwen3.5-2b-q8_0-registry.gguf`. Probe now also ships the
+first real Apple FM backend lane through `psionic-apple-fm-bridge`, targeting
 `http://127.0.0.1:8081` with the model id `apple-foundation-model`.
 
 ## Status Snapshot
@@ -31,6 +31,9 @@ Shipped now:
 - local backend attach and supervised launch flows
 - Apple FM plain-text `exec`/`chat` turns, Apple-FM-backed `consult_oracle`,
   and session-backed Apple FM coding turns through the Probe approval layer
+- `probe tui hello`, the first Textual-inspired Rust TUI shell proving a small
+  app/screen/widget seam, screen stack, help modal, and visible keyboard-driven
+  state changes
 
 Current posture:
 
@@ -157,7 +160,7 @@ when the comparison run fails.
 Build and validation:
 
 ```bash
-cargo test -p probe-provider-openai -p probe-core -p probe-cli
+cargo test -p probe-provider-openai -p probe-core -p probe-cli -p probe-tui
 cargo check
 ```
 
@@ -172,6 +175,27 @@ Interactive session:
 ```bash
 cargo run -p probe-cli -- chat
 ```
+
+Hello-world TUI demo:
+
+```bash
+cargo run -p probe-cli -- tui hello
+```
+
+The demo uses a small retained screen shell in Rust.
+
+Keys:
+
+- `Tab`, `Left`, `Right`
+  - switch between the overview and event-log views
+- `t`
+  - toggle the main panel body copy
+- `?` or `F1`
+  - open or dismiss the help modal
+- `Esc`
+  - dismiss the help modal
+- `q` or `Ctrl+C`
+  - quit cleanly and restore the terminal
 
 Resume a prior session:
 

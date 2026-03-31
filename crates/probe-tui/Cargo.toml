@@ -1,0 +1,12 @@
+[package]
+name = "probe-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+crossterm.workspace = true
+ratatui.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

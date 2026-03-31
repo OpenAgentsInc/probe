@@ -8,8 +8,17 @@
   - controller runtime entrypoint and cross-crate coordination surface
 - `probe-provider-openai`
   - backend client crate for OpenAI-compatible local backends
+- `probe-provider-apple-fm`
+  - Apple Foundation Models provider boundary and bridge integration seam
+- `probe-decisions`
+  - offline-evaluable decision-module boundary above the runtime
+- `probe-optimizer`
+  - offline optimizer receipts and candidate comparison logic
 - `probe-cli`
   - terminal entrypoint for Probe
+- `probe-tui`
+  - Textual-inspired Rust terminal UI shell for retained screens, widget-like
+    regions, and focused modal surfaces
 
 ## Early Rule
 

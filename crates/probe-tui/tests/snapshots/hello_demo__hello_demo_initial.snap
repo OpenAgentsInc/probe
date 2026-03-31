@@ -1,0 +1,28 @@
+---
+source: crates/probe-tui/tests/hello_demo.rs
+expression: snapshot
+---
+┌──────────────────────────────────────────────────────────────────────────────┐
+│Probe TUI Hello                                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+Textual-inspired Rust shell with a screen stack and focused modal ownership.
+┌Hello Demo────────────────────────────────────────────────────────────────────┐
+└──────────────────────────────────────────────────────────────────────────────┘
+┌Main Panel──────────────────────────────────────┐┌Screen Stack────────────────┐
+│Probe now has a visible terminal UI target to   ││depth: 1                    │
+│iterate on.                                     ││base: hello screen          │
+│                                                ││focus: hello screen         │
+│Use Tab or Left/Right to switch views.          ││view: Overview              │
+│Use t to toggle the main panel copy.            ││                            │
+│Use ? to open the focused help modal.           │└────────────────────────────┘
+│                                                │┌Recent Events───────────────┐
+│                                                ││press tab to switch views   │
+│                                                ││press ? for help            │
+│                                                ││hello demo ready            │
+│                                                ││                            │
+│                                                ││                            │
+│                                                ││                            │
+└────────────────────────────────────────────────┘└────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│Tab/Arrow switch view | t toggle body | ? help | q quit                       │
+└──────────────────────────────────────────────────────────────────────────────┘
