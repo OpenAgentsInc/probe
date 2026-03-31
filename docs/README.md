@@ -105,3 +105,7 @@ This folder holds technical planning docs for the Probe runtime.
 - `36-chat-screen-primary-shell-and-setup-secondary.md`
   - the TUI restructuring that makes `Chat` the primary Probe home surface and
     demotes the Apple FM prove-out into the secondary `Setup` tab
+- `37-probe-tui-bottom-pane-and-minimal-composer.md`
+  - the first real bottom-pane seam for Probe TUI input: a cursor-bearing
+    composer, modifier-based global shell commands, explicit disabled/busy
+    states, and bottom-pane-owned status rendering instead of a passive footer

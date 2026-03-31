@@ -12,13 +12,13 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::{Frame, Terminal};
 
+use crate::bottom_pane::{BottomPane, BottomPaneState};
 use crate::event::{UiEvent, event_from_key};
 use crate::message::{AppMessage, BackgroundTaskRequest};
 use crate::screens::{
     ActiveTab, ChatScreen, HelpScreen, ScreenAction, ScreenCommand, ScreenId, ScreenState,
     TaskPhase,
 };
-use crate::widgets::FooterBar;
 use crate::worker::BackgroundWorker;
 
 const TICK_RATE: Duration = Duration::from_millis(250);
@@ -28,6 +28,7 @@ pub struct AppShell {
     screens: Vec<ScreenState>,
     last_status: String,
     should_quit: bool,
+    bottom_pane: BottomPane,
     worker: BackgroundWorker,
 }
 
@@ -51,6 +52,7 @@ impl AppShell {
             screens: vec![ScreenState::Chat(ChatScreen::default())],
             last_status: String::from("probe tui launched"),
             should_quit: false,
+            bottom_pane: BottomPane::new(),
             worker: BackgroundWorker::new(),
         };
         if autostart_setup {
@@ -115,6 +117,29 @@ impl AppShell {
                 self.should_quit = true;
             }
             UiEvent::Tick => {}
+            UiEvent::ComposerInsert(_)
+            | UiEvent::ComposerBackspace
+            | UiEvent::ComposerDelete
+            | UiEvent::ComposerMoveLeft
+            | UiEvent::ComposerMoveRight
+            | UiEvent::ComposerMoveHome
+            | UiEvent::ComposerMoveEnd
+            | UiEvent::ComposerNewline
+            | UiEvent::ComposerSubmit
+                if self.active_screen_id() == ScreenId::Chat =>
+            {
+                let pane_state = self.bottom_pane_state();
+                if let Some(submitted) = self.bottom_pane.handle_event(event, &pane_state) {
+                    self.base_screen_mut().record_event(format!(
+                        "captured composer submission: {}",
+                        preview(submitted.as_str(), 48)
+                    ));
+                    self.last_status = format!(
+                        "captured composer submission ({} chars)",
+                        submitted.chars().count()
+                    );
+                }
+            }
             _ => {
                 let outcome = self
                     .screens
@@ -154,10 +179,7 @@ impl AppShell {
         self.poll_background_messages();
     }
 
-    pub fn submit_background_task(
-        &mut self,
-        request: BackgroundTaskRequest,
-    ) -> Result<(), String> {
+    pub fn submit_background_task(&mut self, request: BackgroundTaskRequest) -> Result<(), String> {
         let backend = request.backend();
         self.base_screen_mut().prepare_for_setup(backend);
         self.last_status = format!("queued {}", request.title());
@@ -188,9 +210,13 @@ impl AppShell {
 
     pub fn render(&self, frame: &mut Frame<'_>) {
         let area = frame.area();
-        let sections = Layout::vertical([Constraint::Min(0), Constraint::Length(3)])
-            .spacing(1)
-            .split(area);
+        let pane_state = self.bottom_pane_state();
+        let sections = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(self.bottom_pane.desired_height()),
+        ])
+        .spacing(1)
+        .split(area);
 
         self.screens[0].render(frame, sections[0], self.screens.len());
         for overlay in self.screens.iter().skip(1) {
@@ -199,7 +225,13 @@ impl AppShell {
             }
         }
 
-        FooterBar::new(self.last_status.as_str()).render(frame, sections[1]);
+        self.bottom_pane
+            .render(frame, sections[1], self.last_status.as_str(), &pane_state);
+        if self.active_screen_id() == ScreenId::Chat
+            && let Some(cursor) = self.bottom_pane.cursor_position(sections[1], &pane_state)
+        {
+            frame.set_cursor_position(cursor);
+        }
     }
 
     pub fn render_to_string(&self, width: u16, height: u16) -> String {
@@ -223,6 +255,42 @@ impl AppShell {
             .first_mut()
             .and_then(ScreenState::chat_mut)
             .expect("base screen is always chat")
+    }
+
+    fn bottom_pane_state(&self) -> BottomPaneState {
+        if self.active_screen_id() != ScreenId::Chat {
+            return BottomPaneState::Disabled(String::from(
+                "Composer disabled while help owns focus. Esc or F1 returns to chat.",
+            ));
+        }
+
+        if self.active_tab() != ActiveTab::Chat {
+            return BottomPaneState::Disabled(format!(
+                "Composer only runs on Chat. Tab or Shift+Tab returns from {}.",
+                self.active_tab().title()
+            ));
+        }
+
+        match self.task_phase() {
+            TaskPhase::Queued | TaskPhase::CheckingAvailability | TaskPhase::Running => {
+                BottomPaneState::Busy(String::from(
+                    "Apple FM setup is running in the background. Composer stays live.",
+                ))
+            }
+            TaskPhase::Idle | TaskPhase::Unavailable | TaskPhase::Completed | TaskPhase::Failed => {
+                BottomPaneState::Active
+            }
+        }
+    }
+}
+
+fn preview(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let preview = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
     }
 }
 
@@ -337,6 +405,24 @@ mod tests {
 
         app.dispatch(UiEvent::PreviousView);
         assert_eq!(app.active_tab(), ActiveTab::Chat);
+    }
+
+    #[test]
+    fn composer_submission_records_a_visible_shell_event() {
+        let mut app = AppShell::new_for_tests();
+
+        app.dispatch(UiEvent::ComposerInsert('h'));
+        app.dispatch(UiEvent::ComposerInsert('i'));
+        app.dispatch(UiEvent::ComposerNewline);
+        app.dispatch(UiEvent::ComposerInsert('!'));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.last_status(), "captured composer submission (4 chars)");
+        assert!(
+            app.recent_events()
+                .iter()
+                .any(|entry| entry.contains("captured composer submission: hi"))
+        );
     }
 
     #[test]

@@ -29,7 +29,7 @@ pub enum ActiveTab {
 }
 
 impl ActiveTab {
-    fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Chat => "Chat",
             Self::Setup => "Setup",
@@ -212,14 +212,16 @@ impl Default for ChatScreen {
             TranscriptRole::System,
             "Shell Ready",
             vec![
-                String::from("Probe selected a retained transcript widget as the initial TUI model."),
-                String::from("Press r to start the Apple FM prove-out."),
+                String::from(
+                    "Probe selected a retained transcript widget as the initial TUI model.",
+                ),
+                String::from("Press Ctrl+R to start or rerun the Apple FM prove-out."),
             ],
         ));
         screen.record_event("probe tui ready");
-        screen.record_event("press r to rerun Apple FM setup");
-        screen.record_event("press ? for help");
-        screen.record_event("press tab to switch views");
+        screen.record_event("press Ctrl+R to rerun Apple FM setup");
+        screen.record_event("press F1 for help");
+        screen.record_event("press Tab or Shift+Tab to switch views");
         screen
     }
 }
@@ -380,9 +382,7 @@ impl ChatScreen {
                         String::from("[waiting for Apple FM reply]"),
                     ],
                 ));
-                self.record_worker_event(format!(
-                    "started call {index}/{total_calls}: {title}"
-                ));
+                self.record_worker_event(format!("started call {index}/{total_calls}: {title}"));
                 format!("running Apple FM call {index}/{total_calls}")
             }
             AppMessage::AppleFmCallCompleted {
@@ -406,7 +406,10 @@ impl ChatScreen {
                 ));
                 format!("completed Apple FM call {index}/{total_calls}")
             }
-            AppMessage::AppleFmSetupCompleted { backend, total_calls } => {
+            AppMessage::AppleFmSetupCompleted {
+                backend,
+                total_calls,
+            } => {
                 self.setup.backend = Some(backend);
                 self.setup.phase = TaskPhase::Completed;
                 self.setup.active_call = None;
@@ -441,13 +444,18 @@ impl ChatScreen {
                     TranscriptRole::Status,
                     format!("Setup Failed: {stage}"),
                     vec![
-                        format!("detail: {}", self.setup.failure.as_ref().map(|value| value.detail.clone()).unwrap_or_default()),
+                        format!(
+                            "detail: {}",
+                            self.setup
+                                .failure
+                                .as_ref()
+                                .map(|value| value.detail.clone())
+                                .unwrap_or_default()
+                        ),
                         format!("reason: {reason}"),
                     ],
                 ));
-                self.record_worker_event(format!(
-                    "Apple FM setup failed at {stage} ({reason})"
-                ));
+                self.record_worker_event(format!("Apple FM setup failed at {stage} ({reason})"));
                 format!("Apple FM setup failed at {stage}")
             }
         }
@@ -489,7 +497,17 @@ impl ChatScreen {
                 String::from("opened help modal"),
             ),
             UiEvent::Tick => ScreenOutcome::idle(),
-            UiEvent::Dismiss | UiEvent::Quit => ScreenOutcome::idle(),
+            UiEvent::Dismiss
+            | UiEvent::Quit
+            | UiEvent::ComposerInsert(_)
+            | UiEvent::ComposerBackspace
+            | UiEvent::ComposerDelete
+            | UiEvent::ComposerMoveLeft
+            | UiEvent::ComposerMoveRight
+            | UiEvent::ComposerMoveHome
+            | UiEvent::ComposerMoveEnd
+            | UiEvent::ComposerNewline
+            | UiEvent::ComposerSubmit => ScreenOutcome::idle(),
         }
     }
 
@@ -515,12 +533,15 @@ impl ChatScreen {
         } else {
             "chat shell"
         };
-        InfoPanel::new("Transcript", self.render_primary_body())
-            .render(frame, columns[0]);
+        InfoPanel::new("Transcript", self.render_primary_body()).render(frame, columns[0]);
 
-        let sidebar = Layout::vertical([Constraint::Length(7), Constraint::Length(6), Constraint::Min(0)])
-            .spacing(1)
-            .split(columns[1]);
+        let sidebar = Layout::vertical([
+            Constraint::Length(7),
+            Constraint::Length(6),
+            Constraint::Min(0),
+        ])
+        .spacing(1)
+        .split(columns[1]);
         SidebarPanel::new(
             "Shell Status",
             self.render_status_lines(focus_name, stack_depth),
@@ -541,13 +562,21 @@ impl ChatScreen {
         };
         InfoPanel::new("Setup Detail", self.render_setup_body()).render(frame, columns[0]);
 
-        let sidebar = Layout::vertical([Constraint::Length(7), Constraint::Length(8), Constraint::Min(0)])
-            .spacing(1)
-            .split(columns[1]);
-        SidebarPanel::new("Setup Status", self.render_status_lines(focus_name, stack_depth))
-            .render(frame, sidebar[0]);
+        let sidebar = Layout::vertical([
+            Constraint::Length(7),
+            Constraint::Length(8),
+            Constraint::Min(0),
+        ])
+        .spacing(1)
+        .split(columns[1]);
+        SidebarPanel::new(
+            "Setup Status",
+            self.render_status_lines(focus_name, stack_depth),
+        )
+        .render(frame, sidebar[0]);
         SidebarPanel::new("Backend Facts", self.render_backend_lines()).render(frame, sidebar[1]);
-        SidebarPanel::new("Availability", self.render_availability_lines()).render(frame, sidebar[2]);
+        SidebarPanel::new("Availability", self.render_availability_lines())
+            .render(frame, sidebar[2]);
     }
 
     fn render_events(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
@@ -559,16 +588,17 @@ impl ChatScreen {
             Text::from(vec![
                 Line::from("AppShell owns terminal lifecycle, dispatch, and worker polling."),
                 Line::from("Probe selected a retained transcript widget as the first shell model."),
-                Line::from("Committed entries stay in app state with one explicit active-turn cell."),
+                Line::from(
+                    "Committed entries stay in app state with one explicit active-turn cell.",
+                ),
                 Line::from(format!("Current stack depth: {stack_depth}")),
             ]),
         )
         .render(frame, rows[0]);
 
-        let columns =
-            Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
-                .spacing(1)
-                .split(rows[1]);
+        let columns = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .spacing(1)
+            .split(rows[1]);
         let ui_items = self
             .recent_events
             .iter()
@@ -576,13 +606,12 @@ impl ChatScreen {
             .map(|(index, entry)| ListItem::new(format!("{:>2}. {entry}", index + 1)))
             .collect::<Vec<_>>();
         frame.render_widget(
-            List::new(ui_items)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .padding(Padding::horizontal(1))
-                        .title(padded_title("UI Event Log")),
-                ),
+            List::new(ui_items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .padding(Padding::horizontal(1))
+                    .title(padded_title("UI Event Log")),
+            ),
             columns[0],
         );
 
@@ -593,13 +622,12 @@ impl ChatScreen {
             .map(|(index, entry)| ListItem::new(format!("{:>2}. {entry}", index + 1)))
             .collect::<Vec<_>>();
         frame.render_widget(
-            List::new(worker_items)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .padding(Padding::horizontal(1))
-                        .title(padded_title("Apple FM Timeline")),
-                ),
+            List::new(worker_items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .padding(Padding::horizontal(1))
+                    .title(padded_title("Apple FM Timeline")),
+            ),
             columns[1],
         );
     }
@@ -609,10 +637,18 @@ impl ChatScreen {
             return Text::from(vec![
                 Line::from("Initial transcript model: retained full-screen widget."),
                 Line::from(""),
-                Line::from("Committed transcript entries stay in app state rather than terminal scrollback."),
-                Line::from("A single explicit active-turn cell renders in-flight work at the bottom of the transcript."),
-                Line::from("This keeps Probe compatible with ratatui while the real chat shell is still being built."),
-                Line::from("Issue #35 chooses this model deliberately before `ChatScreen` and the composer land."),
+                Line::from(
+                    "Committed transcript entries stay in app state rather than terminal scrollback.",
+                ),
+                Line::from(
+                    "A single explicit active-turn cell renders in-flight work at the bottom of the transcript.",
+                ),
+                Line::from(
+                    "This keeps Probe compatible with ratatui while the real chat shell is still being built.",
+                ),
+                Line::from(
+                    "Issue #35 chooses this model deliberately before `ChatScreen` and the composer land.",
+                ),
             ]);
         }
         self.transcript.as_text()
@@ -631,7 +667,7 @@ impl ChatScreen {
         vec![
             format!("setup_phase: {phase}"),
             String::from("Tab to Setup for the full Apple FM prove-out surface."),
-            String::from("The chat shell is now the primary home screen."),
+            String::from("Ctrl+R reruns the Apple FM setup flow from the shell."),
         ]
     }
 
@@ -641,7 +677,9 @@ impl ChatScreen {
                 Line::from("Apple FM setup is now a secondary Probe surface."),
                 Line::from(""),
                 Line::from("The primary home screen is the chat shell."),
-                Line::from("This tab remains the honest setup prove-out and backend admission view."),
+                Line::from(
+                    "This tab remains the honest setup prove-out and backend admission view.",
+                ),
             ]);
         }
 
@@ -715,12 +753,14 @@ impl ChatScreen {
                 Line::from("Apple FM setup has been queued."),
                 Line::from(""),
                 Line::from("Probe will check availability before issuing any inference."),
-                Line::from("Use r to rerun the setup flow manually."),
+                Line::from("Use Ctrl+R to rerun the setup flow manually."),
             ]),
             TaskPhase::CheckingAvailability => Text::from(vec![
                 Line::from("Checking whether Apple FM is available on this machine."),
                 Line::from(""),
-                Line::from("No inference requests will be issued until the availability gate passes."),
+                Line::from(
+                    "No inference requests will be issued until the availability gate passes.",
+                ),
             ]),
             TaskPhase::Unavailable => Text::from(vec![
                 Line::from("Apple FM is not ready on this machine right now."),
@@ -735,7 +775,7 @@ impl ChatScreen {
                         }),
                 ),
                 Line::from(""),
-                Line::from("Press r to rerun the setup check after the machine is admitted."),
+                Line::from("Press Ctrl+R to rerun the setup check after the machine is admitted."),
             ]),
             TaskPhase::Completed => Text::from(vec![
                 Line::from("Apple FM setup completed successfully."),
@@ -746,7 +786,7 @@ impl ChatScreen {
             TaskPhase::Idle | TaskPhase::Running | TaskPhase::Failed => Text::from(vec![
                 Line::from("Probe setup surface is ready."),
                 Line::from(""),
-                Line::from("Press r to start or rerun the Apple FM setup flow."),
+                Line::from("Press Ctrl+R to start or rerun the Apple FM setup flow."),
             ]),
         }
     }
@@ -852,7 +892,6 @@ impl ChatScreen {
             ),
         ]
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -877,13 +916,12 @@ impl HelpScreen {
         let content = Paragraph::new(Text::from(vec![
             Line::from("Probe Chat Shell Keys"),
             Line::from(""),
-            Line::from("Tab / Left / Right  switch Chat / Setup / Events"),
-            Line::from("r                   rerun Apple FM setup"),
-            Line::from("t                   toggle operator notes / live detail"),
-            Line::from("? or F1             open or dismiss this modal"),
-            Line::from("Esc                 dismiss this modal"),
-            Line::from("q or Ctrl+C         quit"),
-            Line::from(""),
+            Line::from("Tab / Shift+Tab     switch Chat / Setup / Events"),
+            Line::from("Enter / Ctrl+J      submit / newline"),
+            Line::from("Ctrl+R / Ctrl+T     rerun setup / toggle detail"),
+            Line::from("F1 / Esc            toggle or dismiss help"),
+            Line::from("Ctrl+C              quit"),
+            Line::from("Composer only runs while Chat owns focus."),
             Line::from(format!("Current stack depth: {stack_depth}")),
         ]));
         ModalCard::new("Help", content).render(frame, area);

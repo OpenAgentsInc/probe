@@ -1,7 +1,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::Text;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph, Tabs, Wrap};
 
 use crate::screens::ActiveTab;
@@ -23,33 +23,6 @@ pub(crate) fn padded_title(title: &str) -> String {
 
 fn panel_padding() -> Padding {
     Padding::horizontal(1)
-}
-
-pub struct FooterBar<'a> {
-    status: &'a str,
-}
-
-impl<'a> FooterBar<'a> {
-    pub const fn new(status: &'a str) -> Self {
-        Self { status }
-    }
-
-    pub fn render(self, frame: &mut Frame<'_>, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .padding(panel_padding())
-            .style(shell_border());
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let lines = vec![
-            Line::from("Tab/Arrow switch view | r rerun setup | t toggle detail | ? help | q quit"),
-            Line::styled(
-                self.status,
-                Style::default().fg(Color::Rgb(0xf1, 0xc4, 0x53)),
-            ),
-        ];
-        frame.render_widget(Paragraph::new(lines), inner);
-    }
 }
 
 pub struct TabStrip {

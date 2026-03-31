@@ -11,19 +11,19 @@ expression: snapshot
 │ [system] Shell Ready                              │ │ phase: unavailable     │
 │   Probe selected a retained transcript widget as  │ │ calls_done: 0          │
 │ the initial TUI model.                            │ │ focus: chat shell      │
-│   Press r to start the Apple FM prove-out.        │ │ stack_depth: 1         │
-│                                                   │ │ availability_ready: fa │
-│ [status] Availability Unavailable                 │ └────────────────────────┘
-│   reason: model_not_ready                         │
-│   Probe stopped before issuing any inference      │ ┌─ Bridge ───────────────┐
-│ call.                                             │ │ profile: psionic-apple │
-│                                                   │ │ base_url: http://127.0 │
-│                                                   │ │ model: apple-foundatio │
-│                                                   │ │                        │
-│                                                   │ └────────────────────────┘
-│                                                   │
-└───────────────────────────────────────────────────┘ ┌─ Setup Entry ──────────┐
+│   Press Ctrl+R to start or rerun the Apple FM     │ └────────────────────────┘
+│ prove-out.                                        │
+│                                                   │ ┌─ Bridge ───────────────┐
+│ [status] Availability Unavailable                 │ │ profile: psionic-apple │
+│   reason: model_not_ready                         │ │ base_url: http://127.0 │
+│   Probe stopped before issuing any inference      │ │ model: apple-foundatio │
+│ call.                                             │ └────────────────────────┘
+└───────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ Tab/Arrow switch view | r rerun setup | t toggle detail | ? help | q quit    │
+│ status: Apple FM unavailable | Tab/Shift+Tab | Ctrl+R | F1 | Ctrl+C          │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌─ Composer ───────────────────────────────────────────────────────────────────┐
+│ Type a Probe message. Enter submits. Ctrl+J inserts a newline.               │
 └──────────────────────────────────────────────────────────────────────────────┘

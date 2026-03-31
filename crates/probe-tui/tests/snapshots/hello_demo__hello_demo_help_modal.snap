@@ -6,24 +6,24 @@ expression: snapshot
 
 
 
-
            ┌─ Help ─────────────────────────────────────────────────┐
            │ Probe Chat Shell Keys                                  │
            │                                                        │
-           │ Tab / Left / Right  switch Chat / Setup / Events       │
-           │ r                   rerun Apple FM setup               │
-           │ t                   toggle operator notes / live       │
-           │ detail                                                 │
-           │ ? or F1             open or dismiss this modal         │
-           │ Esc                 dismiss this modal                 │
-           │ q or Ctrl+C         quit                               │
-           │                                                        │
-           │ Current stack depth: 2                                 │
+           │ Tab / Shift+Tab     switch Chat / Setup / Events       │
+           │ Enter / Ctrl+J      submit / newline                   │
+           │ Ctrl+R / Ctrl+T     rerun setup / toggle detail        │
+           │ F1 / Esc            toggle or dismiss help             │
+           │ Ctrl+C              quit                               │
+           │ Composer only runs while Chat owns focus.              │
            └────────────────────────────────────────────────────────┘
 
 
 
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ Tab/Arrow switch view | r rerun setup | t toggle detail | ? help | q quit    │
+│ status: opened help modal | Tab/Shift+Tab | Ctrl+R | F1 | Ctrl+C             │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌─ Composer (disabled) ────────────────────────────────────────────────────────┐
+│ Composer disabled while help owns focus. Esc or F1 returns to chat.          │
 └──────────────────────────────────────────────────────────────────────────────┘
