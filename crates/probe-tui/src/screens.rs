@@ -400,7 +400,9 @@ impl HelloScreen {
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
-        let sections = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
+        let sections = Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
+            .spacing(1)
+            .split(area);
         TabStrip::new(
             "Apple FM Setup",
             "Probe-owned Apple Foundation Models prove-out with availability gating and live plain-text calls.",
@@ -416,6 +418,7 @@ impl HelloScreen {
 
     fn render_overview(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
         let columns = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .spacing(1)
             .split(area);
         let focus_name = if stack_depth > 1 {
             "help modal"
@@ -427,6 +430,7 @@ impl HelloScreen {
 
         let sidebar =
             Layout::vertical([Constraint::Length(7), Constraint::Length(8), Constraint::Min(0)])
+                .spacing(1)
                 .split(columns[1]);
         SidebarPanel::new(
             "Setup Status",
@@ -438,7 +442,9 @@ impl HelloScreen {
     }
 
     fn render_events(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
-        let rows = Layout::vertical([Constraint::Length(7), Constraint::Min(0)]).split(area);
+        let rows = Layout::vertical([Constraint::Length(7), Constraint::Min(0)])
+            .spacing(1)
+            .split(area);
         InfoPanel::new(
             "App Shell Notes",
             Text::from(vec![
@@ -451,7 +457,9 @@ impl HelloScreen {
         .render(frame, rows[0]);
 
         let columns =
-            Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(rows[1]);
+            Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+                .spacing(1)
+                .split(rows[1]);
         let ui_items = self
             .recent_events
             .iter()

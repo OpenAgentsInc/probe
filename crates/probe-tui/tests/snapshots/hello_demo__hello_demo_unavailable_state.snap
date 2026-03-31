@@ -6,24 +6,24 @@ expression: snapshot
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │Probe Apple FM Setup                                                          │
 └──────────────────────────────────────────────────────────────────────────────┘
+
 Probe-owned Apple Foundation Models prove-out with availability gating and live
 ┌ Apple FM Setup ──────────────────────────────────────────────────────────────┐
 └──────────────────────────────────────────────────────────────────────────────┘
-┌ Current Detail ──────────────────────────────┐┌ Setup Status ────────────────┐
-│Apple FM is not ready on this machine right   ││phase: unavailable            │
-│now.                                          ││calls_done: 0                 │
-│                                              ││focus: setup screen           │
-│Foundation model is still preparing           ││stack_depth: 1                │
-│                                              ││availability_ready: false     │
-│Press r to rerun the setup check after the    │└──────────────────────────────┘
-│machine is admitted.                          │┌ Backend Facts ───────────────┐
-│                                              ││profile: psionic-apple-fm-brid│
-│                                              ││base_url: http://127.0.0.1:114│
-│                                              ││model: apple-foundation-model │
-│                                              ││                              │
-│                                              ││                              │
-│                                              ││                              │
-└──────────────────────────────────────────────┘└──────────────────────────────┘
+
+┌ Current Detail ─────────────────────────────┐ ┌ Setup Status ────────────────┐
+│Apple FM is not ready on this machine right  │ │phase: unavailable            │
+│now.                                         │ │calls_done: 0                 │
+│                                             │ │focus: setup screen           │
+│Foundation model is still preparing          │ └──────────────────────────────┘
+│                                             │
+│Press r to rerun the setup check after the   │ ┌ Backend Facts ───────────────┐
+│machine is admitted.                         │ │profile: psionic-apple-fm-brid│
+│                                             │ │base_url: http://127.0.0.1:114│
+│                                             │ │model: apple-foundation-model │
+│                                             │ └──────────────────────────────┘
+└─────────────────────────────────────────────┘
+
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │Tab/Arrow switch view | r rerun setup | t toggle detail | ? help | q quit     │
 └──────────────────────────────────────────────────────────────────────────────┘

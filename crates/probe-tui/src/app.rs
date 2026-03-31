@@ -193,6 +193,7 @@ impl AppShell {
             Constraint::Min(0),
             Constraint::Length(3),
         ])
+        .spacing(1)
         .split(area);
         let focus = match self.active_screen_id() {
             ScreenId::Hello => "setup screen",

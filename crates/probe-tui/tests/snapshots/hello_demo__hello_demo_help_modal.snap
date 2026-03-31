@@ -9,6 +9,7 @@ expression: snapshot
 
 
 
+
            ┌ Help ──────────────────────────────────────────────────┐
            │Probe Apple FM Setup Keys                               │
            │                                                        │
@@ -18,9 +19,8 @@ expression: snapshot
            │? or F1             open or dismiss this modal          │
            │Esc                 dismiss this modal                  │
            │q or Ctrl+C         quit                                │
-           │                                                        │
-           │Current stack depth: 2                                  │
            └────────────────────────────────────────────────────────┘
+
 
 
 

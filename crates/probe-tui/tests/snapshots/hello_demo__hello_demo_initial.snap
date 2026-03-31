@@ -6,24 +6,24 @@ expression: snapshot
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │Probe Apple FM Setup                                                          │
 └──────────────────────────────────────────────────────────────────────────────┘
+
 Probe-owned Apple Foundation Models prove-out with availability gating and live
 ┌ Apple FM Setup ──────────────────────────────────────────────────────────────┐
 └──────────────────────────────────────────────────────────────────────────────┘
-┌ Current Detail ──────────────────────────────┐┌ Setup Status ────────────────┐
-│Probe TUI is ready.                           ││phase: idle                   │
-│                                              ││calls_done: 0                 │
-│Press r to start or rerun the Apple FM setup  ││focus: setup screen           │
-│flow.                                         ││stack_depth: 1                │
-│                                              ││availability_ready: idle      │
-│                                              │└──────────────────────────────┘
-│                                              │┌ Backend Facts ───────────────┐
-│                                              ││profile: pending              │
-│                                              ││base_url: pending             │
-│                                              ││model: pending                │
-│                                              ││                              │
-│                                              ││                              │
-│                                              ││                              │
-└──────────────────────────────────────────────┘└──────────────────────────────┘
+
+┌ Current Detail ─────────────────────────────┐ ┌ Setup Status ────────────────┐
+│Probe TUI is ready.                          │ │phase: idle                   │
+│                                             │ │calls_done: 0                 │
+│Press r to start or rerun the Apple FM setup │ │focus: setup screen           │
+│flow.                                        │ └──────────────────────────────┘
+│                                             │
+│                                             │ ┌ Backend Facts ───────────────┐
+│                                             │ │profile: pending              │
+│                                             │ │base_url: pending             │
+│                                             │ │model: pending                │
+│                                             │ └──────────────────────────────┘
+└─────────────────────────────────────────────┘
+
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │Tab/Arrow switch view | r rerun setup | t toggle detail | ? help | q quit     │
 └──────────────────────────────────────────────────────────────────────────────┘

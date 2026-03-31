@@ -122,9 +122,9 @@ fn running_state_keeps_completed_reply_visible_while_next_call_waits() {
         prompt: String::from("In one sentence, summarize what Probe owns."),
     });
 
-    let rendered = app.render_to_string(80, 24);
+    let rendered = app.render_to_string(120, 24);
     assert!(rendered.contains("READY"));
-    assert!(rendered.contains("[waiting for Apple FM reply]"));
+    assert!(rendered.contains("Running call 2/3: Runtime Boundary"));
     assert!(rendered.contains("Completed calls: 1"));
 }
 

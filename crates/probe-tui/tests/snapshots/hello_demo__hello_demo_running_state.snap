@@ -6,24 +6,24 @@ expression: snapshot
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │Probe Apple FM Setup                                                          │
 └──────────────────────────────────────────────────────────────────────────────┘
+
 Probe-owned Apple Foundation Models prove-out with availability gating and live
 ┌ Apple FM Setup ──────────────────────────────────────────────────────────────┐
 └──────────────────────────────────────────────────────────────────────────────┘
-┌ Current Detail ──────────────────────────────┐┌ Setup Status ────────────────┐
-│Running call 1/3: Sanity Check                ││phase: running                │
-│                                              ││call: 1/3                     │
-│Prompt                                        ││focus: setup screen           │
-│Reply with exactly READY.                     ││stack_depth: 1                │
-│                                              ││availability_ready: true      │
-│Response                                      │└──────────────────────────────┘
-│[waiting for Apple FM reply]                  │┌ Backend Facts ───────────────┐
-│                                              ││profile: psionic-apple-fm-brid│
-│                                              ││base_url: http://127.0.0.1:114│
-│                                              ││model: apple-foundation-model │
-│                                              ││                              │
-│                                              ││                              │
-│                                              ││                              │
-└──────────────────────────────────────────────┘└──────────────────────────────┘
+
+┌ Current Detail ─────────────────────────────┐ ┌ Setup Status ────────────────┐
+│Running call 1/3: Sanity Check               │ │phase: running                │
+│                                             │ │call: 1/3                     │
+│Prompt                                       │ │focus: setup screen           │
+│Reply with exactly READY.                    │ └──────────────────────────────┘
+│                                             │
+│Response                                     │ ┌ Backend Facts ───────────────┐
+│[waiting for Apple FM reply]                 │ │profile: psionic-apple-fm-brid│
+│                                             │ │base_url: http://127.0.0.1:114│
+│                                             │ │model: apple-foundation-model │
+│                                             │ └──────────────────────────────┘
+└─────────────────────────────────────────────┘
+
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │Tab/Arrow switch view | r rerun setup | t toggle detail | ? help | q quit     │
 └──────────────────────────────────────────────────────────────────────────────┘
