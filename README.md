@@ -1,3 +1,5 @@
+![Protoss Probe](assets/images/protossprobe.jpg)
+
 # Probe
 
 Probe is a coding agent runtime for software work.
