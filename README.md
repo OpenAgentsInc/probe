@@ -31,6 +31,13 @@ first real built-in coding tools:
 
 The retained `weather` tool set remains available as a tiny regression fixture.
 
+Probe also now has a Probe-owned harness profile for that coding lane:
+
+- `coding_bootstrap_default@v1`
+
+This keeps the default controller prompt explicit and versioned instead of
+relying only on raw `--system` strings.
+
 Probe can either attach to an already-running local backend or launch
 `psionic-openai-server` as a supervised child process. It also records basic
 controller-side observability on model-generated turns, including wallclock,
@@ -70,6 +77,7 @@ Tool-enabled execution:
 ```bash
 cargo run -p probe-cli -- exec \
   --tool-set coding_bootstrap \
+  --harness-profile coding_bootstrap_default \
   --tool-choice auto \
   "Read README.md and summarize what this repository does."
 ```
@@ -112,4 +120,5 @@ cargo run -p probe-cli -- exec \
 By default, Probe uses the `psionic-qwen35-2b-q8-registry` profile and
 `attach` server mode. Session transcripts, server config, and acceptance
 reports live under the Probe home directory. `probe exec` and `probe chat`
-emit observability lines on stderr for model-generated turns.
+emit observability lines on stderr for model-generated turns and print the
+active harness profile when one is selected.

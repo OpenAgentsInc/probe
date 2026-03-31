@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use probe_protocol::session::{
-    ItemId, SessionBackendTarget, SessionId, SessionIndex, SessionMetadata, SessionState,
-    SessionTurn, TimestampMs, TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnId,
-    TurnObservability,
+    ItemId, SessionBackendTarget, SessionHarnessProfile, SessionId, SessionIndex, SessionMetadata,
+    SessionState, SessionTurn, TimestampMs, TranscriptEvent, TranscriptItem, TranscriptItemKind,
+    TurnId, TurnObservability,
 };
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -107,6 +107,7 @@ pub struct NewSession {
     pub title: String,
     pub cwd: PathBuf,
     pub system_prompt: Option<String>,
+    pub harness_profile: Option<SessionHarnessProfile>,
     pub backend: Option<SessionBackendTarget>,
 }
 
@@ -117,6 +118,7 @@ impl NewSession {
             title: title.into(),
             cwd: cwd.into(),
             system_prompt: None,
+            harness_profile: None,
             backend: None,
         }
     }
@@ -124,6 +126,12 @@ impl NewSession {
     #[must_use]
     pub fn with_system_prompt(mut self, system_prompt: Option<String>) -> Self {
         self.system_prompt = system_prompt;
+        self
+    }
+
+    #[must_use]
+    pub fn with_harness_profile(mut self, harness_profile: Option<SessionHarnessProfile>) -> Self {
+        self.harness_profile = harness_profile;
         self
     }
 
@@ -181,6 +189,7 @@ impl FilesystemSessionStore {
             title: session.title,
             cwd: session.cwd,
             system_prompt: session.system_prompt,
+            harness_profile: session.harness_profile,
             created_at_ms,
             updated_at_ms: created_at_ms,
             state: SessionState::Active,
@@ -349,7 +358,8 @@ fn now_ms() -> TimestampMs {
 mod tests {
     use super::{FilesystemSessionStore, NewItem, NewSession};
     use probe_protocol::session::{
-        CacheSignal, SessionBackendTarget, TranscriptItemKind, TurnObservability,
+        CacheSignal, SessionBackendTarget, SessionHarnessProfile, TranscriptItemKind,
+        TurnObservability,
     };
 
     #[test]
@@ -377,6 +387,32 @@ mod tests {
                 .expect("backend should be recorded")
                 .profile_name,
             "psionic-qwen35-2b-q8-registry"
+        );
+    }
+
+    #[test]
+    fn create_session_persists_harness_profile() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = FilesystemSessionStore::new(temp.path());
+
+        let metadata = store
+            .create_session_with(
+                NewSession::new("harness", temp.path()).with_harness_profile(Some(
+                    SessionHarnessProfile {
+                        name: String::from("coding_bootstrap_default"),
+                        version: String::from("v1"),
+                    },
+                )),
+            )
+            .expect("create session");
+
+        assert_eq!(
+            metadata
+                .harness_profile
+                .as_ref()
+                .expect("harness profile should persist")
+                .name,
+            "coding_bootstrap_default"
         );
     }
 

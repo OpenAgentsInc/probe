@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use probe_protocol::backend::BackendProfile;
 use probe_protocol::session::{
-    CacheSignal, SessionBackendTarget, SessionId, SessionMetadata, SessionTurn, TranscriptItemKind,
-    TurnObservability,
+    CacheSignal, SessionBackendTarget, SessionHarnessProfile, SessionId, SessionMetadata,
+    SessionTurn, TranscriptItemKind, TurnObservability,
 };
 use probe_provider_openai::{
     ChatCompletionRequest, ChatCompletionUsage, ChatMessage, ChatToolCall, OpenAiProviderClient,
@@ -27,6 +27,7 @@ pub struct PlainTextExecRequest {
     pub title: Option<String>,
     pub cwd: PathBuf,
     pub system_prompt: Option<String>,
+    pub harness_profile: Option<SessionHarnessProfile>,
     pub tool_loop: Option<ToolLoopConfig>,
 }
 
@@ -151,6 +152,7 @@ impl ProbeRuntime {
                 request.cwd,
             )
             .with_system_prompt(request.system_prompt.clone())
+            .with_harness_profile(request.harness_profile.clone())
             .with_backend(SessionBackendTarget {
                 profile_name: request.profile.name.clone(),
                 base_url: request.profile.base_url.clone(),
@@ -578,7 +580,7 @@ mod tests {
 
     use crate::backend_profiles::psionic_qwen35_2b_q8_registry;
     use crate::tools::{ProbeToolChoice, ToolLoopConfig};
-    use probe_protocol::session::{CacheSignal, TranscriptItemKind};
+    use probe_protocol::session::{CacheSignal, SessionHarnessProfile, TranscriptItemKind};
 
     use super::{
         PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, default_session_title,
@@ -637,6 +639,10 @@ mod tests {
                 title: Some(String::from("Exec Test")),
                 cwd: temp.path().to_path_buf(),
                 system_prompt: None,
+                harness_profile: Some(SessionHarnessProfile {
+                    name: String::from("coding_bootstrap_default"),
+                    version: String::from("v1"),
+                }),
                 tool_loop: None,
             })
             .expect("exec should succeed");
@@ -674,6 +680,15 @@ mod tests {
                 .expect("backend metadata should exist")
                 .profile_name,
             "psionic-qwen35-2b-q8-registry"
+        );
+        assert_eq!(
+            outcome
+                .session
+                .harness_profile
+                .as_ref()
+                .expect("harness profile should persist")
+                .name,
+            "coding_bootstrap_default"
         );
 
         let transcript = runtime
@@ -754,6 +769,7 @@ mod tests {
                 title: Some(String::from("Interactive Test")),
                 cwd: temp.path().to_path_buf(),
                 system_prompt: Some(String::from("You are helpful")),
+                harness_profile: None,
                 tool_loop: None,
             })
             .expect("first turn should succeed");
@@ -895,6 +911,7 @@ mod tests {
                 title: Some(String::from("Tool Test")),
                 cwd: temp.path().to_path_buf(),
                 system_prompt: None,
+                harness_profile: None,
                 tool_loop: Some(ToolLoopConfig::weather_demo(
                     ProbeToolChoice::Required,
                     false,
@@ -1015,6 +1032,7 @@ mod tests {
                 title: Some(String::from("Parallel Tool Test")),
                 cwd: temp.path().to_path_buf(),
                 system_prompt: None,
+                harness_profile: None,
                 tool_loop: Some(ToolLoopConfig::weather_demo(
                     ProbeToolChoice::Required,
                     true,

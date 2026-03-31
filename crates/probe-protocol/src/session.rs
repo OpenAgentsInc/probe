@@ -109,11 +109,19 @@ pub struct SessionBackendTarget {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHarnessProfile {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMetadata {
     pub id: SessionId,
     pub title: String,
     pub cwd: PathBuf,
     pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_profile: Option<SessionHarnessProfile>,
     pub created_at_ms: TimestampMs,
     pub updated_at_ms: TimestampMs,
     pub state: SessionState,

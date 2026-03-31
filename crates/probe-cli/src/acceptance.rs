@@ -88,6 +88,7 @@ fn run_case_plain_answer(
         title: Some(String::from("acceptance-plain")),
         cwd: PathBuf::from("."),
         system_prompt: None,
+        harness_profile: None,
         tool_loop: None,
     });
 
@@ -116,6 +117,7 @@ fn run_case_required_single_tool(
         title: Some(String::from("acceptance-required-tool")),
         cwd: PathBuf::from("."),
         system_prompt: None,
+        harness_profile: None,
         tool_loop: Some(ToolLoopConfig::weather_demo(
             ProbeToolChoice::Required,
             false,
@@ -149,6 +151,7 @@ fn run_case_multi_turn_tool_continuation(
         title: Some(String::from("acceptance-multi-turn")),
         cwd: PathBuf::from("."),
         system_prompt: None,
+        harness_profile: None,
         tool_loop: Some(ToolLoopConfig::weather_demo(
             ProbeToolChoice::Required,
             false,
@@ -199,6 +202,7 @@ fn run_case_parallel_tool_batch(
         title: Some(String::from("acceptance-parallel-tools")),
         cwd: PathBuf::from("."),
         system_prompt: None,
+        harness_profile: None,
         tool_loop: Some(ToolLoopConfig::weather_demo(
             ProbeToolChoice::Required,
             true,

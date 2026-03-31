@@ -37,3 +37,7 @@ This folder holds technical planning docs for the Probe runtime.
 - `12-observability-and-cache-signals.md`
   - per-turn wallclock, token usage, throughput, and cache-signal behavior for
     the first local controller lane
+- `13-harness-profiles.md`
+  - Probe-owned versioned harness profiles for the coding tool lane, including
+    the first `coding_bootstrap_default@v1` profile and its relationship to
+    `--system`

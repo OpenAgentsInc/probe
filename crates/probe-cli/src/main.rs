@@ -9,6 +9,7 @@ use std::time::Duration;
 use acceptance::{AcceptanceHarnessConfig, default_report_path, run_acceptance_harness};
 use clap::{Parser, Subcommand};
 use probe_core::backend_profiles::{PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE, named_backend_profile};
+use probe_core::harness::{render_harness_profile, resolve_harness_profile};
 use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, current_working_dir,
     default_probe_home,
@@ -17,7 +18,7 @@ use probe_core::server_control::{
     PsionicServerConfig, PsionicServerMode, ServerConfigOverrides, ServerProcessGuard,
 };
 use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
-use probe_protocol::session::{CacheSignal, SessionId, SessionTurn};
+use probe_protocol::session::{CacheSignal, SessionHarnessProfile, SessionId, SessionTurn};
 
 #[derive(Parser, Debug)]
 #[command(name = "probe")]
@@ -46,6 +47,8 @@ struct ExecArgs {
     #[arg(long)]
     system: Option<String>,
     #[arg(long)]
+    harness_profile: Option<String>,
+    #[arg(long)]
     probe_home: Option<PathBuf>,
     #[arg(long)]
     tool_set: Option<String>,
@@ -71,6 +74,8 @@ struct ChatArgs {
     title: Option<String>,
     #[arg(long)]
     system: Option<String>,
+    #[arg(long)]
+    harness_profile: Option<String>,
     #[arg(long)]
     probe_home: Option<PathBuf>,
     #[arg(long)]
@@ -149,20 +154,28 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
     if let Some(model_id) = server_guard.model_id() {
         profile.model = model_id;
     }
+    let cwd = args
+        .cwd
+        .unwrap_or(current_working_dir().map_err(|error| error.to_string())?);
     let tool_loop = resolve_tool_loop(
         args.tool_set.as_deref(),
         args.tool_choice.as_str(),
         args.parallel_tool_calls,
+    )?;
+    let (system_prompt, harness_profile) = resolve_prompt_config(
+        args.tool_set.as_deref(),
+        args.harness_profile.as_deref(),
+        args.system.as_deref(),
+        cwd.as_path(),
     )?;
     let outcome = runtime
         .exec_plain_text(PlainTextExecRequest {
             profile,
             prompt: args.prompt.join(" "),
             title: args.title,
-            cwd: args
-                .cwd
-                .unwrap_or(current_working_dir().map_err(|error| error.to_string())?),
-            system_prompt: args.system,
+            cwd,
+            system_prompt,
+            harness_profile,
             tool_loop,
         })
         .map_err(|error| error.to_string())?;
@@ -180,6 +193,12 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
         outcome.response_model,
         outcome.session.transcript_path.display()
     );
+    if let Some(harness_profile) = outcome.session.harness_profile.as_ref() {
+        eprintln!(
+            "harness_profile={}",
+            render_harness_profile(harness_profile)
+        );
+    }
     print_turn_observability(&outcome.turn);
     if outcome.turn.observability.is_none()
         && let Some(usage) = outcome.usage
@@ -196,9 +215,11 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
 }
 
 fn run_chat(args: ChatArgs) -> Result<(), String> {
-    if args.resume.is_some() && (args.title.is_some() || args.system.is_some()) {
+    if args.resume.is_some()
+        && (args.title.is_some() || args.system.is_some() || args.harness_profile.is_some())
+    {
         return Err(String::from(
-            "resume does not accept --title or --system overrides; use the stored session settings",
+            "resume does not accept --title, --system, or --harness-profile overrides; use the stored session settings",
         ));
     }
 
@@ -215,6 +236,16 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
     let cwd = args
         .cwd
         .unwrap_or(current_working_dir().map_err(|error| error.to_string())?);
+    let (system_prompt, harness_profile) = if args.resume.is_some() {
+        (None, None)
+    } else {
+        resolve_prompt_config(
+            args.tool_set.as_deref(),
+            args.harness_profile.as_deref(),
+            args.system.as_deref(),
+            cwd.as_path(),
+        )?
+    };
     let mut session_id = args.resume.map(SessionId::new);
     let mut profile_name = match (&session_id, args.profile) {
         (_, Some(profile)) => profile,
@@ -239,8 +270,20 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
             metadata.title,
             metadata.next_turn_index
         );
+        if let Some(harness_profile) = metadata.harness_profile.as_ref() {
+            eprintln!(
+                "harness_profile={}",
+                render_harness_profile(harness_profile)
+            );
+        }
     } else {
         eprintln!("starting new session on profile={}", profile_name);
+        if let Some(harness_profile) = harness_profile.as_ref() {
+            eprintln!(
+                "harness_profile={}",
+                render_harness_profile(harness_profile)
+            );
+        }
     }
 
     loop {
@@ -290,7 +333,8 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
                     prompt: String::from(prompt),
                     title: args.title.clone(),
                     cwd: cwd.clone(),
-                    system_prompt: args.system.clone(),
+                    system_prompt: system_prompt.clone(),
+                    harness_profile: harness_profile.clone(),
                     tool_loop: tool_loop.clone(),
                 })
                 .map_err(|error| error.to_string())?
@@ -314,6 +358,18 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn resolve_prompt_config(
+    tool_set: Option<&str>,
+    harness_profile: Option<&str>,
+    operator_system: Option<&str>,
+    cwd: &Path,
+) -> Result<(Option<String>, Option<SessionHarnessProfile>), String> {
+    match resolve_harness_profile(tool_set, harness_profile, cwd, operator_system)? {
+        Some(resolved) => Ok((Some(resolved.system_prompt), Some(resolved.profile))),
+        None => Ok((operator_system.map(String::from), None)),
+    }
 }
 
 fn run_accept(args: AcceptArgs) -> Result<(), String> {
