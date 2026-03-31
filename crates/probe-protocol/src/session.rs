@@ -167,6 +167,13 @@ pub enum ToolApprovalState {
     Pending,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolApprovalResolution {
+    Approved,
+    Rejected,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolExecutionRecord {
     pub risk_class: ToolRiskClass,
@@ -186,6 +193,31 @@ pub struct ToolExecutionRecord {
     pub files_touched: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingToolApproval {
+    pub session_id: SessionId,
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub arguments: Value,
+    pub risk_class: ToolRiskClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub tool_call_turn_index: u64,
+    pub paused_result_turn_index: u64,
+    pub requested_at_ms: TimestampMs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at_ms: Option<TimestampMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<ToolApprovalResolution>,
+}
+
+impl PendingToolApproval {
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.resolution.is_none()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

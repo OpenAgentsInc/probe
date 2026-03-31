@@ -1,5 +1,6 @@
 use insta::assert_snapshot;
 use probe_core::runtime::RuntimeEvent;
+use probe_protocol::session::{PendingToolApproval, ToolRiskClass};
 use probe_tui::{
     AppMessage, AppShell, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
     AppleFmUsageSummary, TranscriptEntry, TranscriptRole, UiEvent,
@@ -32,7 +33,34 @@ fn setup_overlay_snapshot_is_stable() {
 #[test]
 fn approval_overlay_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
-    app.dispatch(UiEvent::OpenApprovalOverlay);
+    app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+        session_id: String::from("sess_demo_pending"),
+        profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+        model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+        cwd: String::from("/tmp/probe-workspace"),
+    });
+    app.apply_message(AppMessage::PendingToolApprovalsUpdated {
+        session_id: String::from("sess_demo_pending"),
+        approvals: vec![PendingToolApproval {
+            session_id: probe_protocol::session::SessionId::new("sess_demo_pending"),
+            tool_call_id: String::from("call_patch_1"),
+            tool_name: String::from("apply_patch"),
+            arguments: json!({
+                "path": "hello.txt",
+                "old_text": "world",
+                "new_text": "probe"
+            }),
+            risk_class: ToolRiskClass::Write,
+            reason: Some(String::from(
+                "tool `apply_patch` requires write approval under the active local policy",
+            )),
+            tool_call_turn_index: 1,
+            paused_result_turn_index: 2,
+            requested_at_ms: 1,
+            resolved_at_ms: None,
+            resolution: None,
+        }],
+    });
     let snapshot = app.render_to_string(80, 24);
     assert_snapshot!("hello_demo_approval_overlay", snapshot);
 }

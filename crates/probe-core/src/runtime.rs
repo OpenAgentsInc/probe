@@ -3,12 +3,13 @@ use std::env;
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_protocol::session::{
-    BackendTurnReceipt, CacheSignal, SessionBackendTarget, SessionHarnessProfile, SessionId,
-    SessionMetadata, SessionTurn, ToolRiskClass, TranscriptItemKind, TurnObservability,
+    BackendTurnReceipt, CacheSignal, PendingToolApproval, SessionBackendTarget,
+    SessionHarnessProfile, SessionId, SessionMetadata, SessionTurn, ToolApprovalResolution,
+    ToolRiskClass, TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnObservability,
 };
 use probe_provider_openai::{ChatMessage, ChatToolCall};
 use psionic_apple_fm::{
@@ -74,6 +75,15 @@ pub struct PlainTextResumeRequest {
 }
 
 #[derive(Clone, Debug)]
+pub struct ResolvePendingToolApprovalRequest {
+    pub session_id: SessionId,
+    pub profile: BackendProfile,
+    pub tool_loop: ToolLoopConfig,
+    pub call_id: String,
+    pub resolution: ToolApprovalResolution,
+}
+
+#[derive(Clone, Debug)]
 pub struct PlainTextExecOutcome {
     pub session: SessionMetadata,
     pub turn: SessionTurn,
@@ -83,6 +93,17 @@ pub struct PlainTextExecOutcome {
     pub usage: Option<ProviderUsage>,
     pub executed_tool_calls: usize,
     pub tool_results: Vec<ExecutedToolCall>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ResolvePendingToolApprovalOutcome {
+    StillPending {
+        session: SessionMetadata,
+        pending_approvals: Vec<PendingToolApproval>,
+    },
+    Resumed {
+        outcome: PlainTextExecOutcome,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -172,6 +193,15 @@ pub enum RuntimeError {
         call_id: String,
         reason: Option<String>,
     },
+    PendingToolApprovalNotFound {
+        session_id: SessionId,
+        call_id: String,
+    },
+    PendingToolApprovalAlreadyResolved {
+        session_id: SessionId,
+        call_id: String,
+        resolution: ToolApprovalResolution,
+    },
     MaxToolRoundTrips {
         session_id: SessionId,
         max_round_trips: usize,
@@ -226,6 +256,24 @@ impl Display for RuntimeError {
                     .map(|value| format!(": {value}"))
                     .unwrap_or_default()
             ),
+            Self::PendingToolApprovalNotFound {
+                session_id,
+                call_id,
+            } => write!(
+                f,
+                "session {} has no pending approval for call `{call_id}`",
+                session_id.as_str()
+            ),
+            Self::PendingToolApprovalAlreadyResolved {
+                session_id,
+                call_id,
+                resolution,
+            } => write!(
+                f,
+                "session {} already resolved approval for call `{call_id}` as {}",
+                session_id.as_str(),
+                render_tool_approval_resolution(*resolution)
+            ),
             Self::MaxToolRoundTrips {
                 session_id,
                 max_round_trips,
@@ -253,6 +301,8 @@ impl RuntimeError {
             | Self::MissingAssistantMessage { .. }
             | Self::UnsupportedBackendFeature { .. }
             | Self::ToolApprovalPending { .. }
+            | Self::PendingToolApprovalNotFound { .. }
+            | Self::PendingToolApprovalAlreadyResolved { .. }
             | Self::MaxToolRoundTrips { .. }
             | Self::MalformedTranscript(_) => None,
         }
@@ -285,6 +335,15 @@ impl ProbeRuntime {
     #[must_use]
     pub fn session_store(&self) -> &FilesystemSessionStore {
         &self.session_store
+    }
+
+    pub fn pending_tool_approvals(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<PendingToolApproval>, RuntimeError> {
+        self.session_store
+            .read_pending_tool_approvals(session_id)
+            .map_err(RuntimeError::from)
     }
 
     pub fn exec_plain_text(
@@ -348,12 +407,28 @@ impl ProbeRuntime {
         self.continue_plain_text_session_internal(request, Some(event_sink))
     }
 
+    pub fn resolve_pending_tool_approval(
+        &self,
+        request: ResolvePendingToolApprovalRequest,
+    ) -> Result<ResolvePendingToolApprovalOutcome, RuntimeError> {
+        self.resolve_pending_tool_approval_internal(request, None)
+    }
+
+    pub fn resolve_pending_tool_approval_with_events(
+        &self,
+        request: ResolvePendingToolApprovalRequest,
+        event_sink: Arc<dyn RuntimeEventSink>,
+    ) -> Result<ResolvePendingToolApprovalOutcome, RuntimeError> {
+        self.resolve_pending_tool_approval_internal(request, Some(event_sink))
+    }
+
     fn continue_plain_text_session_internal(
         &self,
         request: PlainTextResumeRequest,
         event_sink: Option<Arc<dyn RuntimeEventSink>>,
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
         let session = self.session_store.read_metadata(&request.session_id)?;
+        self.ensure_no_pending_approvals(&session.id)?;
         self.run_plain_text_turn(
             session,
             request.profile,
@@ -361,6 +436,71 @@ impl ProbeRuntime {
             request.tool_loop,
             event_sink,
         )
+    }
+
+    fn resolve_pending_tool_approval_internal(
+        &self,
+        request: ResolvePendingToolApprovalRequest,
+        event_sink: Option<Arc<dyn RuntimeEventSink>>,
+    ) -> Result<ResolvePendingToolApprovalOutcome, RuntimeError> {
+        let session = self.session_store.read_metadata(&request.session_id)?;
+        let pending_approvals = self.pending_tool_approvals(&session.id)?;
+        let pending = pending_approvals
+            .iter()
+            .find(|approval| approval.tool_call_id == request.call_id)
+            .cloned()
+            .ok_or_else(|| {
+                let resolved = self
+                    .session_store
+                    .read_tool_approvals(&session.id)
+                    .ok()
+                    .and_then(|approvals| {
+                        approvals
+                            .into_iter()
+                            .find(|approval| approval.tool_call_id == request.call_id)
+                    });
+                match resolved.and_then(|approval| approval.resolution) {
+                    Some(resolution) => RuntimeError::PendingToolApprovalAlreadyResolved {
+                        session_id: session.id.clone(),
+                        call_id: request.call_id.clone(),
+                        resolution,
+                    },
+                    None => RuntimeError::PendingToolApprovalNotFound {
+                        session_id: session.id.clone(),
+                        call_id: request.call_id.clone(),
+                    },
+                }
+            })?;
+        let resolved_tool = self.execute_pending_tool_resolution(
+            &session,
+            &request.tool_loop,
+            &pending,
+            request.resolution,
+            event_sink.as_ref(),
+        )?;
+        let _ = self.append_tool_result_turn(&session.id, &[resolved_tool])?;
+        let _ = self.session_store.resolve_pending_tool_approval(
+            &session.id,
+            request.call_id.as_str(),
+            request.resolution,
+        )?;
+
+        let remaining = self.pending_tool_approvals(&session.id)?;
+        if !remaining.is_empty() {
+            let session = self.session_store.read_metadata(&session.id)?;
+            return Ok(ResolvePendingToolApprovalOutcome::StillPending {
+                session,
+                pending_approvals: remaining,
+            });
+        }
+
+        let outcome = self.resume_tool_loop_after_approval(
+            session,
+            request.profile,
+            request.tool_loop,
+            event_sink,
+        )?;
+        Ok(ResolvePendingToolApprovalOutcome::Resumed { outcome })
     }
 }
 
@@ -403,6 +543,13 @@ fn emit_tool_result_event(
     emit_runtime_event(event_sink, event);
 }
 
+fn render_tool_approval_resolution(value: ToolApprovalResolution) -> &'static str {
+    match value {
+        ToolApprovalResolution::Approved => "approved",
+        ToolApprovalResolution::Rejected => "rejected",
+    }
+}
+
 pub fn default_probe_home() -> Result<PathBuf, RuntimeError> {
     if let Ok(path) = env::var("PROBE_HOME") {
         return Ok(PathBuf::from(path));
@@ -432,6 +579,36 @@ fn default_session_title(prompt: &str) -> String {
     }
 }
 
+fn latest_tool_result_positions(
+    transcript: &[TranscriptEvent],
+) -> BTreeMap<String, (u64, u32)> {
+    let mut positions = BTreeMap::new();
+    for event in transcript {
+        for item in &event.turn.items {
+            if item.kind != TranscriptItemKind::ToolResult {
+                continue;
+            }
+            if let Some(call_id) = item.tool_call_id.as_ref() {
+                positions.insert(call_id.clone(), (event.turn.index, item.sequence));
+            }
+        }
+    }
+    positions
+}
+
+fn should_replay_tool_result(
+    turn_index: u64,
+    item: &TranscriptItem,
+    latest_positions: &BTreeMap<String, (u64, u32)>,
+) -> bool {
+    let Some(call_id) = item.tool_call_id.as_ref() else {
+        return true;
+    };
+    latest_positions
+        .get(call_id)
+        .is_none_or(|position| *position == (turn_index, item.sequence))
+}
+
 impl ProbeRuntime {
     fn run_plain_text_turn(
         &self,
@@ -458,14 +635,14 @@ impl ProbeRuntime {
             BackendKind::OpenAiChatCompletions => self.run_openai_tool_loop_turn(
                 session,
                 profile,
-                prompt,
+                Some(prompt),
                 tool_loop.expect("filtered"),
                 event_sink,
             ),
             BackendKind::AppleFmBridge => self.run_apple_fm_tool_loop_turn(
                 session,
                 profile,
-                prompt,
+                Some(prompt),
                 tool_loop.expect("filtered"),
                 event_sink,
             ),
@@ -476,12 +653,12 @@ impl ProbeRuntime {
         &self,
         session: SessionMetadata,
         profile: BackendProfile,
-        prompt: String,
+        prompt: Option<String>,
         tool_loop: ToolLoopConfig,
         event_sink: Option<Arc<dyn RuntimeEventSink>>,
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
         let mut messages = self.replay_messages(&session)?;
-        let mut pending_user_prompt = Some(prompt);
+        let mut pending_user_prompt = prompt;
         let mut executed_tool_calls = 0_usize;
         let mut tool_results = Vec::new();
         let max_round_trips = tool_loop.max_model_round_trips;
@@ -550,7 +727,7 @@ impl ProbeRuntime {
                         },
                     );
                 }
-                let _ = self.append_tool_call_turn(
+                let tool_call_turn = self.append_tool_call_turn(
                     &session.id,
                     pending_user_prompt.take(),
                     &tool_calls,
@@ -592,7 +769,13 @@ impl ProbeRuntime {
                 }
                 executed_tool_calls += executed.iter().filter(|tool| tool.was_executed()).count();
                 tool_results.extend(executed.clone());
-                let _ = self.append_tool_result_turn(&session.id, &executed)?;
+                let tool_result_turn = self.append_tool_result_turn(&session.id, &executed)?;
+                self.persist_pending_tool_approvals(
+                    &session.id,
+                    tool_call_turn.index,
+                    tool_result_turn.index,
+                    executed.as_slice(),
+                )?;
                 if let Some(paused) = executed.iter().find(|tool| tool.was_paused()) {
                     return Err(RuntimeError::ToolApprovalPending {
                         session_id: session.id.clone(),
@@ -670,13 +853,14 @@ impl ProbeRuntime {
         &self,
         session: SessionMetadata,
         profile: BackendProfile,
-        prompt: String,
+        prompt: Option<String>,
         tool_loop: ToolLoopConfig,
         event_sink: Option<Arc<dyn RuntimeEventSink>>,
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
+        let prompt_text = prompt.clone().unwrap_or_default();
         let transcript = self.replay_apple_fm_transcript(&session)?;
         let execution_context =
-            self.build_tool_execution_context(&session, &tool_loop, Some(prompt.as_str()))?;
+            self.build_tool_execution_context(&session, &tool_loop, prompt.as_deref())?;
         let recorder = Arc::new(Mutex::new(AppleFmToolLoopRecorder::new(
             session.id.clone(),
             tool_loop
@@ -712,7 +896,7 @@ impl ProbeRuntime {
             &profile,
             session.system_prompt.as_deref(),
             transcript,
-            prompt.as_str(),
+            prompt_text.as_str(),
             tool_definitions,
             Arc::new(move |tool_call| {
                 callback_recorder
@@ -740,25 +924,32 @@ impl ProbeRuntime {
             Ok(response) => response,
             Err(error) => {
                 if !tool_results.is_empty() {
-                    let _ = self.append_recorded_tool_call_turn(
+                    let tool_call_turn = self.append_recorded_tool_call_turn(
                         &session.id,
-                        Some(prompt.clone()),
+                        prompt.clone(),
                         &tool_results,
                         None,
                         None,
                     );
-                    let _ = self.append_tool_result_turn(&session.id, &tool_results);
+                    let tool_result_turn = self.append_tool_result_turn(&session.id, &tool_results);
+                    if let (Ok(tool_call_turn), Ok(tool_result_turn)) = (&tool_call_turn, &tool_result_turn) {
+                        let _ = self.persist_pending_tool_approvals(
+                            &session.id,
+                            tool_call_turn.index,
+                            tool_result_turn.index,
+                            tool_results.as_slice(),
+                        );
+                    }
                 } else if matches!(
                     interruption,
                     Some(AppleFmToolLoopInterruption::CallbackBudgetExceeded { .. })
                 ) {
-                    let _ = self.session_store.append_turn(
-                        &session.id,
-                        &[NewItem::new(
-                            TranscriptItemKind::UserMessage,
-                            prompt.clone(),
-                        )],
-                    );
+                    if let Some(prompt) = prompt.clone() {
+                        let _ = self.session_store.append_turn(
+                            &session.id,
+                            &[NewItem::new(TranscriptItemKind::UserMessage, prompt)],
+                        );
+                    }
                 }
 
                 return match interruption {
@@ -792,7 +983,7 @@ impl ProbeRuntime {
                     }
                     None => {
                         let mut items = Vec::new();
-                        if tool_results.is_empty() {
+                        if tool_results.is_empty() && let Some(prompt) = prompt.clone() {
                             items.push(NewItem::new(TranscriptItemKind::UserMessage, prompt));
                         }
                         items.push(NewItem::new(TranscriptItemKind::Note, error.to_string()));
@@ -810,14 +1001,20 @@ impl ProbeRuntime {
         let observability =
             self.build_turn_observability(&session.id, wallclock_ms, response.usage.as_ref())?;
         if !tool_results.is_empty() {
-            let _ = self.append_recorded_tool_call_turn(
+            let tool_call_turn = self.append_recorded_tool_call_turn(
                 &session.id,
-                Some(prompt),
+                prompt.clone(),
                 &tool_results,
                 None,
                 None,
             )?;
-            let _ = self.append_tool_result_turn(&session.id, &tool_results)?;
+            let tool_result_turn = self.append_tool_result_turn(&session.id, &tool_results)?;
+            self.persist_pending_tool_approvals(
+                &session.id,
+                tool_call_turn.index,
+                tool_result_turn.index,
+                tool_results.as_slice(),
+            )?;
             let turn = self.append_assistant_turn(
                 &session.id,
                 None,
@@ -860,7 +1057,7 @@ impl ProbeRuntime {
         })?;
         let turn = self.append_assistant_turn(
             &session.id,
-            Some(prompt),
+            prompt,
             assistant_text.clone(),
             Some(observability),
             response.backend_receipt,
@@ -967,6 +1164,109 @@ impl ProbeRuntime {
         })
     }
 
+    fn ensure_no_pending_approvals(&self, session_id: &SessionId) -> Result<(), RuntimeError> {
+        if let Some(pending) = self.pending_tool_approvals(session_id)?.into_iter().next() {
+            return Err(RuntimeError::ToolApprovalPending {
+                session_id: session_id.clone(),
+                tool_name: pending.tool_name,
+                call_id: pending.tool_call_id,
+                reason: pending.reason,
+            });
+        }
+        Ok(())
+    }
+
+    fn persist_pending_tool_approvals(
+        &self,
+        session_id: &SessionId,
+        tool_call_turn_index: u64,
+        paused_result_turn_index: u64,
+        executed_tool_calls: &[ExecutedToolCall],
+    ) -> Result<(), RuntimeError> {
+        let approvals = executed_tool_calls
+            .iter()
+            .filter(|tool| tool.was_paused())
+            .map(|tool| PendingToolApproval {
+                session_id: session_id.clone(),
+                tool_call_id: tool.call_id.clone(),
+                tool_name: tool.name.clone(),
+                arguments: tool.arguments.clone(),
+                risk_class: tool.tool_execution.risk_class,
+                reason: tool.tool_execution.reason.clone(),
+                tool_call_turn_index,
+                paused_result_turn_index,
+                requested_at_ms: now_ms(),
+                resolved_at_ms: None,
+                resolution: None,
+            })
+            .collect::<Vec<_>>();
+        self.session_store
+            .append_pending_tool_approvals(session_id, approvals.as_slice())
+            .map_err(RuntimeError::from)
+    }
+
+    fn execute_pending_tool_resolution(
+        &self,
+        session: &SessionMetadata,
+        tool_loop: &ToolLoopConfig,
+        pending: &PendingToolApproval,
+        resolution: ToolApprovalResolution,
+        event_sink: Option<&Arc<dyn RuntimeEventSink>>,
+    ) -> Result<ExecutedToolCall, RuntimeError> {
+        let execution_context = self.build_tool_execution_context(session, tool_loop, None)?;
+        let mut execution_session = tool_loop
+            .registry
+            .execution_session(&execution_context, &tool_loop.approval);
+        let mut observer = |call_id: &str, tool_name: &str, _arguments: &Value, risk_class| {
+            emit_runtime_event(
+                event_sink,
+                RuntimeEvent::ToolExecutionStarted {
+                    session_id: session.id.clone(),
+                    round_trip: 1,
+                    call_id: call_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    risk_class,
+                },
+            );
+        };
+        let tool = execution_session.execute_named_call_with_resolution(
+            pending.tool_call_id.clone(),
+            pending.tool_name.clone(),
+            pending.arguments.clone(),
+            pending.risk_class,
+            resolution,
+            &mut observer,
+        );
+        emit_tool_result_event(event_sink, &session.id, 1, &tool);
+        Ok(tool)
+    }
+
+    fn resume_tool_loop_after_approval(
+        &self,
+        session: SessionMetadata,
+        profile: BackendProfile,
+        tool_loop: ToolLoopConfig,
+        event_sink: Option<Arc<dyn RuntimeEventSink>>,
+    ) -> Result<PlainTextExecOutcome, RuntimeError> {
+        emit_runtime_event(
+            event_sink.as_ref(),
+            RuntimeEvent::TurnStarted {
+                session_id: session.id.clone(),
+                profile_name: profile.name.clone(),
+                prompt: String::from("[resume after approval]"),
+                tool_loop_enabled: true,
+            },
+        );
+        match profile.kind {
+            BackendKind::OpenAiChatCompletions => {
+                self.run_openai_tool_loop_turn(session, profile, None, tool_loop, event_sink)
+            }
+            BackendKind::AppleFmBridge => {
+                self.run_apple_fm_tool_loop_turn(session, profile, None, tool_loop, event_sink)
+            }
+        }
+    }
+
     fn build_tool_execution_context(
         &self,
         session: &SessionMetadata,
@@ -1006,8 +1306,10 @@ impl ProbeRuntime {
         session: &SessionMetadata,
     ) -> Result<AppleFmTranscript, RuntimeError> {
         let mut entries = Vec::new();
+        let transcript = self.session_store.read_transcript(&session.id)?;
+        let latest_tool_results = latest_tool_result_positions(transcript.as_slice());
 
-        for event in self.session_store.read_transcript(&session.id)? {
+        for event in transcript {
             let mut pending_tool_calls = Vec::new();
             let mut pending_tool_entry_id: Option<String> = None;
             for item in event.turn.items {
@@ -1059,6 +1361,13 @@ impl ProbeRuntime {
                         }));
                     }
                     TranscriptItemKind::ToolResult => {
+                        if !should_replay_tool_result(
+                            event.turn.index,
+                            &item,
+                            &latest_tool_results,
+                        ) {
+                            continue;
+                        }
                         flush_apple_pending_tool_calls(
                             &mut entries,
                             &mut pending_tool_calls,
@@ -1109,7 +1418,9 @@ impl ProbeRuntime {
             messages.push(ChatMessage::system(system_prompt.clone()));
         }
 
-        for event in self.session_store.read_transcript(&session.id)? {
+        let transcript = self.session_store.read_transcript(&session.id)?;
+        let latest_tool_results = latest_tool_result_positions(transcript.as_slice());
+        for event in transcript {
             let mut pending_tool_calls = Vec::new();
             for item in event.turn.items {
                 match item.kind {
@@ -1159,6 +1470,13 @@ impl ProbeRuntime {
                         });
                     }
                     TranscriptItemKind::ToolResult => {
+                        if !should_replay_tool_result(
+                            event.turn.index,
+                            &item,
+                            &latest_tool_results,
+                        ) {
+                            continue;
+                        }
                         if !pending_tool_calls.is_empty() {
                             messages.push(ChatMessage::assistant_tool_calls(std::mem::take(
                                 &mut pending_tool_calls,
@@ -1556,6 +1874,13 @@ fn elapsed_ms(started: Instant) -> u64 {
     elapsed_ms.max(1)
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_millis() as u64
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -1567,8 +1892,8 @@ mod tests {
     use crate::backend_profiles::{psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry};
     use crate::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig};
     use probe_protocol::session::{
-        CacheSignal, SessionHarnessProfile, ToolApprovalState, ToolPolicyDecision,
-        TranscriptItemKind, UsageTruth,
+        CacheSignal, SessionHarnessProfile, ToolApprovalResolution, ToolApprovalState,
+        ToolPolicyDecision, TranscriptItemKind, UsageTruth,
     };
     use probe_test_support::{
         FakeAppleFmServer, FakeHttpRequest, FakeHttpResponse, FakeOpenAiServer,
@@ -1577,7 +1902,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, RuntimeEvent,
+        PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime,
+        ResolvePendingToolApprovalOutcome, ResolvePendingToolApprovalRequest, RuntimeEvent,
         RuntimeError, RuntimeEventSink, default_session_title,
     };
 
@@ -2946,6 +3272,222 @@ mod tests {
         let requests = server.finish();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].contains("\"tool_choice\":\"required\""));
+    }
+
+    #[test]
+    fn resolving_pending_tool_approval_can_approve_and_resume_openai_turn() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let server = FakeOpenAiServer::from_json_responses(vec![
+            serde_json::json!({
+                "id": "chatcmpl_pause_then_approve_1",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call_patch_1",
+                            "type": "function",
+                            "function": {
+                                "name": "apply_patch",
+                                "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            serde_json::json!({
+                "id": "chatcmpl_pause_then_approve_2",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Patched hello.txt after approval."
+                    },
+                    "finish_reason": "stop"
+                }]
+            }),
+        ]);
+
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = String::from(server.base_url());
+        let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Required, false);
+        tool_loop.approval = ToolApprovalConfig {
+            allow_write_tools: false,
+            allow_network_shell: false,
+            allow_destructive_shell: false,
+            denied_action: ToolDeniedAction::Pause,
+        };
+
+        let error = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile: profile.clone(),
+                prompt: String::from("patch hello.txt"),
+                title: Some(String::from("Pause Then Approve")),
+                cwd: environment.workspace().to_path_buf(),
+                system_prompt: None,
+                harness_profile: None,
+                tool_loop: Some(tool_loop.clone()),
+            })
+            .expect_err("tool loop should pause");
+        let RuntimeError::ToolApprovalPending { session_id, .. } = error else {
+            panic!("expected tool approval pending error");
+        };
+
+        let pending = runtime
+            .pending_tool_approvals(&session_id)
+            .expect("read pending approvals");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].tool_call_id, "call_patch_1");
+
+        let outcome = runtime
+            .resolve_pending_tool_approval(ResolvePendingToolApprovalRequest {
+                session_id: session_id.clone(),
+                profile,
+                tool_loop,
+                call_id: String::from("call_patch_1"),
+                resolution: ToolApprovalResolution::Approved,
+            })
+            .expect("approval resolution should succeed");
+
+        let ResolvePendingToolApprovalOutcome::Resumed { outcome } = outcome else {
+            panic!("expected resumed outcome");
+        };
+        assert_eq!(outcome.assistant_text, "Patched hello.txt after approval.");
+        assert_eq!(
+            std::fs::read_to_string(environment.workspace().join("hello.txt"))
+                .expect("read patched file"),
+            "hello probe\n"
+        );
+        assert!(
+            runtime
+                .pending_tool_approvals(&session_id)
+                .expect("pending approvals should clear")
+                .is_empty()
+        );
+        let transcript = runtime
+            .session_store()
+            .read_transcript(&session_id)
+            .expect("read transcript");
+        assert_eq!(transcript.len(), 4);
+        assert_eq!(
+            transcript[2].turn.items[0]
+                .tool_execution
+                .as_ref()
+                .expect("resolved tool execution should persist")
+                .policy_decision,
+            ToolPolicyDecision::Approved
+        );
+    }
+
+    #[test]
+    fn resolving_pending_tool_approval_can_reject_and_resume_openai_turn() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let server = FakeOpenAiServer::from_json_responses(vec![
+            serde_json::json!({
+                "id": "chatcmpl_pause_then_reject_1",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call_patch_1",
+                            "type": "function",
+                            "function": {
+                                "name": "apply_patch",
+                                "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            serde_json::json!({
+                "id": "chatcmpl_pause_then_reject_2",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "The patch stayed blocked after rejection."
+                    },
+                    "finish_reason": "stop"
+                }]
+            }),
+        ]);
+
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = String::from(server.base_url());
+        let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Required, false);
+        tool_loop.approval = ToolApprovalConfig {
+            allow_write_tools: false,
+            allow_network_shell: false,
+            allow_destructive_shell: false,
+            denied_action: ToolDeniedAction::Pause,
+        };
+
+        let error = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile: profile.clone(),
+                prompt: String::from("patch hello.txt"),
+                title: Some(String::from("Pause Then Reject")),
+                cwd: environment.workspace().to_path_buf(),
+                system_prompt: None,
+                harness_profile: None,
+                tool_loop: Some(tool_loop.clone()),
+            })
+            .expect_err("tool loop should pause");
+        let RuntimeError::ToolApprovalPending { session_id, .. } = error else {
+            panic!("expected tool approval pending error");
+        };
+
+        let outcome = runtime
+            .resolve_pending_tool_approval(ResolvePendingToolApprovalRequest {
+                session_id: session_id.clone(),
+                profile,
+                tool_loop,
+                call_id: String::from("call_patch_1"),
+                resolution: ToolApprovalResolution::Rejected,
+            })
+            .expect("rejection should succeed");
+
+        let ResolvePendingToolApprovalOutcome::Resumed { outcome } = outcome else {
+            panic!("expected resumed outcome");
+        };
+        assert_eq!(
+            outcome.assistant_text,
+            "The patch stayed blocked after rejection."
+        );
+        assert_eq!(
+            std::fs::read_to_string(environment.workspace().join("hello.txt"))
+                .expect("read unpatched file"),
+            "hello world\n"
+        );
+        let transcript = runtime
+            .session_store()
+            .read_transcript(&session_id)
+            .expect("read transcript");
+        assert_eq!(
+            transcript[2].turn.items[0]
+                .tool_execution
+                .as_ref()
+                .expect("rejected tool execution should persist")
+                .policy_decision,
+            ToolPolicyDecision::Refused
+        );
+        assert!(
+            runtime
+                .pending_tool_approvals(&session_id)
+                .expect("pending approvals should clear")
+                .is_empty()
+        );
     }
 
     #[test]

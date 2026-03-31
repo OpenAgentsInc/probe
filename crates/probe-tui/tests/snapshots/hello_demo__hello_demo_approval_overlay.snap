@@ -1,6 +1,6 @@
 ---
 source: crates/probe-tui/tests/hello_demo.rs
-assertion_line: 35
+assertion_line: 65
 expression: snapshot
 ---
 
@@ -8,18 +8,18 @@ expression: snapshot
 
 
            ┌─ Approval ─────────────────────────────────────────────┐
-           │ Approval Demo                                          │
+           │ tool: apply_patch                                      │
+           │ call: call_patch_1                                     │
+           │ risk: write                                            │
+           │ requested_turn: 1                                      │
+           │ paused_turn: 2                                         │
+           │ reason: tool `apply_patch` requires write approval     │
+           │ under the active local policy                          │
            │                                                        │
-           │ Probe needs approval for a future risky tool action.   │
-           │                                                        │
-           │ > Approve the action                                   │
-           │   Reject the action                                    │
-           │                                                        │
-           │ Tab/Shift+Tab changes selection. Enter commits. Esc    │
-           │ dismisses.                                             │
-           │ Current stack depth: 2                                 │
-           │                                                        │
-           │                                                        │
-           │                                                        │
-           │                                                        │
+           │ arguments                                              │
+           │   {                                                    │
+           │     "new_text": "probe",                               │
+           │     "old_text": "world",                               │
+           │     "path": "hello.txt"                                │
+           │   }                                                    │
            └────────────────────────────────────────────────────────┘

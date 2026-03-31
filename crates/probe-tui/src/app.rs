@@ -211,11 +211,24 @@ impl AppShell {
                         }
                     }
                     ScreenAction::OpenApprovalOverlay => {
+                        let Some(approval) =
+                            self.base_screen().current_pending_tool_approval().cloned()
+                        else {
+                            self.base_screen_mut()
+                                .record_event("approval overlay requested without pending tools");
+                            self.last_status = String::from("no pending approvals");
+                            self.poll_background_messages();
+                            return;
+                        };
                         self.base_screen_mut()
                             .record_event("approval overlay took focus");
-                        if self.active_screen_id() != ScreenId::ApprovalOverlay {
+                        if self.active_screen_id() == ScreenId::ApprovalOverlay {
+                            if let Some(ScreenState::Approval(screen)) = self.screens.last_mut() {
+                                *screen = ApprovalOverlay::new(approval);
+                            }
+                        } else {
                             self.screens
-                                .push(ScreenState::Approval(ApprovalOverlay::new()));
+                                .push(ScreenState::Approval(ApprovalOverlay::new(approval)));
                         }
                     }
                     ScreenAction::OpenRequestInputOverlay => {
@@ -244,6 +257,22 @@ impl AppShell {
                             if let Err(error) =
                                 self.submit_background_task(Self::default_setup_request())
                             {
+                                self.last_status = error;
+                            }
+                        }
+                        ScreenCommand::ResolvePendingToolApproval {
+                            session_id,
+                            call_id,
+                            resolution,
+                        } => {
+                            if let Err(error) = self.submit_background_task(
+                                BackgroundTaskRequest::resolve_pending_tool_approval(
+                                    session_id,
+                                    call_id,
+                                    resolution,
+                                    self.chat_runtime.clone(),
+                                ),
+                            ) {
                                 self.last_status = error;
                             }
                         }
@@ -281,7 +310,14 @@ impl AppShell {
     }
 
     pub fn apply_message(&mut self, message: AppMessage) {
+        let pending_approvals = match &message {
+            AppMessage::PendingToolApprovalsUpdated { approvals, .. } => Some(approvals.clone()),
+            _ => None,
+        };
         self.last_status = self.base_screen_mut().apply_message(message);
+        if let Some(pending_approvals) = pending_approvals {
+            self.sync_pending_approval_overlay(pending_approvals);
+        }
     }
 
     pub fn render(&self, frame: &mut Frame<'_>) {
@@ -377,6 +413,13 @@ impl AppShell {
             ));
         }
 
+        if self.base_screen().has_pending_tool_approvals() {
+            return BottomPaneState::Disabled(format!(
+                "Resolve {} pending approval request(s) before submitting a new turn.",
+                self.base_screen().pending_tool_approval_count()
+            ));
+        }
+
         match self.task_phase() {
             TaskPhase::Queued | TaskPhase::CheckingAvailability | TaskPhase::Running => {
                 BottomPaneState::Busy(String::from(
@@ -386,6 +429,31 @@ impl AppShell {
             TaskPhase::Idle | TaskPhase::Unavailable | TaskPhase::Completed | TaskPhase::Failed => {
                 BottomPaneState::Active
             }
+        }
+    }
+
+    fn sync_pending_approval_overlay(
+        &mut self,
+        pending_approvals: Vec<probe_protocol::session::PendingToolApproval>,
+    ) {
+        if let Some(approval) = pending_approvals.first().cloned() {
+            self.base_screen_mut()
+                .record_event(format!("approval pending for {}", approval.tool_name));
+            if self.active_screen_id() == ScreenId::ApprovalOverlay {
+                if let Some(ScreenState::Approval(screen)) = self.screens.last_mut() {
+                    *screen = ApprovalOverlay::new(approval);
+                }
+            } else {
+                self.screens
+                    .push(ScreenState::Approval(ApprovalOverlay::new(approval)));
+            }
+            return;
+        }
+
+        if self.active_screen_id() == ScreenId::ApprovalOverlay && self.screens.len() > 1 {
+            self.screens.pop();
+            self.base_screen_mut()
+                .record_event("approval overlay released focus");
         }
     }
 }
@@ -793,28 +861,42 @@ mod tests {
     }
 
     #[test]
-    fn paused_tool_rows_render_as_approval_pending_entries() {
+    fn paused_tool_approval_overlay_renders_real_pending_details_and_can_approve() {
         let environment = ProbeTestEnvironment::new();
         environment.seed_coding_workspace();
-        let server = FakeOpenAiServer::from_json_responses(vec![json!({
-            "id": "chatcmpl_probe_tui_pause_1",
-            "model": "qwen3.5-2b-q8_0-registry.gguf",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "tool_calls": [{
-                        "id": "call_patch_1",
-                        "type": "function",
-                        "function": {
-                            "name": "apply_patch",
-                            "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"
-                        }
-                    }]
-                },
-                "finish_reason": "tool_calls"
-            }]
-        })]);
+        let server = FakeOpenAiServer::from_json_responses(vec![
+            json!({
+                "id": "chatcmpl_probe_tui_pause_1",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call_patch_1",
+                            "type": "function",
+                            "function": {
+                                "name": "apply_patch",
+                                "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            json!({
+                "id": "chatcmpl_probe_tui_pause_2",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Patched hello.txt after approval."
+                    },
+                    "finish_reason": "stop"
+                }]
+            }),
+        ]);
         let mut config = runtime_test_config(&environment, server.base_url());
         let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Required, false);
         tool_loop.approval = probe_core::tools::ToolApprovalConfig {
@@ -840,30 +922,47 @@ mod tests {
         wait_for_app_condition(&mut app, Duration::from_secs(2), |app| {
             app.worker_events()
                 .iter()
-                .any(|entry| entry.contains("committed approval pending row: apply_patch"))
+                .any(|entry| entry.contains("loaded 1 pending approval(s)"))
         });
 
+        assert_eq!(app.active_screen_id(), ScreenId::ApprovalOverlay);
         let rendered = app.render_to_string(120, 32);
+        assert!(rendered.contains("tool: apply_patch"));
+        assert!(rendered.contains("call: call_patch_1"));
+        assert!(rendered.contains("risk: write"));
+        assert!(rendered.contains("hello.txt"));
+        assert!(rendered.contains("old_text"));
+
+        app.dispatch(UiEvent::ComposerSubmit);
+        wait_for_app_condition(&mut app, Duration::from_secs(2), |app| {
+            app.active_screen_id() == ScreenId::Chat
+                && app
+                    .worker_events()
+                    .iter()
+                    .any(|entry| entry.contains("pending approvals cleared"))
+                && app
+                    .worker_events()
+                    .iter()
+                    .any(|entry| entry.contains("committed assistant row: Probe"))
+        });
+
+        let rendered = app.render_to_string(160, 48);
         assert!(rendered.contains("[approval pending] apply_patch"));
-        assert!(rendered.contains("policy: paused"));
-        assert!(rendered.contains("approval: pending"));
+        assert!(rendered.contains("[tool result] apply_patch"));
+        assert_eq!(
+            std::fs::read_to_string(environment.workspace().join("hello.txt"))
+                .expect("read patched file"),
+            "hello probe\n"
+        );
     }
 
     #[test]
-    fn typed_overlays_take_focus_and_can_commit_demo_entries() {
+    fn approval_overlay_requires_real_pending_tools_and_request_input_still_commits() {
         let mut app = AppShell::new_for_tests();
 
         app.dispatch(UiEvent::OpenApprovalOverlay);
-        assert_eq!(app.active_screen_id(), ScreenId::ApprovalOverlay);
-        assert_eq!(app.screen_depth(), 2);
-
-        app.dispatch(UiEvent::NextView);
-        app.dispatch(UiEvent::ComposerSubmit);
         assert_eq!(app.active_screen_id(), ScreenId::Chat);
-        assert!(
-            app.render_to_string(120, 32)
-                .contains("Typed overlays now provide a credible home")
-        );
+        assert_eq!(app.last_status(), "no pending approvals");
 
         app.dispatch(UiEvent::OpenRequestInputOverlay);
         assert_eq!(app.active_screen_id(), ScreenId::RequestInputOverlay);

@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use probe_core::runtime::RuntimeEvent;
 use probe_core::tools::ToolLoopConfig;
 use probe_protocol::backend::BackendProfile;
-use probe_protocol::session::SessionHarnessProfile;
+use probe_protocol::session::{
+    PendingToolApproval, SessionHarnessProfile, ToolApprovalResolution,
+};
 
 use crate::transcript::{ActiveTurn, TranscriptEntry};
 
@@ -12,6 +14,12 @@ pub enum BackgroundTaskRequest {
     AppleFmSetup { profile: BackendProfile },
     ProbeRuntimeTurn {
         prompt: String,
+        config: ProbeRuntimeTurnConfig,
+    },
+    ResolvePendingToolApproval {
+        session_id: String,
+        call_id: String,
+        resolution: ToolApprovalResolution,
         config: ProbeRuntimeTurnConfig,
     },
 }
@@ -31,10 +39,25 @@ impl BackgroundTaskRequest {
     }
 
     #[must_use]
+    pub fn resolve_pending_tool_approval(
+        session_id: impl Into<String>,
+        call_id: impl Into<String>,
+        resolution: ToolApprovalResolution,
+        config: ProbeRuntimeTurnConfig,
+    ) -> Self {
+        Self::ResolvePendingToolApproval {
+            session_id: session_id.into(),
+            call_id: call_id.into(),
+            resolution,
+            config,
+        }
+    }
+
+    #[must_use]
     pub fn setup_backend(&self) -> Option<AppleFmBackendSummary> {
         match self {
             Self::AppleFmSetup { profile } => Some(AppleFmBackendSummary::from_profile(profile)),
-            Self::ProbeRuntimeTurn { .. } => None,
+            Self::ProbeRuntimeTurn { .. } | Self::ResolvePendingToolApproval { .. } => None,
         }
     }
 
@@ -43,6 +66,7 @@ impl BackgroundTaskRequest {
         match self {
             Self::AppleFmSetup { .. } => "Apple FM setup demo",
             Self::ProbeRuntimeTurn { .. } => "Probe runtime turn",
+            Self::ResolvePendingToolApproval { .. } => "pending approval decision",
         }
     }
 }
@@ -135,6 +159,10 @@ pub enum AppMessage {
     },
     ProbeRuntimeEvent {
         event: RuntimeEvent,
+    },
+    PendingToolApprovalsUpdated {
+        session_id: String,
+        approvals: Vec<PendingToolApproval>,
     },
     AppleFmSetupStarted {
         backend: AppleFmBackendSummary,

@@ -1180,7 +1180,13 @@ fn classify_attempt(
                     ..
                 }) => Some(AcceptanceFailureCategory::BackendFailure),
                 AcceptanceExecutionError::Runtime(RuntimeError::MaxToolRoundTrips { .. })
-                | AcceptanceExecutionError::Runtime(RuntimeError::MalformedTranscript(_)) => {
+                | AcceptanceExecutionError::Runtime(RuntimeError::MalformedTranscript(_))
+                | AcceptanceExecutionError::Runtime(
+                    RuntimeError::PendingToolApprovalNotFound { .. },
+                )
+                | AcceptanceExecutionError::Runtime(
+                    RuntimeError::PendingToolApprovalAlreadyResolved { .. },
+                ) => {
                     Some(AcceptanceFailureCategory::ToolExecutionFailure)
                 }
                 AcceptanceExecutionError::Runtime(RuntimeError::ProbeHomeUnavailable)

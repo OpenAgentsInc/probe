@@ -7,12 +7,13 @@ use probe_core::provider::{
     ProviderUsageTruth,
 };
 use probe_core::runtime::{
-    PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, RuntimeError, RuntimeEventSink,
+    PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, ResolvePendingToolApprovalOutcome,
+    ResolvePendingToolApprovalRequest, RuntimeError, RuntimeEventSink,
 };
 use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError};
 use probe_protocol::session::{
-    SessionId, SessionMetadata, ToolApprovalState, ToolPolicyDecision, ToolRiskClass,
-    TranscriptEvent, TranscriptItem, TranscriptItemKind,
+    SessionId, SessionMetadata, ToolApprovalResolution, ToolApprovalState, ToolPolicyDecision,
+    ToolRiskClass, TranscriptEvent, TranscriptItem, TranscriptItemKind,
 };
 use psionic_apple_fm::AppleFmSystemLanguageModelAvailability;
 use serde_json::Value;
@@ -130,6 +131,19 @@ fn run_request(
         BackgroundTaskRequest::ProbeRuntimeTurn { prompt, config } => {
             run_probe_runtime_turn(prompt, config, message_tx, state)
         }
+        BackgroundTaskRequest::ResolvePendingToolApproval {
+            session_id,
+            call_id,
+            resolution,
+            config,
+        } => run_pending_tool_approval_resolution(
+            session_id,
+            call_id,
+            resolution,
+            config,
+            message_tx,
+            state,
+        ),
     }
 }
 
@@ -209,6 +223,9 @@ fn run_probe_runtime_turn(
             {
                 return;
             }
+            if emit_pending_tool_approvals(message_tx, &runtime, &outcome.session.id).is_err() {
+                return;
+            }
             state.runtime_session = Some(ProbeRuntimeSessionState::from_metadata(
                 &outcome.session,
                 &config,
@@ -256,6 +273,9 @@ fn run_probe_runtime_turn(
             if emit_transcript_delta(message_tx, transcript, previous_turns).is_err() {
                 return;
             }
+            if emit_pending_tool_approvals(message_tx, &runtime, &session_id).is_err() {
+                return;
+            }
             if let Some(metadata) = metadata {
                 state.runtime_session = Some(ProbeRuntimeSessionState::from_metadata(
                     &metadata,
@@ -272,6 +292,157 @@ fn run_probe_runtime_turn(
                     ),
                 });
             }
+        }
+    }
+}
+
+fn run_pending_tool_approval_resolution(
+    session_id: String,
+    call_id: String,
+    resolution: ToolApprovalResolution,
+    config: ProbeRuntimeTurnConfig,
+    message_tx: &Sender<AppMessage>,
+    state: &mut WorkerState,
+) {
+    let runtime = match config.probe_home.clone() {
+        Some(probe_home) => ProbeRuntime::new(probe_home),
+        None => match ProbeRuntime::detect() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
+                    entry: TranscriptEntry::new(
+                        TranscriptRole::Status,
+                        "Runtime Error",
+                        vec![error.to_string()],
+                    ),
+                });
+                return;
+            }
+        },
+    };
+
+    let Ok(session_id) = runtime
+        .session_store()
+        .read_metadata(&SessionId::new(session_id.clone()))
+        .map(|metadata| metadata.id)
+    else {
+        let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
+            entry: TranscriptEntry::new(
+                TranscriptRole::Status,
+                "Runtime Error",
+                vec![format!("runtime session `{session_id}` was not found")],
+            ),
+        });
+        return;
+    };
+
+    let tool_loop = match config.tool_loop.clone() {
+        Some(tool_loop) => tool_loop,
+        None => {
+            let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
+                entry: TranscriptEntry::new(
+                    TranscriptRole::Status,
+                    "Runtime Error",
+                    vec![String::from(
+                        "pending approval resolution requires an active tool loop config",
+                    )],
+                ),
+            });
+            return;
+        }
+    };
+
+    let previous_turns = state
+        .runtime_session
+        .as_ref()
+        .filter(|session| session.session_id == session_id)
+        .map_or(0, |session| session.rendered_turns);
+    let event_tx = message_tx.clone();
+    let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
+        let _ = event_tx.send(AppMessage::ProbeRuntimeEvent { event });
+    });
+    let result = runtime.resolve_pending_tool_approval_with_events(
+        ResolvePendingToolApprovalRequest {
+            session_id: session_id.clone(),
+            profile: config.profile.clone(),
+            tool_loop,
+            call_id,
+            resolution,
+        },
+        event_sink,
+    );
+
+    match result {
+        Ok(ResolvePendingToolApprovalOutcome::StillPending {
+            session,
+            pending_approvals,
+        }) => {
+            if emit_session_ready(message_tx, &session, &config).is_err() {
+                return;
+            }
+            if emit_transcript_delta(
+                message_tx,
+                runtime.session_store().read_transcript(&session.id),
+                previous_turns,
+            )
+            .is_err()
+            {
+                return;
+            }
+            if message_tx
+                .send(AppMessage::PendingToolApprovalsUpdated {
+                    session_id: session.id.as_str().to_string(),
+                    approvals: pending_approvals.clone(),
+                })
+                .is_err()
+            {
+                return;
+            }
+            state.runtime_session = Some(ProbeRuntimeSessionState::from_metadata(
+                &session,
+                &config,
+                runtime
+                    .session_store()
+                    .read_transcript(&session.id)
+                    .map(|events| events.len())
+                    .unwrap_or(previous_turns),
+            ));
+        }
+        Ok(ResolvePendingToolApprovalOutcome::Resumed { outcome }) => {
+            if emit_session_ready(message_tx, &outcome.session, &config).is_err() {
+                return;
+            }
+            if emit_transcript_delta(
+                message_tx,
+                runtime.session_store().read_transcript(&outcome.session.id),
+                previous_turns,
+            )
+            .is_err()
+            {
+                return;
+            }
+            if emit_pending_tool_approvals(message_tx, &runtime, &outcome.session.id).is_err() {
+                return;
+            }
+            state.runtime_session = Some(ProbeRuntimeSessionState::from_metadata(
+                &outcome.session,
+                &config,
+                runtime
+                    .session_store()
+                    .read_transcript(&outcome.session.id)
+                    .map(|events| events.len())
+                    .unwrap_or(previous_turns),
+            ));
+        }
+        Err(error) => {
+            let _ = emit_pending_tool_approvals(message_tx, &runtime, &session_id);
+            let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
+                entry: TranscriptEntry::new(
+                    TranscriptRole::Status,
+                    "Runtime Error",
+                    vec![error.to_string()],
+                ),
+            });
         }
     }
 }
@@ -309,6 +480,20 @@ fn emit_session_ready(
             profile_name: config.profile.name.clone(),
             model_id: config.profile.model.clone(),
             cwd: metadata.cwd.display().to_string(),
+        })
+        .map_err(|_| ())
+}
+
+fn emit_pending_tool_approvals(
+    message_tx: &Sender<AppMessage>,
+    runtime: &ProbeRuntime,
+    session_id: &SessionId,
+) -> Result<(), ()> {
+    let approvals = runtime.pending_tool_approvals(session_id).map_err(|_| ())?;
+    message_tx
+        .send(AppMessage::PendingToolApprovalsUpdated {
+            session_id: session_id.as_str().to_string(),
+            approvals,
         })
         .map_err(|_| ())
 }
@@ -507,6 +692,8 @@ fn runtime_error_session_id(error: &RuntimeError) -> Option<SessionId> {
         | RuntimeError::MissingAssistantMessage { session_id, .. }
         | RuntimeError::UnsupportedBackendFeature { session_id, .. }
         | RuntimeError::ToolApprovalPending { session_id, .. }
+        | RuntimeError::PendingToolApprovalNotFound { session_id, .. }
+        | RuntimeError::PendingToolApprovalAlreadyResolved { session_id, .. }
         | RuntimeError::MaxToolRoundTrips { session_id, .. } => Some(session_id.clone()),
         RuntimeError::ProbeHomeUnavailable
         | RuntimeError::CurrentDir(_)

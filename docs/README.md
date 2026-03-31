@@ -133,3 +133,7 @@ This folder holds technical planning docs for the Probe runtime.
   - first-class transcript row kinds for persisted Probe tool calls, tool
     results, refusals, and approval-pending outcomes, plus compact operator
     summaries built from the stored `tool_execution` truth
+- `45-probe-tui-resumable-approval-broker.md`
+  - real pending-approval persistence, approve or reject resolution in
+    `probe-core`, replay of resolved tool results into the paused turn, and
+    TUI approval-overlay wiring against that runtime state

@@ -55,7 +55,8 @@ types instead of looking like ordinary tool success rows.
 
 That makes the persisted approval contract from
 `docs/14-approval-classes-and-structured-tool-results.md` visible in the shell
-without needing the approval broker from issue `#45` yet.
+before the resumable approval broker from issue `#45` wires those paused rows
+to a real approve or reject flow.
 
 ## Tests
 

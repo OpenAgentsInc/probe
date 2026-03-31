@@ -52,16 +52,15 @@ The old `Setup` tab is gone. Setup now lives in a dedicated overlay opened by
 This keeps the chat shell structurally stable while still giving the Apple FM
 prove-out a real focused home.
 
-### Demo approval and request-input flows
+### First approval and request-input flows
 
-The first overlay demos are intentionally small but real enough to anchor the
-architecture:
+This issue established the overlay shell shape:
 
 - approval overlay with approve/reject selection
 - request-input overlay with a short option picker
 
-Selections commit visible transcript status entries so the overlays are tied
-back into the shell rather than acting as isolated mock UI.
+Issue `#45` later replaces the demo approval behavior with a real runtime-backed
+pending-approval flow while keeping the same focus and overlay structure.
 
 ## Control Model
 

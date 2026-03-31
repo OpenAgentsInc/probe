@@ -97,6 +97,13 @@ When the model emits tool calls, Probe now does the following in order:
 This means a paused approval request is no longer implicit CLI behavior. It is
 persisted runtime state.
 
+Issue `#45` builds the next layer above that pause contract:
+
+- persisted pending-approval records per session and tool call
+- explicit approve or reject resolution
+- runtime-backed resume after the decision
+- TUI approval overlay wiring against that real runtime state
+
 ## Why This Matters
 
 Later acceptance, replay export, decision-module work, and GEPA optimization
@@ -110,5 +117,5 @@ They need to know:
 - whether the result was truncated
 - how much output came back
 
-This issue establishes that runtime truth without yet turning Probe into a
-full interactive approval broker.
+Probe now has the durable truth needed for a real interactive approval broker,
+not just a persisted pause receipt.

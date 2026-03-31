@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use probe_protocol::backend::BackendProfile;
 use probe_protocol::session::{
-    ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
+    ToolApprovalResolution, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision,
+    ToolRiskClass,
 };
 use probe_provider_openai::{
     ChatNamedToolChoice, ChatNamedToolChoiceFunction, ChatToolCall, ChatToolChoice,
@@ -733,6 +734,46 @@ impl ToolExecutionSession {
     }
 
     #[must_use]
+    pub(crate) fn execute_named_call_with_resolution(
+        &mut self,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+        risk_class: ToolRiskClass,
+        resolution: ToolApprovalResolution,
+        observer: &mut impl FnMut(&str, &str, &serde_json::Value, ToolRiskClass),
+    ) -> ExecutedToolCall {
+        let name = name.into();
+        let mut approval = self.approval.clone();
+        approval.denied_action = ToolDeniedAction::Refuse;
+        match resolution {
+            ToolApprovalResolution::Approved => match risk_class {
+                ToolRiskClass::ReadOnly | ToolRiskClass::ShellReadOnly => {}
+                ToolRiskClass::Write => approval.allow_write_tools = true,
+                ToolRiskClass::Network => approval.allow_network_shell = true,
+                ToolRiskClass::Destructive => approval.allow_destructive_shell = true,
+            },
+            ToolApprovalResolution::Rejected => {}
+        }
+        let denied_reason_override = matches!(resolution, ToolApprovalResolution::Rejected).then(
+            || {
+                format!(
+                    "operator rejected the pending approval request for tool `{}`",
+                    name
+                )
+            },
+        );
+        self.execute_named_call_with_policy(
+            call_id.into(),
+            name,
+            arguments,
+            &approval,
+            denied_reason_override,
+            observer,
+        )
+    }
+
+    #[must_use]
     pub(crate) fn execute_named_call_with_observer(
         &mut self,
         call_id: impl Into<String>,
@@ -740,9 +781,25 @@ impl ToolExecutionSession {
         arguments: serde_json::Value,
         observer: &mut impl FnMut(&str, &str, &serde_json::Value, ToolRiskClass),
     ) -> ExecutedToolCall {
-        let call_id = call_id.into();
-        let name = name.into();
+        self.execute_named_call_with_policy(
+            call_id.into(),
+            name.into(),
+            arguments,
+            &self.approval.clone(),
+            None,
+            observer,
+        )
+    }
 
+    fn execute_named_call_with_policy(
+        &mut self,
+        call_id: String,
+        name: String,
+        arguments: serde_json::Value,
+        approval: &ToolApprovalConfig,
+        denied_reason_override: Option<String>,
+        observer: &mut impl FnMut(&str, &str, &serde_json::Value, ToolRiskClass),
+    ) -> ExecutedToolCall {
         let Some(tool) = self.registry.tools.get(name.as_str()) else {
             return undeclared_tool_call(call_id, name, arguments);
         };
@@ -788,8 +845,9 @@ impl ToolExecutionSession {
             RegisteredToolRisk::Fixed(risk) => risk,
             RegisteredToolRisk::Shell => classify_shell_command(&arguments),
         };
-        let (policy_decision, approval_state, reason) =
-            evaluate_tool_policy(name.as_str(), risk_class, &self.approval);
+        let (policy_decision, approval_state, policy_reason) =
+            evaluate_tool_policy(name.as_str(), risk_class, approval);
+        let reason = denied_reason_override.or(policy_reason);
         let invocation = if matches!(
             policy_decision,
             ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved

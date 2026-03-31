@@ -6,9 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use probe_protocol::session::{
-    BackendTurnReceipt, ItemId, SessionBackendTarget, SessionHarnessProfile, SessionId,
-    SessionIndex, SessionMetadata, SessionState, SessionTurn, TimestampMs, ToolExecutionRecord,
-    TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnId, TurnObservability,
+    BackendTurnReceipt, ItemId, PendingToolApproval, SessionBackendTarget,
+    SessionHarnessProfile, SessionId, SessionIndex, SessionMetadata, SessionState, SessionTurn,
+    TimestampMs, ToolApprovalResolution, ToolExecutionRecord, TranscriptEvent, TranscriptItem,
+    TranscriptItemKind, TurnId, TurnObservability,
 };
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -17,12 +18,14 @@ const INDEX_FILE: &str = "index.json";
 const SESSIONS_DIR: &str = "sessions";
 const METADATA_FILE: &str = "metadata.json";
 const TRANSCRIPT_FILE: &str = "transcript.jsonl";
+const APPROVALS_FILE: &str = "approvals.json";
 
 #[derive(Debug)]
 pub enum SessionStoreError {
     Io(std::io::Error),
     Json(serde_json::Error),
     NotFound(String),
+    Conflict(String),
 }
 
 impl Display for SessionStoreError {
@@ -31,6 +34,7 @@ impl Display for SessionStoreError {
             Self::Io(error) => write!(f, "io error: {error}"),
             Self::Json(error) => write!(f, "json error: {error}"),
             Self::NotFound(id) => write!(f, "session not found: {id}"),
+            Self::Conflict(message) => write!(f, "conflict: {message}"),
         }
     }
 }
@@ -188,6 +192,9 @@ impl FilesystemSessionStore {
 
         let transcript_path = session_dir.join(TRANSCRIPT_FILE);
         File::create(&transcript_path)?;
+        let approvals_path = session_dir.join(APPROVALS_FILE);
+        let approvals_file = File::create(&approvals_path)?;
+        serde_json::to_writer_pretty(approvals_file, &Vec::<PendingToolApproval>::new())?;
 
         let metadata = SessionMetadata {
             id: session_id,
@@ -306,6 +313,84 @@ impl FilesystemSessionStore {
         Ok(events)
     }
 
+    pub fn read_tool_approvals(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<PendingToolApproval>, SessionStoreError> {
+        let path = self.session_dir(session_id).join(APPROVALS_FILE);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = File::open(path)?;
+        Ok(serde_json::from_reader(file)?)
+    }
+
+    pub fn read_pending_tool_approvals(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<PendingToolApproval>, SessionStoreError> {
+        Ok(self
+            .read_tool_approvals(session_id)?
+            .into_iter()
+            .filter(PendingToolApproval::is_pending)
+            .collect())
+    }
+
+    pub fn append_pending_tool_approvals(
+        &self,
+        session_id: &SessionId,
+        new_approvals: &[PendingToolApproval],
+    ) -> Result<(), SessionStoreError> {
+        if new_approvals.is_empty() {
+            return Ok(());
+        }
+
+        let mut approvals = self.read_tool_approvals(session_id)?;
+        for approval in new_approvals {
+            if approvals
+                .iter()
+                .any(|existing| existing.tool_call_id == approval.tool_call_id)
+            {
+                return Err(SessionStoreError::Conflict(format!(
+                    "session {} already tracks approval state for call {}",
+                    session_id.as_str(),
+                    approval.tool_call_id
+                )));
+            }
+            approvals.push(approval.clone());
+        }
+        self.write_tool_approvals(session_id, approvals.as_slice())
+    }
+
+    pub fn resolve_pending_tool_approval(
+        &self,
+        session_id: &SessionId,
+        call_id: &str,
+        resolution: ToolApprovalResolution,
+    ) -> Result<PendingToolApproval, SessionStoreError> {
+        let mut approvals = self.read_tool_approvals(session_id)?;
+        let Some(index) = approvals.iter().position(|approval| approval.tool_call_id == call_id)
+        else {
+            return Err(SessionStoreError::NotFound(format!(
+                "{}:{}",
+                session_id.as_str(),
+                call_id
+            )));
+        };
+        if !approvals[index].is_pending() {
+            return Err(SessionStoreError::Conflict(format!(
+                "approval for session {} call {} was already resolved",
+                session_id.as_str(),
+                call_id
+            )));
+        }
+        approvals[index].resolution = Some(resolution);
+        approvals[index].resolved_at_ms = Some(now_ms());
+        let resolved = approvals[index].clone();
+        self.write_tool_approvals(session_id, approvals.as_slice())?;
+        Ok(resolved)
+    }
+
     fn ensure_layout(&self) -> Result<(), SessionStoreError> {
         fs::create_dir_all(self.root.join(SESSIONS_DIR))?;
         if !self.index_path().exists() {
@@ -321,6 +406,17 @@ impl FilesystemSessionStore {
 
     fn session_dir(&self, session_id: &SessionId) -> PathBuf {
         self.root.join(SESSIONS_DIR).join(session_id.as_str())
+    }
+
+    fn write_tool_approvals(
+        &self,
+        session_id: &SessionId,
+        approvals: &[PendingToolApproval],
+    ) -> Result<(), SessionStoreError> {
+        let path = self.session_dir(session_id).join(APPROVALS_FILE);
+        let file = File::create(path)?;
+        serde_json::to_writer_pretty(file, approvals)?;
+        Ok(())
     }
 
     fn write_metadata(&self, metadata: &SessionMetadata) -> Result<(), SessionStoreError> {
@@ -375,9 +471,10 @@ fn now_ms() -> TimestampMs {
 mod tests {
     use super::{FilesystemSessionStore, NewItem, NewSession};
     use probe_protocol::session::{
-        BackendTranscriptReceipt, BackendTurnReceipt, CacheSignal, SessionBackendTarget,
-        SessionHarnessProfile, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision,
-        ToolRiskClass, TranscriptItemKind, TurnObservability, UsageMeasurement, UsageTruth,
+        BackendTranscriptReceipt, BackendTurnReceipt, CacheSignal, PendingToolApproval,
+        SessionBackendTarget, SessionHarnessProfile, ToolApprovalResolution, ToolApprovalState,
+        ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass, TranscriptItemKind,
+        TurnObservability, UsageMeasurement, UsageTruth,
     };
 
     #[test]
@@ -618,6 +715,103 @@ mod tests {
                 .expect("transcript receipt should persist")
                 .format,
             "foundation_models.transcript.v1"
+        );
+    }
+
+    #[test]
+    fn pending_tool_approvals_persist_and_filter_pending_entries() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = FilesystemSessionStore::new(temp.path());
+        let metadata = store
+            .create_session("approvals", temp.path())
+            .expect("create session");
+
+        let approvals = vec![
+            PendingToolApproval {
+                session_id: metadata.id.clone(),
+                tool_call_id: String::from("call_patch_1"),
+                tool_name: String::from("apply_patch"),
+                arguments: serde_json::json!({ "path": "hello.txt" }),
+                risk_class: ToolRiskClass::Write,
+                reason: Some(String::from("write approval required")),
+                tool_call_turn_index: 0,
+                paused_result_turn_index: 1,
+                requested_at_ms: 1,
+                resolved_at_ms: None,
+                resolution: None,
+            },
+            PendingToolApproval {
+                session_id: metadata.id.clone(),
+                tool_call_id: String::from("call_shell_1"),
+                tool_name: String::from("shell"),
+                arguments: serde_json::json!({ "command": "curl https://example.com" }),
+                risk_class: ToolRiskClass::Network,
+                reason: Some(String::from("network approval required")),
+                tool_call_turn_index: 0,
+                paused_result_turn_index: 1,
+                requested_at_ms: 2,
+                resolved_at_ms: Some(3),
+                resolution: Some(ToolApprovalResolution::Rejected),
+            },
+        ];
+
+        store
+            .append_pending_tool_approvals(&metadata.id, approvals.as_slice())
+            .expect("append approvals");
+
+        let all = store
+            .read_tool_approvals(&metadata.id)
+            .expect("read all approvals");
+        assert_eq!(all, approvals);
+
+        let pending = store
+            .read_pending_tool_approvals(&metadata.id)
+            .expect("read pending approvals");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].tool_call_id, "call_patch_1");
+    }
+
+    #[test]
+    fn resolve_pending_tool_approval_marks_record_resolved() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = FilesystemSessionStore::new(temp.path());
+        let metadata = store
+            .create_session("resolve-approval", temp.path())
+            .expect("create session");
+
+        store
+            .append_pending_tool_approvals(
+                &metadata.id,
+                &[PendingToolApproval {
+                    session_id: metadata.id.clone(),
+                    tool_call_id: String::from("call_patch_1"),
+                    tool_name: String::from("apply_patch"),
+                    arguments: serde_json::json!({ "path": "hello.txt" }),
+                    risk_class: ToolRiskClass::Write,
+                    reason: Some(String::from("write approval required")),
+                    tool_call_turn_index: 0,
+                    paused_result_turn_index: 1,
+                    requested_at_ms: 1,
+                    resolved_at_ms: None,
+                    resolution: None,
+                }],
+            )
+            .expect("append pending approval");
+
+        let resolved = store
+            .resolve_pending_tool_approval(
+                &metadata.id,
+                "call_patch_1",
+                ToolApprovalResolution::Approved,
+            )
+            .expect("resolve approval");
+
+        assert_eq!(resolved.resolution, Some(ToolApprovalResolution::Approved));
+        assert!(resolved.resolved_at_ms.is_some());
+        assert!(
+            store.read_pending_tool_approvals(&metadata.id)
+                .expect("read pending approvals")
+                .is_empty()
         );
     }
 }

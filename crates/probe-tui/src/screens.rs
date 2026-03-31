@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use probe_core::runtime::RuntimeEvent;
+use probe_protocol::session::{PendingToolApproval, ToolApprovalResolution};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Padding, Paragraph};
@@ -87,6 +88,7 @@ struct ProbeRuntimeState {
     phase: Option<String>,
     round_trip: Option<usize>,
     active_tool: Option<String>,
+    pending_approvals: Vec<PendingToolApproval>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,9 +101,14 @@ pub enum ScreenAction {
     CloseModal,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScreenCommand {
     RunAppleFmSetup,
+    ResolvePendingToolApproval {
+        session_id: String,
+        call_id: String,
+        resolution: ToolApprovalResolution,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +141,19 @@ impl ScreenOutcome {
     fn with_command(status: String, command: ScreenCommand) -> Self {
         Self {
             action: ScreenAction::None,
+            status: Some(status),
+            command: Some(command),
+            transcript_entry: None,
+        }
+    }
+
+    fn with_action_and_command(
+        action: ScreenAction,
+        status: String,
+        command: ScreenCommand,
+    ) -> Self {
+        Self {
+            action,
             status: Some(status),
             command: Some(command),
             transcript_entry: None,
@@ -307,6 +327,18 @@ impl ChatScreen {
 
     pub fn runtime_session_id(&self) -> Option<&str> {
         self.runtime.session_id.as_deref()
+    }
+
+    pub fn has_pending_tool_approvals(&self) -> bool {
+        !self.runtime.pending_approvals.is_empty()
+    }
+
+    pub fn pending_tool_approval_count(&self) -> usize {
+        self.runtime.pending_approvals.len()
+    }
+
+    pub fn current_pending_tool_approval(&self) -> Option<&PendingToolApproval> {
+        self.runtime.pending_approvals.first()
     }
 
     pub fn record_event(&mut self, message: impl Into<String>) {
@@ -607,6 +639,7 @@ impl ChatScreen {
                     phase: self.runtime.phase.clone(),
                     round_trip: self.runtime.round_trip,
                     active_tool: self.runtime.active_tool.clone(),
+                    pending_approvals: self.runtime.pending_approvals.clone(),
                 };
                 self.record_worker_event(format!(
                     "runtime session ready: {} via {}",
@@ -619,6 +652,28 @@ impl ChatScreen {
                 )
             }
             AppMessage::ProbeRuntimeEvent { event } => self.apply_runtime_event(event),
+            AppMessage::PendingToolApprovalsUpdated {
+                session_id,
+                approvals,
+            } => {
+                self.runtime.session_id = Some(session_id.clone());
+                self.runtime.pending_approvals = approvals.clone();
+                if approvals.is_empty() {
+                    self.record_worker_event(String::from("pending approvals cleared"));
+                    String::from("pending approvals cleared")
+                } else {
+                    let next = approvals
+                        .first()
+                        .map(|approval| approval.tool_name.as_str())
+                        .unwrap_or("unknown");
+                    self.record_worker_event(format!(
+                        "loaded {} pending approval(s); next: {}",
+                        approvals.len(),
+                        next
+                    ));
+                    format!("loaded {} pending approval(s)", approvals.len())
+                }
+            }
             AppMessage::AppleFmSetupStarted { backend } => {
                 self.setup.backend = Some(backend.clone());
                 self.setup.phase = TaskPhase::CheckingAvailability;
@@ -879,7 +934,7 @@ impl ChatScreen {
         };
         InfoPanel::new("Transcript", self.render_primary_body()).render(frame, columns[0]);
 
-        let sidebar = Layout::vertical([Constraint::Length(10), Constraint::Min(0)])
+        let sidebar = Layout::vertical([Constraint::Length(12), Constraint::Min(0)])
             .spacing(1)
             .split(columns[1]);
         SidebarPanel::new(
@@ -1034,6 +1089,7 @@ impl ChatScreen {
             .as_deref()
             .map(|value| preview(value, 18))
             .unwrap_or_else(|| String::from("pending"));
+        let pending_approvals = self.runtime.pending_approvals.len();
         vec![
             format!(
                 "focus: {}",
@@ -1052,6 +1108,7 @@ impl ChatScreen {
             format!("phase: {phase}"),
             format!("round: {round_trip}"),
             format!("tool: {active_tool}"),
+            format!("approvals: {pending_approvals}"),
             format!("cwd: {cwd}"),
         ]
     }
@@ -1417,12 +1474,14 @@ impl ApprovalChoice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalOverlay {
     selected: ApprovalChoice,
+    approval: PendingToolApproval,
 }
 
 impl ApprovalOverlay {
-    pub fn new() -> Self {
+    pub fn new(approval: PendingToolApproval) -> Self {
         Self {
             selected: ApprovalChoice::Approve,
+            approval,
         }
     }
 
@@ -1442,19 +1501,21 @@ impl ApprovalOverlay {
                     format!("selected {} in approval overlay", self.selected.label()),
                 )
             }
-            UiEvent::ComposerSubmit => ScreenOutcome::with_entry(
+            UiEvent::ComposerSubmit => ScreenOutcome::with_action_and_command(
                 ScreenAction::CloseModal,
-                format!("recorded approval decision: {}", self.selected.label()),
-                TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Approval Demo",
-                    vec![
-                        format!("decision: {}", self.selected.label()),
-                        String::from(
-                            "Typed overlays now provide a credible home for future approvals.",
-                        ),
-                    ],
+                format!(
+                    "queued {} for pending tool {}",
+                    self.selected.label(),
+                    self.approval.tool_name
                 ),
+                ScreenCommand::ResolvePendingToolApproval {
+                    session_id: self.approval.session_id.as_str().to_string(),
+                    call_id: self.approval.tool_call_id.clone(),
+                    resolution: match self.selected {
+                        ApprovalChoice::Approve => ToolApprovalResolution::Approved,
+                        ApprovalChoice::Reject => ToolApprovalResolution::Rejected,
+                    },
+                },
             ),
             UiEvent::Dismiss | UiEvent::OpenApprovalOverlay => ScreenOutcome::with_status(
                 ScreenAction::CloseModal,
@@ -1479,17 +1540,43 @@ impl ApprovalOverlay {
         } else {
             " "
         };
-        let content = Paragraph::new(Text::from(vec![
-            Line::from("Approval Demo"),
+        let mut lines = vec![
+            Line::from(format!("tool: {}", self.approval.tool_name)),
+            Line::from(format!(
+                "call: {}",
+                preview(self.approval.tool_call_id.as_str(), 24)
+            )),
+            Line::from(format!(
+                "risk: {}",
+                render_runtime_risk_class(self.approval.risk_class)
+            )),
+            Line::from(format!("requested_turn: {}", self.approval.tool_call_turn_index)),
+            Line::from(format!(
+                "paused_turn: {}",
+                self.approval.paused_result_turn_index
+            )),
+            Line::from(format!(
+                "reason: {}",
+                self.approval
+                    .reason
+                    .as_deref()
+                    .unwrap_or("pending operator decision")
+            )),
             Line::from(""),
-            Line::from("Probe needs approval for a future risky tool action."),
+            Line::from("arguments"),
+        ];
+        for line in compact_json_lines(&self.approval.arguments, 5) {
+            lines.push(Line::from(format!("  {line}")));
+        }
+        lines.extend([
             Line::from(""),
             Line::from(format!("{approve_marker} Approve the action")),
             Line::from(format!("{reject_marker} Reject the action")),
             Line::from(""),
-            Line::from("Tab/Shift+Tab changes selection. Enter commits. Esc dismisses."),
+            Line::from("Tab/Shift+Tab changes selection. Enter resolves. Esc dismisses."),
             Line::from(format!("Current stack depth: {stack_depth}")),
-        ]));
+        ]);
+        let content = Paragraph::new(Text::from(lines));
         ModalCard::new("Approval", content).render(frame, area);
     }
 }

@@ -111,7 +111,10 @@ Keys:
 The composer is active on `Chat` and disabled while overlays own focus or while
 `Events` is selected. The draft model tracks slash commands, typed mentions
 such as `@skill:rust` or `@app:github`, attachment placeholders, submission
-history, and multiline paste state.
+history, and multiline paste state. When a tool pauses for approval, Probe now
+persists a real pending-approval record in `probe-core`, opens the approval
+overlay with the live tool details, and resumes the paused turn after approve
+or reject instead of leaving the operator in a dead-end pause state.
 
 ## Dev Helpers
 
@@ -150,3 +153,4 @@ Start with:
 - [docs/42-probe-tui-real-runtime-session-worker.md](docs/42-probe-tui-real-runtime-session-worker.md)
 - [docs/43-probe-runtime-event-stream-and-live-tui-lifecycle.md](docs/43-probe-runtime-event-stream-and-live-tui-lifecycle.md)
 - [docs/44-probe-tui-tool-call-and-tool-result-rows.md](docs/44-probe-tui-tool-call-and-tool-result-rows.md)
+- [docs/45-probe-tui-resumable-approval-broker.md](docs/45-probe-tui-resumable-approval-broker.md)
