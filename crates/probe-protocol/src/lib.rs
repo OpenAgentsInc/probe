@@ -1,3 +1,4 @@
+pub mod backend;
 pub mod session;
 
 pub const PROBE_PROTOCOL_VERSION: u32 = 1;
@@ -22,6 +23,7 @@ impl ProtocolDescriptor {
 #[cfg(test)]
 mod tests {
     use super::ProtocolDescriptor;
+    use super::backend::{BackendKind, PrefixCacheMode, ServerAttachMode};
     use super::session::{SessionId, SessionState, TurnId};
 
     #[test]
@@ -39,5 +41,15 @@ mod tests {
         assert_eq!(session_id.as_str(), "session-1");
         assert_eq!(turn_id.0, 0);
         assert!(matches!(state, SessionState::Active));
+    }
+
+    #[test]
+    fn backend_types_are_constructible() {
+        let kind = BackendKind::OpenAiChatCompletions;
+        let attach_mode = ServerAttachMode::AttachToExisting;
+        let cache_mode = PrefixCacheMode::BackendDefault;
+        assert!(matches!(kind, BackendKind::OpenAiChatCompletions));
+        assert!(matches!(attach_mode, ServerAttachMode::AttachToExisting));
+        assert!(matches!(cache_mode, PrefixCacheMode::BackendDefault));
     }
 }

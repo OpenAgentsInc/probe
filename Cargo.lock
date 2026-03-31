@@ -611,6 +611,7 @@ dependencies = [
 name = "probe-provider-openai"
 version = "0.1.0"
 dependencies = [
+ "probe-protocol",
  "reqwest",
  "serde",
  "serde_json",

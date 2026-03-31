@@ -158,7 +158,10 @@ impl FilesystemSessionStore {
         Ok(sessions)
     }
 
-    pub fn read_metadata(&self, session_id: &SessionId) -> Result<SessionMetadata, SessionStoreError> {
+    pub fn read_metadata(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionMetadata, SessionStoreError> {
         let path = self.session_dir(session_id).join(METADATA_FILE);
         if !path.exists() {
             return Err(SessionStoreError::NotFound(session_id.as_str().to_string()));

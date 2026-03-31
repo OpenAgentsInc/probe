@@ -1,6 +1,7 @@
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
+use probe_protocol::backend::BackendProfile;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +29,17 @@ impl OpenAiProviderConfig {
     #[must_use]
     pub fn chat_completions_endpoint(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+    }
+
+    #[must_use]
+    pub fn from_backend_profile(profile: &BackendProfile) -> Self {
+        Self {
+            base_url: profile.base_url.clone(),
+            model: profile.model.clone(),
+            api_key: String::from("dummy"),
+            timeout: Duration::from_secs(profile.timeout_secs),
+            stream: false,
+        }
     }
 }
 
@@ -106,7 +118,9 @@ pub struct ChatCompletionResponse {
 impl ChatCompletionResponse {
     #[must_use]
     pub fn first_message_text(&self) -> Option<&str> {
-        self.choices.first().map(|choice| choice.message.content.as_str())
+        self.choices
+            .first()
+            .map(|choice| choice.message.content.as_str())
     }
 }
 
@@ -123,7 +137,10 @@ impl Display for OpenAiProviderError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnsupportedStreaming => {
-                write!(f, "streaming is not implemented in the initial provider client")
+                write!(
+                    f,
+                    "streaming is not implemented in the initial provider client"
+                )
             }
             Self::BuildClient(message) => write!(f, "failed to build http client: {message}"),
             Self::Transport(message) => write!(f, "request transport failed: {message}"),
@@ -202,6 +219,9 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+    use std::time::Duration;
+
+    use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
 
     use super::{
         ChatCompletionResponse, ChatMessage, OpenAiProviderClient, OpenAiProviderConfig,
@@ -213,7 +233,29 @@ mod tests {
         let config = OpenAiProviderConfig::localhost("example.gguf");
         assert_eq!(config.base_url, "http://127.0.0.1:8080/v1");
         assert_eq!(config.api_key, "dummy");
-        assert_eq!(config.chat_completions_endpoint(), "http://127.0.0.1:8080/v1/chat/completions");
+        assert_eq!(
+            config.chat_completions_endpoint(),
+            "http://127.0.0.1:8080/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn config_can_be_built_from_backend_profile() {
+        let profile = BackendProfile {
+            name: String::from("psionic-qwen35-2b-q8-registry"),
+            kind: BackendKind::OpenAiChatCompletions,
+            base_url: String::from("http://127.0.0.1:8080/v1"),
+            model: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+            api_key_env: String::from("PROBE_OPENAI_API_KEY"),
+            timeout_secs: 45,
+            attach_mode: ServerAttachMode::AttachToExisting,
+            prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        };
+        let config = OpenAiProviderConfig::from_backend_profile(&profile);
+        assert_eq!(config.base_url, "http://127.0.0.1:8080/v1");
+        assert_eq!(config.model, "qwen3.5-2b-q8_0-registry.gguf");
+        assert_eq!(config.timeout, Duration::from_secs(45));
+        assert!(!config.stream);
     }
 
     #[test]

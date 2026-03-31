@@ -17,3 +17,6 @@ This folder holds technical planning docs for the Probe runtime.
     append-only transcript storage
 - `05-openai-compatible-provider-client.md`
   - the first typed backend client seam for local OpenAI-compatible endpoints
+- `06-psionic-qwen35-backend-profile.md`
+  - the first explicit built-in backend profile for a local Psionic-served
+    Qwen3.5 model

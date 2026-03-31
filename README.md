@@ -41,6 +41,12 @@ The repository now includes a Rust workspace with:
 
 Planning docs live under `docs/`.
 
+The first canonical backend profile is a local Psionic-served Qwen lane:
+
+- profile: `psionic-qwen35-2b-q8-registry`
+- base URL: `http://127.0.0.1:8080/v1`
+- model id: `qwen3.5-2b-q8_0-registry.gguf`
+
 ## Non-Goals For The First Milestone
 
 - a large plugin marketplace
