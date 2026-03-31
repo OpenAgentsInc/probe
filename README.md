@@ -13,6 +13,35 @@ The repo currently contains six crates: `probe-protocol`, `probe-core`,
 `psionic-qwen35-2b-q8-registry`, targeting `http://127.0.0.1:8080/v1` with the
 model id `qwen3.5-2b-q8_0-registry.gguf`.
 
+## Status Snapshot
+
+Probe is now past the bootstrap/demo stage and into the first real local
+coding-runtime stage.
+
+Shipped now:
+
+- `probe exec` and `probe chat` on the shared runtime/session model
+- append-only transcript persistence plus local resume
+- the `coding_bootstrap` tool lane with approvals, harness profiles, and acceptance cases
+- replay and decision-dataset export
+- narrow offline-evaluable decision modules plus optimizer receipts
+- bounded oracle consultation and bounded long-context repo-analysis escalation
+- local backend attach and supervised launch flows
+
+Current posture:
+
+- local-first
+- single-controller
+- transcript- and policy-driven
+- optimized for honest coding turns before any larger recursive or multi-agent work
+
+Still intentionally not the goal:
+
+- plugin marketplace sprawl
+- hidden recursive runtimes
+- default long-context escalation for ordinary coding tasks
+- opaque optimizer magic in the hot path
+
 ## Current State
 
 Probe already works as a first local controller stack. You can run one-shot
