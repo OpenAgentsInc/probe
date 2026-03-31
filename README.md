@@ -71,6 +71,12 @@ Probe also has a retained acceptance runner:
 - writes a JSON report for the current local backend target
 - is designed to hit a local Psionic-served Qwen lane when one is available
 
+Probe now supports both local server attachment and supervised launch:
+
+- attach to an already-running local server with the default `--server-mode attach`
+- launch `psionic-openai-server` as a child process with `--server-mode launch`
+- persist the effective local server config under the Probe home
+
 ## Non-Goals For The First Milestone
 
 - a large plugin marketplace

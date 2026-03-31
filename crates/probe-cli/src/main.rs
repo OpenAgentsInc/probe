@@ -1,8 +1,10 @@
 mod acceptance;
 
 use std::io::{self, Write};
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use acceptance::{AcceptanceHarnessConfig, default_report_path, run_acceptance_harness};
 use clap::{Parser, Subcommand};
@@ -10,6 +12,9 @@ use probe_core::backend_profiles::{PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE, named_
 use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, current_working_dir,
     default_probe_home,
+};
+use probe_core::server_control::{
+    PsionicServerConfig, PsionicServerMode, ServerConfigOverrides, ServerProcessGuard,
 };
 use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
 use probe_protocol::session::SessionId;
@@ -48,6 +53,8 @@ struct ExecArgs {
     tool_choice: String,
     #[arg(long, default_value_t = false)]
     parallel_tool_calls: bool,
+    #[command(flatten)]
+    server: ServerArgs,
     #[arg(required = true)]
     prompt: Vec<String>,
 }
@@ -72,6 +79,8 @@ struct ChatArgs {
     tool_choice: String,
     #[arg(long, default_value_t = false)]
     parallel_tool_calls: bool,
+    #[command(flatten)]
+    server: ServerArgs,
 }
 
 #[derive(clap::Args, Debug)]
@@ -84,6 +93,30 @@ struct AcceptArgs {
     probe_home: Option<PathBuf>,
     #[arg(long)]
     report_path: Option<PathBuf>,
+    #[command(flatten)]
+    server: ServerArgs,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct ServerArgs {
+    #[arg(long, default_value = "attach")]
+    server_mode: String,
+    #[arg(long)]
+    server_config: Option<PathBuf>,
+    #[arg(long)]
+    server_binary: Option<PathBuf>,
+    #[arg(long)]
+    server_model_path: Option<PathBuf>,
+    #[arg(long)]
+    server_model_id: Option<String>,
+    #[arg(long)]
+    server_host: Option<String>,
+    #[arg(long)]
+    server_port: Option<u16>,
+    #[arg(long)]
+    server_backend: Option<String>,
+    #[arg(long)]
+    server_reasoning_budget: Option<u8>,
 }
 
 fn main() -> ExitCode {
@@ -106,8 +139,16 @@ fn run() -> Result<(), String> {
 }
 
 fn run_exec(args: ExecArgs) -> Result<(), String> {
-    let profile = named_profile(args.profile.as_str())?;
-    let runtime = resolve_runtime(args.probe_home)?;
+    let probe_home = args
+        .probe_home
+        .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
+    let runtime = resolve_runtime(Some(probe_home.clone()))?;
+    let server_guard = prepare_server(probe_home.as_path(), &args.server)?;
+    let mut profile = named_profile(args.profile.as_str())?;
+    profile.base_url = server_guard.base_url();
+    if let Some(model_id) = server_guard.model_id() {
+        profile.model = model_id;
+    }
     let tool_loop = resolve_tool_loop(
         args.tool_set.as_deref(),
         args.tool_choice.as_str(),
@@ -158,7 +199,11 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
         ));
     }
 
-    let runtime = resolve_runtime(args.probe_home)?;
+    let probe_home = args
+        .probe_home
+        .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
+    let runtime = resolve_runtime(Some(probe_home.clone()))?;
+    let server_guard = prepare_server(probe_home.as_path(), &args.server)?;
     let tool_loop = resolve_tool_loop(
         args.tool_set.as_deref(),
         args.tool_choice.as_str(),
@@ -221,7 +266,11 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
             continue;
         }
 
-        let profile = named_profile(profile_name.as_str())?;
+        let mut profile = named_profile(profile_name.as_str())?;
+        profile.base_url = server_guard.base_url();
+        if let Some(model_id) = server_guard.model_id() {
+            profile.model = model_id;
+        }
         let outcome = if let Some(active_session_id) = &session_id {
             runtime
                 .continue_plain_text_session(PlainTextResumeRequest {
@@ -267,7 +316,12 @@ fn run_accept(args: AcceptArgs) -> Result<(), String> {
     let probe_home = args
         .probe_home
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
+    let server_guard = prepare_server(probe_home.as_path(), &args.server)?;
     let mut profile = named_profile(PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE)?;
+    profile.base_url = server_guard.base_url();
+    if let Some(model_id) = server_guard.model_id() {
+        profile.model = model_id;
+    }
     if let Some(base_url) = args.base_url {
         profile.base_url = base_url;
     }
@@ -319,6 +373,36 @@ fn resolve_runtime(probe_home: Option<PathBuf>) -> Result<ProbeRuntime, String> 
     )))
 }
 
+fn prepare_server(
+    probe_home: &Path,
+    server_args: &ServerArgs,
+) -> Result<ServerProcessGuard, String> {
+    let config_path = server_args
+        .server_config
+        .clone()
+        .unwrap_or_else(|| PsionicServerConfig::config_path(probe_home));
+    let mut config = PsionicServerConfig::load_or_create(config_path.as_path())
+        .map_err(|error| error.to_string())?;
+    config
+        .apply_overrides(&ServerConfigOverrides {
+            mode: Some(parse_server_mode(server_args.server_mode.as_str())?),
+            host: server_args.server_host.clone(),
+            port: server_args.server_port,
+            backend: server_args.server_backend.clone(),
+            binary_path: server_args.server_binary.clone(),
+            model_path: server_args.server_model_path.clone(),
+            model_id: server_args.server_model_id.clone(),
+            reasoning_budget: server_args.server_reasoning_budget,
+        })
+        .map_err(|error| error.to_string())?;
+    config
+        .save(config_path.as_path())
+        .map_err(|error| error.to_string())?;
+    config
+        .prepare(Duration::from_secs(15))
+        .map_err(|error| error.to_string())
+}
+
 fn resolve_tool_loop(
     tool_set: Option<&str>,
     tool_choice: &str,
@@ -338,5 +422,15 @@ fn resolve_tool_loop(
             "tool flags require --tool-set; the first supported value is `weather`",
         )),
         None => Ok(None),
+    }
+}
+
+fn parse_server_mode(value: &str) -> Result<PsionicServerMode, String> {
+    match value {
+        "attach" => Ok(PsionicServerMode::Attach),
+        "launch" => Ok(PsionicServerMode::Launch),
+        other => Err(format!(
+            "invalid server mode `{other}`; expected `attach` or `launch`"
+        )),
     }
 }

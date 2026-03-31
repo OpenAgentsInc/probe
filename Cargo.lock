@@ -709,6 +709,8 @@ version = "0.1.0"
 dependencies = [
  "probe-protocol",
  "probe-provider-openai",
+ "reqwest",
+ "serde",
  "serde_json",
  "tempfile",
 ]

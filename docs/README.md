@@ -31,3 +31,6 @@ This folder holds technical planning docs for the Probe runtime.
 - `10-acceptance-harness.md`
   - the retained local acceptance runner for plain and tool-backed controller
     cases
+- `11-server-attach-and-launch.md`
+  - local server config, attach mode, and supervised launch behavior for
+    `psionic-openai-server`

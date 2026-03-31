@@ -44,12 +44,14 @@ The runner writes a JSON report that records:
 
 ## Current Operating Assumption
 
-The runner expects an already-running local backend target.
+The runner can now use the same attach-or-launch server preparation path as the
+other CLI commands.
 
-It does not launch `psionic-openai-server` itself yet.
+In practice that means:
 
-That launch and attach flow is a separate concern and belongs to the next
-launcher issue.
+- default attach mode checks an already-running local server
+- launch mode can supervise `psionic-openai-server` for the lifetime of the
+  acceptance command
 
 ## Validation Boundary
 

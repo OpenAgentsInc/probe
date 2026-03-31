@@ -47,7 +47,10 @@ pub fn run_acceptance_harness(
     let mut results = Vec::new();
 
     results.push(run_case_plain_answer(&runtime, &config.base_profile));
-    results.push(run_case_required_single_tool(&runtime, &config.base_profile));
+    results.push(run_case_required_single_tool(
+        &runtime,
+        &config.base_profile,
+    ));
     results.push(run_case_multi_turn_tool_continuation(
         &runtime,
         &config.base_profile,
