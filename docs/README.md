@@ -94,3 +94,7 @@ This folder holds technical planning docs for the Probe runtime.
   - narrow retained worker thread and typed app-message seam for the Probe TUI,
     so screens can request bounded background work without freezing the render
     loop
+- `32-apple-fm-setup-demo-screen.md`
+  - the first real Apple FM-backed Probe TUI screen, including availability
+    gating, a retained startup prove-out flow, and snapshot/test coverage for
+    unavailable, running, and completed states

@@ -6,7 +6,13 @@ license.workspace = true
 
 [dependencies]
 crossterm.workspace = true
+probe-core.workspace = true
+probe-protocol.workspace = true
+probe-provider-apple-fm.workspace = true
+psionic-apple-fm.workspace = true
 ratatui.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+probe-test-support.workspace = true
+serde_json.workspace = true

@@ -31,10 +31,10 @@ Shipped now:
 - local backend attach and supervised launch flows
 - Apple FM plain-text `exec`/`chat` turns, Apple-FM-backed `consult_oracle`,
   and session-backed Apple FM coding turns through the Probe approval layer
-- `probe tui`, the first Textual-inspired Rust TUI shell proving a small
-  app/screen/widget seam, screen stack, help modal, typed app-message worker
-  lane, and visible keyboard-driven state changes, with `cargo probe` as the
-  repo-local shortcut
+- `probe tui`, a Textual-inspired Rust TUI shell that now auto-runs a real
+  Apple FM setup prove-out on launch: availability gating first, then a short
+  series of visible plain-text Apple FM calls when the bridge is ready, with
+  `cargo probe` as the repo-local shortcut
 
 Current posture:
 
@@ -191,17 +191,20 @@ cargo probe
 
 This is the current top-level Probe TUI entrypoint.
 
-It is intentionally minimal right now, but it is meant to evolve into the real
-Probe TUI rather than stay as a forever-separate demo path.
+On launch, the TUI immediately checks the canonical Apple FM bridge profile for
+availability and access. If the bridge reports the model ready, Probe runs a
+short three-call plain-text setup prove-out and renders the live results. If
+the bridge is unavailable or not admitted, the screen stays honest and shows
+the unavailable or failure detail instead of pretending inference worked.
 
 Keys:
 
 - `r`
-  - queue the retained background-task demo and watch the worker state update
+  - rerun the Apple FM setup check and three-call prove-out
 - `Tab`, `Left`, `Right`
   - switch between the overview and event-log views
 - `t`
-  - toggle the main panel body copy
+  - toggle between operator notes and live Apple FM detail
 - `?` or `F1`
   - open or dismiss the help modal
 - `Esc`
@@ -211,7 +214,8 @@ Keys:
 
 The current TUI is still intentionally narrow, but it now has a real worker
 thread and typed app-message seam. The shell keeps repainting while the worker
-reports queued, running, completed, or failed task state back into the screen.
+checks Apple FM availability, runs the retained setup calls, and folds ready,
+unavailable, completed, or failed state back into the screen.
 
 Resume a prior session:
 

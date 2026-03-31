@@ -6,7 +6,10 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{List, ListItem, Paragraph};
 
 use crate::event::UiEvent;
-use crate::message::{AppMessage, BackgroundTaskRequest};
+use crate::message::{
+    AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
+    AppleFmFailureSummary, AppleFmUsageSummary,
+};
 use crate::widgets::{InfoPanel, ModalCard, SidebarPanel, TabStrip};
 
 const MAX_EVENT_LOG: usize = 8;
@@ -47,8 +50,10 @@ impl ActiveTab {
 pub enum TaskPhase {
     Idle,
     Queued,
+    CheckingAvailability,
+    Unavailable,
     Running,
-    Succeeded,
+    Completed,
     Failed,
 }
 
@@ -59,11 +64,16 @@ pub enum ScreenAction {
     CloseModal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenCommand {
+    RunAppleFmSetup,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenOutcome {
     pub action: ScreenAction,
     pub status: Option<String>,
-    pub task_request: Option<BackgroundTaskRequest>,
+    pub command: Option<ScreenCommand>,
 }
 
 impl ScreenOutcome {
@@ -71,7 +81,7 @@ impl ScreenOutcome {
         Self {
             action: ScreenAction::None,
             status: None,
-            task_request: None,
+            command: None,
         }
     }
 
@@ -79,15 +89,15 @@ impl ScreenOutcome {
         Self {
             action,
             status: Some(status),
-            task_request: None,
+            command: None,
         }
     }
 
-    fn with_task(status: String, task_request: BackgroundTaskRequest) -> Self {
+    fn with_command(status: String, command: ScreenCommand) -> Self {
         Self {
             action: ScreenAction::None,
             status: Some(status),
-            task_request: Some(task_request),
+            command: Some(command),
         }
     }
 }
@@ -140,85 +150,32 @@ impl ScreenState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum TaskPanelState {
-    Idle,
-    Queued {
-        title: String,
-        detail: String,
-    },
-    Running {
-        title: String,
-        step: usize,
-        total_steps: usize,
-        detail: String,
-    },
-    Succeeded {
-        title: String,
-        lines: Vec<String>,
-    },
-    Failed {
-        title: String,
-        detail: String,
-    },
+struct ActiveCall {
+    title: String,
+    prompt: String,
+    index: usize,
+    total_calls: usize,
 }
 
-impl Default for TaskPanelState {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppleFmSetupState {
+    phase: TaskPhase,
+    backend: Option<AppleFmBackendSummary>,
+    availability: Option<AppleFmAvailabilitySummary>,
+    calls: Vec<AppleFmCallRecord>,
+    active_call: Option<ActiveCall>,
+    failure: Option<AppleFmFailureSummary>,
+}
+
+impl Default for AppleFmSetupState {
     fn default() -> Self {
-        Self::Idle
-    }
-}
-
-impl TaskPanelState {
-    const fn phase(&self) -> TaskPhase {
-        match self {
-            Self::Idle => TaskPhase::Idle,
-            Self::Queued { .. } => TaskPhase::Queued,
-            Self::Running { .. } => TaskPhase::Running,
-            Self::Succeeded { .. } => TaskPhase::Succeeded,
-            Self::Failed { .. } => TaskPhase::Failed,
-        }
-    }
-
-    fn render_body(&self) -> Text<'static> {
-        match self {
-            Self::Idle => Text::from(vec![
-                Line::from("No background task is running."),
-                Line::from(""),
-                Line::from("Press r to start the retained probe setup demo task."),
-                Line::from("The app shell will keep repainting while the worker runs."),
-            ]),
-            Self::Queued { title, detail } => Text::from(vec![
-                Line::from(title.clone()),
-                Line::from(""),
-                Line::from("State: queued"),
-                Line::from(detail.clone()),
-            ]),
-            Self::Running {
-                title,
-                step,
-                total_steps,
-                detail,
-            } => Text::from(vec![
-                Line::from(title.clone()),
-                Line::from(""),
-                Line::from(format!("State: running ({step}/{total_steps})")),
-                Line::from(detail.clone()),
-            ]),
-            Self::Succeeded { title, lines } => {
-                let mut rendered = vec![
-                    Line::from(title.clone()),
-                    Line::from(""),
-                    Line::from("State: completed"),
-                ];
-                rendered.extend(lines.iter().cloned().map(Line::from));
-                Text::from(rendered)
-            }
-            Self::Failed { title, detail } => Text::from(vec![
-                Line::from(title.clone()),
-                Line::from(""),
-                Line::from("State: failed"),
-                Line::from(detail.clone()),
-            ]),
+        Self {
+            phase: TaskPhase::Idle,
+            backend: None,
+            availability: None,
+            calls: Vec::new(),
+            active_call: None,
+            failure: None,
         }
     }
 }
@@ -229,7 +186,7 @@ pub struct HelloScreen {
     emphasized_copy: bool,
     recent_events: VecDeque<String>,
     task_events: VecDeque<String>,
-    task_state: TaskPanelState,
+    setup: AppleFmSetupState,
 }
 
 impl Default for HelloScreen {
@@ -239,10 +196,10 @@ impl Default for HelloScreen {
             emphasized_copy: false,
             recent_events: VecDeque::new(),
             task_events: VecDeque::new(),
-            task_state: TaskPanelState::Idle,
+            setup: AppleFmSetupState::default(),
         };
-        screen.record_event("hello demo ready");
-        screen.record_event("press r to start a background task");
+        screen.record_event("probe tui ready");
+        screen.record_event("press r to rerun Apple FM setup");
         screen.record_event("press ? for help");
         screen.record_event("press tab to switch views");
         screen
@@ -259,7 +216,11 @@ impl HelloScreen {
     }
 
     pub fn task_phase(&self) -> TaskPhase {
-        self.task_state.phase()
+        self.setup.phase
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.setup.calls.len()
     }
 
     pub fn recent_events(&self) -> impl Iterator<Item = &String> {
@@ -284,61 +245,116 @@ impl HelloScreen {
         }
     }
 
-    pub fn queue_task(&mut self, request: BackgroundTaskRequest) {
-        self.task_state = TaskPanelState::Queued {
-            title: request.title().to_string(),
-            detail: String::from("request queued locally and waiting for the worker"),
+    pub fn prepare_for_setup(&mut self, backend: AppleFmBackendSummary) {
+        self.setup = AppleFmSetupState {
+            phase: TaskPhase::Queued,
+            backend: Some(backend.clone()),
+            ..AppleFmSetupState::default()
         };
-        self.record_event(format!("queued {}", request.kind().label()));
-        self.record_worker_event(format!("{} queued", request.kind().label()));
+        self.task_events.clear();
+        self.record_worker_event(format!(
+            "queued Apple FM setup against {}",
+            backend.profile_name
+        ));
     }
 
     pub fn apply_message(&mut self, message: AppMessage) -> String {
         match message {
-            AppMessage::TaskStarted { kind, title } => {
-                self.task_state = TaskPanelState::Running {
-                    title,
-                    step: 0,
-                    total_steps: 0,
-                    detail: String::from("worker accepted the request"),
-                };
-                self.record_worker_event(format!("{} started", kind.label()));
-                format!("started {}", kind.label())
-            }
-            AppMessage::TaskProgress {
-                kind,
-                step,
-                total_steps,
-                detail,
-            } => {
-                self.task_state = TaskPanelState::Running {
-                    title: String::from("Probe setup demo"),
-                    step,
-                    total_steps,
-                    detail: detail.clone(),
-                };
+            AppMessage::AppleFmSetupStarted { backend } => {
+                self.setup.backend = Some(backend.clone());
+                self.setup.phase = TaskPhase::CheckingAvailability;
                 self.record_worker_event(format!(
-                    "{} advanced to step {step}/{total_steps}",
-                    kind.label()
+                    "checking Apple FM availability via {}",
+                    backend.base_url
                 ));
-                format!("running {} ({step}/{total_steps})", kind.label())
+                String::from("checking Apple FM availability")
             }
-            AppMessage::TaskSucceeded { kind, title, lines } => {
-                self.task_state = TaskPanelState::Succeeded {
-                    title,
-                    lines,
-                };
-                self.record_worker_event(format!("{} completed successfully", kind.label()));
-                format!("completed {}", kind.label())
-            }
-            AppMessage::TaskFailed {
-                kind,
-                title,
-                detail,
+            AppMessage::AppleFmAvailabilityReady {
+                backend,
+                availability,
             } => {
-                self.task_state = TaskPanelState::Failed { title, detail };
-                self.record_worker_event(format!("{} failed", kind.label()));
-                format!("failed {}", kind.label())
+                let platform = availability
+                    .platform
+                    .clone()
+                    .unwrap_or_else(|| String::from("unknown platform"));
+                self.setup.backend = Some(backend);
+                self.setup.availability = Some(availability);
+                self.record_worker_event(format!("Apple FM availability ready on {platform}"));
+                String::from("Apple FM availability check passed")
+            }
+            AppMessage::AppleFmAvailabilityUnavailable {
+                backend,
+                availability,
+            } => {
+                let reason = availability
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| String::from("unknown"));
+                self.setup.backend = Some(backend);
+                self.setup.availability = Some(availability);
+                self.setup.active_call = None;
+                self.setup.phase = TaskPhase::Unavailable;
+                self.record_worker_event(format!("Apple FM unavailable: {reason}"));
+                String::from("Apple FM unavailable")
+            }
+            AppMessage::AppleFmCallStarted {
+                backend,
+                index,
+                total_calls,
+                title,
+                prompt,
+            } => {
+                self.setup.backend = Some(backend);
+                self.setup.phase = TaskPhase::Running;
+                self.setup.active_call = Some(ActiveCall {
+                    title: title.clone(),
+                    prompt,
+                    index,
+                    total_calls,
+                });
+                self.record_worker_event(format!(
+                    "started call {index}/{total_calls}: {title}"
+                ));
+                format!("running Apple FM call {index}/{total_calls}")
+            }
+            AppMessage::AppleFmCallCompleted {
+                backend,
+                index,
+                total_calls,
+                call,
+            } => {
+                let preview = preview(call.response_text.as_str(), 36);
+                self.setup.backend = Some(backend);
+                self.setup.calls.push(call);
+                self.setup.active_call = None;
+                self.record_worker_event(format!(
+                    "completed call {index}/{total_calls}: {preview}"
+                ));
+                format!("completed Apple FM call {index}/{total_calls}")
+            }
+            AppMessage::AppleFmSetupCompleted { backend, total_calls } => {
+                self.setup.backend = Some(backend);
+                self.setup.phase = TaskPhase::Completed;
+                self.setup.active_call = None;
+                self.record_worker_event(format!(
+                    "Apple FM setup completed after {total_calls} calls"
+                ));
+                String::from("Apple FM setup completed")
+            }
+            AppMessage::AppleFmSetupFailed { backend, failure } => {
+                let stage = failure.stage.clone();
+                let reason = failure
+                    .reason_code
+                    .clone()
+                    .unwrap_or_else(|| String::from("untyped"));
+                self.setup.backend = Some(backend);
+                self.setup.failure = Some(failure);
+                self.setup.phase = TaskPhase::Failed;
+                self.setup.active_call = None;
+                self.record_worker_event(format!(
+                    "Apple FM setup failed at {stage} ({reason})"
+                ));
+                format!("Apple FM setup failed at {stage}")
             }
         }
     }
@@ -360,26 +376,18 @@ impl HelloScreen {
             UiEvent::ToggleBody => {
                 self.emphasized_copy = !self.emphasized_copy;
                 let status = if self.emphasized_copy {
-                    String::from("toggled body copy to emphasized mode")
+                    String::from("showing operator notes instead of live response detail")
                 } else {
-                    String::from("restored body copy to baseline mode")
+                    String::from("restored live Apple FM detail view")
                 };
                 self.record_event(status.clone());
                 ScreenOutcome::with_status(ScreenAction::None, status)
             }
             UiEvent::RunBackgroundTask => {
-                if matches!(
-                    self.task_state.phase(),
-                    TaskPhase::Queued | TaskPhase::Running
-                ) {
-                    let status = String::from("background task is already in flight");
-                    self.record_event(status.clone());
-                    return ScreenOutcome::with_status(ScreenAction::None, status);
-                }
-                self.queue_task(BackgroundTaskRequest::DemoSuccess);
-                ScreenOutcome::with_task(
-                    String::from("queued background task"),
-                    BackgroundTaskRequest::DemoSuccess,
+                self.record_event(String::from("requested Apple FM setup rerun"));
+                ScreenOutcome::with_command(
+                    String::from("queued Apple FM setup rerun"),
+                    ScreenCommand::RunAppleFmSetup,
                 )
             }
             UiEvent::OpenHelp => ScreenOutcome::with_status(
@@ -394,8 +402,8 @@ impl HelloScreen {
     fn render(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
         let sections = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
         TabStrip::new(
-            "Hello Demo",
-            "Textual-inspired Rust shell with a screen stack, app messages, and worker ownership.",
+            "Apple FM Setup",
+            "Probe-owned Apple Foundation Models prove-out with availability gating and live plain-text calls.",
             self.active_tab,
         )
         .render(frame, sections[0]);
@@ -407,48 +415,26 @@ impl HelloScreen {
     }
 
     fn render_overview(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
-        let columns = Layout::horizontal([Constraint::Percentage(63), Constraint::Percentage(37)])
+        let columns = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(area);
         let focus_name = if stack_depth > 1 {
             "help modal"
         } else {
-            "hello screen"
+            "setup screen"
         };
-        let body_copy = if self.emphasized_copy {
-            Text::from(vec![
-                Line::from("This demo now proves a retained app-message seam in Rust."),
-                Line::from(""),
-                Line::from("The shell owns terminal lifecycle, chrome, and worker polling."),
-                Line::from("The screen owns view state and task presentation."),
-                Line::from("Worker messages flow back into visible UI state without blocking."),
-            ])
-        } else {
-            Text::from(vec![
-                Line::from("Probe now has a visible terminal UI target to iterate on."),
-                Line::from(""),
-                Line::from("Use r to start a background task."),
-                Line::from("Use Tab or Left/Right to switch views."),
-                Line::from("Use ? to open the focused help modal."),
-            ])
-        };
-        InfoPanel::new("Main Panel", body_copy).render(frame, columns[0]);
+        InfoPanel::new("Current Detail", self.render_detail_body())
+            .render(frame, columns[0]);
 
         let sidebar =
-            Layout::vertical([Constraint::Length(8), Constraint::Min(10), Constraint::Min(0)])
+            Layout::vertical([Constraint::Length(7), Constraint::Length(8), Constraint::Min(0)])
                 .split(columns[1]);
         SidebarPanel::new(
-            "Screen Stack",
-            vec![
-                format!("depth: {stack_depth}"),
-                String::from("base: hello screen"),
-                format!("focus: {focus_name}"),
-                format!("view: {}", self.active_tab.title()),
-            ],
+            "Setup Status",
+            self.render_status_lines(focus_name, stack_depth),
         )
         .render(frame, sidebar[0]);
-        InfoPanel::new("Task Status", self.task_state.render_body()).render(frame, sidebar[1]);
-        SidebarPanel::new("Recent UI Events", self.recent_events.iter().cloned().collect())
-            .render(frame, sidebar[2]);
+        SidebarPanel::new("Backend Facts", self.render_backend_lines()).render(frame, sidebar[1]);
+        SidebarPanel::new("Availability", self.render_availability_lines()).render(frame, sidebar[2]);
     }
 
     fn render_events(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
@@ -456,16 +442,16 @@ impl HelloScreen {
         InfoPanel::new(
             "App Shell Notes",
             Text::from(vec![
-                Line::from("AppShell owns terminal lifecycle, chrome, dispatch, and worker polling."),
-                Line::from("HelloScreen owns tab state, body copy, and task presentation."),
-                Line::from("HelpScreen is modal and sits on top of the base screen."),
+                Line::from("AppShell owns terminal lifecycle, dispatch, and worker polling."),
+                Line::from("This screen checks Apple FM availability before any inference call."),
+                Line::from("The current setup flow is deliberately plain-text only."),
                 Line::from(format!("Current stack depth: {stack_depth}")),
             ]),
         )
         .render(frame, rows[0]);
 
         let columns =
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
+            Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(rows[1]);
         let ui_items = self
             .recent_events
             .iter()
@@ -485,9 +471,215 @@ impl HelloScreen {
             .collect::<Vec<_>>();
         frame.render_widget(
             List::new(worker_items)
-                .block(ratatui::widgets::Block::bordered().title("Worker Event Log")),
+                .block(ratatui::widgets::Block::bordered().title("Apple FM Timeline")),
             columns[1],
         );
+    }
+
+    fn render_detail_body(&self) -> Text<'static> {
+        if self.emphasized_copy {
+            return Text::from(vec![
+                Line::from("This screen is intentionally a narrow prove-out lane."),
+                Line::from(""),
+                Line::from("It checks Apple FM availability before any inference."),
+                Line::from("It then runs three short plain-text setup prompts."),
+                Line::from("The worker thread keeps the retained UI responsive."),
+                Line::from("Issue #32 stops here on purpose and does not build full chat."),
+            ]);
+        }
+
+        if let Some(failure) = &self.setup.failure {
+            return Text::from(vec![
+                Line::from(format!("Stage: {}", failure.stage)),
+                Line::from(""),
+                Line::from(failure.detail.clone()),
+                Line::from(format!(
+                    "reason_code: {}",
+                    failure
+                        .reason_code
+                        .clone()
+                        .unwrap_or_else(|| String::from("none"))
+                )),
+                Line::from(format!(
+                    "retryable: {}",
+                    failure
+                        .retryable
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| String::from("unknown"))
+                )),
+                Line::from(format!(
+                    "failure_reason: {}",
+                    failure
+                        .failure_reason
+                        .clone()
+                        .unwrap_or_else(|| String::from("none"))
+                )),
+                Line::from(format!(
+                    "recovery_suggestion: {}",
+                    failure
+                        .recovery_suggestion
+                        .clone()
+                        .unwrap_or_else(|| String::from("none"))
+                )),
+            ]);
+        }
+
+        if let Some(active_call) = &self.setup.active_call {
+            return Text::from(vec![
+                Line::from(format!(
+                    "Running call {}/{}: {}",
+                    active_call.index, active_call.total_calls, active_call.title
+                )),
+                Line::from(""),
+                Line::from("Prompt"),
+                Line::from(active_call.prompt.clone()),
+                Line::from(""),
+                Line::from("Response"),
+                Line::from("[waiting for Apple FM reply]"),
+            ]);
+        }
+
+        if let Some(last_call) = self.setup.calls.last() {
+            let mut lines = vec![
+                Line::from(format!("Last completed call: {}", last_call.title)),
+                Line::from(""),
+                Line::from("Prompt"),
+                Line::from(last_call.prompt.clone()),
+                Line::from(""),
+                Line::from("Response"),
+                Line::from(last_call.response_text.clone()),
+                Line::from(""),
+                Line::from(format!("response_id: {}", last_call.response_id)),
+                Line::from(format!("model: {}", last_call.response_model)),
+            ];
+            lines.extend(last_call.usage.render_lines());
+            return Text::from(lines);
+        }
+
+        match self.setup.phase {
+            TaskPhase::Queued => Text::from(vec![
+                Line::from("Apple FM setup has been queued."),
+                Line::from(""),
+                Line::from("Probe will check availability before issuing any inference."),
+                Line::from("Use r to rerun the setup flow manually."),
+            ]),
+            TaskPhase::CheckingAvailability => Text::from(vec![
+                Line::from("Checking whether Apple FM is available on this machine."),
+                Line::from(""),
+                Line::from("No inference requests will be issued until the availability gate passes."),
+            ]),
+            TaskPhase::Unavailable => Text::from(vec![
+                Line::from("Apple FM is not ready on this machine right now."),
+                Line::from(""),
+                Line::from(
+                    self.setup
+                        .availability
+                        .as_ref()
+                        .and_then(|availability| availability.availability_message.clone())
+                        .unwrap_or_else(|| String::from("The bridge did not provide extra availability detail.")),
+                ),
+                Line::from(""),
+                Line::from("Press r to rerun the setup check after the machine is admitted."),
+            ]),
+            TaskPhase::Completed => Text::from(vec![
+                Line::from("Apple FM setup completed successfully."),
+                Line::from(""),
+                Line::from("The timeline shows the three retained setup calls."),
+                Line::from("Use t to swap between live detail and operator notes."),
+            ]),
+            TaskPhase::Idle | TaskPhase::Running | TaskPhase::Failed => Text::from(vec![
+                Line::from("Probe TUI is ready."),
+                Line::from(""),
+                Line::from("Press r to start or rerun the Apple FM setup flow."),
+            ]),
+        }
+    }
+
+    fn render_status_lines(&self, focus_name: &str, stack_depth: usize) -> Vec<String> {
+        let phase = match self.setup.phase {
+            TaskPhase::Idle => "idle",
+            TaskPhase::Queued => "queued",
+            TaskPhase::CheckingAvailability => "checking_availability",
+            TaskPhase::Unavailable => "unavailable",
+            TaskPhase::Running => "running",
+            TaskPhase::Completed => "completed",
+            TaskPhase::Failed => "failed",
+        };
+        let progress = if let Some(active_call) = &self.setup.active_call {
+            format!("call: {}/{}", active_call.index, active_call.total_calls)
+        } else {
+            format!("calls_done: {}", self.setup.calls.len())
+        };
+        vec![
+            format!("phase: {phase}"),
+            progress,
+            format!("focus: {focus_name}"),
+            format!("stack_depth: {stack_depth}"),
+            format!(
+                "availability_ready: {}",
+                self.setup
+                    .availability
+                    .as_ref()
+                    .map(|availability| availability.ready.to_string())
+                    .unwrap_or_else(|| String::from("pending"))
+            ),
+        ]
+    }
+
+    fn render_backend_lines(&self) -> Vec<String> {
+        let Some(backend) = &self.setup.backend else {
+            return vec![
+                String::from("profile: pending"),
+                String::from("base_url: pending"),
+                String::from("model: pending"),
+            ];
+        };
+        vec![
+            format!("profile: {}", backend.profile_name),
+            format!("base_url: {}", backend.base_url),
+            format!("model: {}", backend.model_id),
+        ]
+    }
+
+    fn render_availability_lines(&self) -> Vec<String> {
+        let Some(availability) = &self.setup.availability else {
+            return vec![
+                String::from("ready: pending"),
+                String::from("reason: pending"),
+                String::from("message: waiting for /health"),
+            ];
+        };
+        vec![
+            format!("ready: {}", availability.ready),
+            format!(
+                "reason: {}",
+                availability
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| String::from("none"))
+            ),
+            format!(
+                "platform: {}",
+                availability
+                    .platform
+                    .clone()
+                    .unwrap_or_else(|| String::from("unknown"))
+            ),
+            format!(
+                "version: {}",
+                availability
+                    .version
+                    .clone()
+                    .unwrap_or_else(|| String::from("unknown"))
+            ),
+            format!(
+                "message: {}",
+                availability
+                    .availability_message
+                    .clone()
+                    .unwrap_or_else(|| String::from("none"))
+            ),
+        ]
     }
 }
 
@@ -511,11 +703,11 @@ impl HelpScreen {
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
         let content = Paragraph::new(Text::from(vec![
-            Line::from("Probe TUI Hello Keys"),
+            Line::from("Probe Apple FM Setup Keys"),
             Line::from(""),
             Line::from("Tab / Left / Right  switch views"),
-            Line::from("r                   run retained background task"),
-            Line::from("t                   toggle body copy"),
+            Line::from("r                   rerun Apple FM setup"),
+            Line::from("t                   toggle operator notes / live detail"),
             Line::from("? or F1             open or dismiss this modal"),
             Line::from("Esc                 dismiss this modal"),
             Line::from("q or Ctrl+C         quit"),
@@ -523,5 +715,48 @@ impl HelpScreen {
             Line::from(format!("Current stack depth: {stack_depth}")),
         ]));
         ModalCard::new("Help", content).render(frame, area);
+    }
+}
+
+impl AppleFmUsageSummary {
+    fn render_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        if self.total_tokens.is_some() {
+            lines.push(Line::from(format!(
+                "usage_total: {}",
+                render_usage_value(self.total_tokens, self.total_truth.as_deref())
+            )));
+        }
+        if self.prompt_tokens.is_some() {
+            lines.push(Line::from(format!(
+                "usage_prompt: {}",
+                render_usage_value(self.prompt_tokens, self.prompt_truth.as_deref())
+            )));
+        }
+        if self.completion_tokens.is_some() {
+            lines.push(Line::from(format!(
+                "usage_completion: {}",
+                render_usage_value(self.completion_tokens, self.completion_truth.as_deref())
+            )));
+        }
+        lines
+    }
+}
+
+fn render_usage_value(value: Option<u64>, truth: Option<&str>) -> String {
+    match (value, truth) {
+        (Some(value), Some(truth)) => format!("{value} ({truth})"),
+        (Some(value), None) => value.to_string(),
+        (None, _) => String::from("n/a"),
+    }
+}
+
+fn preview(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let preview = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
     }
 }

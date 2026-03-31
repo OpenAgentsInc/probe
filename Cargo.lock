@@ -1601,7 +1601,13 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "insta",
+ "probe-core",
+ "probe-protocol",
+ "probe-provider-apple-fm",
+ "probe-test-support",
+ "psionic-apple-fm",
  "ratatui",
+ "serde_json",
 ]
 
 [[package]]

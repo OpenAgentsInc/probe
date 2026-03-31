@@ -45,7 +45,7 @@ use probe_protocol::session::{
     BackendTurnReceipt, CacheSignal, SessionHarnessProfile, SessionId, SessionTurn,
     ToolPolicyDecision, ToolRiskClass, UsageMeasurement, UsageTruth,
 };
-use probe_tui::run_hello_demo;
+use probe_tui::run_probe_tui;
 
 #[derive(Parser, Debug)]
 #[command(name = "probe")]
@@ -297,7 +297,7 @@ fn run() -> Result<(), String> {
 
 fn run_tui(args: TuiArgs) -> Result<(), String> {
     match args.command.unwrap_or(TuiCommands::Hello) {
-        TuiCommands::Hello => run_hello_demo().map_err(|error| error.to_string()),
+        TuiCommands::Hello => run_probe_tui().map_err(|error| error.to_string()),
     }
 }
 

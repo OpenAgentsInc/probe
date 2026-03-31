@@ -6,14 +6,18 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use probe_core::backend_profiles::psionic_apple_fm_bridge;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::{Frame, Terminal};
 
 use crate::event::{UiEvent, event_from_key};
-use crate::message::{AppMessage, BackgroundTaskKind, BackgroundTaskRequest};
-use crate::screens::{ActiveTab, HelloScreen, HelpScreen, ScreenAction, ScreenId, ScreenState, TaskPhase};
+use crate::message::{AppMessage, BackgroundTaskRequest};
+use crate::screens::{
+    ActiveTab, HelloScreen, HelpScreen, ScreenAction, ScreenCommand, ScreenId, ScreenState,
+    TaskPhase,
+};
 use crate::widgets::{FooterBar, HeaderBar};
 use crate::worker::BackgroundWorker;
 
@@ -29,18 +33,34 @@ pub struct AppShell {
 
 impl Default for AppShell {
     fn default() -> Self {
-        Self {
-            screens: vec![ScreenState::Hello(HelloScreen::default())],
-            last_status: String::from("hello demo launched"),
-            should_quit: false,
-            worker: BackgroundWorker::new(),
-        }
+        Self::with_autostart(true)
     }
 }
 
 impl AppShell {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn new_for_tests() -> Self {
+        Self::with_autostart(false)
+    }
+
+    fn with_autostart(autostart_setup: bool) -> Self {
+        let mut app = Self {
+            screens: vec![ScreenState::Hello(HelloScreen::default())],
+            last_status: String::from("probe tui launched"),
+            should_quit: false,
+            worker: BackgroundWorker::new(),
+        };
+        if autostart_setup {
+            let _ = app.submit_background_task(Self::default_setup_request());
+        }
+        app
+    }
+
+    fn default_setup_request() -> BackgroundTaskRequest {
+        BackgroundTaskRequest::apple_fm_setup(psionic_apple_fm_bridge())
     }
 
     pub fn should_quit(&self) -> bool {
@@ -66,6 +86,10 @@ impl AppShell {
         self.base_screen().task_phase()
     }
 
+    pub fn call_count(&self) -> usize {
+        self.base_screen().call_count()
+    }
+
     pub fn screen_depth(&self) -> usize {
         self.screens.len()
     }
@@ -87,7 +111,7 @@ impl AppShell {
         match event {
             UiEvent::Quit => {
                 self.base_screen_mut().record_event("quit requested");
-                self.last_status = String::from("quitting hello demo");
+                self.last_status = String::from("quitting probe tui");
                 self.should_quit = true;
             }
             UiEvent::Tick => {}
@@ -114,13 +138,15 @@ impl AppShell {
                         }
                     }
                 }
-                if let Some(request) = outcome.task_request {
-                    if let Err(error) = self.worker.submit(request) {
-                        self.apply_message(AppMessage::TaskFailed {
-                            kind: request.kind(),
-                            title: request.title().to_string(),
-                            detail: error,
-                        });
+                if let Some(command) = outcome.command {
+                    match command {
+                        ScreenCommand::RunAppleFmSetup => {
+                            if let Err(error) =
+                                self.submit_background_task(Self::default_setup_request())
+                            {
+                                self.last_status = error;
+                            }
+                        }
                     }
                 }
             }
@@ -132,8 +158,9 @@ impl AppShell {
         &mut self,
         request: BackgroundTaskRequest,
     ) -> Result<(), String> {
-        self.base_screen_mut().queue_task(request);
-        self.last_status = format!("queued {}", request.kind().label());
+        let backend = request.backend();
+        self.base_screen_mut().prepare_for_setup(backend);
+        self.last_status = format!("queued {}", request.title());
         self.worker.submit(request)
     }
 
@@ -147,12 +174,7 @@ impl AppShell {
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    self.apply_message(AppMessage::TaskFailed {
-                        kind: BackgroundTaskKind::ProbeSetupDemo,
-                        title: String::from("Probe setup demo"),
-                        detail: error,
-                    });
-                    applied += 1;
+                    self.last_status = error;
                     break;
                 }
             }
@@ -161,8 +183,7 @@ impl AppShell {
     }
 
     pub fn apply_message(&mut self, message: AppMessage) {
-        let status = self.base_screen_mut().apply_message(message);
-        self.last_status = status;
+        self.last_status = self.base_screen_mut().apply_message(message);
     }
 
     pub fn render(&self, frame: &mut Frame<'_>) {
@@ -174,12 +195,12 @@ impl AppShell {
         ])
         .split(area);
         let focus = match self.active_screen_id() {
-            ScreenId::Hello => "hello screen",
+            ScreenId::Hello => "setup screen",
             ScreenId::Help => "help modal",
         };
         HeaderBar::new(
-            "Probe TUI Hello",
-            "Textual-inspired Rust shell proving app/screen/widget seams",
+            "Probe Apple FM Setup",
+            "Probe-owned Apple Foundation Models prove-out with retained UI state",
             focus,
         )
         .render(frame, sections[0]);
@@ -218,7 +239,7 @@ impl AppShell {
     }
 }
 
-pub fn run_hello_demo() -> io::Result<()> {
+pub fn run_probe_tui() -> io::Result<()> {
     let mut stdout = io::stdout();
     enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen)?;
@@ -231,6 +252,10 @@ pub fn run_hello_demo() -> io::Result<()> {
     let cleanup_result = restore_terminal(&mut terminal);
 
     result.and(cleanup_result)
+}
+
+pub fn run_hello_demo() -> io::Result<()> {
+    run_probe_tui()
 }
 
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
@@ -280,14 +305,21 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use probe_core::backend_profiles::psionic_apple_fm_bridge;
+    use probe_test_support::{FakeAppleFmServer, FakeHttpResponse};
+    use serde_json::json;
+
     use super::AppShell;
     use crate::event::UiEvent;
-    use crate::message::{AppMessage, BackgroundTaskKind, BackgroundTaskRequest};
+    use crate::message::{
+        AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
+        AppleFmUsageSummary, BackgroundTaskRequest,
+    };
     use crate::screens::{ActiveTab, ScreenId, TaskPhase};
 
     #[test]
     fn help_modal_takes_focus_and_dismisses_cleanly() {
-        let mut app = AppShell::new();
+        let mut app = AppShell::new_for_tests();
         assert_eq!(app.active_screen_id(), ScreenId::Hello);
         assert_eq!(app.screen_depth(), 1);
 
@@ -305,8 +337,8 @@ mod tests {
     }
 
     #[test]
-    fn hello_screen_switches_views_and_toggles_copy() {
-        let mut app = AppShell::new();
+    fn setup_screen_switches_views_and_toggles_copy() {
+        let mut app = AppShell::new_for_tests();
         assert_eq!(app.active_tab(), ActiveTab::Overview);
         assert!(!app.emphasized_copy());
 
@@ -321,59 +353,133 @@ mod tests {
     }
 
     #[test]
-    fn applying_worker_messages_updates_visible_task_state() {
-        let mut app = AppShell::new();
-        app.apply_message(AppMessage::TaskStarted {
-            kind: BackgroundTaskKind::ProbeSetupDemo,
-            title: String::from("Probe setup demo"),
+    fn applying_setup_messages_updates_visible_state() {
+        let mut app = AppShell::new_for_tests();
+        let backend = AppleFmBackendSummary {
+            profile_name: String::from("psionic-apple-fm-bridge"),
+            base_url: String::from("http://127.0.0.1:8081"),
+            model_id: String::from("apple-foundation-model"),
+        };
+        app.apply_message(AppMessage::AppleFmSetupStarted {
+            backend: backend.clone(),
         });
-        assert_eq!(app.task_phase(), TaskPhase::Running);
+        assert_eq!(app.task_phase(), TaskPhase::CheckingAvailability);
 
-        app.apply_message(AppMessage::TaskSucceeded {
-            kind: BackgroundTaskKind::ProbeSetupDemo,
-            title: String::from("Probe setup demo"),
-            lines: vec![String::from("task finished")],
+        app.apply_message(AppMessage::AppleFmAvailabilityReady {
+            backend: backend.clone(),
+            availability: AppleFmAvailabilitySummary {
+                ready: true,
+                unavailable_reason: None,
+                availability_message: Some(String::from("ready")),
+                version: Some(String::from("1.0")),
+                platform: Some(String::from("macOS")),
+                apple_silicon_required: Some(true),
+                apple_intelligence_required: Some(true),
+            },
         });
-        assert_eq!(app.task_phase(), TaskPhase::Succeeded);
+
+        app.apply_message(AppMessage::AppleFmCallCompleted {
+            backend: backend.clone(),
+            index: 1,
+            total_calls: 3,
+            call: AppleFmCallRecord {
+                title: String::from("Sanity Check"),
+                prompt: String::from("Reply with exactly READY."),
+                response_text: String::from("READY"),
+                response_id: String::from("resp-1"),
+                response_model: String::from("apple-foundation-model"),
+                usage: AppleFmUsageSummary {
+                    total_tokens: Some(12),
+                    total_truth: Some(String::from("exact")),
+                    ..AppleFmUsageSummary::default()
+                },
+            },
+        });
+
+        app.apply_message(AppMessage::AppleFmSetupCompleted {
+            backend,
+            total_calls: 3,
+        });
+        assert_eq!(app.task_phase(), TaskPhase::Completed);
+        assert_eq!(app.call_count(), 1);
         assert!(
             app.worker_events()
                 .iter()
-                .any(|entry| entry.contains("completed successfully"))
+                .any(|entry| entry.contains("completed after 3 calls"))
         );
     }
 
     #[test]
-    fn background_task_completes_without_blocking_repaint() {
-        let mut app = AppShell::new();
-        app.submit_background_task(BackgroundTaskRequest::DemoSuccess)
-            .expect("demo task should queue");
-        assert_eq!(app.task_phase(), TaskPhase::Queued);
-        assert!(app.render_to_string(80, 24).contains("State: queued"));
+    fn apple_fm_setup_stops_when_unavailable() {
+        let server = FakeAppleFmServer::from_responses(vec![FakeHttpResponse::json_status(
+            200,
+            json!({
+                "status": "ok",
+                "model_available": false,
+                "unavailable_reason": "model_not_ready",
+                "availability_message": "Foundation model is still preparing",
+                "platform": "macOS"
+            }),
+        )]);
+
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = server.base_url().to_string();
+
+        let mut app = AppShell::new_for_tests();
+        app.submit_background_task(BackgroundTaskRequest::apple_fm_setup(profile))
+            .expect("setup task should queue");
 
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
             app.poll_background_messages();
-            if app.task_phase() == TaskPhase::Succeeded {
+            if app.task_phase() == TaskPhase::Unavailable {
                 break;
             }
-            let _ = app.render_to_string(80, 24);
             thread::sleep(Duration::from_millis(10));
         }
 
-        assert_eq!(app.task_phase(), TaskPhase::Succeeded);
-        assert!(app.render_to_string(80, 24).contains("State: completed"));
+        assert_eq!(app.task_phase(), TaskPhase::Unavailable);
         assert!(
-            app.worker_events()
-                .iter()
-                .any(|entry| entry.contains("completed successfully"))
+            app.render_to_string(120, 32)
+                .contains("Foundation model is still preparing")
         );
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("GET /health HTTP/1.1"));
     }
 
     #[test]
-    fn background_task_failure_surfaces_error_detail() {
-        let mut app = AppShell::new();
-        app.submit_background_task(BackgroundTaskRequest::DemoFailure)
-            .expect("failing task should queue");
+    fn apple_fm_setup_surfaces_typed_provider_failure() {
+        let server = FakeAppleFmServer::from_responses(vec![
+            FakeHttpResponse::json_status(
+                200,
+                json!({
+                    "status": "ok",
+                    "model_available": true,
+                    "version": "1.0",
+                    "platform": "macOS"
+                }),
+            ),
+            FakeHttpResponse::json_status(
+                503,
+                json!({
+                    "error": {
+                        "message": "Apple Intelligence is not enabled",
+                        "type": "assets_unavailable",
+                        "code": "assets_unavailable",
+                        "failure_reason": "Apple Intelligence is disabled",
+                        "recovery_suggestion": "Enable Apple Intelligence and retry"
+                    }
+                }),
+            ),
+        ]);
+
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = server.base_url().to_string();
+
+        let mut app = AppShell::new_for_tests();
+        app.submit_background_task(BackgroundTaskRequest::apple_fm_setup(profile))
+            .expect("setup task should queue");
 
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
@@ -385,7 +491,117 @@ mod tests {
         }
 
         assert_eq!(app.task_phase(), TaskPhase::Failed);
-        assert!(app.render_to_string(80, 24).contains("State: failed"));
-        assert!(app.worker_events().iter().any(|entry| entry.contains("failed")));
+        let rendered = app.render_to_string(120, 32);
+        assert!(rendered.contains("assets_unavailable"));
+        assert!(rendered.contains("Enable Apple Intelligence and retry"));
+        let requests = server.finish();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].contains("GET /health HTTP/1.1"));
+        assert!(requests[1].contains("POST /v1/chat/completions HTTP/1.1"));
+    }
+
+    #[test]
+    fn apple_fm_setup_completes_multi_call_flow() {
+        let server = FakeAppleFmServer::from_responses(vec![
+            FakeHttpResponse::json_status(
+                200,
+                json!({
+                    "status": "ok",
+                    "model_available": true,
+                    "version": "1.0",
+                    "platform": "macOS"
+                }),
+            ),
+            FakeHttpResponse::json_status(
+                200,
+                json!({
+                    "id": "resp-1",
+                    "model": "apple-foundation-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "READY"},
+                            "finish_reason": "stop"
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens_detail": {"value": 12, "truth": "exact"},
+                        "completion_tokens_detail": {"value": 3, "truth": "exact"},
+                        "total_tokens_detail": {"value": 15, "truth": "exact"}
+                    }
+                }),
+            ),
+            FakeHttpResponse::json_status(
+                200,
+                json!({
+                    "id": "resp-2",
+                    "model": "apple-foundation-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "Probe owns the coding-agent runtime."
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens_detail": {"value": 20, "truth": "exact"},
+                        "completion_tokens_detail": {"value": 8, "truth": "estimated"},
+                        "total_tokens_detail": {"value": 28, "truth": "estimated"}
+                    }
+                }),
+            ),
+            FakeHttpResponse::json_status(
+                200,
+                json!({
+                    "id": "resp-3",
+                    "model": "apple-foundation-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "The TUI should now prove live Apple FM setup truth on startup."
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens_detail": {"value": 22, "truth": "exact"},
+                        "completion_tokens_detail": {"value": 12, "truth": "exact"},
+                        "total_tokens_detail": {"value": 34, "truth": "exact"}
+                    }
+                }),
+            ),
+        ]);
+
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = server.base_url().to_string();
+
+        let mut app = AppShell::new_for_tests();
+        app.submit_background_task(BackgroundTaskRequest::apple_fm_setup(profile))
+            .expect("setup task should queue");
+        assert_eq!(app.task_phase(), TaskPhase::Queued);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            app.poll_background_messages();
+            if app.task_phase() == TaskPhase::Completed {
+                break;
+            }
+            let _ = app.render_to_string(120, 32);
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(app.task_phase(), TaskPhase::Completed);
+        assert_eq!(app.call_count(), 3);
+        assert!(
+            app.render_to_string(120, 32)
+                .contains("The TUI should now prove live Apple FM setup truth on startup.")
+        );
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4);
     }
 }
