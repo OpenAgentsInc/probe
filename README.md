@@ -18,7 +18,18 @@ Probe already works as a first local controller stack. You can run one-shot
 turns with `probe exec`, interactive multi-turn sessions with `probe chat`,
 resume prior sessions by id, persist append-only transcripts under
 `PROBE_HOME` or `~/.probe`, run a retained local acceptance harness, and use a
-small built-in demo tool lane including same-turn parallel tool calls.
+bounded built-in tool runtime including same-turn parallel tool calls.
+
+The canonical local coding lane is now `coding_bootstrap`, which ships the
+first real built-in coding tools:
+
+- `read_file`
+- `list_files`
+- `code_search`
+- `shell`
+- `apply_patch`
+
+The retained `weather` tool set remains available as a tiny regression fixture.
 
 Probe can either attach to an already-running local backend or launch
 `psionic-openai-server` as a supervised child process. It also records basic
@@ -58,19 +69,19 @@ Tool-enabled execution:
 
 ```bash
 cargo run -p probe-cli -- exec \
-  --tool-set weather \
-  --tool-choice required \
-  "Use the weather tool for Paris and answer with the result."
+  --tool-set coding_bootstrap \
+  --tool-choice auto \
+  "Read README.md and summarize what this repository does."
 ```
 
 Parallel tool-call batch:
 
 ```bash
 cargo run -p probe-cli -- exec \
-  --tool-set weather \
-  --tool-choice required \
+  --tool-set coding_bootstrap \
+  --tool-choice auto \
   --parallel-tool-calls \
-  "Use the weather tool for Paris and Tokyo in the same turn."
+  "Search for the runtime crate names and then read the README."
 ```
 
 Acceptance harness:

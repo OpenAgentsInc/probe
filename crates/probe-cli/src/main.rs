@@ -421,9 +421,16 @@ fn resolve_tool_loop(
                 parallel_tool_calls,
             )))
         }
+        Some("coding_bootstrap") => {
+            let tool_choice = ProbeToolChoice::parse(tool_choice)?;
+            Ok(Some(ToolLoopConfig::coding_bootstrap(
+                tool_choice,
+                parallel_tool_calls,
+            )))
+        }
         Some(other) => Err(format!("unknown tool set: {other}")),
         None if has_non_default_tool_flags => Err(String::from(
-            "tool flags require --tool-set; the first supported value is `weather`",
+            "tool flags require --tool-set; supported values are `weather` and `coding_bootstrap`",
         )),
         None => Ok(None),
     }

@@ -14,7 +14,7 @@ use probe_provider_openai::{
 };
 
 use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionStoreError};
-use crate::tools::ToolLoopConfig;
+use crate::tools::{ToolExecutionContext, ToolLoopConfig};
 
 const DEFAULT_PROBE_HOME_DIR: &str = ".probe";
 const LIKELY_WARM_WALLCLOCK_RATIO_NUMERATOR: u64 = 80;
@@ -277,7 +277,10 @@ impl ProbeRuntime {
                         response_id: response.id,
                     });
                 };
-                let executed = tool_loop.registry.execute_batch(&tool_calls);
+                let execution_context = ToolExecutionContext::new(session.cwd.clone());
+                let executed = tool_loop
+                    .registry
+                    .execute_batch(&execution_context, &tool_calls);
                 executed_tool_calls += executed.len();
                 let tool_result_turn = self.append_tool_result_turn(&session.id, &executed)?;
                 let _ = tool_result_turn;

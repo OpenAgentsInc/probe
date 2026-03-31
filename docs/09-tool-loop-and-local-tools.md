@@ -2,18 +2,41 @@
 
 ## Purpose
 
-Probe now has its first bounded tool runtime.
+Probe now has a bounded local tool runtime.
 
-The current lane is intentionally small and deterministic:
+The current implementation is intentionally small and deterministic:
 
-- one local built-in tool set
+- local built-in tool sets
 - one bounded controller loop
 - append-only transcript storage for tool calls and tool results
 - replay into later model turns through the normal `chat.completions` surface
 
 ## Built-In Tool Set
 
-The first shipped tool set is:
+Probe currently ships two built-in tool sets.
+
+### `coding_bootstrap`
+
+This is the canonical local coding lane.
+
+It declares:
+
+- `read_file`
+  - reads a bounded line range from a relative text file in the session cwd
+- `list_files`
+  - lists relative directory contents with bounded depth and entry count
+- `code_search`
+  - wraps `rg` for bounded code search inside the session cwd
+- `shell`
+  - runs a bounded shell command in the session cwd
+- `apply_patch`
+  - applies deterministic text replacement to a relative file
+
+This is the first honest coding-tool bundle for Probe.
+
+### `weather`
+
+The retained demo tool set is:
 
 - `weather`
   - declares one tool: `lookup_weather`
@@ -33,6 +56,7 @@ This is enough to prove:
 Both `probe exec` and `probe chat` now accept:
 
 - `--tool-set weather`
+- `--tool-set coding_bootstrap`
 - `--tool-choice <none|auto|required|named:lookup_weather>`
 - `--parallel-tool-calls`
 
@@ -40,19 +64,19 @@ Example:
 
 ```bash
 cargo run -p probe-cli -- exec \
-  --tool-set weather \
-  --tool-choice required \
-  "What is the weather in Paris?"
+  --tool-set coding_bootstrap \
+  --tool-choice auto \
+  "Read README.md and summarize the repository."
 ```
 
 Parallel batch example:
 
 ```bash
 cargo run -p probe-cli -- exec \
-  --tool-set weather \
-  --tool-choice required \
+  --tool-set coding_bootstrap \
+  --tool-choice auto \
   --parallel-tool-calls \
-  "Check Paris and Tokyo."
+  "Search for runtime crates and then read the root README."
 ```
 
 ## Runtime Flow
@@ -83,7 +107,7 @@ That lets Probe reconstruct:
 
 ## Current Boundary
 
-The first tool lane intentionally does not try to solve everything:
+The current built-in tool lanes intentionally do not try to solve everything:
 
 - no plugin marketplace
 - no arbitrary external executors
