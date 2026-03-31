@@ -11,8 +11,8 @@ use probe_provider_apple_fm::{
     AppleFmProviderSessionResponse, AppleFmProviderToolCall, AppleFmProviderToolDefinition,
 };
 use probe_provider_openai::{
-    ChatMessage, ChatToolCall, ChatToolDefinitionEnvelope, OpenAiProviderClient,
-    OpenAiProviderConfig, OpenAiProviderError,
+    ChatCompletionChunk, ChatMessage, ChatToolCall, ChatToolDefinitionEnvelope,
+    OpenAiProviderClient, OpenAiProviderConfig, OpenAiProviderError,
 };
 use psionic_apple_fm::{
     AppleFmChatUsage, AppleFmErrorCode, AppleFmToolCallError, AppleFmTranscript,
@@ -119,6 +119,8 @@ pub struct ToolLoopProviderResponse {
     pub backend_receipt: Option<BackendTurnReceipt>,
 }
 
+pub type OpenAiStreamChunkCallback<'a> = dyn FnMut(&ChatCompletionChunk) + 'a;
+
 #[derive(Debug)]
 pub enum ProviderError {
     OpenAi(OpenAiProviderError),
@@ -193,38 +195,40 @@ fn complete_openai_plain_text(
     profile: &BackendProfile,
     messages: Vec<PlainTextMessage>,
 ) -> Result<PlainTextProviderResponse, ProviderError> {
+    complete_openai_plain_text_with_callback(profile, messages, None)
+}
+
+pub fn complete_openai_plain_text_with_callback(
+    profile: &BackendProfile,
+    messages: Vec<PlainTextMessage>,
+    callback: Option<&mut OpenAiStreamChunkCallback<'_>>,
+) -> Result<PlainTextProviderResponse, ProviderError> {
     let provider_config = OpenAiProviderConfig::from_backend_profile(profile);
     let provider = OpenAiProviderClient::new(provider_config).map_err(ProviderError::OpenAi)?;
-    let response = provider
-        .chat_completion(
-            messages
-                .iter()
-                .map(PlainTextMessage::to_openai_message)
-                .collect(),
-        )
-        .map_err(ProviderError::OpenAi)?;
+    let request_messages = messages
+        .iter()
+        .map(PlainTextMessage::to_openai_message)
+        .collect::<Vec<_>>();
+    let response = match callback {
+        Some(callback) => {
+            let mut streaming_config = provider.config().clone();
+            streaming_config.stream = true;
+            let request =
+                probe_provider_openai::ChatCompletionRequest::from_config(&streaming_config, request_messages);
+            provider
+                .send_chat_completion_with_callback(&request, callback)
+                .map_err(ProviderError::OpenAi)?
+        }
+        None => provider
+            .chat_completion(request_messages)
+            .map_err(ProviderError::OpenAi)?,
+    };
     let assistant_text = response.first_message_text().map(ToOwned::to_owned);
     Ok(PlainTextProviderResponse {
         response_id: response.id,
         response_model: response.model,
         assistant_text,
-        usage: response.usage.map(|usage| ProviderUsage {
-            prompt_tokens: Some(u64::from(usage.prompt_tokens)),
-            completion_tokens: Some(u64::from(usage.completion_tokens)),
-            total_tokens: Some(u64::from(usage.total_tokens)),
-            prompt_tokens_detail: Some(ProviderUsageMeasurement {
-                value: u64::from(usage.prompt_tokens),
-                truth: ProviderUsageTruth::Exact,
-            }),
-            completion_tokens_detail: Some(ProviderUsageMeasurement {
-                value: u64::from(usage.completion_tokens),
-                truth: ProviderUsageTruth::Exact,
-            }),
-            total_tokens_detail: Some(ProviderUsageMeasurement {
-                value: u64::from(usage.total_tokens),
-                truth: ProviderUsageTruth::Exact,
-            }),
-        }),
+        usage: response.usage.map(provider_usage_from_openai),
         backend_receipt: None,
     })
 }
@@ -318,6 +322,24 @@ pub fn openai_tool_loop_response(
     tool_choice: Option<probe_provider_openai::ChatToolChoice>,
     parallel_tool_calls: Option<bool>,
 ) -> Result<ToolLoopProviderResponse, ProviderError> {
+    openai_tool_loop_response_with_callback(
+        profile,
+        messages,
+        tools,
+        tool_choice,
+        parallel_tool_calls,
+        None,
+    )
+}
+
+pub fn openai_tool_loop_response_with_callback(
+    profile: &BackendProfile,
+    messages: Vec<ChatMessage>,
+    tools: Vec<ChatToolDefinitionEnvelope>,
+    tool_choice: Option<probe_provider_openai::ChatToolChoice>,
+    parallel_tool_calls: Option<bool>,
+    callback: Option<&mut OpenAiStreamChunkCallback<'_>>,
+) -> Result<ToolLoopProviderResponse, ProviderError> {
     if profile.kind != BackendKind::OpenAiChatCompletions {
         return Err(ProviderError::UnsupportedFeature {
             backend: profile.kind,
@@ -328,34 +350,26 @@ pub fn openai_tool_loop_response(
     let provider_config = OpenAiProviderConfig::from_backend_profile(profile);
     let provider =
         OpenAiProviderClient::new(provider_config.clone()).map_err(ProviderError::OpenAi)?;
-    let request =
+    let mut request =
         probe_provider_openai::ChatCompletionRequest::from_config(&provider_config, messages)
             .with_tools(tools, tool_choice, parallel_tool_calls);
-    let response = provider
-        .send_chat_completion(&request)
-        .map_err(ProviderError::OpenAi)?;
+    if callback.is_some() {
+        request.stream = true;
+    }
+    let response = match callback {
+        Some(callback) => provider
+            .send_chat_completion_with_callback(&request, callback)
+            .map_err(ProviderError::OpenAi)?,
+        None => provider
+            .send_chat_completion(&request)
+            .map_err(ProviderError::OpenAi)?,
+    };
     let tool_calls = response.first_tool_calls().map(ToOwned::to_owned);
     let assistant_text = response.first_message_text().map(ToOwned::to_owned);
     Ok(ToolLoopProviderResponse {
         response_id: response.id,
         response_model: response.model,
-        usage: response.usage.map(|usage| ProviderUsage {
-            prompt_tokens: Some(u64::from(usage.prompt_tokens)),
-            completion_tokens: Some(u64::from(usage.completion_tokens)),
-            total_tokens: Some(u64::from(usage.total_tokens)),
-            prompt_tokens_detail: Some(ProviderUsageMeasurement {
-                value: u64::from(usage.prompt_tokens),
-                truth: ProviderUsageTruth::Exact,
-            }),
-            completion_tokens_detail: Some(ProviderUsageMeasurement {
-                value: u64::from(usage.completion_tokens),
-                truth: ProviderUsageTruth::Exact,
-            }),
-            total_tokens_detail: Some(ProviderUsageMeasurement {
-                value: u64::from(usage.total_tokens),
-                truth: ProviderUsageTruth::Exact,
-            }),
-        }),
+        usage: response.usage.map(provider_usage_from_openai),
         assistant_text,
         tool_calls,
         backend_receipt: None,
@@ -407,6 +421,28 @@ fn plain_text_provider_response_from_apple_session(
                         payload,
                     }),
                 })
+        }),
+    }
+}
+
+fn provider_usage_from_openai(
+    usage: probe_provider_openai::ChatCompletionUsage,
+) -> ProviderUsage {
+    ProviderUsage {
+        prompt_tokens: Some(u64::from(usage.prompt_tokens)),
+        completion_tokens: Some(u64::from(usage.completion_tokens)),
+        total_tokens: Some(u64::from(usage.total_tokens)),
+        prompt_tokens_detail: Some(ProviderUsageMeasurement {
+            value: u64::from(usage.prompt_tokens),
+            truth: ProviderUsageTruth::Exact,
+        }),
+        completion_tokens_detail: Some(ProviderUsageMeasurement {
+            value: u64::from(usage.completion_tokens),
+            truth: ProviderUsageTruth::Exact,
+        }),
+        total_tokens_detail: Some(ProviderUsageMeasurement {
+            value: u64::from(usage.total_tokens),
+            truth: ProviderUsageTruth::Exact,
         }),
     }
 }

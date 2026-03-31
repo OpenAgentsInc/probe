@@ -11,7 +11,7 @@ use probe_protocol::session::{
     SessionHarnessProfile, SessionId, SessionMetadata, SessionTurn, ToolApprovalResolution,
     ToolRiskClass, TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnObservability,
 };
-use probe_provider_openai::{ChatMessage, ChatToolCall};
+use probe_provider_openai::{ChatCompletionChunk, ChatMessage, ChatToolCall};
 use psionic_apple_fm::{
     APPLE_FM_TRANSCRIPT_TYPE, APPLE_FM_TRANSCRIPT_VERSION, AppleFmToolCallError, AppleFmTranscript,
     AppleFmTranscriptContent, AppleFmTranscriptEntry, AppleFmTranscriptPayload,
@@ -21,7 +21,9 @@ use serde_json::Value;
 use crate::dataset_export::build_decision_summary;
 use crate::provider::{
     PlainTextMessage, ProviderError, ProviderUsage, apple_fm_tool_loop_response,
-    complete_plain_text, observability_usage_measurement, openai_tool_loop_response,
+    complete_openai_plain_text_with_callback, complete_plain_text,
+    observability_usage_measurement, openai_tool_loop_response,
+    openai_tool_loop_response_with_callback,
 };
 use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionStoreError};
 use crate::tools::{
@@ -95,6 +97,14 @@ pub struct PlainTextExecOutcome {
     pub tool_results: Vec<ExecutedToolCall>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamedToolCallDelta {
+    pub tool_index: usize,
+    pub call_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub arguments_delta: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub enum ResolvePendingToolApprovalOutcome {
     StillPending {
@@ -118,6 +128,27 @@ pub enum RuntimeEvent {
         session_id: SessionId,
         round_trip: usize,
         backend_kind: BackendKind,
+    },
+    AssistantStreamStarted {
+        session_id: SessionId,
+        round_trip: usize,
+        response_id: String,
+        response_model: String,
+    },
+    TimeToFirstTokenObserved {
+        session_id: SessionId,
+        round_trip: usize,
+        milliseconds: u64,
+    },
+    AssistantDelta {
+        session_id: SessionId,
+        round_trip: usize,
+        delta: String,
+    },
+    ToolCallDelta {
+        session_id: SessionId,
+        round_trip: usize,
+        deltas: Vec<StreamedToolCallDelta>,
     },
     ToolCallRequested {
         session_id: SessionId,
@@ -147,6 +178,19 @@ pub enum RuntimeEvent {
         session_id: SessionId,
         round_trip: usize,
         tool: ExecutedToolCall,
+    },
+    AssistantStreamFinished {
+        session_id: SessionId,
+        round_trip: usize,
+        response_id: String,
+        response_model: String,
+        finish_reason: Option<String>,
+    },
+    ModelRequestFailed {
+        session_id: SessionId,
+        round_trip: usize,
+        backend_kind: BackendKind,
+        error: String,
     },
     AssistantTurnCommitted {
         session_id: SessionId,
@@ -543,6 +587,118 @@ fn emit_tool_result_event(
     emit_runtime_event(event_sink, event);
 }
 
+#[derive(Default)]
+struct OpenAiStreamRuntimeState {
+    stream_started: bool,
+    ttft_recorded: bool,
+    stream_finished: bool,
+}
+
+fn emit_openai_stream_events(
+    event_sink: Option<&Arc<dyn RuntimeEventSink>>,
+    session_id: &SessionId,
+    round_trip: usize,
+    request_started: Instant,
+    state: &mut OpenAiStreamRuntimeState,
+    chunk: &ChatCompletionChunk,
+) {
+    if !state.stream_started {
+        emit_runtime_event(
+            event_sink,
+            RuntimeEvent::AssistantStreamStarted {
+                session_id: session_id.clone(),
+                round_trip,
+                response_id: chunk.id.clone(),
+                response_model: chunk.model.clone(),
+            },
+        );
+        state.stream_started = true;
+    }
+    if !state.ttft_recorded {
+        emit_runtime_event(
+            event_sink,
+            RuntimeEvent::TimeToFirstTokenObserved {
+                session_id: session_id.clone(),
+                round_trip,
+                milliseconds: elapsed_ms(request_started),
+            },
+        );
+        state.ttft_recorded = true;
+    }
+
+    for choice in &chunk.choices {
+        if let Some(content) = choice.delta.content.as_ref()
+            && !content.is_empty()
+        {
+            emit_runtime_event(
+                event_sink,
+                RuntimeEvent::AssistantDelta {
+                    session_id: session_id.clone(),
+                    round_trip,
+                    delta: content.clone(),
+                },
+            );
+        }
+        if let Some(tool_calls) = choice.delta.tool_calls.as_ref()
+            && !tool_calls.is_empty()
+        {
+            emit_runtime_event(
+                event_sink,
+                RuntimeEvent::ToolCallDelta {
+                    session_id: session_id.clone(),
+                    round_trip,
+                    deltas: tool_calls
+                        .iter()
+                        .map(|tool_call| StreamedToolCallDelta {
+                            tool_index: tool_call.index,
+                            call_id: tool_call.id.clone(),
+                            tool_name: tool_call
+                                .function
+                                .as_ref()
+                                .and_then(|function| function.name.clone()),
+                            arguments_delta: tool_call
+                                .function
+                                .as_ref()
+                                .and_then(|function| function.arguments.clone()),
+                        })
+                        .collect(),
+                },
+            );
+        }
+        if !state.stream_finished && choice.finish_reason.is_some() {
+            emit_runtime_event(
+                event_sink,
+                RuntimeEvent::AssistantStreamFinished {
+                    session_id: session_id.clone(),
+                    round_trip,
+                    response_id: chunk.id.clone(),
+                    response_model: chunk.model.clone(),
+                    finish_reason: choice.finish_reason.clone(),
+                },
+            );
+            state.stream_finished = true;
+        }
+    }
+}
+
+fn emit_model_request_failed(
+    event_sink: Option<&Arc<dyn RuntimeEventSink>>,
+    session_id: &SessionId,
+    round_trip: usize,
+    backend_kind: BackendKind,
+    error: &RuntimeError,
+) {
+    emit_runtime_event(
+        event_sink,
+        RuntimeEvent::ModelRequestFailed {
+            session_id: session_id.clone(),
+            round_trip,
+            backend_kind,
+            error: error.to_string(),
+        },
+    );
+}
+
 fn render_tool_approval_resolution(value: ToolApprovalResolution) -> &'static str {
     match value {
         ToolApprovalResolution::Approved => "approved",
@@ -678,13 +834,37 @@ impl ProbeRuntime {
                 },
             );
             let request_started = Instant::now();
-            let response = openai_tool_loop_response(
-                &profile,
-                messages.clone(),
-                tool_loop.registry.declared_tools(),
-                tool_loop.tool_choice.to_provider_choice(),
-                Some(tool_loop.parallel_tool_calls),
-            )
+            let response = {
+                let mut stream_state = OpenAiStreamRuntimeState::default();
+                let mut callback = |chunk: &ChatCompletionChunk| {
+                    emit_openai_stream_events(
+                        event_sink.as_ref(),
+                        &session.id,
+                        round_trip,
+                        request_started,
+                        &mut stream_state,
+                        chunk,
+                    );
+                };
+                if event_sink.is_some() {
+                    openai_tool_loop_response_with_callback(
+                        &profile,
+                        messages.clone(),
+                        tool_loop.registry.declared_tools(),
+                        tool_loop.tool_choice.to_provider_choice(),
+                        Some(tool_loop.parallel_tool_calls),
+                        Some(&mut callback),
+                    )
+                } else {
+                    openai_tool_loop_response(
+                        &profile,
+                        messages.clone(),
+                        tool_loop.registry.declared_tools(),
+                        tool_loop.tool_choice.to_provider_choice(),
+                        Some(tool_loop.parallel_tool_calls),
+                    )
+                }
+            }
             .map_err(|source| RuntimeError::ProviderRequest {
                 session_id: session.id.clone(),
                 source,
@@ -694,6 +874,13 @@ impl ProbeRuntime {
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
+                    emit_model_request_failed(
+                        event_sink.as_ref(),
+                        &session.id,
+                        round_trip,
+                        profile.kind,
+                        &error,
+                    );
                     let mut items = Vec::new();
                     if let Some(user_prompt) = pending_user_prompt.take() {
                         items.push(NewItem::new(TranscriptItemKind::UserMessage, user_prompt));
@@ -1103,17 +1290,39 @@ impl ProbeRuntime {
             },
         );
         let request_started = Instant::now();
-        let response = complete_plain_text(&profile, messages).map_err(|source| {
-            RuntimeError::ProviderRequest {
-                session_id: session.id.clone(),
-                source,
+        let response = match profile.kind {
+            BackendKind::OpenAiChatCompletions if event_sink.is_some() => {
+                let mut stream_state = OpenAiStreamRuntimeState::default();
+                let mut callback = |chunk: &ChatCompletionChunk| {
+                    emit_openai_stream_events(
+                        event_sink.as_ref(),
+                        &session.id,
+                        1,
+                        request_started,
+                        &mut stream_state,
+                        chunk,
+                    );
+                };
+                complete_openai_plain_text_with_callback(&profile, messages, Some(&mut callback))
             }
+            _ => complete_plain_text(&profile, messages),
+        }
+        .map_err(|source| RuntimeError::ProviderRequest {
+            session_id: session.id.clone(),
+            source,
         });
         let wallclock_ms = elapsed_ms(request_started);
 
         let response = match response {
             Ok(response) => response,
             Err(error) => {
+                emit_model_request_failed(
+                    event_sink.as_ref(),
+                    &session.id,
+                    1,
+                    profile.kind,
+                    &error,
+                );
                 let _ = self.session_store.append_turn_with_details(
                     &session.id,
                     &[
@@ -3198,6 +3407,214 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn eventful_plain_openai_turn_emits_stream_deltas_when_backend_supports_streaming() {
+        let environment = ProbeTestEnvironment::new();
+        let server = FakeOpenAiServer::from_responses(vec![FakeHttpResponse::text_event_stream(
+            200,
+            concat!(
+                "data: {\"id\":\"chatcmpl_stream_plain\",\"model\":\"qwen3.5-2b-q8_0-registry.gguf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_stream_plain\",\"model\":\"qwen3.5-2b-q8_0-registry.gguf\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_stream_plain\",\"model\":\"qwen3.5-2b-q8_0-registry.gguf\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n",
+                "data: [DONE]\n\n",
+            ),
+        )]);
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = server.base_url().to_string();
+        let collector = Arc::new(TestRuntimeEventCollector::default());
+
+        let outcome = runtime
+            .exec_plain_text_with_events(
+                PlainTextExecRequest {
+                    profile,
+                    prompt: String::from("say hello"),
+                    title: Some(String::from("Streamed Plain Turn")),
+                    cwd: environment.workspace().to_path_buf(),
+                    system_prompt: None,
+                    harness_profile: None,
+                    tool_loop: None,
+                },
+                collector.clone(),
+            )
+            .expect("streamed plain turn should succeed");
+
+        assert_eq!(outcome.assistant_text, "hello world");
+        assert_eq!(
+            outcome
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.total_tokens),
+            Some(5)
+        );
+        let events = collector.snapshot();
+        let session_id = outcome.session.id.clone();
+        assert_eq!(events.len(), 8);
+        assert!(matches!(
+            &events[0],
+            RuntimeEvent::TurnStarted {
+                session_id: event_session,
+                prompt,
+                tool_loop_enabled: false,
+                ..
+            } if event_session == &session_id && prompt == "say hello"
+        ));
+        assert!(matches!(
+            &events[1],
+            RuntimeEvent::ModelRequestStarted {
+                session_id: event_session,
+                round_trip: 1,
+                backend_kind: probe_protocol::backend::BackendKind::OpenAiChatCompletions,
+            } if event_session == &session_id
+        ));
+        assert!(matches!(
+            &events[2],
+            RuntimeEvent::AssistantStreamStarted {
+                session_id: event_session,
+                round_trip: 1,
+                response_id,
+                response_model,
+            } if event_session == &session_id
+                && response_id == "chatcmpl_stream_plain"
+                && response_model == "qwen3.5-2b-q8_0-registry.gguf"
+        ));
+        assert!(matches!(
+            &events[3],
+            RuntimeEvent::TimeToFirstTokenObserved {
+                session_id: event_session,
+                round_trip: 1,
+                ..
+            } if event_session == &session_id
+        ));
+        assert!(matches!(
+            &events[4],
+            RuntimeEvent::AssistantDelta {
+                session_id: event_session,
+                round_trip: 1,
+                delta,
+            } if event_session == &session_id && delta == "hello"
+        ));
+        assert!(matches!(
+            &events[5],
+            RuntimeEvent::AssistantDelta {
+                session_id: event_session,
+                round_trip: 1,
+                delta,
+            } if event_session == &session_id && delta == " world"
+        ));
+        assert!(matches!(
+            &events[6],
+            RuntimeEvent::AssistantStreamFinished {
+                session_id: event_session,
+                round_trip: 1,
+                response_id,
+                finish_reason,
+                ..
+            } if event_session == &session_id
+                && response_id == "chatcmpl_stream_plain"
+                && finish_reason.as_deref() == Some("stop")
+        ));
+        assert!(matches!(
+            &events[7],
+            RuntimeEvent::AssistantTurnCommitted {
+                session_id: event_session,
+                assistant_text,
+                ..
+            } if event_session == &session_id && assistant_text == "hello world"
+        ));
+    }
+
+    #[test]
+    fn eventful_openai_tool_loop_emits_streamed_tool_call_deltas() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let server = FakeOpenAiServer::from_responses(vec![
+            FakeHttpResponse::text_event_stream(
+                200,
+                concat!(
+                    "data: {\"id\":\"chatcmpl_stream_tool_1\",\"model\":\"qwen3.5-2b-q8_0-registry.gguf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_readme_1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}]}}]}\n\n",
+                    "data: {\"id\":\"chatcmpl_stream_tool_1\",\"model\":\"qwen3.5-2b-q8_0-registry.gguf\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                    "data: [DONE]\n\n",
+                ),
+            ),
+            FakeHttpResponse::text_event_stream(
+                200,
+                concat!(
+                    "data: {\"id\":\"chatcmpl_stream_tool_2\",\"model\":\"qwen3.5-2b-q8_0-registry.gguf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"README inspected.\"}}]}\n\n",
+                    "data: {\"id\":\"chatcmpl_stream_tool_2\",\"model\":\"qwen3.5-2b-q8_0-registry.gguf\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":18,\"completion_tokens\":4,\"total_tokens\":22}}\n\n",
+                    "data: [DONE]\n\n",
+                ),
+            ),
+        ]);
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = server.base_url().to_string();
+        let collector = Arc::new(TestRuntimeEventCollector::default());
+
+        let outcome = runtime
+            .exec_plain_text_with_events(
+                PlainTextExecRequest {
+                    profile,
+                    prompt: String::from("Inspect README.md"),
+                    title: Some(String::from("Streamed Tool Loop")),
+                    cwd: environment.workspace().to_path_buf(),
+                    system_prompt: None,
+                    harness_profile: None,
+                    tool_loop: Some(ToolLoopConfig::coding_bootstrap(
+                        ProbeToolChoice::Required,
+                        false,
+                    )),
+                },
+                collector.clone(),
+            )
+            .expect("streamed tool loop should succeed");
+
+        assert_eq!(outcome.assistant_text, "README inspected.");
+        assert_eq!(outcome.tool_results.len(), 1);
+        let events = collector.snapshot();
+        let session_id = outcome.session.id.clone();
+
+        assert!(matches!(&events[0], RuntimeEvent::TurnStarted { session_id: event_session, .. } if event_session == &session_id));
+        assert!(matches!(&events[1], RuntimeEvent::ModelRequestStarted { session_id: event_session, round_trip: 1, .. } if event_session == &session_id));
+        assert!(matches!(&events[2], RuntimeEvent::AssistantStreamStarted { session_id: event_session, round_trip: 1, response_id, .. } if event_session == &session_id && response_id == "chatcmpl_stream_tool_1"));
+        assert!(matches!(&events[3], RuntimeEvent::TimeToFirstTokenObserved { session_id: event_session, round_trip: 1, .. } if event_session == &session_id));
+        assert!(matches!(
+            &events[4],
+            RuntimeEvent::ToolCallDelta {
+                session_id: event_session,
+                round_trip: 1,
+                deltas,
+            } if event_session == &session_id
+                && deltas == &vec![super::StreamedToolCallDelta {
+                    tool_index: 0,
+                    call_id: Some(String::from("call_readme_1")),
+                    tool_name: Some(String::from("read_file")),
+                    arguments_delta: Some(String::from("{\"path\":\"README.md\"}")),
+                }]
+        ));
+        assert!(matches!(
+            &events[5],
+            RuntimeEvent::AssistantStreamFinished {
+                session_id: event_session,
+                round_trip: 1,
+                response_id,
+                finish_reason,
+                ..
+            } if event_session == &session_id
+                && response_id == "chatcmpl_stream_tool_1"
+                && finish_reason.as_deref() == Some("tool_calls")
+        ));
+        assert!(matches!(&events[6], RuntimeEvent::ToolCallRequested { session_id: event_session, round_trip: 1, call_id, tool_name, .. } if event_session == &session_id && call_id == "call_readme_1" && tool_name == "read_file"));
+        assert!(matches!(&events[7], RuntimeEvent::ToolExecutionStarted { session_id: event_session, round_trip: 1, .. } if event_session == &session_id));
+        assert!(matches!(&events[8], RuntimeEvent::ToolExecutionCompleted { session_id: event_session, round_trip: 1, .. } if event_session == &session_id));
+        assert!(matches!(&events[9], RuntimeEvent::ModelRequestStarted { session_id: event_session, round_trip: 2, .. } if event_session == &session_id));
+        assert!(matches!(&events[10], RuntimeEvent::AssistantStreamStarted { session_id: event_session, round_trip: 2, response_id, .. } if event_session == &session_id && response_id == "chatcmpl_stream_tool_2"));
+        assert!(matches!(&events[11], RuntimeEvent::TimeToFirstTokenObserved { session_id: event_session, round_trip: 2, .. } if event_session == &session_id));
+        assert!(matches!(&events[12], RuntimeEvent::AssistantDelta { session_id: event_session, round_trip: 2, delta } if event_session == &session_id && delta == "README inspected."));
+        assert!(matches!(&events[13], RuntimeEvent::AssistantStreamFinished { session_id: event_session, round_trip: 2, finish_reason, .. } if event_session == &session_id && finish_reason.as_deref() == Some("stop")));
+        assert!(matches!(&events[14], RuntimeEvent::AssistantTurnCommitted { session_id: event_session, assistant_text, .. } if event_session == &session_id && assistant_text == "README inspected."));
     }
 
     #[test]

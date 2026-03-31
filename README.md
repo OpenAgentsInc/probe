@@ -154,3 +154,4 @@ Start with:
 - [docs/43-probe-runtime-event-stream-and-live-tui-lifecycle.md](docs/43-probe-runtime-event-stream-and-live-tui-lifecycle.md)
 - [docs/44-probe-tui-tool-call-and-tool-result-rows.md](docs/44-probe-tui-tool-call-and-tool-result-rows.md)
 - [docs/45-probe-tui-resumable-approval-broker.md](docs/45-probe-tui-resumable-approval-broker.md)
+- [docs/47-openai-streaming-runtime-delta-events.md](docs/47-openai-streaming-runtime-delta-events.md)

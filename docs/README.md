@@ -137,3 +137,8 @@ This folder holds technical planning docs for the Probe runtime.
   - real pending-approval persistence, approve or reject resolution in
     `probe-core`, replay of resolved tool results into the paused turn, and
     TUI approval-overlay wiring against that runtime state
+- `47-openai-streaming-runtime-delta-events.md`
+  - streamed OpenAI-compatible SSE parsing in `probe-provider-openai`, runtime
+    delta events for streamed assistant or tool-call progression, and JSON
+    fallback for backends that still answer a streaming request with blocking
+    chat-completion output

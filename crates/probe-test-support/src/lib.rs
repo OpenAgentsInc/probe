@@ -38,6 +38,14 @@ impl FakeHttpResponse {
             body: body.into(),
         }
     }
+
+    pub fn text_event_stream(status_code: u16, body: impl Into<String>) -> Self {
+        Self {
+            status_code,
+            content_type: String::from("text/event-stream"),
+            body: body.into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
