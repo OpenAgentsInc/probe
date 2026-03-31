@@ -1,4 +1,5 @@
 pub mod backend_profiles;
+pub mod dataset_export;
 pub mod harness;
 pub mod runtime;
 pub mod server_control;

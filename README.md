@@ -133,6 +133,17 @@ only the old weather demo. Its JSON report includes repeat-run receipts,
 median wallclock, per-attempt tool-policy counts, and final-turn
 observability fields.
 
+Dataset export:
+
+```bash
+cargo run -p probe-cli -- export \
+  --dataset decision \
+  --output ~/.probe/reports/probe_decision.jsonl
+```
+
+By default, export targets coding-lane sessions. Add `--all-sessions` to widen
+scope or `--session <id>` to export one specific session.
+
 Explicit attach mode:
 
 ```bash

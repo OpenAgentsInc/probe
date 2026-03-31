@@ -44,3 +44,6 @@ This folder holds technical planning docs for the Probe runtime.
 - `14-approval-classes-and-structured-tool-results.md`
   - explicit risk classes, local approval policy, CLI approval controls, and
     structured tool-result records for the coding tool lane
+- `15-replay-and-decision-dataset-export.md`
+  - local-first JSONL export for replay and derived decision datasets from
+    real Probe sessions

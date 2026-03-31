@@ -9,6 +9,7 @@ use std::time::Duration;
 use acceptance::{AcceptanceHarnessConfig, default_report_path, run_acceptance_harness};
 use clap::{Parser, Subcommand};
 use probe_core::backend_profiles::{PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE, named_backend_profile};
+use probe_core::dataset_export::{DatasetExportConfig, DatasetKind, export_dataset};
 use probe_core::harness::{render_harness_profile, resolve_harness_profile};
 use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, current_working_dir,
@@ -38,6 +39,7 @@ enum Commands {
     Exec(ExecArgs),
     Chat(ChatArgs),
     Accept(AcceptArgs),
+    Export(ExportArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -122,6 +124,20 @@ struct AcceptArgs {
     server: ServerArgs,
 }
 
+#[derive(clap::Args, Debug)]
+struct ExportArgs {
+    #[arg(long, default_value = "decision")]
+    dataset: String,
+    #[arg(long)]
+    output: PathBuf,
+    #[arg(long)]
+    session: Option<String>,
+    #[arg(long, default_value_t = false)]
+    all_sessions: bool,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+}
+
 #[derive(clap::Args, Debug, Clone)]
 struct ServerArgs {
     #[arg(long, default_value = "attach")]
@@ -160,6 +176,7 @@ fn run() -> Result<(), String> {
         Commands::Exec(args) => run_exec(args),
         Commands::Chat(args) => run_chat(args),
         Commands::Accept(args) => run_accept(args),
+        Commands::Export(args) => run_export(args),
     }
 }
 
@@ -456,6 +473,34 @@ fn run_accept(args: AcceptArgs) -> Result<(), String> {
             report_path.display()
         ))
     }
+}
+
+fn run_export(args: ExportArgs) -> Result<(), String> {
+    let probe_home = args
+        .probe_home
+        .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
+    let runtime = resolve_runtime(Some(probe_home))?;
+    let report = export_dataset(
+        runtime.session_store(),
+        &DatasetExportConfig {
+            kind: DatasetKind::parse(args.dataset.as_str())?,
+            output_path: args.output.clone(),
+            session_ids: args
+                .session
+                .into_iter()
+                .map(SessionId::new)
+                .collect::<Vec<_>>(),
+            include_all_sessions: args.all_sessions,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    eprintln!(
+        "dataset={} sessions={} output={}",
+        report.kind.as_str(),
+        report.sessions_exported,
+        report.output_path.display()
+    );
+    Ok(())
 }
 
 fn named_profile(name: &str) -> Result<probe_protocol::backend::BackendProfile, String> {

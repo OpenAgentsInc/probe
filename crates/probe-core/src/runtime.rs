@@ -367,6 +367,16 @@ impl ProbeRuntime {
             });
         }
 
+        let _ = self.session_store.append_turn(
+            &session.id,
+            &[NewItem::new(
+                TranscriptItemKind::Note,
+                format!(
+                    "session exceeded the configured tool loop bound of {} model round trips",
+                    max_round_trips
+                ),
+            )],
+        );
         Err(RuntimeError::MaxToolRoundTrips {
             session_id: session.id,
             max_round_trips,
