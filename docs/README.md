@@ -76,3 +76,7 @@ This folder holds technical planning docs for the Probe runtime.
 - `25-apple-fm-tool-lane.md`
   - session-backed Apple FM coding turns through Probe-owned tool callbacks,
     Probe transcript replay, and the existing approval or refusal policy
+- `30-textual-inspired-rust-tui-shell.md`
+  - first Rust-native TUI bootstrap issue for a Textual-inspired Probe screen
+    shell, proving basic app/screen/widget structure, keyboard-driven state
+    changes, and a visible hello-world terminal UI target
