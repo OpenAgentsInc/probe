@@ -29,6 +29,8 @@ first real built-in coding tools:
 - `code_search`
 - `shell`
 - `apply_patch`
+- `consult_oracle`
+  - only when an auxiliary oracle profile is configured
 
 The retained `weather` tool set remains available as a tiny regression fixture.
 
@@ -52,6 +54,10 @@ bytes returned, and touched paths when known.
 Above that runtime lane, Probe now has a narrow Rust-native decision-module
 crate for offline module evaluation. The first module families are
 `ToolRoute` and `PatchReadiness`.
+
+Probe also now supports a bounded auxiliary oracle lane through a typed
+`consult_oracle` tool. Oracle calls stay inside the main controller loop as
+tool invocations rather than becoming a second controller.
 
 Probe can either attach to an already-running local backend or launch
 `psionic-openai-server` as a supervised child process. It also records basic
@@ -171,6 +177,16 @@ cargo run -p probe-cli -- optimize-harness \
   --baseline-report ~/.probe/reports/probe_acceptance_baseline.json \
   --candidate-report ~/.probe/reports/probe_acceptance_candidate.json \
   --output ~/.probe/reports/probe_harness_optimization.json
+```
+
+Oracle-enabled coding session:
+
+```bash
+cargo run -p probe-cli -- exec \
+  --tool-set coding_bootstrap \
+  --oracle-profile psionic-qwen35-2b-q8-oracle \
+  --oracle-max-calls 1 \
+  "Ask the oracle for a checking recommendation before editing."
 ```
 
 Explicit attach mode:

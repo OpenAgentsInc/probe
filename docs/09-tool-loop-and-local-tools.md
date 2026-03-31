@@ -31,6 +31,9 @@ It declares:
   - runs a bounded shell command in the session cwd
 - `apply_patch`
   - applies deterministic text replacement to a relative file
+- `consult_oracle`
+  - when configured, consults a bounded auxiliary model for planning,
+    checking, or research guidance
 
 This is the first honest coding-tool bundle for Probe.
 
@@ -63,6 +66,8 @@ Both `probe exec` and `probe chat` now accept:
 - `--approve-network-shell`
 - `--approve-destructive-shell`
 - `--pause-for-approval`
+- `--oracle-profile <name>`
+- `--oracle-max-calls <n>`
 
 Example:
 

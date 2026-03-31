@@ -8,7 +8,10 @@ use std::time::Duration;
 
 use acceptance::{AcceptanceHarnessConfig, default_report_path, run_acceptance_harness};
 use clap::{Parser, Subcommand};
-use probe_core::backend_profiles::{PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE, named_backend_profile};
+use probe_core::backend_profiles::{
+    PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
+    named_backend_profile,
+};
 use probe_core::dataset_export::{
     DatasetExportConfig, DatasetKind, DecisionSessionSummary, export_dataset,
 };
@@ -22,6 +25,7 @@ use probe_core::server_control::{
 };
 use probe_core::tools::{
     ExecutedToolCall, ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig,
+    ToolOracleConfig,
 };
 use probe_decisions::{
     AggressiveToolRouteModule, HeuristicPatchReadinessModule, HeuristicToolRouteModule,
@@ -83,6 +87,10 @@ struct ExecArgs {
     approve_destructive_shell: bool,
     #[arg(long, default_value_t = false)]
     pause_for_approval: bool,
+    #[arg(long)]
+    oracle_profile: Option<String>,
+    #[arg(long, default_value_t = 1)]
+    oracle_max_calls: usize,
     #[command(flatten)]
     server: ServerArgs,
     #[arg(required = true)]
@@ -119,6 +127,10 @@ struct ChatArgs {
     approve_destructive_shell: bool,
     #[arg(long, default_value_t = false)]
     pause_for_approval: bool,
+    #[arg(long)]
+    oracle_profile: Option<String>,
+    #[arg(long, default_value_t = 1)]
+    oracle_max_calls: usize,
     #[command(flatten)]
     server: ServerArgs,
 }
@@ -243,6 +255,13 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
         args.approve_destructive_shell,
         args.pause_for_approval,
     )?;
+    let tool_loop = attach_oracle_config(
+        tool_loop,
+        args.tool_set.as_deref(),
+        args.oracle_profile.as_deref(),
+        args.oracle_max_calls,
+        &server_guard,
+    )?;
     let (system_prompt, harness_profile) = resolve_prompt_config(
         args.tool_set.as_deref(),
         args.harness_profile.as_deref(),
@@ -278,6 +297,12 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
         eprintln!(
             "harness_profile={}",
             render_harness_profile(harness_profile)
+        );
+    }
+    if let Some(oracle_profile) = args.oracle_profile.as_deref() {
+        eprintln!(
+            "oracle_profile={} oracle_max_calls={}",
+            oracle_profile, args.oracle_max_calls
         );
     }
     print_turn_observability(&outcome.turn);
@@ -318,6 +343,13 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
         args.approve_network_shell,
         args.approve_destructive_shell,
         args.pause_for_approval,
+    )?;
+    let tool_loop = attach_oracle_config(
+        tool_loop,
+        args.tool_set.as_deref(),
+        args.oracle_profile.as_deref(),
+        args.oracle_max_calls,
+        &server_guard,
     )?;
     let cwd = args
         .cwd
@@ -368,6 +400,12 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
             eprintln!(
                 "harness_profile={}",
                 render_harness_profile(harness_profile)
+            );
+        }
+        if let Some(oracle_profile) = args.oracle_profile.as_deref() {
+            eprintln!(
+                "oracle_profile={} oracle_max_calls={}",
+                oracle_profile, args.oracle_max_calls
             );
         }
     }
@@ -810,6 +848,51 @@ fn resolve_tool_loop(
         )),
         None => Ok(None),
     }
+}
+
+fn attach_oracle_config(
+    tool_loop: Option<ToolLoopConfig>,
+    tool_set: Option<&str>,
+    oracle_profile: Option<&str>,
+    oracle_max_calls: usize,
+    server_guard: &ServerProcessGuard,
+) -> Result<Option<ToolLoopConfig>, String> {
+    let Some(oracle_profile) = oracle_profile else {
+        return Ok(tool_loop);
+    };
+    if tool_set != Some("coding_bootstrap") {
+        return Err(String::from(
+            "oracle flags are only available for the `coding_bootstrap` tool set",
+        ));
+    }
+    if oracle_max_calls == 0 {
+        return Err(String::from("oracle_max_calls must be at least 1"));
+    }
+    let Some(tool_loop) = tool_loop else {
+        return Err(String::from(
+            "oracle configuration requires --tool-set coding_bootstrap",
+        ));
+    };
+    let oracle = resolve_oracle_config(oracle_profile, oracle_max_calls, server_guard)?;
+    Ok(Some(tool_loop.with_oracle(oracle)))
+}
+
+fn resolve_oracle_config(
+    profile_name: &str,
+    max_calls: usize,
+    server_guard: &ServerProcessGuard,
+) -> Result<ToolOracleConfig, String> {
+    let mut profile = named_profile(profile_name)?;
+    if matches!(
+        profile_name,
+        PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE | PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE
+    ) {
+        profile.base_url = server_guard.base_url();
+        if let Some(model_id) = server_guard.model_id() {
+            profile.model = model_id;
+        }
+    }
+    Ok(ToolOracleConfig { profile, max_calls })
 }
 
 fn print_tool_policy_summary(tool_results: &[ExecutedToolCall]) {

@@ -53,3 +53,5 @@ This folder holds technical planning docs for the Probe runtime.
 - `17-offline-optimizer.md`
   - GEPA-style offline optimization receipts, shared promotion rules, and the
     baseline-versus-candidate comparison flow for modules and harness reports
+- `18-oracle-consultation.md`
+  - typed bounded oracle consultation as an auxiliary tool and backend role

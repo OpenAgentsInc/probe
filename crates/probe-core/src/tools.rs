@@ -6,12 +6,14 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use probe_protocol::backend::BackendProfile;
 use probe_protocol::session::{
     ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
 };
 use probe_provider_openai::{
-    ChatNamedToolChoice, ChatNamedToolChoiceFunction, ChatToolCall, ChatToolChoice,
-    ChatToolDefinition, ChatToolDefinitionEnvelope,
+    ChatMessage, ChatNamedToolChoice, ChatNamedToolChoiceFunction, ChatToolCall,
+    ChatToolChoice, ChatToolDefinition, ChatToolDefinitionEnvelope, OpenAiProviderClient,
+    OpenAiProviderConfig,
 };
 use wait_timeout::ChildExt;
 
@@ -49,6 +51,7 @@ pub struct ToolRegistry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolExecutionContext {
     cwd: PathBuf,
+    oracle: Option<ToolOracleContext>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +69,7 @@ pub struct ToolLoopConfig {
     pub parallel_tool_calls: bool,
     pub max_model_round_trips: usize,
     pub approval: ToolApprovalConfig,
+    pub oracle: Option<ToolOracleConfig>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +93,19 @@ pub struct ToolApprovalConfig {
     pub allow_network_shell: bool,
     pub allow_destructive_shell: bool,
     pub denied_action: ToolDeniedAction,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolOracleConfig {
+    pub profile: BackendProfile,
+    pub max_calls: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolOracleContext {
+    profile: BackendProfile,
+    max_calls: usize,
+    calls_used: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,7 +139,10 @@ impl std::error::Error for ToolInvocationError {}
 impl ToolExecutionContext {
     #[must_use]
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
-        Self { cwd: cwd.into() }
+        Self {
+            cwd: cwd.into(),
+            oracle: None,
+        }
     }
 
     #[must_use]
@@ -139,6 +159,17 @@ impl ToolExecutionContext {
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .join(&self.cwd)
         }
+    }
+
+    #[must_use]
+    pub fn with_oracle(mut self, oracle: ToolOracleContext) -> Self {
+        self.oracle = Some(oracle);
+        self
+    }
+
+    #[must_use]
+    pub fn oracle(&self) -> Option<&ToolOracleContext> {
+        self.oracle.as_ref()
     }
 }
 
@@ -161,6 +192,32 @@ impl ToolApprovalConfig {
             allow_destructive_shell: true,
             denied_action: ToolDeniedAction::Refuse,
         }
+    }
+}
+
+impl ToolOracleContext {
+    #[must_use]
+    pub fn new(profile: BackendProfile, max_calls: usize, calls_used: usize) -> Self {
+        Self {
+            profile,
+            max_calls,
+            calls_used,
+        }
+    }
+
+    #[must_use]
+    pub fn profile(&self) -> &BackendProfile {
+        &self.profile
+    }
+
+    #[must_use]
+    pub fn max_calls(&self) -> usize {
+        self.max_calls
+    }
+
+    #[must_use]
+    pub fn calls_used(&self) -> usize {
+        self.calls_used
     }
 }
 
@@ -237,18 +294,27 @@ impl ToolLoopConfig {
             parallel_tool_calls,
             max_model_round_trips: 4,
             approval: ToolApprovalConfig::allow_all(),
+            oracle: None,
         }
     }
 
     #[must_use]
     pub fn coding_bootstrap(tool_choice: ProbeToolChoice, parallel_tool_calls: bool) -> Self {
         Self {
-            registry: ToolRegistry::coding_bootstrap(),
+            registry: ToolRegistry::coding_bootstrap(false),
             tool_choice,
             parallel_tool_calls,
             max_model_round_trips: 8,
             approval: ToolApprovalConfig::conservative(),
+            oracle: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_oracle(mut self, oracle: ToolOracleConfig) -> Self {
+        self.registry = ToolRegistry::coding_bootstrap(true);
+        self.oracle = Some(oracle);
+        self
     }
 }
 
@@ -287,8 +353,8 @@ impl ToolRegistry {
     }
 
     #[must_use]
-    pub fn coding_bootstrap() -> Self {
-        Self::new("coding_bootstrap")
+    pub fn coding_bootstrap(include_oracle: bool) -> Self {
+        let registry = Self::new("coding_bootstrap")
             .register(
                 String::from("read_file"),
                 Some(String::from(
@@ -333,7 +399,21 @@ impl ToolRegistry {
                 Some(apply_patch_parameters()),
                 RegisteredToolRisk::Fixed(ToolRiskClass::Write),
                 apply_patch,
+            );
+
+        if include_oracle {
+            registry.register(
+                String::from("consult_oracle"),
+                Some(String::from(
+                    "Consult a bounded auxiliary oracle model for planning, checking, or research support.",
+                )),
+                Some(consult_oracle_parameters()),
+                RegisteredToolRisk::Fixed(ToolRiskClass::ReadOnly),
+                consult_oracle,
             )
+        } else {
+            registry
+        }
     }
 
     #[must_use]
@@ -387,6 +467,10 @@ impl ToolRegistry {
         tool_calls: &[ChatToolCall],
         approval: &ToolApprovalConfig,
     ) -> Vec<ExecutedToolCall> {
+        let mut oracle_calls_remaining = context
+            .oracle()
+            .map(|oracle| oracle.max_calls().saturating_sub(oracle.calls_used()))
+            .unwrap_or(0);
         tool_calls
             .iter()
             .map(|tool_call| {
@@ -400,6 +484,37 @@ impl ToolRegistry {
                 });
 
                 if let Some(tool) = self.tools.get(tool_call.function.name.as_str()) {
+                    if tool_call.function.name == "consult_oracle" && oracle_calls_remaining == 0 {
+                        let reason = Some(String::from(
+                            "oracle call budget exhausted for this session",
+                        ));
+                        let invocation = denied_tool_invocation(
+                            context,
+                            tool_call.function.name.as_str(),
+                            &parsed_arguments,
+                            ToolRiskClass::ReadOnly,
+                            &reason,
+                        );
+                        return ExecutedToolCall {
+                            call_id: tool_call.id.clone(),
+                            name: tool_call.function.name.clone(),
+                            arguments: parsed_arguments,
+                            output: invocation.output.clone(),
+                            tool_execution: ToolExecutionRecord {
+                                risk_class: ToolRiskClass::ReadOnly,
+                                policy_decision: ToolPolicyDecision::Refused,
+                                approval_state: ToolApprovalState::Refused,
+                                command: invocation.command,
+                                exit_code: invocation.exit_code,
+                                timed_out: invocation.timed_out,
+                                truncated: invocation.truncated,
+                                bytes_returned: invocation.bytes_returned,
+                                files_touched: invocation.files_touched,
+                                reason,
+                            },
+                        };
+                    }
+
                     let risk_class = match tool.risk {
                         RegisteredToolRisk::Fixed(risk) => risk,
                         RegisteredToolRisk::Shell => classify_shell_command(&parsed_arguments),
@@ -427,6 +542,15 @@ impl ToolRegistry {
                             &reason,
                         )
                     };
+                    if tool_call.function.name == "consult_oracle"
+                        && matches!(
+                            policy_decision,
+                            ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved
+                        )
+                        && oracle_calls_remaining > 0
+                    {
+                        oracle_calls_remaining -= 1;
+                    }
 
                     ExecutedToolCall {
                         call_id: tool_call.id.clone(),
@@ -883,6 +1007,66 @@ fn apply_patch(
     })
 }
 
+fn consult_oracle(
+    context: &ToolExecutionContext,
+    arguments: &serde_json::Value,
+) -> Result<ToolInvocationOutcome, ToolInvocationError> {
+    let oracle = context.oracle().ok_or_else(|| {
+        ToolInvocationError::ExecutionFailed(String::from(
+            "consult_oracle requires an oracle profile in the active tool loop",
+        ))
+    })?;
+    let task_kind = expect_string(arguments, "task_kind", "consult_oracle")?;
+    if !matches!(task_kind, "planning" | "checking" | "research") {
+        return Err(ToolInvocationError::InvalidArguments(String::from(
+            "consult_oracle requires task_kind to be one of: planning, checking, research",
+        )));
+    }
+    let question = expect_string(arguments, "question", "consult_oracle")?;
+
+    let provider_config = OpenAiProviderConfig::from_backend_profile(oracle.profile());
+    let provider = OpenAiProviderClient::new(provider_config.clone()).map_err(|error| {
+        ToolInvocationError::ExecutionFailed(format!("failed to build oracle client: {error}"))
+    })?;
+    let response = provider
+        .chat_completion(vec![
+            ChatMessage::system(format!(
+                "You are Probe's bounded oracle. Only help with {} support. Do not execute tools or claim filesystem changes. Return concise guidance grounded in the question.",
+                task_kind
+            )),
+            ChatMessage::user(question),
+        ])
+        .map_err(|error| {
+            ToolInvocationError::ExecutionFailed(format!("oracle request failed: {error}"))
+        })?;
+    let answer = response
+        .first_message_text()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            ToolInvocationError::ExecutionFailed(String::from(
+                "oracle response did not include assistant text",
+            ))
+        })?;
+
+    Ok(ToolInvocationOutcome {
+        output: serde_json::json!({
+            "task_kind": task_kind,
+            "question": question,
+            "oracle_profile": oracle.profile().name,
+            "oracle_model": oracle.profile().model,
+            "oracle_answer": answer,
+            "calls_used_after": oracle.calls_used() + 1,
+            "max_calls": oracle.max_calls(),
+        }),
+        command: None,
+        exit_code: None,
+        timed_out: Some(false),
+        truncated: Some(false),
+        bytes_returned: Some(answer.len() as u64),
+        files_touched: Vec::new(),
+    })
+}
+
 fn classify_shell_command(arguments: &serde_json::Value) -> ToolRiskClass {
     let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str) else {
         return ToolRiskClass::Write;
@@ -1177,6 +1361,18 @@ fn apply_patch_parameters() -> serde_json::Value {
     })
 }
 
+fn consult_oracle_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "task_kind": { "type": "string", "description": "Oracle task type: planning, checking, or research." },
+            "question": { "type": "string", "description": "Bounded question for the oracle model." }
+        },
+        "required": ["task_kind", "question"],
+        "additionalProperties": false
+    })
+}
+
 fn expect_string<'a>(
     arguments: &'a serde_json::Value,
     key: &str,
@@ -1360,14 +1556,19 @@ fn truncate_text(text: &str) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use probe_protocol::session::{ToolPolicyDecision, ToolRiskClass};
     use probe_provider_openai::{ChatToolCall, ChatToolCallFunction};
     use tempfile::tempdir;
 
+    use crate::backend_profiles::psionic_qwen35_2b_q8_oracle;
+
     use super::{
         ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolExecutionContext,
-        ToolLoopConfig, ToolRegistry,
+        ToolLoopConfig, ToolOracleConfig, ToolOracleContext, ToolRegistry,
     };
 
     #[test]
@@ -1403,7 +1604,7 @@ mod tests {
 
     #[test]
     fn coding_bootstrap_registry_declares_all_tools() {
-        let registry = ToolRegistry::coding_bootstrap();
+        let registry = ToolRegistry::coding_bootstrap(false);
         let tools = registry
             .declared_tools()
             .into_iter()
@@ -1430,7 +1631,7 @@ mod tests {
             "one\ntwo\nthree\nfour\nfive\n",
         )
         .expect("write notes");
-        let registry = ToolRegistry::coding_bootstrap();
+        let registry = ToolRegistry::coding_bootstrap(false);
         let context = ToolExecutionContext::new(tempdir.path());
         let results = registry.execute_batch(
             &context,
@@ -1457,7 +1658,7 @@ mod tests {
         let tempdir = tempdir().expect("tempdir");
         fs::create_dir_all(tempdir.path().join("src/bin")).expect("mkdirs");
         fs::write(tempdir.path().join("src/main.rs"), "fn main() {}").expect("write main");
-        let registry = ToolRegistry::coding_bootstrap();
+        let registry = ToolRegistry::coding_bootstrap(false);
         let context = ToolExecutionContext::new(tempdir.path());
         let results = registry.execute_batch(
             &context,
@@ -1494,7 +1695,7 @@ mod tests {
         let tempdir = tempdir().expect("tempdir");
         let path = tempdir.path().join("hello.txt");
         fs::write(&path, "hello world\n").expect("write file");
-        let registry = ToolRegistry::coding_bootstrap();
+        let registry = ToolRegistry::coding_bootstrap(false);
         let context = ToolExecutionContext::new(tempdir.path());
         let results = registry.execute_batch(
             &context,
@@ -1531,7 +1732,7 @@ mod tests {
             "fn alpha() {}\nfn beta() {}\n",
         )
         .expect("write file");
-        let registry = ToolRegistry::coding_bootstrap();
+        let registry = ToolRegistry::coding_bootstrap(false);
         let context = ToolExecutionContext::new(tempdir.path());
         let results = registry.execute_batch(
             &context,
@@ -1563,7 +1764,7 @@ mod tests {
     #[test]
     fn coding_bootstrap_runs_bounded_shell_command() {
         let tempdir = tempdir().expect("tempdir");
-        let registry = ToolRegistry::coding_bootstrap();
+        let registry = ToolRegistry::coding_bootstrap(false);
         let context = ToolExecutionContext::new(tempdir.path());
         let results = registry.execute_batch(
             &context,
@@ -1595,7 +1796,7 @@ mod tests {
         let tempdir = tempdir().expect("tempdir");
         let path = tempdir.path().join("hello.txt");
         fs::write(&path, "hello world\n").expect("write file");
-        let registry = ToolRegistry::coding_bootstrap();
+        let registry = ToolRegistry::coding_bootstrap(false);
         let context = ToolExecutionContext::new(tempdir.path());
         let results = registry.execute_batch(
             &context,
@@ -1626,7 +1827,7 @@ mod tests {
     #[test]
     fn coding_bootstrap_can_pause_on_destructive_shell_requests() {
         let tempdir = tempdir().expect("tempdir");
-        let registry = ToolRegistry::coding_bootstrap();
+        let registry = ToolRegistry::coding_bootstrap(false);
         let context = ToolExecutionContext::new(tempdir.path());
         let results = registry.execute_batch(
             &context,
@@ -1654,6 +1855,100 @@ mod tests {
             results[0].tool_execution.policy_decision,
             ToolPolicyDecision::Paused
         );
+    }
+
+    #[test]
+    fn coding_bootstrap_can_consult_oracle_with_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let address = listener.local_addr().expect("listener addr");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let body = serde_json::json!({
+                "id": "oracle_tool_test",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Inspect src/main.rs before editing."
+                        },
+                        "finish_reason": "stop"
+                    }
+                ]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        let tempdir = tempdir().expect("tempdir");
+        let mut oracle_profile = psionic_qwen35_2b_q8_oracle();
+        oracle_profile.base_url = format!("http://{address}/v1");
+        let tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Auto, false).with_oracle(
+            ToolOracleConfig {
+                profile: oracle_profile.clone(),
+                max_calls: 1,
+            },
+        );
+        let context = ToolExecutionContext::new(tempdir.path()).with_oracle(ToolOracleContext::new(
+            oracle_profile,
+            1,
+            0,
+        ));
+        let results = tool_loop.registry.execute_batch(
+            &context,
+            &[
+                ChatToolCall {
+                    id: String::from("call_oracle_1"),
+                    kind: String::from("function"),
+                    function: ChatToolCallFunction {
+                        name: String::from("consult_oracle"),
+                        arguments: String::from(
+                            "{\"task_kind\":\"planning\",\"question\":\"What should I inspect first?\"}",
+                        ),
+                    },
+                },
+                ChatToolCall {
+                    id: String::from("call_oracle_2"),
+                    kind: String::from("function"),
+                    function: ChatToolCallFunction {
+                        name: String::from("consult_oracle"),
+                        arguments: String::from(
+                            "{\"task_kind\":\"checking\",\"question\":\"What should I verify next?\"}",
+                        ),
+                    },
+                },
+            ],
+            &ToolApprovalConfig::conservative(),
+        );
+
+        assert_eq!(
+            results[0].output["oracle_answer"],
+            "Inspect src/main.rs before editing."
+        );
+        assert_eq!(
+            results[1].tool_execution.policy_decision,
+            ToolPolicyDecision::Refused
+        );
+        assert!(
+            results[1]
+                .tool_execution
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("budget exhausted")
+        );
+
+        handle.join().expect("oracle server should exit cleanly");
     }
 
     #[test]

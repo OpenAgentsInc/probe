@@ -14,7 +14,7 @@ use probe_provider_openai::{
 };
 
 use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionStoreError};
-use crate::tools::{ExecutedToolCall, ToolExecutionContext, ToolLoopConfig};
+use crate::tools::{ExecutedToolCall, ToolExecutionContext, ToolLoopConfig, ToolOracleContext};
 
 const DEFAULT_PROBE_HOME_DIR: &str = ".probe";
 const LIKELY_WARM_WALLCLOCK_RATIO_NUMERATOR: u64 = 80;
@@ -301,7 +301,16 @@ impl ProbeRuntime {
                         response_id: response.id,
                     });
                 };
-                let execution_context = ToolExecutionContext::new(session.cwd.clone());
+                let oracle_calls_used =
+                    self.count_tool_results_named(&session.id, "consult_oracle")?;
+                let mut execution_context = ToolExecutionContext::new(session.cwd.clone());
+                if let Some(oracle) = tool_loop.oracle.as_ref() {
+                    execution_context = execution_context.with_oracle(ToolOracleContext::new(
+                        oracle.profile.clone(),
+                        oracle.max_calls,
+                        oracle_calls_used,
+                    ));
+                }
                 let executed = tool_loop.registry.execute_batch(
                     &execution_context,
                     &tool_calls,
@@ -573,6 +582,33 @@ impl ProbeRuntime {
             let observability = event.turn.observability?;
             observability.prompt_tokens.map(|_| observability)
         }))
+    }
+
+    fn count_tool_results_named(
+        &self,
+        session_id: &SessionId,
+        tool_name: &str,
+    ) -> Result<usize, RuntimeError> {
+        let transcript = self.session_store.read_transcript(session_id)?;
+        Ok(transcript
+            .into_iter()
+            .flat_map(|event| event.turn.items.into_iter())
+            .filter(|item| {
+                item.kind == TranscriptItemKind::ToolResult
+                    && item.name.as_deref() == Some(tool_name)
+                    && item
+                        .tool_execution
+                        .as_ref()
+                        .map(|execution| {
+                            matches!(
+                                execution.policy_decision,
+                                probe_protocol::session::ToolPolicyDecision::AutoAllow
+                                    | probe_protocol::session::ToolPolicyDecision::Approved
+                            )
+                        })
+                        .unwrap_or(false)
+            })
+            .count())
     }
 }
 
