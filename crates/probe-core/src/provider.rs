@@ -1,14 +1,19 @@
 use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_provider_apple_fm::{
     AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError, AppleFmProviderMessage,
+    AppleFmProviderSessionResponse, AppleFmProviderToolCall, AppleFmProviderToolDefinition,
 };
 use probe_provider_openai::{
     ChatMessage, ChatToolCall, ChatToolDefinitionEnvelope, OpenAiProviderClient,
     OpenAiProviderConfig, OpenAiProviderError,
 };
-use psionic_apple_fm::{AppleFmChatUsage, AppleFmUsageMeasurement, AppleFmUsageTruth};
+use psionic_apple_fm::{
+    AppleFmChatUsage, AppleFmToolCallError, AppleFmTranscript, AppleFmUsageMeasurement,
+    AppleFmUsageTruth,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlainTextMessageRole {
@@ -318,4 +323,40 @@ pub fn openai_tool_loop_response(
         assistant_text,
         tool_calls,
     ))
+}
+
+pub fn apple_fm_tool_loop_response(
+    profile: &BackendProfile,
+    system_prompt: Option<&str>,
+    transcript: AppleFmTranscript,
+    prompt: &str,
+    tools: Vec<AppleFmProviderToolDefinition>,
+    callback: Arc<
+        dyn Fn(AppleFmProviderToolCall) -> Result<String, AppleFmToolCallError> + Send + Sync,
+    >,
+) -> Result<PlainTextProviderResponse, ProviderError> {
+    if profile.kind != BackendKind::AppleFmBridge {
+        return Err(ProviderError::UnsupportedFeature {
+            backend: profile.kind,
+            feature: "apple-fm session tool callbacks",
+        });
+    }
+
+    let provider_config = AppleFmProviderConfig::from_backend_profile(profile);
+    let provider = AppleFmProviderClient::new(provider_config).map_err(ProviderError::AppleFm)?;
+    let response = provider
+        .respond_in_session_with_tools(system_prompt, transcript, prompt, tools, callback)
+        .map_err(ProviderError::AppleFm)?;
+    Ok(plain_text_provider_response_from_apple_session(response))
+}
+
+fn plain_text_provider_response_from_apple_session(
+    response: AppleFmProviderSessionResponse,
+) -> PlainTextProviderResponse {
+    PlainTextProviderResponse {
+        response_id: response.id,
+        response_model: response.model,
+        assistant_text: Some(response.assistant_text),
+        usage: response.usage.as_ref().map(provider_usage_from_apple),
+    }
 }

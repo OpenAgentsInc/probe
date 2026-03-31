@@ -8,6 +8,8 @@ license.workspace = true
 probe-protocol.workspace = true
 psionic-apple-fm.workspace = true
 reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 probe-test-support.workspace = true

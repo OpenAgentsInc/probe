@@ -29,7 +29,8 @@ Shipped now:
 - narrow offline-evaluable decision modules plus optimizer receipts
 - bounded oracle consultation and bounded long-context repo-analysis escalation
 - local backend attach and supervised launch flows
-- Apple FM plain-text `exec`/`chat` turns plus Apple-FM-backed `consult_oracle`
+- Apple FM plain-text `exec`/`chat` turns, Apple-FM-backed `consult_oracle`,
+  and session-backed Apple FM coding turns through the Probe approval layer
 
 Current posture:
 
@@ -106,11 +107,17 @@ usage when available, derived completion throughput, and a conservative
 cache-signal heuristic. More detailed design and implementation notes live
 under `docs/`.
 
-The current Apple FM claim boundary is intentionally narrower than Qwen:
+The Apple FM lane now overlaps honestly with the Qwen coding lane, but it is
+still not identical:
 
 - `probe exec` and `probe chat` support plain-text Apple FM turns
 - `consult_oracle` can target an Apple FM profile
-- tool-backed coding turns on Apple FM are still a separate follow-up lane
+- tool-backed coding turns on Apple FM now run through a Probe-owned callback
+  server and the same local approval policy
+- Apple FM resume rebuilds session continuity from Probe transcript state each
+  turn instead of depending on stored backend session ids
+- managed launch remains OpenAI-compatible only, and Apple FM does not claim
+  explicit OpenAI-style parallel tool-call control
 
 For local validation, Probe now has a canonical runner script at the repo
 root: `./probe-dev fmt`, `./probe-dev check`, `./probe-dev test`, and
@@ -260,6 +267,16 @@ Apple FM plain-text session:
 cargo run -p probe-cli -- exec \
   --profile psionic-apple-fm-bridge \
   "Summarize the Probe runtime boundary."
+```
+
+Apple FM tool-backed coding session:
+
+```bash
+cargo run -p probe-cli -- exec \
+  --profile psionic-apple-fm-bridge \
+  --tool-set coding_bootstrap \
+  --tool-choice required \
+  "Read hello.txt and tell me what it says."
 ```
 
 Apple FM oracle inside the Qwen coding lane:

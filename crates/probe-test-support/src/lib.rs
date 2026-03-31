@@ -40,6 +40,14 @@ impl FakeHttpResponse {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct FakeHttpRequest {
+    pub raw: String,
+    pub method: String,
+    pub path: String,
+    pub body: String,
+}
+
 pub struct FakeOpenAiServer {
     base_url: String,
     requests: Arc<Mutex<Vec<String>>>,
@@ -149,6 +157,19 @@ impl FakeAppleFmServer {
     }
 
     pub fn from_responses(responses: Vec<FakeHttpResponse>) -> Self {
+        let responses = Arc::new(Mutex::new(responses.into_iter()));
+        Self::from_handler(move |_request| {
+            responses
+                .lock()
+                .expect("fake apple fm response lock")
+                .next()
+                .expect("fake apple fm response should be queued")
+        })
+    }
+
+    pub fn from_handler(
+        handler: impl Fn(FakeHttpRequest) -> FakeHttpResponse + Send + Sync + 'static,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake server");
         listener
             .set_nonblocking(true)
@@ -158,20 +179,20 @@ impl FakeAppleFmServer {
         let requests_thread = Arc::clone(&requests);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
+        let handler = Arc::new(handler);
+        let handler_thread = Arc::clone(&handler);
 
         let thread = thread::spawn(move || {
-            let mut response_index = 0_usize;
-            while response_index < responses.len() && !stop_thread.load(Ordering::SeqCst) {
+            while !stop_thread.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let request = read_request(&mut stream);
                         requests_thread
                             .lock()
                             .expect("fake server request lock")
-                            .push(request);
+                            .push(request.clone());
 
-                        let response = &responses[response_index];
-                        response_index += 1;
+                        let response = handler_thread(parse_http_request(request));
                         let payload = format!(
                             "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                             response.status_code,
@@ -338,6 +359,25 @@ fn read_request(stream: &mut std::net::TcpStream) -> String {
         }
     }
     request
+}
+
+fn parse_http_request(raw: String) -> FakeHttpRequest {
+    let (head, body) = raw
+        .split_once("\r\n\r\n")
+        .map_or((raw.as_str(), String::new()), |(head, body)| {
+            (head, body.to_string())
+        });
+    let mut lines = head.lines();
+    let request_line = lines.next().unwrap_or_default();
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let path = parts.next().unwrap_or_default().to_string();
+    FakeHttpRequest {
+        raw,
+        method,
+        path,
+        body,
+    }
 }
 
 fn status_text(status_code: u16) -> &'static str {

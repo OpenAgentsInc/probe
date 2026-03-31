@@ -1350,6 +1350,7 @@ dependencies = [
  "probe-test-support",
  "psionic-apple-fm",
  "reqwest",
+ "serde",
  "serde_json",
 ]
 

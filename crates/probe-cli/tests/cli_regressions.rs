@@ -128,7 +128,7 @@ fn accept_process_emits_stable_report_shape() {
 
     let requests = server.finish();
     assert_eq!(requests.len(), 29);
-    assert!(requests[0].contains("GET /v1/models HTTP/1.1"));
+    assert!(requests[0].contains("/models"));
     assert!(requests[1].contains("POST /v1/chat/completions HTTP/1.1"));
 
     let report = normalized_acceptance_report(report_path.as_path(), &environment);

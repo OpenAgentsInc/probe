@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use probe_protocol::backend::{BackendKind, BackendProfile};
@@ -9,20 +11,46 @@ use probe_protocol::session::{
     SessionTurn, TranscriptItemKind, TurnObservability,
 };
 use probe_provider_openai::{ChatMessage, ChatToolCall};
+use psionic_apple_fm::{
+    APPLE_FM_TRANSCRIPT_TYPE, APPLE_FM_TRANSCRIPT_VERSION, AppleFmToolCallError, AppleFmTranscript,
+    AppleFmTranscriptContent, AppleFmTranscriptEntry, AppleFmTranscriptPayload,
+};
 
 use crate::dataset_export::build_decision_summary;
 use crate::provider::{
-    PlainTextMessage, ProviderError, ProviderUsage, complete_plain_text, openai_tool_loop_response,
+    PlainTextMessage, ProviderError, ProviderUsage, apple_fm_tool_loop_response,
+    complete_plain_text, openai_tool_loop_response,
 };
 use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionStoreError};
 use crate::tools::{
-    ExecutedToolCall, ToolExecutionContext, ToolLongContextContext, ToolLoopConfig,
-    ToolOracleContext,
+    ExecutedToolCall, ToolExecutionContext, ToolExecutionSession, ToolLongContextContext,
+    ToolLoopConfig, ToolOracleContext,
 };
 
 const DEFAULT_PROBE_HOME_DIR: &str = ".probe";
 const LIKELY_WARM_WALLCLOCK_RATIO_NUMERATOR: u64 = 80;
 const LIKELY_WARM_WALLCLOCK_RATIO_DENOMINATOR: u64 = 100;
+
+#[derive(Clone, Debug)]
+enum AppleFmToolLoopInterruption {
+    ApprovalPending {
+        tool_name: String,
+        call_id: String,
+        reason: Option<String>,
+    },
+    CallbackBudgetExceeded {
+        max_round_trips: usize,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct AppleFmToolLoopRecorder {
+    execution_session: ToolExecutionSession,
+    records: Vec<ExecutedToolCall>,
+    next_call_index: usize,
+    max_callback_calls: usize,
+    interruption: Option<AppleFmToolLoopInterruption>,
+}
 
 #[derive(Clone, Debug)]
 pub struct PlainTextExecRequest {
@@ -138,7 +166,7 @@ impl Display for RuntimeError {
                 max_round_trips,
             } => write!(
                 f,
-                "session {} exceeded the configured tool loop bound of {} model round trips",
+                "session {} exceeded the configured tool loop bound of {} controller round trips",
                 session_id.as_str(),
                 max_round_trips
             ),
@@ -251,30 +279,34 @@ impl ProbeRuntime {
         if tool_loop.is_none() {
             return self.run_plain_completion_turn(session, profile, prompt);
         }
-        if profile.kind != BackendKind::OpenAiChatCompletions {
-            let error = RuntimeError::UnsupportedBackendFeature {
-                session_id: session.id.clone(),
-                backend: profile.kind,
-                feature: "coding tool loops",
-            };
-            let _ = self.session_store.append_turn(
-                &session.id,
-                &[
-                    NewItem::new(TranscriptItemKind::UserMessage, prompt),
-                    NewItem::new(TranscriptItemKind::Note, error.to_string()),
-                ],
-            );
-            return Err(error);
+        match profile.kind {
+            BackendKind::OpenAiChatCompletions => self.run_openai_tool_loop_turn(
+                session,
+                profile,
+                prompt,
+                tool_loop.expect("filtered"),
+            ),
+            BackendKind::AppleFmBridge => self.run_apple_fm_tool_loop_turn(
+                session,
+                profile,
+                prompt,
+                tool_loop.expect("filtered"),
+            ),
         }
+    }
 
+    fn run_openai_tool_loop_turn(
+        &self,
+        session: SessionMetadata,
+        profile: BackendProfile,
+        prompt: String,
+        tool_loop: ToolLoopConfig,
+    ) -> Result<PlainTextExecOutcome, RuntimeError> {
         let mut messages = self.replay_messages(&session)?;
         let mut pending_user_prompt = Some(prompt);
         let mut executed_tool_calls = 0_usize;
         let mut tool_results = Vec::new();
-        let max_round_trips = tool_loop
-            .as_ref()
-            .map(|config| config.max_model_round_trips)
-            .unwrap_or(1);
+        let max_round_trips = tool_loop.max_model_round_trips;
 
         for _ in 0..max_round_trips {
             let next_user_prompt = pending_user_prompt.as_ref().cloned();
@@ -286,14 +318,9 @@ impl ProbeRuntime {
             let response = openai_tool_loop_response(
                 &profile,
                 messages.clone(),
-                tool_loop
-                    .as_ref()
-                    .map(|config| config.registry.declared_tools())
-                    .unwrap_or_default(),
-                tool_loop
-                    .as_ref()
-                    .and_then(|config| config.tool_choice.to_provider_choice()),
-                tool_loop.as_ref().map(|config| config.parallel_tool_calls),
+                tool_loop.registry.declared_tools(),
+                tool_loop.tool_choice.to_provider_choice(),
+                Some(tool_loop.parallel_tool_calls),
             )
             .map_err(|source| RuntimeError::ProviderRequest {
                 session_id: session.id.clone(),
@@ -320,48 +347,18 @@ impl ProbeRuntime {
                 && !tool_calls.is_empty()
             {
                 let tool_calls = tool_calls.clone();
-                let tool_call_turn = self.append_tool_call_turn(
+                let _ = self.append_tool_call_turn(
                     &session.id,
                     pending_user_prompt.take(),
                     &tool_calls,
                     Some(observability),
                 )?;
-                let _ = tool_call_turn;
 
-                let Some(tool_loop) = tool_loop.as_ref() else {
-                    return Err(RuntimeError::MissingAssistantMessage {
-                        session_id: session.id.clone(),
-                        response_id: response.0,
-                    });
-                };
-                let transcript = self.session_store.read_transcript(&session.id)?;
-                let session_summary = build_decision_summary(&session, transcript.as_slice());
-                let mut execution_context = ToolExecutionContext::new(session.cwd.clone());
-                if let Some(oracle) = tool_loop.oracle.as_ref() {
-                    execution_context = execution_context.with_oracle(ToolOracleContext::new(
-                        oracle.profile.clone(),
-                        oracle.max_calls,
-                        session_summary.oracle_calls,
-                    ));
-                }
-                if let Some(long_context) = tool_loop.long_context.as_ref() {
-                    execution_context =
-                        execution_context.with_long_context(ToolLongContextContext::new(
-                            long_context.profile.clone(),
-                            long_context.max_calls,
-                            session_summary.long_context_calls,
-                            long_context.max_evidence_files,
-                            long_context.max_lines_per_file,
-                            next_user_prompt
-                                .as_ref()
-                                .map_or(0, |prompt| prompt.chars().count()),
-                            session_summary.files_listed.len(),
-                            session_summary.files_searched.len(),
-                            session_summary.files_read.len(),
-                            session_summary.too_many_turns,
-                            session_summary.oracle_calls,
-                        ));
-                }
+                let execution_context = self.build_tool_execution_context(
+                    &session,
+                    &tool_loop,
+                    next_user_prompt.as_deref(),
+                )?;
                 let executed = tool_loop.registry.execute_batch(
                     &execution_context,
                     tool_calls.as_slice(),
@@ -369,8 +366,7 @@ impl ProbeRuntime {
                 );
                 executed_tool_calls += executed.iter().filter(|tool| tool.was_executed()).count();
                 tool_results.extend(executed.clone());
-                let tool_result_turn = self.append_tool_result_turn(&session.id, &executed)?;
-                let _ = tool_result_turn;
+                let _ = self.append_tool_result_turn(&session.id, &executed)?;
                 if let Some(paused) = executed.iter().find(|tool| tool.was_paused()) {
                     return Err(RuntimeError::ToolApprovalPending {
                         session_id: session.id.clone(),
@@ -401,18 +397,10 @@ impl ProbeRuntime {
                         session_id: session.id.clone(),
                         response_id: response.0.clone(),
                     })?;
-
-            let mut items = Vec::new();
-            if let Some(user_prompt) = pending_user_prompt.take() {
-                items.push(NewItem::new(TranscriptItemKind::UserMessage, user_prompt));
-            }
-            items.push(NewItem::new(
-                TranscriptItemKind::AssistantMessage,
-                assistant_text.clone(),
-            ));
-            let turn = self.session_store.append_turn_with_observability(
+            let turn = self.append_assistant_turn(
                 &session.id,
-                &items,
+                pending_user_prompt.take(),
+                assistant_text.clone(),
                 Some(observability),
             )?;
             let session = self.session_store.read_metadata(&session.id)?;
@@ -433,7 +421,7 @@ impl ProbeRuntime {
             &[NewItem::new(
                 TranscriptItemKind::Note,
                 format!(
-                    "session exceeded the configured tool loop bound of {} model round trips",
+                    "session exceeded the configured tool loop bound of {} controller round trips",
                     max_round_trips
                 ),
             )],
@@ -441,6 +429,189 @@ impl ProbeRuntime {
         Err(RuntimeError::MaxToolRoundTrips {
             session_id: session.id,
             max_round_trips,
+        })
+    }
+
+    fn run_apple_fm_tool_loop_turn(
+        &self,
+        session: SessionMetadata,
+        profile: BackendProfile,
+        prompt: String,
+        tool_loop: ToolLoopConfig,
+    ) -> Result<PlainTextExecOutcome, RuntimeError> {
+        let transcript = self.replay_apple_fm_transcript(&session)?;
+        let execution_context =
+            self.build_tool_execution_context(&session, &tool_loop, Some(prompt.as_str()))?;
+        let recorder = Arc::new(Mutex::new(AppleFmToolLoopRecorder::new(
+            tool_loop
+                .registry
+                .execution_session(&execution_context, &tool_loop.approval),
+            tool_loop.max_model_round_trips,
+        )));
+        let callback_recorder = Arc::clone(&recorder);
+        let tool_definitions = tool_loop
+            .registry
+            .declared_tools()
+            .into_iter()
+            .map(
+                |tool| probe_provider_apple_fm::AppleFmProviderToolDefinition {
+                    name: tool.function.name,
+                    description: tool.function.description,
+                    parameters: tool.function.parameters,
+                },
+            )
+            .collect::<Vec<_>>();
+
+        let request_started = Instant::now();
+        let response = apple_fm_tool_loop_response(
+            &profile,
+            session.system_prompt.as_deref(),
+            transcript,
+            prompt.as_str(),
+            tool_definitions,
+            Arc::new(move |tool_call| {
+                callback_recorder
+                    .lock()
+                    .expect("apple fm tool recorder lock")
+                    .handle_call(tool_call)
+            }),
+        )
+        .map_err(|source| RuntimeError::ProviderRequest {
+            session_id: session.id.clone(),
+            source,
+        });
+        let wallclock_ms = elapsed_ms(request_started);
+
+        let (tool_results, interruption) = {
+            let recorder = recorder.lock().expect("apple fm tool recorder lock");
+            (recorder.records.clone(), recorder.interruption.clone())
+        };
+        let executed_tool_calls = tool_results
+            .iter()
+            .filter(|tool| tool.was_executed())
+            .count();
+
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                if !tool_results.is_empty() {
+                    let _ = self.append_recorded_tool_call_turn(
+                        &session.id,
+                        Some(prompt.clone()),
+                        &tool_results,
+                        None,
+                    );
+                    let _ = self.append_tool_result_turn(&session.id, &tool_results);
+                } else if matches!(
+                    interruption,
+                    Some(AppleFmToolLoopInterruption::CallbackBudgetExceeded { .. })
+                ) {
+                    let _ = self.session_store.append_turn(
+                        &session.id,
+                        &[NewItem::new(
+                            TranscriptItemKind::UserMessage,
+                            prompt.clone(),
+                        )],
+                    );
+                }
+
+                return match interruption {
+                    Some(AppleFmToolLoopInterruption::ApprovalPending {
+                        tool_name,
+                        call_id,
+                        reason,
+                    }) => Err(RuntimeError::ToolApprovalPending {
+                        session_id: session.id,
+                        tool_name,
+                        call_id,
+                        reason,
+                    }),
+                    Some(AppleFmToolLoopInterruption::CallbackBudgetExceeded {
+                        max_round_trips,
+                    }) => {
+                        let _ = self.session_store.append_turn(
+                            &session.id,
+                            &[NewItem::new(
+                                TranscriptItemKind::Note,
+                                format!(
+                                    "session exceeded the configured tool loop bound of {} controller round trips",
+                                    max_round_trips
+                                ),
+                            )],
+                        );
+                        Err(RuntimeError::MaxToolRoundTrips {
+                            session_id: session.id,
+                            max_round_trips,
+                        })
+                    }
+                    None => {
+                        let mut items = Vec::new();
+                        if tool_results.is_empty() {
+                            items.push(NewItem::new(TranscriptItemKind::UserMessage, prompt));
+                        }
+                        items.push(NewItem::new(TranscriptItemKind::Note, error.to_string()));
+                        let _ = self.session_store.append_turn(&session.id, &items);
+                        Err(error)
+                    }
+                };
+            }
+        };
+        let observability =
+            self.build_turn_observability(&session.id, wallclock_ms, response.usage.as_ref())?;
+        if !tool_results.is_empty() {
+            let _ = self.append_recorded_tool_call_turn(
+                &session.id,
+                Some(prompt),
+                &tool_results,
+                None,
+            )?;
+            let _ = self.append_tool_result_turn(&session.id, &tool_results)?;
+            let turn = self.append_assistant_turn(
+                &session.id,
+                None,
+                response.assistant_text.clone().ok_or_else(|| {
+                    RuntimeError::MissingAssistantMessage {
+                        session_id: session.id.clone(),
+                        response_id: response.response_id.clone(),
+                    }
+                })?,
+                Some(observability),
+            )?;
+            let session = self.session_store.read_metadata(&session.id)?;
+            return Ok(PlainTextExecOutcome {
+                session,
+                turn,
+                assistant_text: response.assistant_text.unwrap_or_default(),
+                response_id: response.response_id,
+                response_model: response.response_model,
+                usage: response.usage,
+                executed_tool_calls,
+                tool_results,
+            });
+        }
+
+        let assistant_text = response.assistant_text.clone().ok_or_else(|| {
+            RuntimeError::MissingAssistantMessage {
+                session_id: session.id.clone(),
+                response_id: response.response_id.clone(),
+            }
+        })?;
+        let turn = self.append_assistant_turn(
+            &session.id,
+            Some(prompt),
+            assistant_text.clone(),
+            Some(observability),
+        )?;
+        let session = self.session_store.read_metadata(&session.id)?;
+        Ok(PlainTextExecOutcome {
+            session,
+            turn,
+            assistant_text,
+            response_id: response.response_id,
+            response_model: response.response_model,
+            usage: response.usage,
+            executed_tool_calls,
+            tool_results,
         })
     }
 
@@ -502,6 +673,142 @@ impl ProbeRuntime {
             usage: response.usage,
             executed_tool_calls: 0,
             tool_results: Vec::new(),
+        })
+    }
+
+    fn build_tool_execution_context(
+        &self,
+        session: &SessionMetadata,
+        tool_loop: &ToolLoopConfig,
+        prompt: Option<&str>,
+    ) -> Result<ToolExecutionContext, RuntimeError> {
+        let transcript = self.session_store.read_transcript(&session.id)?;
+        let session_summary = build_decision_summary(session, transcript.as_slice());
+        let mut execution_context = ToolExecutionContext::new(session.cwd.clone());
+        if let Some(oracle) = tool_loop.oracle.as_ref() {
+            execution_context = execution_context.with_oracle(ToolOracleContext::new(
+                oracle.profile.clone(),
+                oracle.max_calls,
+                session_summary.oracle_calls,
+            ));
+        }
+        if let Some(long_context) = tool_loop.long_context.as_ref() {
+            execution_context = execution_context.with_long_context(ToolLongContextContext::new(
+                long_context.profile.clone(),
+                long_context.max_calls,
+                session_summary.long_context_calls,
+                long_context.max_evidence_files,
+                long_context.max_lines_per_file,
+                prompt.map_or(0, |value| value.chars().count()),
+                session_summary.files_listed.len(),
+                session_summary.files_searched.len(),
+                session_summary.files_read.len(),
+                session_summary.too_many_turns,
+                session_summary.oracle_calls,
+            ));
+        }
+        Ok(execution_context)
+    }
+
+    fn replay_apple_fm_transcript(
+        &self,
+        session: &SessionMetadata,
+    ) -> Result<AppleFmTranscript, RuntimeError> {
+        let mut entries = Vec::new();
+
+        for event in self.session_store.read_transcript(&session.id)? {
+            let mut pending_tool_calls = Vec::new();
+            let mut pending_tool_entry_id: Option<String> = None;
+            for item in event.turn.items {
+                match item.kind {
+                    TranscriptItemKind::UserMessage => {
+                        flush_apple_pending_tool_calls(
+                            &mut entries,
+                            &mut pending_tool_calls,
+                            &mut pending_tool_entry_id,
+                        );
+                        entries.push(apple_fm_text_entry(
+                            format!("turn-{}-user-{}", event.turn.index, item.sequence),
+                            "user",
+                            item.text,
+                            BTreeMap::new(),
+                        ));
+                    }
+                    TranscriptItemKind::AssistantMessage => {
+                        flush_apple_pending_tool_calls(
+                            &mut entries,
+                            &mut pending_tool_calls,
+                            &mut pending_tool_entry_id,
+                        );
+                        entries.push(apple_fm_text_entry(
+                            format!("turn-{}-assistant-{}", event.turn.index, item.sequence),
+                            "assistant",
+                            item.text,
+                            BTreeMap::new(),
+                        ));
+                    }
+                    TranscriptItemKind::ToolCall => {
+                        let name = item.name.ok_or_else(|| {
+                            RuntimeError::MalformedTranscript(String::from(
+                                "tool call transcript items require a tool name",
+                            ))
+                        })?;
+                        let arguments = item.arguments.ok_or_else(|| {
+                            RuntimeError::MalformedTranscript(String::from(
+                                "tool call transcript items require structured arguments",
+                            ))
+                        })?;
+                        if pending_tool_entry_id.is_none() {
+                            pending_tool_entry_id =
+                                Some(format!("turn-{}-assistant-tools", event.turn.index));
+                        }
+                        pending_tool_calls.push(serde_json::json!({
+                            "name": name,
+                            "arguments": arguments,
+                        }));
+                    }
+                    TranscriptItemKind::ToolResult => {
+                        flush_apple_pending_tool_calls(
+                            &mut entries,
+                            &mut pending_tool_calls,
+                            &mut pending_tool_entry_id,
+                        );
+                        let name = item.name.ok_or_else(|| {
+                            RuntimeError::MalformedTranscript(String::from(
+                                "tool result transcript items require a tool name",
+                            ))
+                        })?;
+                        let mut extra = BTreeMap::from([(
+                            String::from("toolName"),
+                            serde_json::Value::String(name),
+                        )]);
+                        if let Some(tool_call_id) = item.tool_call_id {
+                            extra.insert(
+                                String::from("toolCallId"),
+                                serde_json::Value::String(tool_call_id),
+                            );
+                        }
+                        entries.push(apple_fm_text_entry(
+                            format!("turn-{}-tool-{}", event.turn.index, item.sequence),
+                            "tool",
+                            item.text,
+                            extra,
+                        ));
+                    }
+                    TranscriptItemKind::Note => {}
+                }
+            }
+            flush_apple_pending_tool_calls(
+                &mut entries,
+                &mut pending_tool_calls,
+                &mut pending_tool_entry_id,
+            );
+        }
+
+        Ok(AppleFmTranscript {
+            version: APPLE_FM_TRANSCRIPT_VERSION,
+            transcript_type: APPLE_FM_TRANSCRIPT_TYPE.to_string(),
+            transcript: AppleFmTranscriptPayload { entries },
         })
     }
 
@@ -680,6 +987,49 @@ impl ProbeRuntime {
             .map_err(RuntimeError::from)
     }
 
+    fn append_recorded_tool_call_turn(
+        &self,
+        session_id: &SessionId,
+        user_prompt: Option<String>,
+        executed_tool_calls: &[ExecutedToolCall],
+        observability: Option<TurnObservability>,
+    ) -> Result<SessionTurn, RuntimeError> {
+        let mut items = Vec::new();
+        if let Some(user_prompt) = user_prompt {
+            items.push(NewItem::new(TranscriptItemKind::UserMessage, user_prompt));
+        }
+        for tool_call in executed_tool_calls {
+            items.push(NewItem::tool_call(
+                tool_call.name.clone(),
+                tool_call.call_id.clone(),
+                tool_call.arguments.clone(),
+            ));
+        }
+        self.session_store
+            .append_turn_with_observability(session_id, &items, observability)
+            .map_err(RuntimeError::from)
+    }
+
+    fn append_assistant_turn(
+        &self,
+        session_id: &SessionId,
+        user_prompt: Option<String>,
+        assistant_text: String,
+        observability: Option<TurnObservability>,
+    ) -> Result<SessionTurn, RuntimeError> {
+        let mut items = Vec::new();
+        if let Some(user_prompt) = user_prompt {
+            items.push(NewItem::new(TranscriptItemKind::UserMessage, user_prompt));
+        }
+        items.push(NewItem::new(
+            TranscriptItemKind::AssistantMessage,
+            assistant_text,
+        ));
+        self.session_store
+            .append_turn_with_observability(session_id, &items, observability)
+            .map_err(RuntimeError::from)
+    }
+
     fn build_turn_observability(
         &self,
         session_id: &SessionId,
@@ -731,6 +1081,106 @@ impl ProbeRuntime {
     }
 }
 
+impl AppleFmToolLoopRecorder {
+    fn new(execution_session: ToolExecutionSession, max_callback_calls: usize) -> Self {
+        Self {
+            execution_session,
+            records: Vec::new(),
+            next_call_index: 0,
+            max_callback_calls,
+            interruption: None,
+        }
+    }
+
+    fn handle_call(
+        &mut self,
+        tool_call: probe_provider_apple_fm::AppleFmProviderToolCall,
+    ) -> Result<String, AppleFmToolCallError> {
+        if self.next_call_index >= self.max_callback_calls {
+            self.interruption = Some(AppleFmToolLoopInterruption::CallbackBudgetExceeded {
+                max_round_trips: self.max_callback_calls,
+            });
+            return Err(AppleFmToolCallError::new(
+                tool_call.name,
+                format!(
+                    "Probe controller-side Apple FM callback budget of {} round trips was exhausted",
+                    self.max_callback_calls
+                ),
+            ));
+        }
+
+        self.next_call_index += 1;
+        let call_id = format!("apple_fm_call_{}", self.next_call_index);
+        let executed = self.execution_session.execute_named_call(
+            call_id.clone(),
+            tool_call.name.clone(),
+            tool_call.arguments,
+        );
+        let output = serde_json::to_string(&executed.output)
+            .unwrap_or_else(|_| String::from("{\"error\":\"tool output encode failed\"}"));
+        if executed.was_paused() {
+            self.interruption = Some(AppleFmToolLoopInterruption::ApprovalPending {
+                tool_name: executed.name.clone(),
+                call_id,
+                reason: executed.tool_execution.reason.clone(),
+            });
+            self.records.push(executed.clone());
+            return Err(AppleFmToolCallError::new(
+                executed.name,
+                executed
+                    .tool_execution
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| String::from("tool execution paused for approval")),
+            ));
+        }
+        self.records.push(executed);
+        Ok(output)
+    }
+}
+
+fn apple_fm_text_entry(
+    id: String,
+    role: &str,
+    text: String,
+    extra: BTreeMap<String, serde_json::Value>,
+) -> AppleFmTranscriptEntry {
+    AppleFmTranscriptEntry {
+        id: Some(id.clone()),
+        role: role.to_string(),
+        contents: vec![AppleFmTranscriptContent {
+            content_type: String::from("text"),
+            id: Some(format!("{id}-content")),
+            extra: BTreeMap::from([(String::from("text"), serde_json::Value::String(text))]),
+        }],
+        extra,
+    }
+}
+
+fn flush_apple_pending_tool_calls(
+    entries: &mut Vec<AppleFmTranscriptEntry>,
+    pending_tool_calls: &mut Vec<serde_json::Value>,
+    pending_tool_entry_id: &mut Option<String>,
+) {
+    if pending_tool_calls.is_empty() {
+        return;
+    }
+    let entry_id = pending_tool_entry_id
+        .take()
+        .unwrap_or_else(|| String::from("assistant-tools"));
+    let mut extra = BTreeMap::new();
+    extra.insert(
+        String::from("toolCalls"),
+        serde_json::Value::Array(std::mem::take(pending_tool_calls)),
+    );
+    entries.push(apple_fm_text_entry(
+        entry_id,
+        "assistant",
+        String::new(),
+        extra,
+    ));
+}
+
 fn infer_cache_signal(
     previous: Option<&TurnObservability>,
     current_prompt_tokens: Option<u32>,
@@ -774,7 +1224,8 @@ fn elapsed_ms(started: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
@@ -784,11 +1235,144 @@ mod tests {
         CacheSignal, SessionHarnessProfile, ToolApprovalState, ToolPolicyDecision,
         TranscriptItemKind,
     };
-    use probe_test_support::{FakeAppleFmServer, FakeOpenAiServer, ProbeTestEnvironment};
+    use probe_test_support::{
+        FakeAppleFmServer, FakeHttpRequest, FakeHttpResponse, FakeOpenAiServer,
+        ProbeTestEnvironment,
+    };
+    use serde_json::json;
 
     use super::{
         PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, default_session_title,
     };
+
+    #[derive(Default)]
+    struct AppleFmSessionBridgeState {
+        callback_url: String,
+        session_token: String,
+        create_requests: Vec<serde_json::Value>,
+        response_requests: Vec<serde_json::Value>,
+    }
+
+    struct ToolCallbackResponse {
+        status_code: u16,
+        body: String,
+    }
+
+    fn record_apple_session_create(
+        state: &Arc<Mutex<AppleFmSessionBridgeState>>,
+        request: &FakeHttpRequest,
+        session_id: &str,
+    ) -> FakeHttpResponse {
+        let request_json: serde_json::Value =
+            serde_json::from_str(request.body.as_str()).expect("session create json");
+        let callback_url = request_json["tool_callback"]["url"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let session_token = request_json["tool_callback"]["session_token"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let mut guard = state.lock().expect("apple fm session bridge lock");
+        guard.callback_url = callback_url;
+        guard.session_token = session_token;
+        guard.create_requests.push(request_json.clone());
+        FakeHttpResponse::json_ok(json!({
+            "session": {
+                "id": session_id,
+                "instructions": request_json["instructions"],
+                "model": {
+                    "id": "apple-foundation-model",
+                    "use_case": "general",
+                    "guardrails": "default"
+                },
+                "tools": request_json["tools"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|tool| json!({
+                        "name": tool["name"],
+                        "description": tool["description"]
+                    }))
+                    .collect::<Vec<_>>(),
+                "is_responding": false,
+                "transcript_json": serde_json::to_string(&request_json["transcript"])
+                    .unwrap_or_else(|_| String::from("{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"))
+            }
+        }))
+    }
+
+    fn invoke_apple_tool_callback(
+        state: &Arc<Mutex<AppleFmSessionBridgeState>>,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> ToolCallbackResponse {
+        let (callback_url, session_token) = {
+            let guard = state.lock().expect("apple fm session bridge lock");
+            (guard.callback_url.clone(), guard.session_token.clone())
+        };
+        let url = callback_url
+            .strip_prefix("http://")
+            .expect("callback url should be http");
+        let (authority, path) = url
+            .split_once('/')
+            .expect("callback url should include path");
+        let body = json!({
+            "session_token": session_token,
+            "tool_name": tool_name,
+            "arguments": {
+                "content": arguments,
+                "is_complete": true
+            }
+        })
+        .to_string();
+        let mut stream = TcpStream::connect(authority).expect("connect tool callback");
+        let request = format!(
+            "POST /{} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            path,
+            authority,
+            body.len(),
+            body
+        );
+        stream
+            .write_all(request.as_bytes())
+            .expect("write tool callback request");
+        stream.flush().expect("flush tool callback request");
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("close tool callback request writer");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read tool callback response");
+        let (head, body) = response
+            .split_once("\r\n\r\n")
+            .expect("tool callback response should include body");
+        let status_code = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u16>().ok())
+            .expect("tool callback status code");
+        ToolCallbackResponse {
+            status_code,
+            body: body.to_string(),
+        }
+    }
+
+    fn record_apple_response_request(
+        state: &Arc<Mutex<AppleFmSessionBridgeState>>,
+        request: &FakeHttpRequest,
+    ) {
+        let request_json: serde_json::Value =
+            serde_json::from_str(request.body.as_str()).expect("session respond json");
+        state
+            .lock()
+            .expect("apple fm session bridge lock")
+            .response_requests
+            .push(request_json);
+    }
 
     #[test]
     fn default_title_is_trimmed_for_exec_prompts() {
@@ -1145,33 +1729,435 @@ mod tests {
     }
 
     #[test]
-    fn apple_fm_tool_loops_are_rejected_explicitly() {
+    fn apple_fm_tool_loop_executes_probe_tools_through_session_callbacks() {
         let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let bridge_state = Arc::new(Mutex::new(AppleFmSessionBridgeState::default()));
+        let captured_state = Arc::clone(&bridge_state);
+        let server = FakeAppleFmServer::from_handler(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/v1/sessions") => {
+                    record_apple_session_create(&captured_state, &request, "sess-apple-tool-1")
+                }
+                ("POST", "/v1/sessions/sess-apple-tool-1/responses") => {
+                    record_apple_response_request(&captured_state, &request);
+                    let callback_response = invoke_apple_tool_callback(
+                        &captured_state,
+                        "read_file",
+                        json!({
+                            "path": "hello.txt",
+                            "start_line": 1,
+                            "max_lines": 10
+                        }),
+                    );
+                    assert_eq!(callback_response.status_code, 200);
+                    let callback_json: serde_json::Value =
+                        serde_json::from_str(callback_response.body.as_str())
+                            .expect("callback json");
+                    FakeHttpResponse::json_ok(json!({
+                        "session": {
+                            "id": "sess-apple-tool-1",
+                            "instructions": "You are helpful",
+                            "model": {
+                                "id": "apple-foundation-model",
+                                "use_case": "general",
+                                "guardrails": "default"
+                            },
+                            "tools": [{"name": "read_file"}],
+                            "is_responding": false,
+                            "transcript_json": "{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"
+                        },
+                        "model": "apple-foundation-model",
+                        "output": format!(
+                            "tool-backed answer: {}",
+                            callback_json["output"].as_str().unwrap_or_default()
+                        ),
+                        "usage": {
+                            "total_tokens_detail": {"value": 21, "truth": "estimated"}
+                        }
+                    }))
+                }
+                ("DELETE", "/v1/sessions/sess-apple-tool-1") => {
+                    FakeHttpResponse::json_ok(json!({}))
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+        });
+
         let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
-        let profile = psionic_apple_fm_bridge();
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = server.base_url().to_string();
+
+        let outcome = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile,
+                prompt: String::from("Use read_file on hello.txt and tell me the contents."),
+                title: Some(String::from("Apple FM Tool Success")),
+                cwd: environment.workspace().to_path_buf(),
+                system_prompt: Some(String::from("You are helpful")),
+                harness_profile: None,
+                tool_loop: Some(ToolLoopConfig::coding_bootstrap(
+                    ProbeToolChoice::Required,
+                    false,
+                )),
+            })
+            .expect("apple fm tool loop should succeed");
+
+        assert!(outcome.assistant_text.contains("hello world"));
+        assert_eq!(outcome.executed_tool_calls, 1);
+        assert_eq!(outcome.tool_results.len(), 1);
+        assert_eq!(
+            outcome.tool_results[0].tool_execution.policy_decision,
+            ToolPolicyDecision::AutoAllow
+        );
+        let transcript = runtime
+            .session_store()
+            .read_transcript(&outcome.session.id)
+            .expect("read transcript");
+        assert_eq!(transcript.len(), 3);
+        assert!(matches!(
+            transcript[0].turn.items[1].kind,
+            TranscriptItemKind::ToolCall
+        ));
+        assert!(matches!(
+            transcript[1].turn.items[0].kind,
+            TranscriptItemKind::ToolResult
+        ));
+        assert!(matches!(
+            transcript[2].turn.items[0].kind,
+            TranscriptItemKind::AssistantMessage
+        ));
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+    }
+
+    #[test]
+    fn apple_fm_tool_loop_refusal_persists_probe_receipts() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let bridge_state = Arc::new(Mutex::new(AppleFmSessionBridgeState::default()));
+        let captured_state = Arc::clone(&bridge_state);
+        let server = FakeAppleFmServer::from_handler(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/v1/sessions") => {
+                    record_apple_session_create(&captured_state, &request, "sess-apple-refuse-1")
+                }
+                ("POST", "/v1/sessions/sess-apple-refuse-1/responses") => {
+                    record_apple_response_request(&captured_state, &request);
+                    let callback_response = invoke_apple_tool_callback(
+                        &captured_state,
+                        "apply_patch",
+                        json!({
+                            "path": "hello.txt",
+                            "old_text": "world",
+                            "new_text": "probe"
+                        }),
+                    );
+                    assert_eq!(callback_response.status_code, 200);
+                    let callback_json: serde_json::Value =
+                        serde_json::from_str(callback_response.body.as_str())
+                            .expect("callback json");
+                    FakeHttpResponse::json_ok(json!({
+                        "session": {
+                            "id": "sess-apple-refuse-1",
+                            "instructions": "You are helpful",
+                            "model": {
+                                "id": "apple-foundation-model",
+                                "use_case": "general",
+                                "guardrails": "default"
+                            },
+                            "tools": [{"name": "apply_patch"}],
+                            "is_responding": false,
+                            "transcript_json": "{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"
+                        },
+                        "model": "apple-foundation-model",
+                        "output": format!(
+                            "refused output seen: {}",
+                            callback_json["output"].as_str().unwrap_or_default()
+                        )
+                    }))
+                }
+                ("DELETE", "/v1/sessions/sess-apple-refuse-1") => {
+                    FakeHttpResponse::json_ok(json!({}))
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+        });
+
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = server.base_url().to_string();
+
+        let outcome = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile,
+                prompt: String::from("Patch hello.txt."),
+                title: Some(String::from("Apple FM Tool Refusal")),
+                cwd: environment.workspace().to_path_buf(),
+                system_prompt: Some(String::from("You are helpful")),
+                harness_profile: None,
+                tool_loop: Some(ToolLoopConfig::coding_bootstrap(
+                    ProbeToolChoice::Required,
+                    false,
+                )),
+            })
+            .expect("apple fm refusal should complete");
+
+        assert_eq!(outcome.executed_tool_calls, 0);
+        assert_eq!(outcome.tool_results.len(), 1);
+        assert_eq!(
+            outcome.tool_results[0].tool_execution.policy_decision,
+            ToolPolicyDecision::Refused
+        );
+        let transcript = runtime
+            .session_store()
+            .read_transcript(&outcome.session.id)
+            .expect("read transcript");
+        assert_eq!(
+            transcript[1].turn.items[0]
+                .tool_execution
+                .as_ref()
+                .expect("tool execution should persist")
+                .policy_decision,
+            ToolPolicyDecision::Refused
+        );
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+    }
+
+    #[test]
+    fn apple_fm_tool_loop_can_pause_for_approval() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let bridge_state = Arc::new(Mutex::new(AppleFmSessionBridgeState::default()));
+        let captured_state = Arc::clone(&bridge_state);
+        let server = FakeAppleFmServer::from_handler(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/v1/sessions") => {
+                    record_apple_session_create(&captured_state, &request, "sess-apple-pause-1")
+                }
+                ("POST", "/v1/sessions/sess-apple-pause-1/responses") => {
+                    record_apple_response_request(&captured_state, &request);
+                    let callback_response = invoke_apple_tool_callback(
+                        &captured_state,
+                        "apply_patch",
+                        json!({
+                            "path": "hello.txt",
+                            "old_text": "world",
+                            "new_text": "probe"
+                        }),
+                    );
+                    assert_eq!(callback_response.status_code, 422);
+                    let callback_error: serde_json::Value =
+                        serde_json::from_str(callback_response.body.as_str())
+                            .expect("callback error json");
+                    FakeHttpResponse::json_status(
+                        422,
+                        json!({
+                            "error": {
+                                "message": format!(
+                                    "tool '{}' failed: {}",
+                                    callback_error["tool_name"].as_str().unwrap_or_default(),
+                                    callback_error["underlying_error"].as_str().unwrap_or_default()
+                                ),
+                                "type": "tool_call_failed",
+                                "code": "tool_call_failed",
+                                "tool_name": callback_error["tool_name"],
+                                "underlying_error": callback_error["underlying_error"]
+                            }
+                        }),
+                    )
+                }
+                ("DELETE", "/v1/sessions/sess-apple-pause-1") => {
+                    FakeHttpResponse::json_ok(json!({}))
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+        });
+
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = server.base_url().to_string();
+        let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Required, false);
+        tool_loop.approval = ToolApprovalConfig {
+            allow_write_tools: false,
+            allow_network_shell: false,
+            allow_destructive_shell: false,
+            denied_action: ToolDeniedAction::Pause,
+        };
 
         let error = runtime
             .exec_plain_text(PlainTextExecRequest {
                 profile,
-                prompt: String::from("Use read_file on README.md."),
-                title: None,
+                prompt: String::from("Patch hello.txt."),
+                title: Some(String::from("Apple FM Tool Pause")),
                 cwd: environment.workspace().to_path_buf(),
-                system_prompt: None,
+                system_prompt: Some(String::from("You are helpful")),
                 harness_profile: None,
-                tool_loop: Some(ToolLoopConfig::coding_bootstrap(
-                    ProbeToolChoice::Auto,
-                    false,
-                )),
+                tool_loop: Some(tool_loop),
             })
-            .expect_err("apple fm tool loop should be rejected");
+            .expect_err("apple fm pause should surface pending approval");
 
         assert!(matches!(
             error,
-            super::RuntimeError::UnsupportedBackendFeature {
-                backend: probe_protocol::backend::BackendKind::AppleFmBridge,
-                ..
-            }
+            super::RuntimeError::ToolApprovalPending { .. }
         ));
+        let sessions = runtime
+            .session_store()
+            .list_sessions()
+            .expect("list sessions");
+        let transcript = runtime
+            .session_store()
+            .read_transcript(&sessions[0].id)
+            .expect("read transcript");
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(
+            transcript[1].turn.items[0]
+                .tool_execution
+                .as_ref()
+                .expect("tool execution should persist")
+                .policy_decision,
+            ToolPolicyDecision::Paused
+        );
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+    }
+
+    #[test]
+    fn apple_fm_tool_loop_resume_reconstructs_session_transcript() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let bridge_state = Arc::new(Mutex::new(AppleFmSessionBridgeState::default()));
+        let captured_state = Arc::clone(&bridge_state);
+        let response_count = Arc::new(Mutex::new(0_usize));
+        let captured_responses = Arc::clone(&response_count);
+        let server = FakeAppleFmServer::from_handler(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/v1/sessions") => {
+                    let index = captured_state
+                        .lock()
+                        .expect("apple fm session bridge lock")
+                        .create_requests
+                        .len()
+                        + 1;
+                    record_apple_session_create(
+                        &captured_state,
+                        &request,
+                        format!("sess-apple-resume-{index}").as_str(),
+                    )
+                }
+                ("POST", path) if path.starts_with("/v1/sessions/sess-apple-resume-") => {
+                    record_apple_response_request(&captured_state, &request);
+                    let mut response_index = captured_responses
+                        .lock()
+                        .expect("apple fm response count lock");
+                    *response_index += 1;
+                    if *response_index == 1 {
+                        let callback_response = invoke_apple_tool_callback(
+                            &captured_state,
+                            "read_file",
+                            json!({
+                                "path": "hello.txt",
+                                "start_line": 1,
+                                "max_lines": 10
+                            }),
+                        );
+                        assert_eq!(callback_response.status_code, 200);
+                        FakeHttpResponse::json_ok(json!({
+                            "session": {
+                                "id": "sess-apple-resume-1",
+                                "instructions": "You are helpful",
+                                "model": {
+                                    "id": "apple-foundation-model",
+                                    "use_case": "general",
+                                    "guardrails": "default"
+                                },
+                                "tools": [{"name": "read_file"}],
+                                "is_responding": false,
+                                "transcript_json": "{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"
+                            },
+                            "model": "apple-foundation-model",
+                            "output": "first tool-backed answer"
+                        }))
+                    } else {
+                        FakeHttpResponse::json_ok(json!({
+                            "session": {
+                                "id": "sess-apple-resume-2",
+                                "instructions": "You are helpful",
+                                "model": {
+                                    "id": "apple-foundation-model",
+                                    "use_case": "general",
+                                    "guardrails": "default"
+                                },
+                                "tools": [{"name": "read_file"}],
+                                "is_responding": false,
+                                "transcript_json": "{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"
+                            },
+                            "model": "apple-foundation-model",
+                            "output": "second tool-backed answer"
+                        }))
+                    }
+                }
+                ("DELETE", path) if path.starts_with("/v1/sessions/sess-apple-resume-") => {
+                    FakeHttpResponse::json_ok(json!({}))
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+        });
+
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = server.base_url().to_string();
+        let first = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile: profile.clone(),
+                prompt: String::from("Read hello.txt"),
+                title: Some(String::from("Apple FM Tool Resume")),
+                cwd: environment.workspace().to_path_buf(),
+                system_prompt: Some(String::from("You are helpful")),
+                harness_profile: None,
+                tool_loop: Some(ToolLoopConfig::coding_bootstrap(
+                    ProbeToolChoice::Required,
+                    false,
+                )),
+            })
+            .expect("first apple fm tool turn should succeed");
+
+        let second = runtime
+            .continue_plain_text_session(PlainTextResumeRequest {
+                session_id: first.session.id.clone(),
+                profile,
+                prompt: String::from("Summarize the previous read."),
+                tool_loop: Some(ToolLoopConfig::coding_bootstrap(
+                    ProbeToolChoice::Required,
+                    false,
+                )),
+            })
+            .expect("second apple fm tool turn should succeed");
+
+        assert_eq!(second.assistant_text, "second tool-backed answer");
+        let bridge_state = bridge_state.lock().expect("apple fm session bridge lock");
+        assert_eq!(bridge_state.create_requests.len(), 2);
+        let restored_entries =
+            bridge_state.create_requests[1]["transcript"]["transcript"]["entries"]
+                .as_array()
+                .expect("restored entries");
+        assert!(restored_entries.iter().any(|entry| {
+            entry["toolCalls"]
+                .as_array()
+                .is_some_and(|calls| calls.iter().any(|call| call["name"] == "read_file"))
+        }));
+        assert!(restored_entries.iter().any(|entry| {
+            entry["role"] == "tool"
+                && entry["toolName"] == "read_file"
+                && entry["contents"][0]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("hello world")
+        }));
+        drop(bridge_state);
+        let requests = server.finish();
+        assert_eq!(requests.len(), 6);
     }
 
     #[test]

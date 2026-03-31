@@ -72,4 +72,7 @@ This folder holds technical planning docs for the Probe runtime.
     offline-eval lanes in `probe-dev`
 - `24-apple-fm-backend-lane.md`
   - the first real Apple FM backend lane for plain-text turns, server attach,
-    and bounded oracle use without claiming coding-tool parity yet
+    and bounded oracle use
+- `25-apple-fm-tool-lane.md`
+  - session-backed Apple FM coding turns through Probe-owned tool callbacks,
+    Probe transcript replay, and the existing approval or refusal policy

@@ -54,6 +54,15 @@ pub struct ToolRegistry {
     tools: BTreeMap<String, RegisteredTool>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ToolExecutionSession {
+    registry: ToolRegistry,
+    context: ToolExecutionContext,
+    approval: ToolApprovalConfig,
+    oracle_calls_remaining: usize,
+    long_context_calls_remaining: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolExecutionContext {
     cwd: PathBuf,
@@ -620,17 +629,41 @@ impl ToolRegistry {
         self.tools.is_empty()
     }
 
+    #[must_use]
+    pub fn execution_session(
+        &self,
+        context: &ToolExecutionContext,
+        approval: &ToolApprovalConfig,
+    ) -> ToolExecutionSession {
+        ToolExecutionSession::new(self.clone(), context.clone(), approval.clone())
+    }
+
     pub fn execute_batch(
         &self,
         context: &ToolExecutionContext,
         tool_calls: &[ChatToolCall],
         approval: &ToolApprovalConfig,
     ) -> Vec<ExecutedToolCall> {
-        let mut oracle_calls_remaining = context
+        let mut session = self.execution_session(context, approval);
+        tool_calls
+            .iter()
+            .map(|tool_call| session.execute_openai_tool_call(tool_call))
+            .collect()
+    }
+}
+
+impl ToolExecutionSession {
+    #[must_use]
+    pub fn new(
+        registry: ToolRegistry,
+        context: ToolExecutionContext,
+        approval: ToolApprovalConfig,
+    ) -> Self {
+        let oracle_calls_remaining = context
             .oracle()
             .map(|oracle| oracle.max_calls().saturating_sub(oracle.calls_used()))
             .unwrap_or(0);
-        let mut long_context_calls_remaining = context
+        let long_context_calls_remaining = context
             .long_context()
             .map(|long_context| {
                 long_context
@@ -638,149 +671,141 @@ impl ToolRegistry {
                     .saturating_sub(long_context.calls_used())
             })
             .unwrap_or(0);
-        tool_calls
-            .iter()
-            .map(|tool_call| {
-                let parsed_arguments = serde_json::from_str::<serde_json::Value>(
-                    tool_call.function.arguments.as_str(),
-                )
+        Self {
+            registry,
+            context,
+            approval,
+            oracle_calls_remaining,
+            long_context_calls_remaining,
+        }
+    }
+
+    #[must_use]
+    pub fn execute_openai_tool_call(&mut self, tool_call: &ChatToolCall) -> ExecutedToolCall {
+        let parsed_arguments =
+            serde_json::from_str::<serde_json::Value>(tool_call.function.arguments.as_str())
                 .unwrap_or_else(|error| {
                     serde_json::json!({
                         "error": format!("invalid tool arguments json: {error}")
                     })
                 });
+        self.execute_named_call(
+            tool_call.id.clone(),
+            tool_call.function.name.clone(),
+            parsed_arguments,
+        )
+    }
 
-                if let Some(tool) = self.tools.get(tool_call.function.name.as_str()) {
-                    if tool_call.function.name == "consult_oracle" && oracle_calls_remaining == 0 {
-                        let reason = Some(String::from(
-                            "oracle call budget exhausted for this session",
-                        ));
-                        return refused_tool_call(
-                            context,
-                            tool_call,
-                            parsed_arguments,
-                            ToolRiskClass::ReadOnly,
-                            reason,
-                        );
-                    }
-                    if tool_call.function.name == "analyze_repository"
-                        && long_context_calls_remaining == 0
-                    {
-                        let reason = Some(String::from(
-                            "long-context repo-analysis budget exhausted for this session",
-                        ));
-                        return refused_tool_call(
-                            context,
-                            tool_call,
-                            parsed_arguments,
-                            ToolRiskClass::ReadOnly,
-                            reason,
-                        );
-                    }
-                    if tool_call.function.name == "analyze_repository"
-                        && let Some(decision) =
-                            long_context_refusal_decision(context, &parsed_arguments)
-                    {
-                        return refused_tool_call(
-                            context,
-                            tool_call,
-                            parsed_arguments,
-                            ToolRiskClass::ReadOnly,
-                            Some(decision.reason),
-                        );
-                    }
+    #[must_use]
+    pub fn execute_named_call(
+        &mut self,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> ExecutedToolCall {
+        let call_id = call_id.into();
+        let name = name.into();
 
-                    let risk_class = match tool.risk {
-                        RegisteredToolRisk::Fixed(risk) => risk,
-                        RegisteredToolRisk::Shell => classify_shell_command(&parsed_arguments),
-                    };
-                    let (policy_decision, approval_state, reason) = evaluate_tool_policy(
-                        tool_call.function.name.as_str(),
-                        risk_class,
-                        approval,
-                    );
-                    let invocation = if matches!(
-                        policy_decision,
-                        ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved
-                    ) {
-                        (tool.handler)(context, &parsed_arguments).unwrap_or_else(|error| {
-                            ToolInvocationOutcome::new(
-                                serde_json::json!({ "error": error.to_string() }),
-                            )
-                        })
-                    } else {
-                        denied_tool_invocation(
-                            context,
-                            tool_call.function.name.as_str(),
-                            &parsed_arguments,
-                            risk_class,
-                            &reason,
-                        )
-                    };
-                    if tool_call.function.name == "consult_oracle"
-                        && matches!(
-                            policy_decision,
-                            ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved
-                        )
-                        && oracle_calls_remaining > 0
-                    {
-                        oracle_calls_remaining -= 1;
-                    }
-                    if tool_call.function.name == "analyze_repository"
-                        && matches!(
-                            policy_decision,
-                            ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved
-                        )
-                        && long_context_calls_remaining > 0
-                    {
-                        long_context_calls_remaining -= 1;
-                    }
+        let Some(tool) = self.registry.tools.get(name.as_str()) else {
+            return undeclared_tool_call(call_id, name, arguments);
+        };
 
-                    ExecutedToolCall {
-                        call_id: tool_call.id.clone(),
-                        name: tool_call.function.name.clone(),
-                        arguments: parsed_arguments,
-                        output: invocation.output.clone(),
-                        tool_execution: ToolExecutionRecord {
-                            risk_class,
-                            policy_decision,
-                            approval_state,
-                            command: invocation.command,
-                            exit_code: invocation.exit_code,
-                            timed_out: invocation.timed_out,
-                            truncated: invocation.truncated,
-                            bytes_returned: invocation.bytes_returned,
-                            files_touched: invocation.files_touched,
-                            reason,
-                        },
-                    }
-                } else {
-                    ExecutedToolCall {
-                        call_id: tool_call.id.clone(),
-                        name: tool_call.function.name.clone(),
-                        arguments: parsed_arguments,
-                        output: serde_json::json!({
-                            "error": format!("undeclared tool `{}`", tool_call.function.name),
-                        }),
-                        tool_execution: ToolExecutionRecord {
-                            risk_class: ToolRiskClass::ReadOnly,
-                            policy_decision: ToolPolicyDecision::Refused,
-                            approval_state: ToolApprovalState::Refused,
-                            command: None,
-                            exit_code: None,
-                            timed_out: None,
-                            truncated: None,
-                            bytes_returned: None,
-                            files_touched: Vec::new(),
-                            reason: Some(format!(
-                                "tool `{}` is not registered in this tool loop",
-                                tool_call.function.name
-                            )),
-                        },
-                    }
-                }
+        if name == "consult_oracle" && self.oracle_calls_remaining == 0 {
+            return refused_named_tool_call(
+                &self.context,
+                call_id,
+                name,
+                arguments,
+                ToolRiskClass::ReadOnly,
+                Some(String::from(
+                    "oracle call budget exhausted for this session",
+                )),
+            );
+        }
+        if name == "analyze_repository" && self.long_context_calls_remaining == 0 {
+            return refused_named_tool_call(
+                &self.context,
+                call_id,
+                name,
+                arguments,
+                ToolRiskClass::ReadOnly,
+                Some(String::from(
+                    "long-context repo-analysis budget exhausted for this session",
+                )),
+            );
+        }
+        if name == "analyze_repository"
+            && let Some(decision) = long_context_refusal_decision(&self.context, &arguments)
+        {
+            return refused_named_tool_call(
+                &self.context,
+                call_id,
+                name,
+                arguments,
+                ToolRiskClass::ReadOnly,
+                Some(decision.reason),
+            );
+        }
+
+        let risk_class = match tool.risk {
+            RegisteredToolRisk::Fixed(risk) => risk,
+            RegisteredToolRisk::Shell => classify_shell_command(&arguments),
+        };
+        let (policy_decision, approval_state, reason) =
+            evaluate_tool_policy(name.as_str(), risk_class, &self.approval);
+        let invocation = if matches!(
+            policy_decision,
+            ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved
+        ) {
+            (tool.handler)(&self.context, &arguments).unwrap_or_else(|error| {
+                ToolInvocationOutcome::new(serde_json::json!({ "error": error.to_string() }))
             })
-            .collect()
+        } else {
+            denied_tool_invocation(
+                &self.context,
+                name.as_str(),
+                &arguments,
+                risk_class,
+                &reason,
+            )
+        };
+        if name == "consult_oracle"
+            && matches!(
+                policy_decision,
+                ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved
+            )
+            && self.oracle_calls_remaining > 0
+        {
+            self.oracle_calls_remaining -= 1;
+        }
+        if name == "analyze_repository"
+            && matches!(
+                policy_decision,
+                ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved
+            )
+            && self.long_context_calls_remaining > 0
+        {
+            self.long_context_calls_remaining -= 1;
+        }
+
+        ExecutedToolCall {
+            call_id,
+            name,
+            arguments,
+            output: invocation.output.clone(),
+            tool_execution: ToolExecutionRecord {
+                risk_class,
+                policy_decision,
+                approval_state,
+                command: invocation.command,
+                exit_code: invocation.exit_code,
+                timed_out: invocation.timed_out,
+                truncated: invocation.truncated,
+                bytes_returned: invocation.bytes_returned,
+                files_touched: invocation.files_touched,
+                reason,
+            },
+        }
     }
 }
 
@@ -1417,23 +1442,19 @@ fn long_context_refusal_decision(
     (!decision.should_escalate).then_some(decision)
 }
 
-fn refused_tool_call(
+fn refused_named_tool_call(
     context: &ToolExecutionContext,
-    tool_call: &ChatToolCall,
+    call_id: String,
+    tool_name: String,
     arguments: serde_json::Value,
     risk_class: ToolRiskClass,
     reason: Option<String>,
 ) -> ExecutedToolCall {
-    let invocation = denied_tool_invocation(
-        context,
-        tool_call.function.name.as_str(),
-        &arguments,
-        risk_class,
-        &reason,
-    );
+    let invocation =
+        denied_tool_invocation(context, tool_name.as_str(), &arguments, risk_class, &reason);
     ExecutedToolCall {
-        call_id: tool_call.id.clone(),
-        name: tool_call.function.name.clone(),
+        call_id,
+        name: tool_name,
         arguments,
         output: invocation.output.clone(),
         tool_execution: ToolExecutionRecord {
@@ -1447,6 +1468,35 @@ fn refused_tool_call(
             bytes_returned: invocation.bytes_returned,
             files_touched: invocation.files_touched,
             reason,
+        },
+    }
+}
+
+fn undeclared_tool_call(
+    call_id: String,
+    tool_name: String,
+    arguments: serde_json::Value,
+) -> ExecutedToolCall {
+    ExecutedToolCall {
+        call_id,
+        name: tool_name.clone(),
+        arguments,
+        output: serde_json::json!({
+            "error": format!("undeclared tool `{tool_name}`"),
+        }),
+        tool_execution: ToolExecutionRecord {
+            risk_class: ToolRiskClass::ReadOnly,
+            policy_decision: ToolPolicyDecision::Refused,
+            approval_state: ToolApprovalState::Refused,
+            command: None,
+            exit_code: None,
+            timed_out: None,
+            truncated: None,
+            bytes_returned: None,
+            files_touched: Vec::new(),
+            reason: Some(format!(
+                "tool `{tool_name}` is not registered in this tool loop"
+            )),
         },
     }
 }

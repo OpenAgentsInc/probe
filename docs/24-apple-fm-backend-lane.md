@@ -58,21 +58,20 @@ That shared dispatch is used by:
 - `consult_oracle`
 - the bounded repo-analysis helper
 
-This is the smallest honest seam that lets Probe consume Apple FM without
-claiming that Apple FM already matches the current OpenAI tool-call loop.
+This is the smallest honest seam that lets Probe consume Apple FM for plain
+text, bounded oracle use, and backend attach without forcing the OpenAI tool
+wire shape onto the backend.
 
-## Explicit Non-Claim
+## Relationship To The Coding Lane
 
-Apple FM tool-backed coding turns are still not part of this patch.
+The later Apple FM coding-tool lane now lives separately in
+`docs/25-apple-fm-tool-lane.md`.
 
-If an operator tries to run the current coding-tool loop directly against an
-Apple FM profile, Probe now refuses explicitly instead of pretending it can
-replay the OpenAI tool-call contract over Apple FM.
-
-That follow-up lane needs:
+That follow-up adds:
 
 - session-backed tool registration
 - callback-based tool execution through Probe's approval layer
-- explicit Apple-FM-aware receipts for session and transcript adjuncts
+- Probe-owned replay of Apple transcript state for resume
 
-Those are separate from the plain-text and oracle entry point.
+This document remains the retained record for the first plain-text, oracle, and
+attach boundary.

@@ -78,6 +78,9 @@ In practice that means:
 - default attach mode checks an already-running local server
 - launch mode can supervise `psionic-openai-server` for the lifetime of the
   acceptance command
+- the runtime contract below the harness now overlaps with Apple FM through the
+  session-backed callback lane, but `probe accept` still treats the Qwen lane
+  as the retained default until the explicit comparison suite lands
 
 ## Validation Boundary
 

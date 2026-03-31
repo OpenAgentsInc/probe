@@ -1,13 +1,23 @@
 use std::fmt::{Display, Formatter};
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+use std::{thread, thread::JoinHandle};
 
 use probe_protocol::backend::BackendProfile;
 use psionic_apple_fm::{
     AppleFmBridgeClient, AppleFmBridgeClientError, AppleFmChatCompletionRequest,
     AppleFmChatMessage, AppleFmChatMessageRole, AppleFmChatUsage, AppleFmFoundationModelsError,
-    AppleFmSystemLanguageModelAvailability,
+    AppleFmGenerationSchema, AppleFmSessionCreateRequest, AppleFmSessionRespondRequest,
+    AppleFmSystemLanguageModel, AppleFmSystemLanguageModelAvailability, AppleFmToolCallError,
+    AppleFmToolCallRequest, AppleFmToolCallResponse, AppleFmToolCallbackConfiguration,
+    AppleFmToolDefinition, AppleFmTranscript,
 };
 use reqwest::blocking::Client;
+
+static NEXT_TOOL_CALLBACK_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppleFmProviderConfig {
@@ -94,9 +104,34 @@ pub struct AppleFmProviderResponse {
     pub usage: Option<AppleFmChatUsage>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppleFmProviderToolDefinition {
+    pub name: String,
+    pub description: Option<String>,
+    pub parameters: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppleFmProviderToolCall {
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppleFmProviderSessionResponse {
+    pub id: String,
+    pub session_id: String,
+    pub model: String,
+    pub assistant_text: String,
+    pub usage: Option<AppleFmChatUsage>,
+    pub transcript: Option<AppleFmTranscript>,
+}
+
 #[derive(Debug)]
 pub enum AppleFmProviderError {
     Build(String),
+    ToolSchema { tool_name: String, message: String },
+    Transcript(String),
     Request(AppleFmBridgeClientError),
 }
 
@@ -105,7 +140,7 @@ impl AppleFmProviderError {
     pub fn foundation_models_error(&self) -> Option<&AppleFmFoundationModelsError> {
         match self {
             Self::Request(error) => error.foundation_models_error(),
-            Self::Build(_) => None,
+            Self::Build(_) | Self::ToolSchema { .. } | Self::Transcript(_) => None,
         }
     }
 }
@@ -117,6 +152,18 @@ impl Display for AppleFmProviderError {
                 f,
                 "failed to initialize Apple FM provider client: {message}"
             ),
+            Self::ToolSchema { tool_name, message } => {
+                write!(
+                    f,
+                    "failed to build Apple FM tool schema for `{tool_name}`: {message}"
+                )
+            }
+            Self::Transcript(message) => {
+                write!(
+                    f,
+                    "failed to decode Apple FM transcript snapshot: {message}"
+                )
+            }
             Self::Request(error) => {
                 write!(f, "{error}")?;
                 if let Some(typed) = error.foundation_models_error() {
@@ -143,6 +190,13 @@ impl Display for AppleFmProviderError {
 }
 
 impl std::error::Error for AppleFmProviderError {}
+
+struct AppleFmProviderToolCallbackServer {
+    callback_url: String,
+    session_token: String,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
 
 pub struct AppleFmProviderClient {
     config: AppleFmProviderConfig,
@@ -203,10 +257,338 @@ impl AppleFmProviderClient {
             usage: response.usage.clone(),
         })
     }
+
+    pub fn respond_in_session_with_tools(
+        &self,
+        system_prompt: Option<&str>,
+        transcript: AppleFmTranscript,
+        prompt: &str,
+        tools: Vec<AppleFmProviderToolDefinition>,
+        callback: Arc<
+            dyn Fn(AppleFmProviderToolCall) -> Result<String, AppleFmToolCallError> + Send + Sync,
+        >,
+    ) -> Result<AppleFmProviderSessionResponse, AppleFmProviderError> {
+        let model = AppleFmSystemLanguageModel {
+            id: self.config.model.clone(),
+            ..Default::default()
+        };
+        let tool_definitions = tools
+            .into_iter()
+            .map(provider_tool_definition)
+            .collect::<Result<Vec<_>, _>>()?;
+        let callback_server = AppleFmProviderToolCallbackServer::new(callback)?;
+        let session = self
+            .client
+            .create_session(&AppleFmSessionCreateRequest {
+                instructions: system_prompt.map(ToOwned::to_owned),
+                model: Some(model),
+                tools: tool_definitions,
+                adapter: None,
+                tool_callback: Some(callback_server.configuration()),
+                transcript_json: None,
+                transcript: Some(transcript),
+            })
+            .map_err(AppleFmProviderError::Request)?;
+        let response = self.client.respond_in_session(
+            session.id.as_str(),
+            &AppleFmSessionRespondRequest {
+                prompt: prompt.to_string(),
+                options: None,
+                adapter: None,
+            },
+        );
+        let _ = self.client.delete_session(session.id.as_str());
+        drop(callback_server);
+        let response = response.map_err(AppleFmProviderError::Request)?;
+        Ok(AppleFmProviderSessionResponse {
+            id: response.session.id.clone(),
+            session_id: response.session.id.clone(),
+            model: response.model,
+            assistant_text: response.output,
+            usage: response.usage,
+            transcript: response
+                .session
+                .transcript()
+                .map_err(|error| AppleFmProviderError::Transcript(error.to_string()))?,
+        })
+    }
+}
+
+fn provider_tool_definition(
+    definition: AppleFmProviderToolDefinition,
+) -> Result<AppleFmToolDefinition, AppleFmProviderError> {
+    let tool_name = definition.name.clone();
+    let schema = AppleFmGenerationSchema::new(
+        definition
+            .parameters
+            .unwrap_or_else(default_empty_tool_schema),
+    )
+    .map_err(|error| AppleFmProviderError::ToolSchema {
+        tool_name: tool_name.clone(),
+        message: error.to_string(),
+    })?;
+    Ok(AppleFmToolDefinition::new(
+        tool_name,
+        definition.description,
+        schema,
+    ))
+}
+
+fn default_empty_tool_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+    })
+}
+
+impl AppleFmProviderToolCallbackServer {
+    fn new(
+        callback: Arc<
+            dyn Fn(AppleFmProviderToolCall) -> Result<String, AppleFmToolCallError> + Send + Sync,
+        >,
+    ) -> Result<Self, AppleFmProviderError> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| AppleFmProviderError::Build(error.to_string()))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| AppleFmProviderError::Build(error.to_string()))?;
+        let port = listener
+            .local_addr()
+            .map_err(|error| AppleFmProviderError::Build(error.to_string()))?
+            .port();
+        let callback_url = format!("http://127.0.0.1:{port}/tool-call");
+        let session_token = format!(
+            "probe-apple-fm-tool-session-{}",
+            NEXT_TOOL_CALLBACK_TOKEN.fetch_add(1, Ordering::Relaxed)
+        );
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let callback_thread = Arc::clone(&callback);
+        let expected_token = session_token.clone();
+        let thread = thread::spawn(move || {
+            while !stop_thread.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = handle_tool_callback_connection(
+                            &mut stream,
+                            expected_token.as_str(),
+                            callback_thread.as_ref(),
+                        );
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(Self {
+            callback_url,
+            session_token,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    fn configuration(&self) -> AppleFmToolCallbackConfiguration {
+        AppleFmToolCallbackConfiguration {
+            url: self.callback_url.clone(),
+            session_token: self.session_token.clone(),
+        }
+    }
+}
+
+impl Drop for AppleFmProviderToolCallbackServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(
+            self.callback_url
+                .strip_prefix("http://")
+                .and_then(|value| value.split_once('/').map(|(authority, _)| authority))
+                .unwrap_or("127.0.0.1:0"),
+        );
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn handle_tool_callback_connection(
+    stream: &mut TcpStream,
+    expected_session_token: &str,
+    callback: &(
+         dyn Fn(AppleFmProviderToolCall) -> Result<String, AppleFmToolCallError> + Send + Sync
+     ),
+) -> Result<(), String> {
+    let request = match read_http_request(stream) {
+        Ok(request) => request,
+        Err(error) => {
+            write_json_response(
+                stream,
+                400,
+                &serde_json::json!({
+                    "error": {
+                        "message": error,
+                        "type": "invalid_request",
+                        "code": "invalid_request"
+                    }
+                }),
+            )?;
+            return Ok(());
+        }
+    };
+    if request.method != "POST" || request.path != "/tool-call" {
+        write_json_response(
+            stream,
+            404,
+            &serde_json::json!({
+                "error": {
+                    "message": format!("Not found: {} {}", request.method, request.path),
+                    "type": "not_found",
+                    "code": "not_found"
+                }
+            }),
+        )?;
+        return Ok(());
+    }
+    let request: AppleFmToolCallRequest = match serde_json::from_slice(request.body.as_slice()) {
+        Ok(request) => request,
+        Err(error) => {
+            write_json_response(
+                stream,
+                400,
+                &serde_json::json!({
+                    "error": {
+                        "message": error.to_string(),
+                        "type": "invalid_request",
+                        "code": "invalid_request"
+                    }
+                }),
+            )?;
+            return Ok(());
+        }
+    };
+    if request.session_token != expected_session_token {
+        write_json_response(
+            stream,
+            422,
+            &AppleFmToolCallError::new(
+                request.tool_name,
+                "unexpected Probe Apple FM callback session token",
+            ),
+        )?;
+        return Ok(());
+    }
+    match callback(AppleFmProviderToolCall {
+        name: request.tool_name.clone(),
+        arguments: request.arguments.content,
+    }) {
+        Ok(output) => write_json_response(stream, 200, &AppleFmToolCallResponse { output })?,
+        Err(error) => write_json_response(stream, 422, &error)?,
+    }
+    Ok(())
+}
+
+struct CallbackHttpRequest {
+    method: String,
+    path: String,
+    body: Vec<u8>,
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Result<CallbackHttpRequest, String> {
+    let mut buffer = Vec::new();
+    let mut header_end = None;
+    let mut content_length = 0usize;
+    loop {
+        let mut chunk = [0_u8; 4096];
+        let read = stream.read(&mut chunk).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if header_end.is_none()
+            && let Some(index) = find_header_end(buffer.as_slice())
+        {
+            header_end = Some(index);
+            content_length = parse_content_length(&buffer[..index])?;
+        }
+        if let Some(index) = header_end {
+            let body_end = index + 4 + content_length;
+            if buffer.len() >= body_end {
+                break;
+            }
+        }
+    }
+    let header_end = header_end.ok_or("missing HTTP header terminator".to_string())?;
+    let header_text =
+        String::from_utf8(buffer[..header_end].to_vec()).map_err(|error| error.to_string())?;
+    let mut header_lines = header_text.split("\r\n");
+    let request_line = header_lines
+        .next()
+        .ok_or("missing tool callback request line".to_string())?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts
+        .next()
+        .ok_or("missing tool callback method".to_string())?
+        .to_string();
+    let path = request_parts
+        .next()
+        .ok_or("missing tool callback path".to_string())?
+        .to_string();
+    let body_start = header_end + 4;
+    let body_end = body_start + content_length;
+    if buffer.len() < body_end {
+        return Err("incomplete HTTP body".to_string());
+    }
+    Ok(CallbackHttpRequest {
+        method,
+        path,
+        body: buffer[body_start..body_end].to_vec(),
+    })
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn parse_content_length(headers: &[u8]) -> Result<usize, String> {
+    let headers = String::from_utf8(headers.to_vec()).map_err(|error| error.to_string())?;
+    for line in headers.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            return value
+                .trim()
+                .parse::<usize>()
+                .map_err(|error| error.to_string());
+        }
+    }
+    Ok(0)
+}
+
+fn write_json_response<T: serde::Serialize>(
+    stream: &mut TcpStream,
+    status_code: u16,
+    body: &T,
+) -> Result<(), String> {
+    let body = serde_json::to_string(body).map_err(|error| error.to_string())?;
+    let response = format!(
+        "HTTP/1.1 {status_code} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpStream};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
@@ -215,7 +597,68 @@ mod tests {
 
     use super::{
         AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError, AppleFmProviderMessage,
+        AppleFmProviderToolCall, AppleFmProviderToolDefinition,
     };
+
+    struct ToolCallbackResponse {
+        status_code: u16,
+        body: String,
+    }
+
+    fn invoke_tool_callback(
+        callback_url: &str,
+        session_token: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> ToolCallbackResponse {
+        let url = callback_url
+            .strip_prefix("http://")
+            .expect("callback url should be http");
+        let (authority, path) = url
+            .split_once('/')
+            .expect("callback url should include path");
+        let body = json!({
+            "session_token": session_token,
+            "tool_name": tool_name,
+            "arguments": {
+                "content": arguments,
+                "is_complete": true
+            }
+        })
+        .to_string();
+        let mut stream = TcpStream::connect(authority).expect("connect tool callback");
+        let request = format!(
+            "POST /{} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            path,
+            authority,
+            body.len(),
+            body
+        );
+        stream
+            .write_all(request.as_bytes())
+            .expect("write tool callback request");
+        stream.flush().expect("flush tool callback request");
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("close tool callback request writer");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read tool callback response");
+        let (head, body) = response
+            .split_once("\r\n\r\n")
+            .expect("tool callback response should include body");
+        let status_code = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u16>().ok())
+            .expect("tool callback status code");
+        ToolCallbackResponse {
+            status_code,
+            body: body.to_string(),
+        }
+    }
 
     #[test]
     fn localhost_helper_uses_local_default() {
@@ -343,5 +786,146 @@ mod tests {
         let requests = server.finish();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].contains("GET /health HTTP/1.1"));
+    }
+
+    #[test]
+    fn client_runs_session_tool_callbacks_against_the_bridge() {
+        let callback_payloads = Arc::new(Mutex::new(Vec::new()));
+        let captured_payloads = Arc::clone(&callback_payloads);
+        let bridge_state = Arc::new(Mutex::new((String::new(), String::new())));
+        let captured_state = Arc::clone(&bridge_state);
+        let server = FakeAppleFmServer::from_handler(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/v1/sessions") => {
+                    let request_json: serde_json::Value =
+                        serde_json::from_str(request.body.as_str()).expect("session create json");
+                    let callback = request_json["tool_callback"]["url"]
+                        .as_str()
+                        .expect("callback url")
+                        .to_string();
+                    let session_token = request_json["tool_callback"]["session_token"]
+                        .as_str()
+                        .expect("session token")
+                        .to_string();
+                    let mut state = captured_state.lock().expect("bridge state lock");
+                    state.0 = callback;
+                    state.1 = session_token;
+                    FakeHttpResponse::json_ok(json!({
+                        "session": {
+                            "id": "sess-tool-1",
+                            "instructions": request_json["instructions"],
+                            "model": {
+                                "id": "apple-foundation-model",
+                                "use_case": "general",
+                                "guardrails": "default"
+                            },
+                            "tools": [{"name": "read_file"}],
+                            "is_responding": false,
+                            "transcript_json": "{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"
+                        }
+                    }))
+                }
+                ("POST", "/v1/sessions/sess-tool-1/responses") => {
+                    let (callback, session_token) = {
+                        let state = bridge_state.lock().expect("bridge state lock");
+                        (state.0.clone(), state.1.clone())
+                    };
+                    let callback_response = invoke_tool_callback(
+                        callback.as_str(),
+                        session_token.as_str(),
+                        "read_file",
+                        json!({
+                            "path": "hello.txt",
+                            "start_line": 1,
+                            "max_lines": 10
+                        }),
+                    );
+                    assert_eq!(
+                        callback_response.status_code, 200,
+                        "{}",
+                        callback_response.body
+                    );
+                    let callback_json: serde_json::Value =
+                        serde_json::from_str(callback_response.body.as_str())
+                            .expect("callback json");
+                    captured_payloads
+                        .lock()
+                        .expect("callback payload lock")
+                        .push(
+                            callback_json["output"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        );
+                    FakeHttpResponse::json_ok(json!({
+                        "session": {
+                            "id": "sess-tool-1",
+                            "instructions": "You are a helper",
+                            "model": {
+                                "id": "apple-foundation-model",
+                                "use_case": "general",
+                                "guardrails": "default"
+                            },
+                            "tools": [{"name": "read_file"}],
+                            "is_responding": false,
+                            "transcript_json": "{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"
+                        },
+                        "model": "apple-foundation-model",
+                        "output": "tool-backed answer",
+                        "usage": {
+                            "total_tokens_detail": {"value": 21, "truth": "estimated"}
+                        }
+                    }))
+                }
+                ("DELETE", "/v1/sessions/sess-tool-1") => FakeHttpResponse::json_ok(json!({})),
+                other => panic!("unexpected request: {other:?}"),
+            }
+        });
+
+        let client = AppleFmProviderClient::new(AppleFmProviderConfig {
+            base_url: server.base_url().to_string(),
+            model: String::from("apple-foundation-model"),
+            timeout: Duration::from_secs(5),
+        })
+        .expect("client");
+        let response = client
+            .respond_in_session_with_tools(
+                Some("You are a helper"),
+                psionic_apple_fm::AppleFmTranscript::default(),
+                "read hello.txt",
+                vec![AppleFmProviderToolDefinition {
+                    name: String::from("read_file"),
+                    description: Some(String::from("Read a file.")),
+                    parameters: Some(json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "start_line": {"type": "integer"},
+                            "max_lines": {"type": "integer"}
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    })),
+                }],
+                Arc::new(|tool_call: AppleFmProviderToolCall| {
+                    Ok(json!({
+                        "tool": tool_call.name,
+                        "arguments": tool_call.arguments
+                    })
+                    .to_string())
+                }),
+            )
+            .expect("tool session response");
+
+        assert_eq!(response.session_id, "sess-tool-1");
+        assert_eq!(response.assistant_text, "tool-backed answer");
+        let callback_payloads = callback_payloads.lock().expect("callback payload lock");
+        assert_eq!(callback_payloads.len(), 1);
+        assert!(callback_payloads[0].contains("\"read_file\""));
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].contains("POST /v1/sessions HTTP/1.1"));
+        assert!(requests[1].contains("POST /v1/sessions/sess-tool-1/responses HTTP/1.1"));
+        assert!(requests[2].contains("DELETE /v1/sessions/sess-tool-1 HTTP/1.1"));
     }
 }
