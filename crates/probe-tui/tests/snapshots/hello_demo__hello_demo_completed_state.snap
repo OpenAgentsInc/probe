@@ -18,7 +18,7 @@ Probe-owned Apple Foundation Models prove-out with availability gating and live
 │                                              │└──────────────────────────────┘
 │Response                                      │┌Backend Facts─────────────────┐
 │The TUI should now prove live Apple FM setup  ││profile: psionic-apple-fm-brid│
-│truth on startup.                             ││base_url: http://127.0.0.1:808│
+│truth on startup.                             ││base_url: http://127.0.0.1:114│
 │                                              ││model: apple-foundation-model │
 │response_id: resp-3                           ││                              │
 │model: apple-foundation-model                 ││                              │

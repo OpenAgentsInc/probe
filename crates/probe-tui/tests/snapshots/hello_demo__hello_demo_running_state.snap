@@ -18,7 +18,7 @@ Probe-owned Apple Foundation Models prove-out with availability gating and live
 │Response                                      │└──────────────────────────────┘
 │[waiting for Apple FM reply]                  │┌Backend Facts─────────────────┐
 │                                              ││profile: psionic-apple-fm-brid│
-│                                              ││base_url: http://127.0.0.1:808│
+│                                              ││base_url: http://127.0.0.1:114│
 │                                              ││model: apple-foundation-model │
 │                                              ││                              │
 │                                              ││                              │

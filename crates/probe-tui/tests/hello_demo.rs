@@ -24,7 +24,7 @@ fn unavailable_state_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
     let backend = AppleFmBackendSummary {
         profile_name: String::from("psionic-apple-fm-bridge"),
-        base_url: String::from("http://127.0.0.1:8081"),
+        base_url: String::from("http://127.0.0.1:11435"),
         model_id: String::from("apple-foundation-model"),
     };
     app.apply_message(AppMessage::AppleFmAvailabilityUnavailable {
@@ -48,7 +48,7 @@ fn running_state_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
     let backend = AppleFmBackendSummary {
         profile_name: String::from("psionic-apple-fm-bridge"),
-        base_url: String::from("http://127.0.0.1:8081"),
+        base_url: String::from("http://127.0.0.1:11435"),
         model_id: String::from("apple-foundation-model"),
     };
     app.apply_message(AppMessage::AppleFmSetupStarted {
@@ -82,7 +82,7 @@ fn completed_state_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
     let backend = AppleFmBackendSummary {
         profile_name: String::from("psionic-apple-fm-bridge"),
-        base_url: String::from("http://127.0.0.1:8081"),
+        base_url: String::from("http://127.0.0.1:11435"),
         model_id: String::from("apple-foundation-model"),
     };
     app.apply_message(AppMessage::AppleFmAvailabilityReady {

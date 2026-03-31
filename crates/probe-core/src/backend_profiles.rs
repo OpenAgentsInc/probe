@@ -1,12 +1,18 @@
+use std::env;
+
 use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
 
 pub const PSIONIC_APPLE_FM_BRIDGE_PROFILE: &str = "psionic-apple-fm-bridge";
 pub const PSIONIC_APPLE_FM_ORACLE_PROFILE: &str = "psionic-apple-fm-oracle";
 pub const PSIONIC_APPLE_FM_MODEL: &str = "apple-foundation-model";
+pub const DEFAULT_APPLE_FM_BRIDGE_BASE_URL: &str = "http://127.0.0.1:11435";
 pub const PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE: &str = "psionic-qwen35-2b-q8-registry";
 pub const PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE: &str = "psionic-qwen35-2b-q8-oracle";
 pub const PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE: &str = "psionic-qwen35-2b-q8-long-context";
 pub const PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL: &str = "qwen3.5-2b-q8_0-registry.gguf";
+
+const APPLE_FM_BASE_URL_ENV_KEYS: [&str; 2] =
+    ["PROBE_APPLE_FM_BASE_URL", "OPENAGENTS_APPLE_FM_BASE_URL"];
 
 #[must_use]
 pub fn named_backend_profile(name: &str) -> Option<BackendProfile> {
@@ -25,7 +31,7 @@ pub fn psionic_apple_fm_bridge() -> BackendProfile {
     BackendProfile {
         name: String::from(PSIONIC_APPLE_FM_BRIDGE_PROFILE),
         kind: BackendKind::AppleFmBridge,
-        base_url: String::from("http://127.0.0.1:8081"),
+        base_url: resolved_apple_fm_bridge_base_url(),
         model: String::from(PSIONIC_APPLE_FM_MODEL),
         api_key_env: String::new(),
         timeout_secs: 45,
@@ -39,7 +45,7 @@ pub fn psionic_apple_fm_oracle() -> BackendProfile {
     BackendProfile {
         name: String::from(PSIONIC_APPLE_FM_ORACLE_PROFILE),
         kind: BackendKind::AppleFmBridge,
-        base_url: String::from("http://127.0.0.1:8081"),
+        base_url: resolved_apple_fm_bridge_base_url(),
         model: String::from(PSIONIC_APPLE_FM_MODEL),
         api_key_env: String::new(),
         timeout_secs: 30,
@@ -90,17 +96,40 @@ pub fn psionic_qwen35_2b_q8_long_context() -> BackendProfile {
     }
 }
 
+fn resolved_apple_fm_bridge_base_url() -> String {
+    resolve_apple_fm_bridge_base_url_with(|key| {
+        env::var(key).ok().and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+    })
+}
+
+fn resolve_apple_fm_bridge_base_url_with(
+    mut read_env: impl FnMut(&str) -> Option<String>,
+) -> String {
+    APPLE_FM_BASE_URL_ENV_KEYS
+        .iter()
+        .find_map(|key| read_env(key))
+        .unwrap_or_else(|| String::from(DEFAULT_APPLE_FM_BRIDGE_BASE_URL))
+}
+
 #[cfg(test)]
 mod tests {
     use probe_protocol::backend::{PrefixCacheMode, ServerAttachMode};
 
     use super::{
-        PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_APPLE_FM_MODEL, PSIONIC_APPLE_FM_ORACLE_PROFILE,
+        DEFAULT_APPLE_FM_BRIDGE_BASE_URL, PSIONIC_APPLE_FM_BRIDGE_PROFILE,
+        PSIONIC_APPLE_FM_MODEL, PSIONIC_APPLE_FM_ORACLE_PROFILE,
         PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE, PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE,
         PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
         named_backend_profile, psionic_apple_fm_bridge, psionic_apple_fm_oracle,
         psionic_qwen35_2b_q8_long_context, psionic_qwen35_2b_q8_oracle,
-        psionic_qwen35_2b_q8_registry,
+        psionic_qwen35_2b_q8_registry, resolve_apple_fm_bridge_base_url_with,
     };
 
     #[test]
@@ -133,7 +162,7 @@ mod tests {
         let profile =
             named_backend_profile(PSIONIC_APPLE_FM_BRIDGE_PROFILE).expect("apple fm profile");
         assert_eq!(profile.name, PSIONIC_APPLE_FM_BRIDGE_PROFILE);
-        assert_eq!(profile.base_url, "http://127.0.0.1:8081");
+        assert_eq!(profile.base_url, DEFAULT_APPLE_FM_BRIDGE_BASE_URL);
         assert_eq!(profile.model, PSIONIC_APPLE_FM_MODEL);
         assert_eq!(profile.api_key_env, "");
         assert_eq!(psionic_apple_fm_bridge().model, PSIONIC_APPLE_FM_MODEL);
@@ -173,5 +202,31 @@ mod tests {
             psionic_qwen35_2b_q8_long_context().name,
             PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE
         );
+    }
+
+    #[test]
+    fn apple_fm_bridge_uses_probe_specific_base_url_override_first() {
+        let base_url = resolve_apple_fm_bridge_base_url_with(|key| match key {
+            "PROBE_APPLE_FM_BASE_URL" => Some(String::from("http://127.0.0.1:19091")),
+            "OPENAGENTS_APPLE_FM_BASE_URL" => Some(String::from("http://127.0.0.1:11435")),
+            _ => None,
+        });
+        assert_eq!(base_url, "http://127.0.0.1:19091");
+    }
+
+    #[test]
+    fn apple_fm_bridge_falls_back_to_openagents_override() {
+        let base_url = resolve_apple_fm_bridge_base_url_with(|key| match key {
+            "PROBE_APPLE_FM_BASE_URL" => None,
+            "OPENAGENTS_APPLE_FM_BASE_URL" => Some(String::from("http://127.0.0.1:11435")),
+            _ => None,
+        });
+        assert_eq!(base_url, "http://127.0.0.1:11435");
+    }
+
+    #[test]
+    fn apple_fm_bridge_uses_default_when_no_override_is_set() {
+        let base_url = resolve_apple_fm_bridge_base_url_with(|_| None);
+        assert_eq!(base_url, DEFAULT_APPLE_FM_BRIDGE_BASE_URL);
     }
 }

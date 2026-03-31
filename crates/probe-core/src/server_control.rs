@@ -15,7 +15,7 @@ use crate::backend_profiles::{PSIONIC_APPLE_FM_MODEL, PSIONIC_QWEN35_2B_Q8_REGIS
 const DEFAULT_SERVER_CONFIG_PATH: &str = "server/psionic-local.json";
 const DEFAULT_SERVER_HOST: &str = "127.0.0.1";
 const DEFAULT_OPENAI_SERVER_PORT: u16 = 8080;
-const DEFAULT_APPLE_FM_SERVER_PORT: u16 = 8081;
+const DEFAULT_APPLE_FM_SERVER_PORT: u16 = 11435;
 const DEFAULT_SERVER_BACKEND: &str = "cpu";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

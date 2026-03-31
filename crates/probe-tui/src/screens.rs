@@ -610,19 +610,21 @@ impl HelloScreen {
         } else {
             format!("calls_done: {}", self.setup.calls.len())
         };
+        let availability_ready = match self.setup.availability.as_ref() {
+            Some(availability) => availability.ready.to_string(),
+            None => match self.setup.phase {
+                TaskPhase::Failed => String::from("failed"),
+                TaskPhase::Unavailable => String::from("false"),
+                TaskPhase::Idle => String::from("idle"),
+                _ => String::from("pending"),
+            },
+        };
         vec![
             format!("phase: {phase}"),
             progress,
             format!("focus: {focus_name}"),
             format!("stack_depth: {stack_depth}"),
-            format!(
-                "availability_ready: {}",
-                self.setup
-                    .availability
-                    .as_ref()
-                    .map(|availability| availability.ready.to_string())
-                    .unwrap_or_else(|| String::from("pending"))
-            ),
+            format!("availability_ready: {availability_ready}"),
         ]
     }
 
@@ -643,6 +645,19 @@ impl HelloScreen {
 
     fn render_availability_lines(&self) -> Vec<String> {
         let Some(availability) = &self.setup.availability else {
+            if let Some(failure) = &self.setup.failure {
+                return vec![
+                    String::from("ready: failed"),
+                    format!(
+                        "reason: {}",
+                        failure
+                            .reason_code
+                            .clone()
+                            .unwrap_or_else(|| String::from("transport_or_unknown"))
+                    ),
+                    format!("message: {}", preview(failure.detail.as_str(), 64)),
+                ];
+            }
             return vec![
                 String::from("ready: pending"),
                 String::from("reason: pending"),

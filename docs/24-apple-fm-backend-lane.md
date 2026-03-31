@@ -27,8 +27,14 @@ Built-in profiles:
 
 The default local bridge expectation is:
 
-- `http://127.0.0.1:8081`
+- `http://127.0.0.1:11435`
 - model id `apple-foundation-model`
+
+Probe resolves the Apple FM bridge base URL in this order:
+
+- `PROBE_APPLE_FM_BASE_URL`
+- `OPENAGENTS_APPLE_FM_BASE_URL`
+- default `http://127.0.0.1:11435`
 
 ## Server Attach Boundary
 

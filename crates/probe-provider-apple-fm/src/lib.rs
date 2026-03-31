@@ -30,7 +30,7 @@ impl AppleFmProviderConfig {
     #[must_use]
     pub fn localhost(model: impl Into<String>) -> Self {
         Self {
-            base_url: String::from("http://127.0.0.1:8081"),
+            base_url: String::from("http://127.0.0.1:11435"),
             model: model.into(),
             timeout: Duration::from_secs(30),
         }
@@ -663,7 +663,7 @@ mod tests {
     #[test]
     fn localhost_helper_uses_local_default() {
         let config = AppleFmProviderConfig::localhost("apple-foundation-model");
-        assert_eq!(config.base_url, "http://127.0.0.1:8081");
+        assert_eq!(config.base_url, "http://127.0.0.1:11435");
         assert_eq!(config.model, "apple-foundation-model");
     }
 
@@ -672,7 +672,7 @@ mod tests {
         let profile = BackendProfile {
             name: String::from("psionic-apple-fm-bridge"),
             kind: BackendKind::AppleFmBridge,
-            base_url: String::from("http://127.0.0.1:8081"),
+            base_url: String::from("http://127.0.0.1:11435"),
             model: String::from("apple-foundation-model"),
             api_key_env: String::new(),
             timeout_secs: 45,
@@ -680,7 +680,7 @@ mod tests {
             prefix_cache_mode: PrefixCacheMode::BackendDefault,
         };
         let config = AppleFmProviderConfig::from_backend_profile(&profile);
-        assert_eq!(config.base_url, "http://127.0.0.1:8081");
+        assert_eq!(config.base_url, "http://127.0.0.1:11435");
         assert_eq!(config.model, "apple-foundation-model");
         assert_eq!(config.timeout, Duration::from_secs(45));
     }

@@ -14,7 +14,7 @@ Probe-owned Apple Foundation Models prove-out with availability gating and live
 │                                              ││calls_done: 0                 │
 │Press r to start or rerun the Apple FM setup  ││focus: setup screen           │
 │flow.                                         ││stack_depth: 1                │
-│                                              ││availability_ready: pending   │
+│                                              ││availability_ready: idle      │
 │                                              │└──────────────────────────────┘
 │                                              │┌Backend Facts─────────────────┐
 │                                              ││profile: pending              │

@@ -12,6 +12,10 @@ On launch, Probe queues the canonical Apple FM setup request in the TUI worker
 lane. The screen checks availability first and only issues inference calls if
 the Apple FM bridge reports the configured model as ready.
 
+The canonical local bridge target now follows the real upstream bridge default
+at `http://127.0.0.1:11435`, with `PROBE_APPLE_FM_BASE_URL` and
+`OPENAGENTS_APPLE_FM_BASE_URL` supported as explicit overrides.
+
 ## Why
 
 Probe already had the real backend pieces:

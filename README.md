@@ -13,7 +13,7 @@ The repo currently contains eight crates: `probe-protocol`, `probe-core`,
 lane is `psionic-qwen35-2b-q8-registry`, targeting `http://127.0.0.1:8080/v1`
 with the model id `qwen3.5-2b-q8_0-registry.gguf`. Probe now also ships the
 first real Apple FM backend lane through `psionic-apple-fm-bridge`, targeting
-`http://127.0.0.1:8081` with the model id `apple-foundation-model`.
+`http://127.0.0.1:11435` with the model id `apple-foundation-model`.
 
 ## Status Snapshot
 
@@ -112,6 +112,12 @@ derived completion throughput, and a conservative cache-signal heuristic.
 Probe now also has a typed backend-receipt slot for adjunct evidence such as
 Apple FM transcript exports or typed refusal and availability facts. More
 detailed design and implementation notes live under `docs/`.
+
+Probe resolves the Apple FM bridge base URL in this order:
+
+- `PROBE_APPLE_FM_BASE_URL`
+- `OPENAGENTS_APPLE_FM_BASE_URL`
+- default `http://127.0.0.1:11435`
 
 The Apple FM lane now overlaps honestly with the Qwen coding lane, but it is
 still not identical:
