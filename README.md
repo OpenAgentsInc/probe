@@ -2,234 +2,62 @@
 
 # Probe
 
-Probe is a coding-agent runtime for software work. It is being built as a
-Rust-first controller with a CLI, durable local session state, a typed runtime
-protocol, bounded tool execution, and a clean seam to local or remote model
-backends.
+Probe is a Rust-first coding-agent runtime. It owns session lifecycle,
+transcript persistence, tool execution, approvals, backend attachment, and the
+CLI/TUI surfaces above that runtime.
 
-The repo currently contains eight crates: `probe-protocol`, `probe-core`,
-`probe-provider-openai`, `probe-provider-apple-fm`, `probe-decisions`,
-`probe-optimizer`, `probe-cli`, and `probe-tui`. The default local backend
-lane is `psionic-qwen35-2b-q8-registry`, targeting `http://127.0.0.1:8080/v1`
-with the model id `qwen3.5-2b-q8_0-registry.gguf`. Probe now also ships the
-first real Apple FM backend lane through `psionic-apple-fm-bridge`, targeting
-`http://127.0.0.1:11435` with the model id `apple-foundation-model`.
+Current shipped surface:
 
-## Status Snapshot
+- `probe exec` for one-shot turns
+- `probe chat` for interactive sessions plus resume
+- `probe tui` / `cargo probe` for the local terminal UI
+- `coding_bootstrap` tools, approvals, and harness profiles
+- append-only local transcripts under `PROBE_HOME` or `~/.probe`
+- bounded oracle and long-context escalation lanes
+- local acceptance/eval and module-optimization tooling
 
-Probe is now past the bootstrap/demo stage and into the first real local
-coding-runtime stage.
+## Backends
 
-Shipped now:
+Probe currently ships two backend families:
 
-- `probe exec` and `probe chat` on the shared runtime/session model
-- append-only transcript persistence plus local resume
-- the `coding_bootstrap` tool lane with approvals, harness profiles, and acceptance cases
-- replay and decision-dataset export
-- narrow offline-evaluable decision modules plus optimizer receipts
-- bounded oracle consultation and bounded long-context repo-analysis escalation
-- local backend attach and supervised launch flows
-- Apple FM plain-text `exec`/`chat` turns, Apple-FM-backed `consult_oracle`,
-  and session-backed Apple FM coding turns through the Probe approval layer
-- `probe tui`, a Textual-inspired Rust TUI shell that now auto-runs a real
-  Apple FM setup prove-out on launch: availability gating first, then a short
-  series of visible plain-text Apple FM calls when the bridge is ready, with
-  `cargo probe` as the repo-local shortcut
+- `psionic-qwen35-2b-q8-registry`
+  - base URL: `http://127.0.0.1:8080/v1`
+  - model: `qwen3.5-2b-q8_0-registry.gguf`
+- `psionic-apple-fm-bridge`
+  - default base URL: `http://127.0.0.1:11435`
+  - model: `apple-foundation-model`
+  - override order: `PROBE_APPLE_FM_BASE_URL`, then `OPENAGENTS_APPLE_FM_BASE_URL`
 
-Current posture:
+Apple FM is attach-only. Probe checks `GET /health` before use and stays honest
+about unavailable or non-admitted machines.
 
-- local-first
-- single-controller
-- transcript- and policy-driven
-- optimized for honest coding turns before any larger recursive or multi-agent work
+## Quick Start
 
-Still intentionally not the goal:
-
-- plugin marketplace sprawl
-- hidden recursive runtimes
-- default long-context escalation for ordinary coding tasks
-- opaque optimizer magic in the hot path
-
-## Current State
-
-Probe already works as a first local controller stack. You can run one-shot
-turns with `probe exec`, interactive multi-turn sessions with `probe chat`,
-resume prior sessions by id, persist append-only transcripts under
-`PROBE_HOME` or `~/.probe`, run a retained local acceptance harness, and use a
-bounded built-in tool runtime including same-turn parallel tool calls.
-
-The canonical local coding lane is now `coding_bootstrap`, which ships the
-first real built-in coding tools:
-
-- `read_file`
-- `list_files`
-- `code_search`
-- `shell`
-- `apply_patch`
-- `consult_oracle`
-  - only when an auxiliary oracle profile is configured
-- `analyze_repository`
-  - only when an auxiliary long-context profile is configured
-
-The retained `weather` tool set remains available as a tiny regression fixture.
-
-Probe also now has a Probe-owned harness profile for that coding lane:
-
-- `coding_bootstrap_default@v1`
-
-This keeps the default controller prompt explicit and versioned instead of
-relying only on raw `--system` strings.
-
-The coding lane now also has explicit local approval classes. By default:
-
-- `read_file`, `list_files`, `code_search`, and read-only `shell` commands are auto-allowed
-- `apply_patch`, write-class shell commands, networked shell commands, and destructive shell commands are refused unless explicitly approved
-- `--pause-for-approval` switches denied risky tool calls from refusal into a persisted pending-approval pause
-
-Probe persists structured tool-result records for coding sessions, including
-risk class, policy decision, approval state, command metadata, truncation,
-bytes returned, and touched paths when known.
-
-Above that runtime lane, Probe now has a narrow Rust-native decision-module
-crate for offline module evaluation. The first module families are
-`ToolRoute`, `PatchReadiness`, and `LongContextEscalation`.
-
-Probe also now supports a bounded auxiliary oracle lane through a typed
-`consult_oracle` tool. Oracle calls stay inside the main controller loop as
-tool invocations rather than becoming a second controller. The auxiliary oracle
-can now target either the current Psionic Qwen lane or the Apple FM bridge lane.
-
-Probe also now supports a bounded long-context repo-analysis lane through a
-typed `analyze_repository` tool. This path is opt-in, budgeted, and only
-allowed for explicit repo-analysis tasks once the session has enough evidence
-or obvious context pressure.
-
-Probe can either attach to an already-running local backend or launch
-`psionic-openai-server` as a supervised child process. It also records basic
-controller-side observability on model-generated turns, including wallclock,
-best-effort usage, exact-versus-estimated usage truth when the backend can say,
-derived completion throughput, and a conservative cache-signal heuristic.
-Probe now also has a typed backend-receipt slot for adjunct evidence such as
-Apple FM transcript exports or typed refusal and availability facts. More
-detailed design and implementation notes live under `docs/`.
-
-Probe resolves the Apple FM bridge base URL in this order:
-
-- `PROBE_APPLE_FM_BASE_URL`
-- `OPENAGENTS_APPLE_FM_BASE_URL`
-- default `http://127.0.0.1:11435`
-
-The Apple FM lane now overlaps honestly with the Qwen coding lane, but it is
-still not identical:
-
-- `probe exec` and `probe chat` support plain-text Apple FM turns
-- `consult_oracle` can target an Apple FM profile
-- tool-backed coding turns on Apple FM now run through a Probe-owned callback
-  server and the same local approval policy
-- Apple FM resume rebuilds session continuity from Probe transcript state each
-  turn instead of depending on stored backend session ids
-- managed launch remains OpenAI-compatible only, and Apple FM does not claim
-  explicit OpenAI-style parallel tool-call control
-
-For local validation, Probe now has a canonical runner script at the repo
-root: `./probe-dev fmt`, `./probe-dev check`, `./probe-dev test`, and
-`./probe-dev accept`. The test command prefers `cargo nextest run
---no-fail-fast` when `cargo nextest` is installed and falls back to
-`cargo test --workspace` otherwise.
-
-Probe now also has binary-level CLI regression tests and narrow normalized
-snapshots for `exec` stderr, selected transcript receipts, and the acceptance
-report shape.
-
-The acceptance report itself now carries run identity, git provenance, backend
-and harness metadata, aggregate counts, typed failure categories, transcript
-references, and final-turn observability truth summaries so it can serve as a
-real local eval receipt.
-
-Probe now also has an admitted-Mac comparison lane for the overlapping Apple
-FM and Psionic Qwen coding cases. That lane produces one Probe-owned artifact
-with explicit per-backend pass, fail, or unsupported posture instead of
-assuming silent parity.
-
-The repo-local operator split is now explicit: use `./probe-dev pr-fast` for
-the fast merge-safe lane, `./probe-dev cli-regressions` for binary output and
-snapshot work, `./probe-dev accept-live` for one backend, `./probe-dev
-accept-compare` for the admitted-Mac Apple FM versus Qwen comparison lane, and
-the eval wrappers for the heavier local acceptance and research lanes.
-
-The repo now also has a separate GitHub Actions workflow for the heavy Apple
-FM versus Qwen comparison path. It is manual or scheduled on admitted
-self-hosted Apple hardware and uploads the retained comparison artifacts even
-when the comparison run fails.
-
-## Commands
-
-Build and validation:
-
-```bash
-cargo test -p probe-provider-openai -p probe-core -p probe-cli -p probe-tui
-cargo check
-```
-
-One-shot execution:
-
-```bash
-cargo run -p probe-cli -- exec "Explain what this repository does."
-```
-
-Interactive session:
-
-```bash
-cargo run -p probe-cli -- chat
-```
-
-Probe terminal UI:
-
-```bash
-cargo run -p probe-cli -- tui
-```
-
-Repo-local cargo alias:
+Run the TUI:
 
 ```bash
 cargo probe
 ```
 
-This is the current top-level Probe TUI entrypoint.
+Run a one-shot turn:
 
-On launch, the TUI immediately checks the canonical Apple FM bridge profile for
-availability and access. If the bridge reports the model ready, Probe runs a
-short three-call plain-text setup prove-out and renders the live results. If
-the bridge is unavailable or not admitted, the screen stays honest and shows
-the unavailable or failure detail instead of pretending inference worked.
+```bash
+cargo run -p probe-cli -- exec "Explain what this repository does."
+```
 
-Keys:
+Start an interactive session:
 
-- `r`
-  - rerun the Apple FM setup check and three-call prove-out
-- `Tab`, `Left`, `Right`
-  - switch between the overview and event-log views
-- `t`
-  - toggle between operator notes and live Apple FM detail
-- `?` or `F1`
-  - open or dismiss the help modal
-- `Esc`
-  - dismiss the help modal
-- `q` or `Ctrl+C`
-  - quit cleanly and restore the terminal
+```bash
+cargo run -p probe-cli -- chat
+```
 
-The current TUI is still intentionally narrow, but it now has a real worker
-thread and typed app-message seam. The shell keeps repainting while the worker
-checks Apple FM availability, runs the retained setup calls, and folds ready,
-unavailable, completed, or failed state back into the screen.
-
-Resume a prior session:
+Resume a session:
 
 ```bash
 cargo run -p probe-cli -- chat --resume <session-id>
 ```
 
-Tool-enabled execution:
+Run a tool-enabled turn:
 
 ```bash
 cargo run -p probe-cli -- exec \
@@ -239,171 +67,46 @@ cargo run -p probe-cli -- exec \
   "Read README.md and summarize what this repository does."
 ```
 
-Parallel tool-call batch:
+## TUI
+
+`cargo probe` is the current top-level Probe UI entrypoint. On launch it checks
+the Apple FM bridge, then runs a short plain-text prove-out when the model is
+ready.
+
+Keys:
+
+- `Tab`, `Left`, `Right`: switch views
+- `r`: rerun setup
+- `t`: toggle operator notes vs live detail
+- `?` or `F1`: help
+- `Esc`: dismiss modal
+- `q` or `Ctrl+C`: quit
+
+## Dev Helpers
+
+Repo-local helpers:
 
 ```bash
-cargo run -p probe-cli -- exec \
-  --tool-set coding_bootstrap \
-  --approve-write-tools \
-  --tool-choice auto \
-  "Update hello.txt by replacing world with probe."
+./probe-dev fmt
+./probe-dev check
+./probe-dev test
+./probe-dev accept
 ```
 
-Pause instead of refusing a risky tool call:
+Useful focused lanes:
 
-```bash
-cargo run -p probe-cli -- exec \
-  --tool-set coding_bootstrap \
-  --pause-for-approval \
-  --tool-choice auto \
-  "Patch hello.txt to say probe instead of world."
-```
+- `./probe-dev pr-fast`
+- `./probe-dev cli-regressions`
+- `./probe-dev accept-live`
+- `./probe-dev accept-compare`
 
-Parallel tool-call batch:
+## Docs
 
-```bash
-cargo run -p probe-cli -- exec \
-  --tool-set coding_bootstrap \
-  --tool-choice auto \
-  --parallel-tool-calls \
-  "Search for the runtime crate names and then read the README."
-```
+Start with:
 
-Acceptance harness:
-
-```bash
-cargo run -p probe-cli -- accept
-cargo run -p probe-cli -- accept --profile psionic-apple-fm-bridge
-cargo run -p probe-cli -- accept-compare
-```
-
-The acceptance runner now targets retained `coding_bootstrap` cases instead of
-only the old weather demo. Its JSON report includes repeat-run receipts,
-median wallclock, per-attempt tool-policy counts, and final-turn
-observability fields, including exact-versus-estimated usage detail when the
-backend reports it.
-
-`probe accept` still defaults to the retained Qwen lane, but it can now target
-Apple FM intentionally through `--profile psionic-apple-fm-bridge`.
-
-`probe accept-compare` runs the retained overlapping case set against both the
-Qwen profile and the Apple FM profile, writes backend-specific acceptance
-reports for each side, and emits one comparison artifact that keeps
-unsupported posture explicit.
-
-Dataset export:
-
-```bash
-cargo run -p probe-cli -- export \
-  --dataset decision \
-  --output ~/.probe/reports/probe_decision.jsonl
-```
-
-By default, export targets coding-lane sessions. Add `--all-sessions` to widen
-scope or `--session <id>` to export one specific session.
-
-Offline module evaluation:
-
-```bash
-cargo run -p probe-cli -- module-eval \
-  --dataset ~/.probe/reports/probe_decision.jsonl
-```
-
-Offline module optimization receipts:
-
-```bash
-cargo run -p probe-cli -- optimize-modules \
-  --dataset ~/.probe/reports/probe_decision.jsonl \
-  --output ~/.probe/reports/probe_module_optimization.json
-```
-
-Harness candidate comparison:
-
-```bash
-cargo run -p probe-cli -- optimize-harness \
-  --baseline-report ~/.probe/reports/probe_acceptance_baseline.json \
-  --candidate-report ~/.probe/reports/probe_acceptance_candidate.json \
-  --output ~/.probe/reports/probe_harness_optimization.json
-```
-
-Oracle-enabled coding session:
-
-```bash
-cargo run -p probe-cli -- exec \
-  --tool-set coding_bootstrap \
-  --oracle-profile psionic-qwen35-2b-q8-oracle \
-  --oracle-max-calls 1 \
-  "Ask the oracle for a checking recommendation before editing."
-```
-
-Apple FM plain-text session:
-
-```bash
-cargo run -p probe-cli -- exec \
-  --profile psionic-apple-fm-bridge \
-  "Summarize the Probe runtime boundary."
-```
-
-Apple FM tool-backed coding session:
-
-```bash
-cargo run -p probe-cli -- exec \
-  --profile psionic-apple-fm-bridge \
-  --tool-set coding_bootstrap \
-  --tool-choice required \
-  "Read hello.txt and tell me what it says."
-```
-
-Apple FM oracle inside the Qwen coding lane:
-
-```bash
-cargo run -p probe-cli -- exec \
-  --tool-set coding_bootstrap \
-  --oracle-profile psionic-apple-fm-oracle \
-  --oracle-max-calls 1 \
-  "Consult the Apple FM oracle before deciding what file to inspect."
-```
-
-Long-context repo-analysis session:
-
-```bash
-cargo run -p probe-cli -- exec \
-  --tool-set coding_bootstrap \
-  --long-context-profile psionic-qwen35-2b-q8-long-context \
-  --long-context-max-calls 1 \
-  --long-context-max-evidence-files 6 \
-  --long-context-max-lines-per-file 160 \
-  "If this turns into a repo-analysis task, use analyze_repository with explicit evidence paths."
-```
-
-Explicit attach mode:
-
-```bash
-cargo run -p probe-cli -- exec \
-  --server-mode attach \
-  "Reply with exactly ATTACHED_OK."
-```
-
-Launch mode:
-
-```bash
-cargo run -p probe-cli -- exec \
-  --server-mode launch \
-  --server-binary /path/to/psionic-openai-server \
-  --server-model-path /path/to/model.gguf \
-  --server-model-id qwen3.5-2b-q8_0-registry.gguf \
-  "Reply with exactly LAUNCHED_OK."
-```
-
-By default, Probe uses the `psionic-qwen35-2b-q8-registry` profile and
-`attach` server mode. Session transcripts, server config, and acceptance
-reports live under the Probe home directory. `probe exec` and `probe chat`
-emit observability lines on stderr for model-generated turns, print exact or
-estimated usage truth when available, surface backend-receipt summaries when a
-turn carries one, and print the active harness profile when one is selected.
-Tool-backed runs also emit a policy summary for auto-allowed, approved,
-refused, and paused tool calls.
-
-`probe accept-compare` is intentionally an attach-only admitted-Mac lane for
-now. It expects both the local Psionic Qwen endpoint and the Apple FM bridge
-to already be reachable at the configured profile URLs.
+- [docs/02-runtime-ownership-and-boundaries.md](docs/02-runtime-ownership-and-boundaries.md)
+- [docs/03-workspace-map.md](docs/03-workspace-map.md)
+- [docs/24-apple-fm-backend-lane.md](docs/24-apple-fm-backend-lane.md)
+- [docs/25-apple-fm-tool-lane.md](docs/25-apple-fm-tool-lane.md)
+- [docs/31-probe-tui-background-task-and-app-message-bridge.md](docs/31-probe-tui-background-task-and-app-message-bridge.md)
+- [docs/32-apple-fm-setup-demo-screen.md](docs/32-apple-fm-setup-demo-screen.md)
