@@ -1,0 +1,2 @@
+[alias]
+probe = "run -p probe-cli -- tui"

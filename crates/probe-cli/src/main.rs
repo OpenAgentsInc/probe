@@ -60,6 +60,7 @@ struct Cli {
 enum Commands {
     Exec(ExecArgs),
     Chat(ChatArgs),
+    #[command(about = "Launch the current Probe terminal UI")]
     Tui(TuiArgs),
     Accept(AcceptArgs),
     AcceptCompare(AcceptCompareArgs),
@@ -72,12 +73,12 @@ enum Commands {
 #[derive(clap::Args, Debug)]
 struct TuiArgs {
     #[command(subcommand)]
-    command: TuiCommands,
+    command: Option<TuiCommands>,
 }
 
 #[derive(Subcommand, Debug)]
 enum TuiCommands {
-    #[command(about = "Launch the hello-world Probe TUI demo")]
+    #[command(about = "Launch the current Probe terminal UI")]
     Hello,
 }
 
@@ -295,7 +296,7 @@ fn run() -> Result<(), String> {
 }
 
 fn run_tui(args: TuiArgs) -> Result<(), String> {
-    match args.command {
+    match args.command.unwrap_or(TuiCommands::Hello) {
         TuiCommands::Hello => run_hello_demo().map_err(|error| error.to_string()),
     }
 }

@@ -44,9 +44,9 @@ Concrete work:
   - screen
   - one or more bounded view/widget regions
   - UI-local events or messages
-- add a narrow CLI entrypoint such as `probe tui hello` or equivalent so
-  operators can launch the demo intentionally without pretending the full
-  interactive CLI is already TUI-backed
+- add a narrow CLI entrypoint such as `probe tui` so operators can launch the
+  current TUI intentionally without pretending the full interactive CLI is
+  already TUI-backed
 - wire terminal lifecycle in a way that leaves the terminal clean on exit and
   failure
 - render one hello-world style screen that shows obvious visible structure, at

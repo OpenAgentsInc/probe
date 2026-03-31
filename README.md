@@ -31,9 +31,9 @@ Shipped now:
 - local backend attach and supervised launch flows
 - Apple FM plain-text `exec`/`chat` turns, Apple-FM-backed `consult_oracle`,
   and session-backed Apple FM coding turns through the Probe approval layer
-- `probe tui hello`, the first Textual-inspired Rust TUI shell proving a small
+- `probe tui`, the first Textual-inspired Rust TUI shell proving a small
   app/screen/widget seam, screen stack, help modal, and visible keyboard-driven
-  state changes
+  state changes, with `cargo probe` as the repo-local shortcut
 
 Current posture:
 
@@ -176,13 +176,22 @@ Interactive session:
 cargo run -p probe-cli -- chat
 ```
 
-Hello-world TUI demo:
+Probe terminal UI:
 
 ```bash
-cargo run -p probe-cli -- tui hello
+cargo run -p probe-cli -- tui
 ```
 
-The demo uses a small retained screen shell in Rust.
+Repo-local cargo alias:
+
+```bash
+cargo probe
+```
+
+This is the current top-level Probe TUI entrypoint.
+
+It is intentionally minimal right now, but it is meant to evolve into the real
+Probe TUI rather than stay as a forever-separate demo path.
 
 Keys:
 
