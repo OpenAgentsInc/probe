@@ -41,3 +41,6 @@ This folder holds technical planning docs for the Probe runtime.
   - Probe-owned versioned harness profiles for the coding tool lane, including
     the first `coding_bootstrap_default@v1` profile and its relationship to
     `--system`
+- `14-approval-classes-and-structured-tool-results.md`
+  - explicit risk classes, local approval policy, CLI approval controls, and
+    structured tool-result records for the coding tool lane

@@ -14,7 +14,7 @@ use probe_provider_openai::{
 };
 
 use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionStoreError};
-use crate::tools::{ToolExecutionContext, ToolLoopConfig};
+use crate::tools::{ExecutedToolCall, ToolExecutionContext, ToolLoopConfig};
 
 const DEFAULT_PROBE_HOME_DIR: &str = ".probe";
 const LIKELY_WARM_WALLCLOCK_RATIO_NUMERATOR: u64 = 80;
@@ -48,6 +48,7 @@ pub struct PlainTextExecOutcome {
     pub response_model: String,
     pub usage: Option<ChatCompletionUsage>,
     pub executed_tool_calls: usize,
+    pub tool_results: Vec<ExecutedToolCall>,
 }
 
 #[derive(Debug)]
@@ -63,6 +64,12 @@ pub enum RuntimeError {
     MissingAssistantMessage {
         session_id: SessionId,
         response_id: String,
+    },
+    ToolApprovalPending {
+        session_id: SessionId,
+        tool_name: String,
+        call_id: String,
+        reason: Option<String>,
     },
     MaxToolRoundTrips {
         session_id: SessionId,
@@ -94,6 +101,20 @@ impl Display for RuntimeError {
                 f,
                 "backend response {response_id} for session {} did not include assistant text",
                 session_id.as_str()
+            ),
+            Self::ToolApprovalPending {
+                session_id,
+                tool_name,
+                call_id,
+                reason,
+            } => write!(
+                f,
+                "session {} paused for approval on tool `{tool_name}` ({call_id}){}",
+                session_id.as_str(),
+                reason
+                    .as_deref()
+                    .map(|value| format!(": {value}"))
+                    .unwrap_or_default()
             ),
             Self::MaxToolRoundTrips {
                 session_id,
@@ -215,6 +236,7 @@ impl ProbeRuntime {
         let mut messages = self.replay_messages(&session)?;
         let mut pending_user_prompt = Some(prompt);
         let mut executed_tool_calls = 0_usize;
+        let mut tool_results = Vec::new();
         let tool_loop = tool_loop.filter(|config| !config.registry.is_empty());
         let max_round_trips = tool_loop
             .as_ref()
@@ -280,12 +302,23 @@ impl ProbeRuntime {
                     });
                 };
                 let execution_context = ToolExecutionContext::new(session.cwd.clone());
-                let executed = tool_loop
-                    .registry
-                    .execute_batch(&execution_context, &tool_calls);
-                executed_tool_calls += executed.len();
+                let executed = tool_loop.registry.execute_batch(
+                    &execution_context,
+                    &tool_calls,
+                    &tool_loop.approval,
+                );
+                executed_tool_calls += executed.iter().filter(|tool| tool.was_executed()).count();
+                tool_results.extend(executed.clone());
                 let tool_result_turn = self.append_tool_result_turn(&session.id, &executed)?;
                 let _ = tool_result_turn;
+                if let Some(paused) = executed.iter().find(|tool| tool.was_paused()) {
+                    return Err(RuntimeError::ToolApprovalPending {
+                        session_id: session.id.clone(),
+                        tool_name: paused.name.clone(),
+                        call_id: paused.call_id.clone(),
+                        reason: paused.tool_execution.reason.clone(),
+                    });
+                }
 
                 messages.push(ChatMessage::assistant_tool_calls(tool_calls));
                 for tool_result in executed {
@@ -330,6 +363,7 @@ impl ProbeRuntime {
                 response_model: response.model,
                 usage: response.usage,
                 executed_tool_calls,
+                tool_results,
             });
         }
 
@@ -474,6 +508,7 @@ impl ProbeRuntime {
                     serde_json::to_string(&tool_call.output).unwrap_or_else(|_| {
                         String::from("{\"error\":\"tool output encode failed\"}")
                     }),
+                    tool_call.tool_execution.clone(),
                 )
             })
             .collect::<Vec<_>>();
@@ -579,8 +614,11 @@ mod tests {
     use std::time::Duration;
 
     use crate::backend_profiles::psionic_qwen35_2b_q8_registry;
-    use crate::tools::{ProbeToolChoice, ToolLoopConfig};
-    use probe_protocol::session::{CacheSignal, SessionHarnessProfile, TranscriptItemKind};
+    use crate::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig};
+    use probe_protocol::session::{
+        CacheSignal, SessionHarnessProfile, ToolApprovalState, ToolPolicyDecision,
+        TranscriptItemKind,
+    };
 
     use super::{
         PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, default_session_title,
@@ -921,6 +959,11 @@ mod tests {
 
         assert_eq!(outcome.assistant_text, "Paris is sunny at 18C.");
         assert_eq!(outcome.executed_tool_calls, 1);
+        assert_eq!(outcome.tool_results.len(), 1);
+        assert_eq!(
+            outcome.tool_results[0].tool_execution.policy_decision,
+            ToolPolicyDecision::AutoAllow
+        );
 
         let transcript = runtime
             .session_store()
@@ -938,7 +981,109 @@ mod tests {
             transcript[1].turn.items[0].kind,
             TranscriptItemKind::ToolResult
         ));
+        assert_eq!(
+            transcript[1].turn.items[0]
+                .tool_execution
+                .as_ref()
+                .expect("tool execution should persist")
+                .approval_state,
+            ToolApprovalState::NotRequired
+        );
         assert_eq!(transcript[2].turn.items[0].text, "Paris is sunny at 18C.");
+
+        handle.join().expect("server thread should exit cleanly");
+    }
+
+    #[test]
+    fn tool_loop_can_pause_for_approval() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let address = listener.local_addr().expect("listener addr");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let body = serde_json::json!({
+                "id": "chatcmpl_pause_test",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call_patch_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "apply_patch",
+                                        "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }
+                ]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join("hello.txt"), "hello world\n").expect("write hello");
+        let runtime = ProbeRuntime::new(temp.path().join(".probe"));
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = format!("http://{address}/v1");
+        let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Required, false);
+        tool_loop.approval = ToolApprovalConfig {
+            allow_write_tools: false,
+            allow_network_shell: false,
+            allow_destructive_shell: false,
+            denied_action: ToolDeniedAction::Pause,
+        };
+
+        let error = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile,
+                prompt: String::from("patch hello.txt"),
+                title: Some(String::from("Pause Test")),
+                cwd: temp.path().to_path_buf(),
+                system_prompt: None,
+                harness_profile: None,
+                tool_loop: Some(tool_loop),
+            })
+            .expect_err("tool loop should pause");
+
+        assert!(matches!(
+            error,
+            super::RuntimeError::ToolApprovalPending { .. }
+        ));
+
+        let sessions = runtime
+            .session_store()
+            .list_sessions()
+            .expect("list sessions");
+        let session_id = sessions[0].id.clone();
+        let transcript = runtime
+            .session_store()
+            .read_transcript(&session_id)
+            .expect("read transcript");
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(
+            transcript[1].turn.items[0]
+                .tool_execution
+                .as_ref()
+                .expect("tool execution should persist")
+                .policy_decision,
+            ToolPolicyDecision::Paused
+        );
 
         handle.join().expect("server thread should exit cleanly");
     }

@@ -50,6 +50,11 @@ The initial item kinds are:
 - tool result
 - note
 
+Tool-backed items may also carry structured metadata beyond raw text, such as:
+
+- tool arguments on `tool_call` items
+- tool execution and policy records on `tool_result` items
+
 ## Storage Layout
 
 The first filesystem layout is:

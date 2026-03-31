@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -6,6 +6,9 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use probe_protocol::session::{
+    ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
+};
 use probe_provider_openai::{
     ChatNamedToolChoice, ChatNamedToolChoiceFunction, ChatToolCall, ChatToolChoice,
     ChatToolDefinition, ChatToolDefinitionEnvelope,
@@ -19,13 +22,22 @@ const CODE_SEARCH_DEFAULT_MAX_MATCHES: usize = 50;
 const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 5;
 const SHELL_MAX_OUTPUT_CHARS: usize = 4_000;
 
-pub type ToolHandler =
-    fn(&ToolExecutionContext, &serde_json::Value) -> Result<serde_json::Value, ToolInvocationError>;
+pub type ToolHandler = fn(
+    &ToolExecutionContext,
+    &serde_json::Value,
+) -> Result<ToolInvocationOutcome, ToolInvocationError>;
+
+#[derive(Clone, Copy, Debug)]
+enum RegisteredToolRisk {
+    Fixed(ToolRiskClass),
+    Shell,
+}
 
 #[derive(Clone, Debug)]
 struct RegisteredTool {
     definition: ChatToolDefinition,
     handler: ToolHandler,
+    risk: RegisteredToolRisk,
 }
 
 #[derive(Clone, Debug)]
@@ -53,6 +65,7 @@ pub struct ToolLoopConfig {
     pub tool_choice: ProbeToolChoice,
     pub parallel_tool_calls: bool,
     pub max_model_round_trips: usize,
+    pub approval: ToolApprovalConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +74,32 @@ pub struct ExecutedToolCall {
     pub name: String,
     pub arguments: serde_json::Value,
     pub output: serde_json::Value,
+    pub tool_execution: ToolExecutionRecord,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolDeniedAction {
+    Refuse,
+    Pause,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolApprovalConfig {
+    pub allow_write_tools: bool,
+    pub allow_network_shell: bool,
+    pub allow_destructive_shell: bool,
+    pub denied_action: ToolDeniedAction,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolInvocationOutcome {
+    pub output: serde_json::Value,
+    pub command: Option<String>,
+    pub exit_code: Option<i32>,
+    pub timed_out: Option<bool>,
+    pub truncated: Option<bool>,
+    pub bytes_returned: Option<u64>,
+    pub files_touched: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,6 +142,63 @@ impl ToolExecutionContext {
     }
 }
 
+impl ToolApprovalConfig {
+    #[must_use]
+    pub fn conservative() -> Self {
+        Self {
+            allow_write_tools: false,
+            allow_network_shell: false,
+            allow_destructive_shell: false,
+            denied_action: ToolDeniedAction::Refuse,
+        }
+    }
+
+    #[must_use]
+    pub fn allow_all() -> Self {
+        Self {
+            allow_write_tools: true,
+            allow_network_shell: true,
+            allow_destructive_shell: true,
+            denied_action: ToolDeniedAction::Refuse,
+        }
+    }
+}
+
+impl ToolInvocationOutcome {
+    #[must_use]
+    pub fn new(output: serde_json::Value) -> Self {
+        Self {
+            output,
+            command: None,
+            exit_code: None,
+            timed_out: None,
+            truncated: None,
+            bytes_returned: None,
+            files_touched: Vec::new(),
+        }
+    }
+}
+
+impl ExecutedToolCall {
+    #[must_use]
+    pub fn was_executed(&self) -> bool {
+        matches!(
+            self.tool_execution.policy_decision,
+            ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved
+        )
+    }
+
+    #[must_use]
+    pub fn was_refused(&self) -> bool {
+        self.tool_execution.policy_decision == ToolPolicyDecision::Refused
+    }
+
+    #[must_use]
+    pub fn was_paused(&self) -> bool {
+        self.tool_execution.policy_decision == ToolPolicyDecision::Paused
+    }
+}
+
 impl ProbeToolChoice {
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
@@ -140,6 +236,7 @@ impl ToolLoopConfig {
             tool_choice,
             parallel_tool_calls,
             max_model_round_trips: 4,
+            approval: ToolApprovalConfig::allow_all(),
         }
     }
 
@@ -150,6 +247,7 @@ impl ToolLoopConfig {
             tool_choice,
             parallel_tool_calls,
             max_model_round_trips: 8,
+            approval: ToolApprovalConfig::conservative(),
         }
     }
 }
@@ -183,6 +281,7 @@ impl ToolRegistry {
                 "Look up the retained demo weather for a city.",
             )),
             Some(parameters),
+            RegisteredToolRisk::Fixed(ToolRiskClass::ReadOnly),
             lookup_weather,
         )
     }
@@ -196,6 +295,7 @@ impl ToolRegistry {
                     "Read a bounded set of lines from a relative text file inside the session cwd.",
                 )),
                 Some(read_file_parameters()),
+                RegisteredToolRisk::Fixed(ToolRiskClass::ReadOnly),
                 read_file,
             )
             .register(
@@ -204,6 +304,7 @@ impl ToolRegistry {
                     "List files and directories relative to the session cwd with bounded depth and entry count.",
                 )),
                 Some(list_files_parameters()),
+                RegisteredToolRisk::Fixed(ToolRiskClass::ReadOnly),
                 list_files,
             )
             .register(
@@ -212,6 +313,7 @@ impl ToolRegistry {
                     "Search the codebase with ripgrep using a bounded pattern search relative to the session cwd.",
                 )),
                 Some(code_search_parameters()),
+                RegisteredToolRisk::Fixed(ToolRiskClass::ReadOnly),
                 code_search,
             )
             .register(
@@ -220,6 +322,7 @@ impl ToolRegistry {
                     "Run a bounded shell command inside the session cwd and capture stdout, stderr, exit code, and timeout state.",
                 )),
                 Some(shell_parameters()),
+                RegisteredToolRisk::Shell,
                 run_shell,
             )
             .register(
@@ -228,16 +331,18 @@ impl ToolRegistry {
                     "Apply a deterministic text replacement to a relative file in the session cwd.",
                 )),
                 Some(apply_patch_parameters()),
+                RegisteredToolRisk::Fixed(ToolRiskClass::Write),
                 apply_patch,
             )
     }
 
     #[must_use]
-    pub fn register(
+    fn register(
         mut self,
         name: String,
         description: Option<String>,
         parameters: Option<serde_json::Value>,
+        risk: RegisteredToolRisk,
         handler: ToolHandler,
     ) -> Self {
         self.tools.insert(
@@ -249,6 +354,7 @@ impl ToolRegistry {
                     parameters,
                 },
                 handler,
+                risk,
             },
         );
         self
@@ -279,6 +385,7 @@ impl ToolRegistry {
         &self,
         context: &ToolExecutionContext,
         tool_calls: &[ChatToolCall],
+        approval: &ToolApprovalConfig,
     ) -> Vec<ExecutedToolCall> {
         tool_calls
             .iter()
@@ -292,23 +399,77 @@ impl ToolRegistry {
                     })
                 });
 
-                let output = self
-                    .tools
-                    .get(tool_call.function.name.as_str())
-                    .map(|tool| (tool.handler)(context, &parsed_arguments))
-                    .unwrap_or_else(|| {
-                        Err(ToolInvocationError::ExecutionFailed(format!(
-                            "undeclared tool `{}`",
-                            tool_call.function.name
-                        )))
-                    })
-                    .unwrap_or_else(|error| serde_json::json!({ "error": error.to_string() }));
+                if let Some(tool) = self.tools.get(tool_call.function.name.as_str()) {
+                    let risk_class = match tool.risk {
+                        RegisteredToolRisk::Fixed(risk) => risk,
+                        RegisteredToolRisk::Shell => classify_shell_command(&parsed_arguments),
+                    };
+                    let (policy_decision, approval_state, reason) = evaluate_tool_policy(
+                        tool_call.function.name.as_str(),
+                        risk_class,
+                        approval,
+                    );
+                    let invocation = if matches!(
+                        policy_decision,
+                        ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved
+                    ) {
+                        (tool.handler)(context, &parsed_arguments).unwrap_or_else(|error| {
+                            ToolInvocationOutcome::new(
+                                serde_json::json!({ "error": error.to_string() }),
+                            )
+                        })
+                    } else {
+                        denied_tool_invocation(
+                            context,
+                            tool_call.function.name.as_str(),
+                            &parsed_arguments,
+                            risk_class,
+                            &reason,
+                        )
+                    };
 
-                ExecutedToolCall {
-                    call_id: tool_call.id.clone(),
-                    name: tool_call.function.name.clone(),
-                    arguments: parsed_arguments,
-                    output,
+                    ExecutedToolCall {
+                        call_id: tool_call.id.clone(),
+                        name: tool_call.function.name.clone(),
+                        arguments: parsed_arguments,
+                        output: invocation.output.clone(),
+                        tool_execution: ToolExecutionRecord {
+                            risk_class,
+                            policy_decision,
+                            approval_state,
+                            command: invocation.command,
+                            exit_code: invocation.exit_code,
+                            timed_out: invocation.timed_out,
+                            truncated: invocation.truncated,
+                            bytes_returned: invocation.bytes_returned,
+                            files_touched: invocation.files_touched,
+                            reason,
+                        },
+                    }
+                } else {
+                    ExecutedToolCall {
+                        call_id: tool_call.id.clone(),
+                        name: tool_call.function.name.clone(),
+                        arguments: parsed_arguments,
+                        output: serde_json::json!({
+                            "error": format!("undeclared tool `{}`", tool_call.function.name),
+                        }),
+                        tool_execution: ToolExecutionRecord {
+                            risk_class: ToolRiskClass::ReadOnly,
+                            policy_decision: ToolPolicyDecision::Refused,
+                            approval_state: ToolApprovalState::Refused,
+                            command: None,
+                            exit_code: None,
+                            timed_out: None,
+                            truncated: None,
+                            bytes_returned: None,
+                            files_touched: Vec::new(),
+                            reason: Some(format!(
+                                "tool `{}` is not registered in this tool loop",
+                                tool_call.function.name
+                            )),
+                        },
+                    }
                 }
             })
             .collect()
@@ -318,7 +479,7 @@ impl ToolRegistry {
 fn lookup_weather(
     _context: &ToolExecutionContext,
     arguments: &serde_json::Value,
-) -> Result<serde_json::Value, ToolInvocationError> {
+) -> Result<ToolInvocationOutcome, ToolInvocationError> {
     let city = expect_string(arguments, "city", "lookup_weather")?;
     let payload = match city {
         "Paris" => serde_json::json!({
@@ -335,13 +496,13 @@ fn lookup_weather(
             "error": format!("unsupported city: {other}")
         }),
     };
-    Ok(payload)
+    Ok(ToolInvocationOutcome::new(payload))
 }
 
 fn read_file(
     context: &ToolExecutionContext,
     arguments: &serde_json::Value,
-) -> Result<serde_json::Value, ToolInvocationError> {
+) -> Result<ToolInvocationOutcome, ToolInvocationError> {
     let path = expect_string(arguments, "path", "read_file")?;
     let start_line = expect_u64(arguments, "start_line").unwrap_or(1);
     let max_lines = expect_u64(arguments, "max_lines").unwrap_or(READ_FILE_DEFAULT_MAX_LINES);
@@ -374,20 +535,31 @@ fn read_file(
         .min(lines.len());
     let selected_lines = lines[start_index..end_index].join("\n");
     let end_line = if end_index == 0 { 0 } else { end_index as u64 };
-    Ok(serde_json::json!({
-        "path": display_relative_path(context.cwd(), &resolved_path),
-        "start_line": start_line,
-        "end_line": end_line,
-        "total_lines": lines.len(),
-        "truncated": end_index < lines.len(),
-        "content": selected_lines,
-    }))
+    let relative_path = display_relative_path(context.cwd(), &resolved_path);
+    let truncated = end_index < lines.len();
+    let content_bytes = selected_lines.len() as u64;
+    Ok(ToolInvocationOutcome {
+        output: serde_json::json!({
+            "path": relative_path.clone(),
+            "start_line": start_line,
+            "end_line": end_line,
+            "total_lines": lines.len(),
+            "truncated": truncated,
+            "content": selected_lines,
+        }),
+        command: None,
+        exit_code: None,
+        timed_out: None,
+        truncated: Some(truncated),
+        bytes_returned: Some(content_bytes),
+        files_touched: vec![relative_path],
+    })
 }
 
 fn list_files(
     context: &ToolExecutionContext,
     arguments: &serde_json::Value,
-) -> Result<serde_json::Value, ToolInvocationError> {
+) -> Result<ToolInvocationOutcome, ToolInvocationError> {
     let requested_path = arguments
         .get("path")
         .and_then(serde_json::Value::as_str)
@@ -429,18 +601,28 @@ fn list_files(
         &mut truncated,
     )?;
 
-    Ok(serde_json::json!({
-        "path": display_relative_path(context.cwd(), &root),
-        "max_depth": max_depth,
-        "truncated": truncated,
-        "entries": entries,
-    }))
+    let relative_path = display_relative_path(context.cwd(), &root);
+    let entries_bytes = serde_json::to_vec(&entries).unwrap_or_default().len() as u64;
+    Ok(ToolInvocationOutcome {
+        output: serde_json::json!({
+            "path": relative_path.clone(),
+            "max_depth": max_depth,
+            "truncated": truncated,
+            "entries": entries,
+        }),
+        command: None,
+        exit_code: None,
+        timed_out: None,
+        truncated: Some(truncated),
+        bytes_returned: Some(entries_bytes),
+        files_touched: vec![relative_path],
+    })
 }
 
 fn code_search(
     context: &ToolExecutionContext,
     arguments: &serde_json::Value,
-) -> Result<serde_json::Value, ToolInvocationError> {
+) -> Result<ToolInvocationOutcome, ToolInvocationError> {
     let pattern = expect_string(arguments, "pattern", "code_search")?;
     let requested_path = arguments
         .get("path")
@@ -484,7 +666,7 @@ fn code_search(
     })?;
     let status_code = output.status.code().unwrap_or(-1);
     if !output.status.success() && status_code != 1 {
-        let stderr = truncate_text(String::from_utf8_lossy(&output.stderr).as_ref());
+        let (stderr, _) = truncate_text(String::from_utf8_lossy(&output.stderr).as_ref());
         return Err(ToolInvocationError::ExecutionFailed(format!(
             "ripgrep failed with exit code {status_code}: {stderr}"
         )));
@@ -509,21 +691,38 @@ fn code_search(
         }));
     }
 
-    Ok(serde_json::json!({
-        "path": display_relative_path(context.cwd(), &search_root),
-        "pattern": pattern,
-        "glob": glob,
-        "case_sensitive": case_sensitive,
-        "matches": matches,
-        "truncated": matches.len() >= max_matches,
-        "status_code": status_code,
-    }))
+    let matched_paths = matches
+        .iter()
+        .filter_map(|entry| entry.get("path").and_then(serde_json::Value::as_str))
+        .map(String::from)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let relative_path = display_relative_path(context.cwd(), &search_root);
+    let truncated = matches.len() >= max_matches;
+    Ok(ToolInvocationOutcome {
+        output: serde_json::json!({
+            "path": relative_path.clone(),
+            "pattern": pattern,
+            "glob": glob,
+            "case_sensitive": case_sensitive,
+            "matches": matches,
+            "truncated": truncated,
+            "status_code": status_code,
+        }),
+        command: None,
+        exit_code: Some(status_code),
+        timed_out: Some(false),
+        truncated: Some(truncated),
+        bytes_returned: Some(output.stdout.len() as u64),
+        files_touched: matched_paths,
+    })
 }
 
 fn run_shell(
     context: &ToolExecutionContext,
     arguments: &serde_json::Value,
-) -> Result<serde_json::Value, ToolInvocationError> {
+) -> Result<ToolInvocationOutcome, ToolInvocationError> {
     let command_text = expect_string(arguments, "command", "shell")?;
     let timeout_secs = expect_u64(arguments, "timeout_secs").unwrap_or(SHELL_DEFAULT_TIMEOUT_SECS);
     if timeout_secs == 0 {
@@ -572,20 +771,34 @@ fn run_shell(
         ToolInvocationError::ExecutionFailed(format!("failed to collect shell output: {error}"))
     })?;
     let exit_code = output.status.code();
-    Ok(serde_json::json!({
-        "command": command_text,
-        "timeout_secs": timeout_secs,
-        "timed_out": timed_out,
-        "exit_code": exit_code,
-        "stdout": truncate_text(String::from_utf8_lossy(&output.stdout).as_ref()),
-        "stderr": truncate_text(String::from_utf8_lossy(&output.stderr).as_ref()),
-    }))
+    let (stdout, stdout_truncated) =
+        truncate_text(String::from_utf8_lossy(&output.stdout).as_ref());
+    let (stderr, stderr_truncated) =
+        truncate_text(String::from_utf8_lossy(&output.stderr).as_ref());
+    Ok(ToolInvocationOutcome {
+        output: serde_json::json!({
+            "command": command_text,
+            "timeout_secs": timeout_secs,
+            "timed_out": timed_out,
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+        }),
+        command: Some(String::from(command_text)),
+        exit_code,
+        timed_out: Some(timed_out),
+        truncated: Some(stdout_truncated || stderr_truncated),
+        bytes_returned: Some((output.stdout.len() + output.stderr.len()) as u64),
+        files_touched: Vec::new(),
+    })
 }
 
 fn apply_patch(
     context: &ToolExecutionContext,
     arguments: &serde_json::Value,
-) -> Result<serde_json::Value, ToolInvocationError> {
+) -> Result<ToolInvocationOutcome, ToolInvocationError> {
     let path = expect_string(arguments, "path", "apply_patch")?;
     let old_text = expect_string(arguments, "old_text", "apply_patch")?;
     let new_text = expect_string(arguments, "new_text", "apply_patch")?;
@@ -653,11 +866,247 @@ fn apply_patch(
         ))
     })?;
 
-    Ok(serde_json::json!({
-        "path": display_relative_path(context.cwd(), &resolved_path),
-        "created": !existed,
-        "replace_all": replace_all,
-    }))
+    let relative_path = display_relative_path(context.cwd(), &resolved_path);
+    Ok(ToolInvocationOutcome {
+        output: serde_json::json!({
+            "path": relative_path.clone(),
+            "created": !existed,
+            "replace_all": replace_all,
+            "bytes_written": new_contents.len(),
+        }),
+        command: None,
+        exit_code: None,
+        timed_out: None,
+        truncated: Some(false),
+        bytes_returned: None,
+        files_touched: vec![relative_path],
+    })
+}
+
+fn classify_shell_command(arguments: &serde_json::Value) -> ToolRiskClass {
+    let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str) else {
+        return ToolRiskClass::Write;
+    };
+    let lowered = command.to_ascii_lowercase();
+
+    if contains_any(
+        lowered.as_str(),
+        &[
+            " rm ",
+            "rm -",
+            " rm\n",
+            "git reset --hard",
+            "git clean ",
+            "kill ",
+            "pkill ",
+            "killall ",
+            "shutdown",
+            "reboot",
+            " mkfs",
+            "dd if=",
+        ],
+    ) {
+        return ToolRiskClass::Destructive;
+    }
+
+    if contains_any(
+        lowered.as_str(),
+        &[
+            "curl ",
+            "wget ",
+            "ssh ",
+            "scp ",
+            "rsync ",
+            "git clone ",
+            "git fetch ",
+            "git pull ",
+            "cargo install ",
+            "pip install ",
+            "uv pip install ",
+            "npm install ",
+            "pnpm add ",
+            "yarn add ",
+            "brew install ",
+            "apt-get ",
+            "apt ",
+            "go get ",
+        ],
+    ) {
+        return ToolRiskClass::Network;
+    }
+
+    if contains_any(
+        lowered.as_str(),
+        &[
+            " >",
+            ">>",
+            "touch ",
+            "mkdir ",
+            "cp ",
+            "mv ",
+            "sed -i",
+            "perl -i",
+            "python -c",
+            "python3 -c",
+            "tee ",
+            "truncate ",
+            "git apply ",
+        ],
+    ) {
+        return ToolRiskClass::Write;
+    }
+
+    if is_read_only_shell_command(lowered.as_str()) {
+        ToolRiskClass::ShellReadOnly
+    } else {
+        ToolRiskClass::Write
+    }
+}
+
+fn evaluate_tool_policy(
+    tool_name: &str,
+    risk_class: ToolRiskClass,
+    approval: &ToolApprovalConfig,
+) -> (ToolPolicyDecision, ToolApprovalState, Option<String>) {
+    match risk_class {
+        ToolRiskClass::ReadOnly | ToolRiskClass::ShellReadOnly => (
+            ToolPolicyDecision::AutoAllow,
+            ToolApprovalState::NotRequired,
+            None,
+        ),
+        ToolRiskClass::Write if approval.allow_write_tools => (
+            ToolPolicyDecision::Approved,
+            ToolApprovalState::Approved,
+            Some(format!("tool `{tool_name}` was approved for write access")),
+        ),
+        ToolRiskClass::Network if approval.allow_network_shell => (
+            ToolPolicyDecision::Approved,
+            ToolApprovalState::Approved,
+            Some(format!(
+                "tool `{tool_name}` was approved for network access"
+            )),
+        ),
+        ToolRiskClass::Destructive if approval.allow_destructive_shell => (
+            ToolPolicyDecision::Approved,
+            ToolApprovalState::Approved,
+            Some(format!(
+                "tool `{tool_name}` was approved for destructive access"
+            )),
+        ),
+        ToolRiskClass::Write => denied_by_policy(approval, tool_name, "write"),
+        ToolRiskClass::Network => denied_by_policy(approval, tool_name, "network"),
+        ToolRiskClass::Destructive => denied_by_policy(approval, tool_name, "destructive"),
+    }
+}
+
+fn denied_by_policy(
+    approval: &ToolApprovalConfig,
+    tool_name: &str,
+    class_name: &str,
+) -> (ToolPolicyDecision, ToolApprovalState, Option<String>) {
+    let reason = Some(format!(
+        "tool `{tool_name}` requires {class_name} approval under the active local policy"
+    ));
+    match approval.denied_action {
+        ToolDeniedAction::Refuse => (
+            ToolPolicyDecision::Refused,
+            ToolApprovalState::Refused,
+            reason,
+        ),
+        ToolDeniedAction::Pause => (
+            ToolPolicyDecision::Paused,
+            ToolApprovalState::Pending,
+            reason,
+        ),
+    }
+}
+
+fn denied_tool_invocation(
+    context: &ToolExecutionContext,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    risk_class: ToolRiskClass,
+    reason: &Option<String>,
+) -> ToolInvocationOutcome {
+    let command = arguments
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .map(String::from);
+    let files_touched = arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|path| resolve_workspace_path(context.cwd(), path).ok())
+        .map(|path| vec![display_relative_path(context.cwd(), &path)])
+        .unwrap_or_default();
+    ToolInvocationOutcome {
+        output: serde_json::json!({
+            "error": "tool execution blocked by local approval policy",
+            "tool": tool_name,
+            "risk_class": render_risk_class(risk_class),
+            "approval_required": true,
+            "reason": reason,
+        }),
+        command,
+        exit_code: None,
+        timed_out: None,
+        truncated: Some(false),
+        bytes_returned: None,
+        files_touched,
+    }
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn is_read_only_shell_command(command: &str) -> bool {
+    let first = command.split_whitespace().next().unwrap_or_default();
+    matches!(
+        first,
+        "pwd"
+            | "ls"
+            | "cat"
+            | "sed"
+            | "head"
+            | "tail"
+            | "rg"
+            | "find"
+            | "fd"
+            | "wc"
+            | "stat"
+            | "file"
+            | "du"
+            | "tree"
+            | "ps"
+            | "env"
+            | "which"
+            | "readlink"
+            | "printf"
+            | "echo"
+            | "git"
+    ) && is_safe_git_read_only(command)
+}
+
+fn is_safe_git_read_only(command: &str) -> bool {
+    if !command.starts_with("git") {
+        return true;
+    }
+    let mut parts = command.split_whitespace();
+    let _ = parts.next();
+    matches!(
+        parts.next().unwrap_or_default(),
+        "status" | "diff" | "show" | "log" | "branch" | "rev-parse" | "grep"
+    )
+}
+
+fn render_risk_class(risk_class: ToolRiskClass) -> &'static str {
+    match risk_class {
+        ToolRiskClass::ReadOnly => "read_only",
+        ToolRiskClass::ShellReadOnly => "shell_read_only",
+        ToolRiskClass::Write => "write",
+        ToolRiskClass::Network => "network",
+        ToolRiskClass::Destructive => "destructive",
+    }
 }
 
 fn read_file_parameters() -> serde_json::Value {
@@ -890,18 +1339,21 @@ fn visit_directory(
     Ok(())
 }
 
-fn truncate_text(text: &str) -> String {
+fn truncate_text(text: &str) -> (String, bool) {
     let total = text.chars().count();
     if total <= SHELL_MAX_OUTPUT_CHARS {
-        return String::from(text);
+        return (String::from(text), false);
     }
     let truncated = text
         .chars()
         .take(SHELL_MAX_OUTPUT_CHARS)
         .collect::<String>();
-    format!(
-        "{truncated}\n...[truncated {} chars]",
-        total - SHELL_MAX_OUTPUT_CHARS
+    (
+        format!(
+            "{truncated}\n...[truncated {} chars]",
+            total - SHELL_MAX_OUTPUT_CHARS
+        ),
+        true,
     )
 }
 
@@ -909,10 +1361,14 @@ fn truncate_text(text: &str) -> String {
 mod tests {
     use std::fs;
 
+    use probe_protocol::session::{ToolPolicyDecision, ToolRiskClass};
     use probe_provider_openai::{ChatToolCall, ChatToolCallFunction};
     use tempfile::tempdir;
 
-    use super::{ProbeToolChoice, ToolExecutionContext, ToolLoopConfig, ToolRegistry};
+    use super::{
+        ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolExecutionContext,
+        ToolLoopConfig, ToolRegistry,
+    };
 
     #[test]
     fn weather_demo_registry_declares_lookup_weather() {
@@ -937,6 +1393,7 @@ mod tests {
                     arguments: String::from("{\"city\":\"Paris\"}"),
                 },
             }],
+            &ToolApprovalConfig::allow_all(),
         );
 
         assert_eq!(results.len(), 1);
@@ -987,6 +1444,7 @@ mod tests {
                     ),
                 },
             }],
+            &ToolApprovalConfig::conservative(),
         );
 
         assert_eq!(results[0].output["path"], "notes.txt");
@@ -1013,6 +1471,7 @@ mod tests {
                     ),
                 },
             }],
+            &ToolApprovalConfig::conservative(),
         );
 
         let entries = results[0].output["entries"]
@@ -1049,6 +1508,12 @@ mod tests {
                     ),
                 },
             }],
+            &ToolApprovalConfig {
+                allow_write_tools: true,
+                allow_network_shell: false,
+                allow_destructive_shell: false,
+                denied_action: ToolDeniedAction::Refuse,
+            },
         );
 
         assert_eq!(results[0].output["path"], "hello.txt");
@@ -1080,6 +1545,7 @@ mod tests {
                     ),
                 },
             }],
+            &ToolApprovalConfig::conservative(),
         );
 
         let matches = results[0].output["matches"]
@@ -1109,10 +1575,85 @@ mod tests {
                     arguments: String::from("{\"command\":\"printf hello\",\"timeout_secs\":2}"),
                 },
             }],
+            &ToolApprovalConfig::conservative(),
         );
 
         assert_eq!(results[0].output["timed_out"], false);
         assert_eq!(results[0].output["stdout"], "hello");
+        assert_eq!(
+            results[0].tool_execution.risk_class,
+            ToolRiskClass::ShellReadOnly
+        );
+        assert_eq!(
+            results[0].tool_execution.policy_decision,
+            ToolPolicyDecision::AutoAllow
+        );
+    }
+
+    #[test]
+    fn coding_bootstrap_refuses_write_tools_without_approval() {
+        let tempdir = tempdir().expect("tempdir");
+        let path = tempdir.path().join("hello.txt");
+        fs::write(&path, "hello world\n").expect("write file");
+        let registry = ToolRegistry::coding_bootstrap();
+        let context = ToolExecutionContext::new(tempdir.path());
+        let results = registry.execute_batch(
+            &context,
+            &[ChatToolCall {
+                id: String::from("call_patch"),
+                kind: String::from("function"),
+                function: ChatToolCallFunction {
+                    name: String::from("apply_patch"),
+                    arguments: String::from(
+                        "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}",
+                    ),
+                },
+            }],
+            &ToolApprovalConfig::conservative(),
+        );
+
+        assert_eq!(results[0].tool_execution.risk_class, ToolRiskClass::Write);
+        assert_eq!(
+            results[0].tool_execution.policy_decision,
+            ToolPolicyDecision::Refused
+        );
+        assert_eq!(
+            fs::read_to_string(path).expect("read file"),
+            "hello world\n"
+        );
+    }
+
+    #[test]
+    fn coding_bootstrap_can_pause_on_destructive_shell_requests() {
+        let tempdir = tempdir().expect("tempdir");
+        let registry = ToolRegistry::coding_bootstrap();
+        let context = ToolExecutionContext::new(tempdir.path());
+        let results = registry.execute_batch(
+            &context,
+            &[ChatToolCall {
+                id: String::from("call_shell"),
+                kind: String::from("function"),
+                function: ChatToolCallFunction {
+                    name: String::from("shell"),
+                    arguments: String::from("{\"command\":\"rm -rf build\",\"timeout_secs\":2}"),
+                },
+            }],
+            &ToolApprovalConfig {
+                allow_write_tools: false,
+                allow_network_shell: false,
+                allow_destructive_shell: false,
+                denied_action: ToolDeniedAction::Pause,
+            },
+        );
+
+        assert_eq!(
+            results[0].tool_execution.risk_class,
+            ToolRiskClass::Destructive
+        );
+        assert_eq!(
+            results[0].tool_execution.policy_decision,
+            ToolPolicyDecision::Paused
+        );
     }
 
     #[test]

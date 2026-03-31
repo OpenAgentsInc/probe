@@ -59,6 +59,10 @@ Both `probe exec` and `probe chat` now accept:
 - `--tool-set coding_bootstrap`
 - `--tool-choice <none|auto|required|named:lookup_weather>`
 - `--parallel-tool-calls`
+- `--approve-write-tools`
+- `--approve-network-shell`
+- `--approve-destructive-shell`
+- `--pause-for-approval`
 
 Example:
 
@@ -85,9 +89,12 @@ cargo run -p probe-cli -- exec \
 2. Send the current user turn to the backend.
 3. If the backend returns assistant tool calls:
    - persist a `tool_call` turn
-   - execute the declared local tools in order
+   - classify each requested tool call against the local approval policy
+   - auto-allow, approve, refuse, or pause each tool call
+   - execute only the calls allowed by policy
    - persist a `tool_result` turn
-   - replay those results into the next model request
+   - replay executed or refused results into the next model request
+   - stop early if the active policy pauses on approval
 4. Stop when the backend returns a normal assistant message.
 5. Refuse infinite loops with a fixed model-round-trip bound.
 
@@ -98,6 +105,20 @@ Transcript items now carry tool-specific fields:
 - `name`
 - `tool_call_id`
 - structured `arguments` for `tool_call` items
+- structured `tool_execution` records for `tool_result` items
+
+The `tool_execution` record carries fields such as:
+
+- `risk_class`
+- `policy_decision`
+- `approval_state`
+- `command`
+- `exit_code`
+- `timed_out`
+- `truncated`
+- `bytes_returned`
+- `files_touched`
+- `reason`
 
 That lets Probe reconstruct:
 
@@ -119,3 +140,4 @@ It is the smallest honest tool-backed controller loop that:
 - uses declared tools
 - preserves stable replay
 - stays compatible with the retained local backend lane
+- makes the local policy boundary explicit instead of hiding it in ad hoc shell conventions

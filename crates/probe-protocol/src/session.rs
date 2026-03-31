@@ -75,6 +75,55 @@ pub struct TurnObservability {
     pub cache_signal: CacheSignal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRiskClass {
+    ReadOnly,
+    ShellReadOnly,
+    Write,
+    Network,
+    Destructive,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPolicyDecision {
+    AutoAllow,
+    Approved,
+    Refused,
+    Paused,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolApprovalState {
+    NotRequired,
+    Approved,
+    Refused,
+    Pending,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolExecutionRecord {
+    pub risk_class: ToolRiskClass,
+    pub policy_decision: ToolPolicyDecision,
+    pub approval_state: ToolApprovalState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timed_out: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_returned: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files_touched: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptItem {
     pub id: ItemId,
@@ -88,6 +137,8 @@ pub struct TranscriptItem {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_execution: Option<ToolExecutionRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

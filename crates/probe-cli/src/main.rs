@@ -17,8 +17,12 @@ use probe_core::runtime::{
 use probe_core::server_control::{
     PsionicServerConfig, PsionicServerMode, ServerConfigOverrides, ServerProcessGuard,
 };
-use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
-use probe_protocol::session::{CacheSignal, SessionHarnessProfile, SessionId, SessionTurn};
+use probe_core::tools::{
+    ExecutedToolCall, ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig,
+};
+use probe_protocol::session::{
+    CacheSignal, SessionHarnessProfile, SessionId, SessionTurn, ToolPolicyDecision, ToolRiskClass,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "probe")]
@@ -56,6 +60,14 @@ struct ExecArgs {
     tool_choice: String,
     #[arg(long, default_value_t = false)]
     parallel_tool_calls: bool,
+    #[arg(long, default_value_t = false)]
+    approve_write_tools: bool,
+    #[arg(long, default_value_t = false)]
+    approve_network_shell: bool,
+    #[arg(long, default_value_t = false)]
+    approve_destructive_shell: bool,
+    #[arg(long, default_value_t = false)]
+    pause_for_approval: bool,
     #[command(flatten)]
     server: ServerArgs,
     #[arg(required = true)]
@@ -84,6 +96,14 @@ struct ChatArgs {
     tool_choice: String,
     #[arg(long, default_value_t = false)]
     parallel_tool_calls: bool,
+    #[arg(long, default_value_t = false)]
+    approve_write_tools: bool,
+    #[arg(long, default_value_t = false)]
+    approve_network_shell: bool,
+    #[arg(long, default_value_t = false)]
+    approve_destructive_shell: bool,
+    #[arg(long, default_value_t = false)]
+    pause_for_approval: bool,
     #[command(flatten)]
     server: ServerArgs,
 }
@@ -161,6 +181,10 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
         args.tool_set.as_deref(),
         args.tool_choice.as_str(),
         args.parallel_tool_calls,
+        args.approve_write_tools,
+        args.approve_network_shell,
+        args.approve_destructive_shell,
+        args.pause_for_approval,
     )?;
     let (system_prompt, harness_profile) = resolve_prompt_config(
         args.tool_set.as_deref(),
@@ -211,6 +235,7 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
     if outcome.executed_tool_calls > 0 {
         eprintln!("tool_calls executed={}", outcome.executed_tool_calls);
     }
+    print_tool_policy_summary(&outcome.tool_results);
     Ok(())
 }
 
@@ -232,6 +257,10 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
         args.tool_set.as_deref(),
         args.tool_choice.as_str(),
         args.parallel_tool_calls,
+        args.approve_write_tools,
+        args.approve_network_shell,
+        args.approve_destructive_shell,
+        args.pause_for_approval,
     )?;
     let cwd = args
         .cwd
@@ -355,6 +384,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
         if outcome.executed_tool_calls > 0 {
             eprintln!("tool_calls executed={}", outcome.executed_tool_calls);
         }
+        print_tool_policy_summary(&outcome.tool_results);
     }
 
     Ok(())
@@ -467,10 +497,38 @@ fn resolve_tool_loop(
     tool_set: Option<&str>,
     tool_choice: &str,
     parallel_tool_calls: bool,
+    approve_write_tools: bool,
+    approve_network_shell: bool,
+    approve_destructive_shell: bool,
+    pause_for_approval: bool,
 ) -> Result<Option<ToolLoopConfig>, String> {
-    let has_non_default_tool_flags = tool_choice != "auto" || parallel_tool_calls;
+    let approval = ToolApprovalConfig {
+        allow_write_tools: approve_write_tools,
+        allow_network_shell: approve_network_shell,
+        allow_destructive_shell: approve_destructive_shell,
+        denied_action: if pause_for_approval {
+            ToolDeniedAction::Pause
+        } else {
+            ToolDeniedAction::Refuse
+        },
+    };
+    let has_non_default_tool_flags = tool_choice != "auto"
+        || parallel_tool_calls
+        || approve_write_tools
+        || approve_network_shell
+        || approve_destructive_shell
+        || pause_for_approval;
     match tool_set {
         Some("weather") => {
+            if approve_write_tools
+                || approve_network_shell
+                || approve_destructive_shell
+                || pause_for_approval
+            {
+                return Err(String::from(
+                    "approval flags are only available for the `coding_bootstrap` tool set",
+                ));
+            }
             let tool_choice = ProbeToolChoice::parse(tool_choice)?;
             Ok(Some(ToolLoopConfig::weather_demo(
                 tool_choice,
@@ -479,16 +537,50 @@ fn resolve_tool_loop(
         }
         Some("coding_bootstrap") => {
             let tool_choice = ProbeToolChoice::parse(tool_choice)?;
-            Ok(Some(ToolLoopConfig::coding_bootstrap(
-                tool_choice,
-                parallel_tool_calls,
-            )))
+            let mut config = ToolLoopConfig::coding_bootstrap(tool_choice, parallel_tool_calls);
+            config.approval = approval;
+            Ok(Some(config))
         }
         Some(other) => Err(format!("unknown tool set: {other}")),
         None if has_non_default_tool_flags => Err(String::from(
             "tool flags require --tool-set; supported values are `weather` and `coding_bootstrap`",
         )),
         None => Ok(None),
+    }
+}
+
+fn print_tool_policy_summary(tool_results: &[ExecutedToolCall]) {
+    if tool_results.is_empty() {
+        return;
+    }
+
+    let mut auto_allowed = 0_usize;
+    let mut approved = 0_usize;
+    let mut refused = 0_usize;
+    let mut paused = 0_usize;
+    for tool in tool_results {
+        match tool.tool_execution.policy_decision {
+            ToolPolicyDecision::AutoAllow => auto_allowed += 1,
+            ToolPolicyDecision::Approved => approved += 1,
+            ToolPolicyDecision::Refused => refused += 1,
+            ToolPolicyDecision::Paused => paused += 1,
+        }
+    }
+    eprintln!(
+        "tool_policy auto_allowed={} approved={} refused={} paused={}",
+        auto_allowed, approved, refused, paused
+    );
+    for tool in tool_results
+        .iter()
+        .filter(|tool| tool.was_refused() || tool.was_paused())
+    {
+        eprintln!(
+            "tool_policy tool={} risk_class={} decision={} reason={}",
+            tool.name,
+            render_tool_risk_class(tool.tool_execution.risk_class),
+            render_policy_decision(tool.tool_execution.policy_decision),
+            tool.tool_execution.reason.as_deref().unwrap_or("-"),
+        );
     }
 }
 
@@ -546,6 +638,25 @@ fn render_cache_signal(signal: CacheSignal) -> &'static str {
         CacheSignal::ColdStart => "cold_start",
         CacheSignal::LikelyWarm => "likely_warm",
         CacheSignal::NoClearSignal => "no_clear_signal",
+    }
+}
+
+fn render_policy_decision(decision: ToolPolicyDecision) -> &'static str {
+    match decision {
+        ToolPolicyDecision::AutoAllow => "auto_allow",
+        ToolPolicyDecision::Approved => "approved",
+        ToolPolicyDecision::Refused => "refused",
+        ToolPolicyDecision::Paused => "paused",
+    }
+}
+
+fn render_tool_risk_class(risk_class: ToolRiskClass) -> &'static str {
+    match risk_class {
+        ToolRiskClass::ReadOnly => "read_only",
+        ToolRiskClass::ShellReadOnly => "shell_read_only",
+        ToolRiskClass::Write => "write",
+        ToolRiskClass::Network => "network",
+        ToolRiskClass::Destructive => "destructive",
     }
 }
 

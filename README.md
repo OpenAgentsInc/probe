@@ -38,6 +38,16 @@ Probe also now has a Probe-owned harness profile for that coding lane:
 This keeps the default controller prompt explicit and versioned instead of
 relying only on raw `--system` strings.
 
+The coding lane now also has explicit local approval classes. By default:
+
+- `read_file`, `list_files`, `code_search`, and read-only `shell` commands are auto-allowed
+- `apply_patch`, write-class shell commands, networked shell commands, and destructive shell commands are refused unless explicitly approved
+- `--pause-for-approval` switches denied risky tool calls from refusal into a persisted pending-approval pause
+
+Probe persists structured tool-result records for coding sessions, including
+risk class, policy decision, approval state, command metadata, truncation,
+bytes returned, and touched paths when known.
+
 Probe can either attach to an already-running local backend or launch
 `psionic-openai-server` as a supervised child process. It also records basic
 controller-side observability on model-generated turns, including wallclock,
@@ -87,6 +97,26 @@ Parallel tool-call batch:
 ```bash
 cargo run -p probe-cli -- exec \
   --tool-set coding_bootstrap \
+  --approve-write-tools \
+  --tool-choice auto \
+  "Update hello.txt by replacing world with probe."
+```
+
+Pause instead of refusing a risky tool call:
+
+```bash
+cargo run -p probe-cli -- exec \
+  --tool-set coding_bootstrap \
+  --pause-for-approval \
+  --tool-choice auto \
+  "Patch hello.txt to say probe instead of world."
+```
+
+Parallel tool-call batch:
+
+```bash
+cargo run -p probe-cli -- exec \
+  --tool-set coding_bootstrap \
   --tool-choice auto \
   --parallel-tool-calls \
   "Search for the runtime crate names and then read the README."
@@ -121,4 +151,5 @@ By default, Probe uses the `psionic-qwen35-2b-q8-registry` profile and
 `attach` server mode. Session transcripts, server config, and acceptance
 reports live under the Probe home directory. `probe exec` and `probe chat`
 emit observability lines on stderr for model-generated turns and print the
-active harness profile when one is selected.
+active harness profile when one is selected. Tool-backed runs also emit a
+policy summary for auto-allowed, approved, refused, and paused tool calls.

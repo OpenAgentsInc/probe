@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use probe_protocol::session::{
     ItemId, SessionBackendTarget, SessionHarnessProfile, SessionId, SessionIndex, SessionMetadata,
-    SessionState, SessionTurn, TimestampMs, TranscriptEvent, TranscriptItem, TranscriptItemKind,
-    TurnId, TurnObservability,
+    SessionState, SessionTurn, TimestampMs, ToolExecutionRecord, TranscriptEvent, TranscriptItem,
+    TranscriptItemKind, TurnId, TurnObservability,
 };
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -56,6 +56,7 @@ pub struct NewItem {
     pub name: Option<String>,
     pub tool_call_id: Option<String>,
     pub arguments: Option<serde_json::Value>,
+    pub tool_execution: Option<ToolExecutionRecord>,
 }
 
 impl NewItem {
@@ -67,6 +68,7 @@ impl NewItem {
             name: None,
             tool_call_id: None,
             arguments: None,
+            tool_execution: None,
         }
     }
 
@@ -83,6 +85,7 @@ impl NewItem {
             name: Some(name.into()),
             tool_call_id: Some(tool_call_id.into()),
             arguments: Some(arguments),
+            tool_execution: None,
         }
     }
 
@@ -91,6 +94,7 @@ impl NewItem {
         name: impl Into<String>,
         tool_call_id: impl Into<String>,
         text: impl Into<String>,
+        tool_execution: ToolExecutionRecord,
     ) -> Self {
         Self {
             kind: TranscriptItemKind::ToolResult,
@@ -98,6 +102,7 @@ impl NewItem {
             name: Some(name.into()),
             tool_call_id: Some(tool_call_id.into()),
             arguments: None,
+            tool_execution: Some(tool_execution),
         }
     }
 }
@@ -231,6 +236,7 @@ impl FilesystemSessionStore {
                 name: item.name.clone(),
                 tool_call_id: item.tool_call_id.clone(),
                 arguments: item.arguments.clone(),
+                tool_execution: item.tool_execution.clone(),
             })
             .collect::<Vec<_>>();
         let turn = SessionTurn {
@@ -358,7 +364,8 @@ fn now_ms() -> TimestampMs {
 mod tests {
     use super::{FilesystemSessionStore, NewItem, NewSession};
     use probe_protocol::session::{
-        CacheSignal, SessionBackendTarget, SessionHarnessProfile, TranscriptItemKind,
+        CacheSignal, SessionBackendTarget, SessionHarnessProfile, ToolApprovalState,
+        ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass, TranscriptItemKind,
         TurnObservability,
     };
 
@@ -445,6 +452,52 @@ mod tests {
 
         let listed = store.list_sessions().expect("list sessions");
         assert_eq!(listed[0].next_turn_index, 1);
+    }
+
+    #[test]
+    fn append_turn_persists_tool_execution_record() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = FilesystemSessionStore::new(temp.path());
+        let metadata = store
+            .create_session("tool-result", temp.path())
+            .expect("create session");
+
+        store
+            .append_turn(
+                &metadata.id,
+                &[NewItem::tool_result(
+                    "shell",
+                    "call_1",
+                    "{\"ok\":true}",
+                    ToolExecutionRecord {
+                        risk_class: ToolRiskClass::ShellReadOnly,
+                        policy_decision: ToolPolicyDecision::AutoAllow,
+                        approval_state: ToolApprovalState::NotRequired,
+                        command: Some(String::from("pwd")),
+                        exit_code: Some(0),
+                        timed_out: Some(false),
+                        truncated: Some(false),
+                        bytes_returned: Some(4),
+                        files_touched: Vec::new(),
+                        reason: None,
+                    },
+                )],
+            )
+            .expect("append turn");
+
+        let transcript = store
+            .read_transcript(&metadata.id)
+            .expect("read transcript");
+        let item = &transcript[0].turn.items[0];
+        assert_eq!(item.kind, TranscriptItemKind::ToolResult);
+        assert_eq!(
+            item.tool_execution
+                .as_ref()
+                .expect("tool execution record should persist")
+                .command
+                .as_deref(),
+            Some("pwd")
+        );
     }
 
     #[test]
