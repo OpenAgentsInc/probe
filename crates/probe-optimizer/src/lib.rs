@@ -56,8 +56,10 @@ pub fn compare_candidate(
     let latency_ok = latency_within_budget(&baseline, &candidate, &rule);
     let trust_ok = candidate.operator_trust_penalty <= baseline.operator_trust_penalty;
     let improves_correctness = candidate_correctness > baseline_correctness;
-    let improves_latency =
-        candidate.median_wallclock_ms.zip(baseline.median_wallclock_ms).map_or(false, |(candidate_ms, baseline_ms)| {
+    let improves_latency = candidate
+        .median_wallclock_ms
+        .zip(baseline.median_wallclock_ms)
+        .map_or(false, |(candidate_ms, baseline_ms)| {
             candidate_ms < baseline_ms
         });
     let improves_trust = candidate.operator_trust_penalty < baseline.operator_trust_penalty;
@@ -96,8 +98,7 @@ fn correctness_rate_bps(scorecard: &OptimizationScorecard) -> u64 {
     if scorecard.correctness_denominator == 0 {
         return 0;
     }
-    (scorecard.correctness_numerator as u64 * 10_000)
-        / scorecard.correctness_denominator as u64
+    (scorecard.correctness_numerator as u64 * 10_000) / scorecard.correctness_denominator as u64
 }
 
 fn latency_within_budget(
@@ -107,7 +108,8 @@ fn latency_within_budget(
 ) -> bool {
     match (baseline.median_wallclock_ms, candidate.median_wallclock_ms) {
         (Some(baseline_ms), Some(candidate_ms)) if baseline_ms > 0 => {
-            candidate_ms as u128 * 10_000 <= baseline_ms as u128 * u128::from(rule.max_latency_regression_bps)
+            candidate_ms as u128 * 10_000
+                <= baseline_ms as u128 * u128::from(rule.max_latency_regression_bps)
         }
         _ => true,
     }
@@ -115,9 +117,7 @@ fn latency_within_budget(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        OptimizationScorecard, OptimizationTargetKind, PromotionRule, compare_candidate,
-    };
+    use super::{OptimizationScorecard, OptimizationTargetKind, PromotionRule, compare_candidate};
 
     #[test]
     fn compare_candidate_promotes_better_scorecard() {

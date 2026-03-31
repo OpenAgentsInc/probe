@@ -116,6 +116,11 @@ The acceptance report itself now carries run identity, git provenance, backend
 and harness metadata, aggregate counts, typed failure categories, and
 transcript references so it can serve as a real local eval receipt.
 
+The repo-local operator split is now explicit: use `./probe-dev pr-fast` for
+the fast merge-safe lane, `./probe-dev cli-regressions` for binary output and
+snapshot work, and `./probe-dev accept-live` plus the eval wrappers for the
+heavier local acceptance and research lanes.
+
 ## Commands
 
 Build and validation:

@@ -6,10 +6,18 @@ usage() {
 Usage: ./probe-dev <command> [args...]
 
 Commands:
-  fmt               Run cargo fmt across the workspace.
-  check             Run cargo check across the workspace.
-  test              Prefer cargo nextest; fall back to cargo test.
-  accept [args...]  Run probe accept with any extra CLI args forwarded through.
+  fmt                      Run cargo fmt across the workspace.
+  fmt-check                Check formatting without rewriting files.
+  check                    Run cargo check across the workspace.
+  test [cargo-test-args]   Prefer cargo nextest; fall back to cargo test.
+  cli-regressions          Run the dedicated probe-cli regression and snapshot test binary.
+  pr-fast                  Run the fast local merge-safe tier: fmt-check, check, and test.
+  accept [args...]         Backward-compatible alias for accept-live.
+  accept-live [args...]    Run the live acceptance harness against the configured backend.
+  decision-export [args...]  Run probe export with any extra CLI args.
+  module-eval [args...]      Run probe module-eval with any extra CLI args.
+  optimize-modules [args...] Run probe optimize-modules with any extra CLI args.
+  optimize-harness [args...] Run probe optimize-harness with any extra CLI args.
 EOF
 }
 
@@ -33,6 +41,9 @@ case "$command_name" in
   fmt)
     cargo fmt --all
     ;;
+  fmt-check)
+    cargo fmt --all --check
+    ;;
   check)
     cargo check --workspace
     ;;
@@ -43,8 +54,28 @@ case "$command_name" in
       cargo test --workspace "$@"
     fi
     ;;
-  accept)
+  cli-regressions)
+    cargo test -p probe-cli --test cli_regressions "$@"
+    ;;
+  pr-fast)
+    "$0" fmt-check
+    "$0" check
+    "$0" test
+    ;;
+  accept|accept-live)
     cargo run -p probe-cli -- accept "$@"
+    ;;
+  decision-export)
+    cargo run -p probe-cli -- export "$@"
+    ;;
+  module-eval)
+    cargo run -p probe-cli -- module-eval "$@"
+    ;;
+  optimize-modules)
+    cargo run -p probe-cli -- optimize-modules "$@"
+    ;;
+  optimize-harness)
+    cargo run -p probe-cli -- optimize-harness "$@"
     ;;
   help|-h|--help)
     usage

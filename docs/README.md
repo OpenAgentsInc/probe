@@ -67,3 +67,6 @@ This folder holds technical planning docs for the Probe runtime.
 - `22-acceptance-report-schema.md`
   - run identity, backend and harness metadata, failure categories, counts,
     and transcript references for the richer `probe accept` report
+- `23-local-test-tiers.md`
+  - explicit local fast-test, binary-regression, live-acceptance, and
+    offline-eval lanes in `probe-dev`

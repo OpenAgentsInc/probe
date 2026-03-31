@@ -36,9 +36,10 @@ Primary commands:
 
 ```bash
 ./probe-dev fmt
+./probe-dev fmt-check
 ./probe-dev check
 ./probe-dev test
-./probe-dev accept
+./probe-dev accept-live
 ```
 
 `./probe-dev test` is `nextest`-first. If `cargo nextest` is installed, Probe uses
@@ -47,6 +48,18 @@ Primary commands:
 
 This keeps the default path fast where `nextest` is available without making
 the repo unusable on a fresh machine.
+
+The runner now also exposes explicit local tiers:
+
+- `./probe-dev pr-fast`
+  - merge-safe local lane: `fmt-check`, `check`, and `test`
+- `./probe-dev cli-regressions`
+  - targeted binary-level Probe CLI regression and snapshot lane
+- `./probe-dev accept-live`
+  - heavier live-backend acceptance lane
+- `./probe-dev decision-export`, `./probe-dev module-eval`,
+  `./probe-dev optimize-modules`, and `./probe-dev optimize-harness`
+  - explicit local eval and optimization lanes that stay out of the fast path
 
 ## Why This Matters
 
