@@ -1,4 +1,5 @@
 use std::io::{self, Stdout};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent};
@@ -11,7 +12,9 @@ use probe_core::backend_profiles::{
 };
 use probe_core::harness::resolve_harness_profile;
 use probe_core::runtime::{current_working_dir, default_probe_home};
+use probe_core::server_control::PsionicServerConfig;
 use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
+use probe_protocol::backend::{BackendKind, BackendProfile};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout};
@@ -50,7 +53,7 @@ impl AppShell {
     }
 
     pub fn new_for_tests() -> Self {
-        Self::with_autostart(false, Self::default_chat_runtime_config())
+        Self::with_autostart(false, Self::test_chat_runtime_config())
     }
 
     pub fn new_for_tests_with_chat_config(chat_runtime: ProbeRuntimeTurnConfig) -> Self {
@@ -73,14 +76,31 @@ impl AppShell {
     }
 
     fn default_chat_runtime_config() -> ProbeRuntimeTurnConfig {
-        let cwd = current_working_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let probe_home = default_probe_home().ok();
+        Self::chat_runtime_config_from_probe_home(probe_home)
+    }
+
+    fn test_chat_runtime_config() -> ProbeRuntimeTurnConfig {
+        Self::build_chat_runtime_config(None, psionic_qwen35_2b_q8_registry())
+    }
+
+    fn chat_runtime_config_from_probe_home(probe_home: Option<PathBuf>) -> ProbeRuntimeTurnConfig {
+        let profile = resolve_tui_chat_profile(probe_home.as_deref());
+        Self::build_chat_runtime_config(probe_home, profile)
+    }
+
+    fn build_chat_runtime_config(
+        probe_home: Option<PathBuf>,
+        profile: BackendProfile,
+    ) -> ProbeRuntimeTurnConfig {
+        let cwd = current_working_dir().unwrap_or_else(|_| PathBuf::from("."));
         let harness = resolve_harness_profile(Some("coding_bootstrap"), None, cwd.as_path(), None)
             .ok()
             .flatten();
         ProbeRuntimeTurnConfig {
-            probe_home: default_probe_home().ok(),
+            probe_home,
             cwd,
-            profile: psionic_qwen35_2b_q8_registry(),
+            profile,
             system_prompt: harness.as_ref().map(|resolved| resolved.system_prompt.clone()),
             harness_profile: harness.map(|resolved| resolved.profile),
             tool_loop: Some(ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Auto, false)),
@@ -450,6 +470,30 @@ impl AppShell {
     }
 }
 
+fn resolve_tui_chat_profile(probe_home: Option<&Path>) -> BackendProfile {
+    probe_home
+        .and_then(load_server_config)
+        .map(|config| profile_from_server_config(&config))
+        .unwrap_or_else(psionic_qwen35_2b_q8_registry)
+}
+
+fn load_server_config(probe_home: &Path) -> Option<PsionicServerConfig> {
+    let config_path = PsionicServerConfig::config_path(probe_home);
+    PsionicServerConfig::load_or_create(config_path.as_path()).ok()
+}
+
+fn profile_from_server_config(config: &PsionicServerConfig) -> BackendProfile {
+    let mut profile = match config.api_kind {
+        BackendKind::OpenAiChatCompletions => psionic_qwen35_2b_q8_registry(),
+        BackendKind::AppleFmBridge => psionic_apple_fm_bridge(),
+    };
+    profile.base_url = config.base_url();
+    if let Some(model_id) = config.resolved_model_id() {
+        profile.model = model_id;
+    }
+    profile
+}
+
 fn preview(value: &str, max_chars: usize) -> String {
     let mut chars = value.chars();
     let preview = chars.by_ref().take(max_chars).collect::<String>();
@@ -548,13 +592,16 @@ mod tests {
         psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
     };
     use probe_core::harness::resolve_harness_profile;
+    use probe_core::server_control::PsionicServerConfig;
     use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
+    use probe_protocol::backend::BackendKind;
     use probe_test_support::{
         FakeAppleFmServer, FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment,
     };
     use serde_json::json;
+    use tempfile::tempdir;
 
-    use super::AppShell;
+    use super::{AppShell, profile_from_server_config, resolve_tui_chat_profile};
     use crate::event::UiEvent;
     use crate::message::{
         AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
@@ -607,6 +654,36 @@ mod tests {
             "timed out waiting for app condition; last_status={}",
             app.last_status()
         );
+    }
+
+    #[test]
+    fn tui_chat_profile_uses_probe_server_config_when_present() {
+        let probe_home = tempdir().expect("temp probe home");
+        let mut config = PsionicServerConfig::default();
+        config.set_api_kind(BackendKind::AppleFmBridge);
+        config.port = 19091;
+        config.model_id = Some(String::from("apple-foundation-model"));
+        config
+            .save(PsionicServerConfig::config_path(probe_home.path()).as_path())
+            .expect("save server config");
+
+        let profile = resolve_tui_chat_profile(Some(probe_home.path()));
+        assert_eq!(profile.kind, BackendKind::AppleFmBridge);
+        assert_eq!(profile.base_url, "http://127.0.0.1:19091");
+        assert_eq!(profile.model, "apple-foundation-model");
+    }
+
+    #[test]
+    fn server_config_profile_conversion_preserves_openai_base_url_and_model() {
+        let mut config = PsionicServerConfig::default();
+        config.host = String::from("127.0.0.1");
+        config.port = 18080;
+        config.model_id = Some(String::from("custom-qwen.gguf"));
+
+        let profile = profile_from_server_config(&config);
+        assert_eq!(profile.kind, BackendKind::OpenAiChatCompletions);
+        assert_eq!(profile.base_url, "http://127.0.0.1:18080/v1");
+        assert_eq!(profile.model, "custom-qwen.gguf");
     }
 
     #[test]

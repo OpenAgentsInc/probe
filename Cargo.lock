@@ -1608,6 +1608,7 @@ dependencies = [
  "psionic-apple-fm",
  "ratatui",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

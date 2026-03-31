@@ -16,3 +16,4 @@ serde_json.workspace = true
 [dev-dependencies]
 insta.workspace = true
 probe-test-support.workspace = true
+tempfile.workspace = true

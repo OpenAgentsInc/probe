@@ -72,15 +72,16 @@ cargo run -p probe-cli -- exec \
 `cargo probe` is the current top-level Probe UI entrypoint. The current shell
 uses a retained transcript widget with committed user, tool, and assistant
 turns plus one explicit active-turn cell. `Chat` is the home surface and the
-composer now submits through the real Probe runtime, using the default
-`psionic-qwen35-2b-q8-registry` backend with the `coding_bootstrap` harness and
-conservative tool approval policy. The first submit creates a persisted Probe
-session; later submits continue that same session. The active-turn cell is now
-driven by real runtime lifecycle events, so the TUI can show model requests,
-tool request/start/completion, refusal or pause, and the final assistant commit
-before the transcript delta is rendered. Persisted tool activity renders as
-first-class transcript rows such as `[tool call]`, `[tool result]`, and
-`[approval pending]` rather than generic notes.
+composer now submits through the real Probe runtime, using the backend resolved
+from `~/.probe/server/psionic-local.json` together with the
+`coding_bootstrap` harness and conservative tool approval policy. The first
+submit creates a persisted Probe session; later submits continue that same
+session. The active-turn cell is now driven by real runtime lifecycle events,
+so the TUI can show model requests, tool request/start/completion, refusal or
+pause, and the final assistant commit before the transcript delta is rendered.
+Persisted tool activity renders as first-class transcript rows such as
+`[tool call]`, `[tool result]`, and `[approval pending]` rather than generic
+notes.
 
 Setup, help, and approval flows live in a typed overlay stack above or in
 place of the composer. A background Apple FM availability/setup check still
