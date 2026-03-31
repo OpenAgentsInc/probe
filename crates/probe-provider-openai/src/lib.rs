@@ -46,7 +46,14 @@ impl OpenAiProviderConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ChatToolCall>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl ChatMessage {
@@ -54,7 +61,10 @@ impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: String::from("system"),
-            content: content.into(),
+            content: Some(content.into()),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
 
@@ -62,7 +72,10 @@ impl ChatMessage {
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: String::from("user"),
-            content: content.into(),
+            content: Some(content.into()),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
 
@@ -70,9 +83,87 @@ impl ChatMessage {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: String::from("assistant"),
-            content: content.into(),
+            content: Some(content.into()),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
+
+    #[must_use]
+    pub fn assistant_tool_calls(tool_calls: Vec<ChatToolCall>) -> Self {
+        Self {
+            role: String::from("assistant"),
+            content: None,
+            name: None,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+        }
+    }
+
+    #[must_use]
+    pub fn tool(
+        name: impl Into<String>,
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: String::from("tool"),
+            content: Some(content.into()),
+            name: Some(name.into()),
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatToolDefinitionEnvelope {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ChatToolDefinition,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatToolDefinition {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChatToolChoice {
+    Mode(String),
+    Named(ChatNamedToolChoice),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatNamedToolChoice {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ChatNamedToolChoiceFunction,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatNamedToolChoiceFunction {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ChatToolCallFunction,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatToolCallFunction {
+    pub name: String,
+    pub arguments: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -80,6 +171,12 @@ pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub stream: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ChatToolDefinitionEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ChatToolChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
 }
 
 impl ChatCompletionRequest {
@@ -89,7 +186,23 @@ impl ChatCompletionRequest {
             model: config.model.clone(),
             messages,
             stream: config.stream,
+            tools: Vec::new(),
+            tool_choice: None,
+            parallel_tool_calls: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_tools(
+        mut self,
+        tools: Vec<ChatToolDefinitionEnvelope>,
+        tool_choice: Option<ChatToolChoice>,
+        parallel_tool_calls: Option<bool>,
+    ) -> Self {
+        self.tools = tools;
+        self.tool_choice = tool_choice;
+        self.parallel_tool_calls = parallel_tool_calls;
+        self
     }
 }
 
@@ -120,7 +233,14 @@ impl ChatCompletionResponse {
     pub fn first_message_text(&self) -> Option<&str> {
         self.choices
             .first()
-            .map(|choice| choice.message.content.as_str())
+            .and_then(|choice| choice.message.content.as_deref())
+    }
+
+    #[must_use]
+    pub fn first_tool_calls(&self) -> Option<&[ChatToolCall]> {
+        self.choices
+            .first()
+            .and_then(|choice| choice.message.tool_calls.as_deref())
     }
 }
 
@@ -224,8 +344,8 @@ mod tests {
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
 
     use super::{
-        ChatCompletionResponse, ChatMessage, OpenAiProviderClient, OpenAiProviderConfig,
-        OpenAiProviderError,
+        ChatCompletionResponse, ChatMessage, ChatToolCall, ChatToolCallFunction,
+        OpenAiProviderClient, OpenAiProviderConfig, OpenAiProviderError,
     };
 
     #[test]
@@ -307,6 +427,88 @@ mod tests {
 
         assert_eq!(response.first_message_text(), Some("hello from backend"));
         handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn client_decodes_tool_call_responses() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let address = listener.local_addr().expect("listener addr");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let body = serde_json::json!({
+                "id": "chatcmpl_tools",
+                "model": "tiny-qwen35",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "lookup_weather",
+                                        "arguments": "{\"city\":\"Paris\"}"
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }
+                ]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        let config = OpenAiProviderConfig {
+            base_url: format!("http://{address}/v1"),
+            model: String::from("tiny-qwen35"),
+            api_key: String::from("dummy"),
+            timeout: Duration::from_secs(5),
+            stream: false,
+        };
+        let client = OpenAiProviderClient::new(config).expect("client");
+        let response = client
+            .chat_completion(vec![ChatMessage::user("weather in Paris")])
+            .expect("tool call response");
+
+        let tool_calls = response.first_tool_calls().expect("tool calls");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "lookup_weather");
+        assert_eq!(tool_calls[0].function.arguments, "{\"city\":\"Paris\"}");
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn assistant_tool_call_messages_are_constructible() {
+        let message = ChatMessage::assistant_tool_calls(vec![ChatToolCall {
+            id: String::from("call_1"),
+            kind: String::from("function"),
+            function: ChatToolCallFunction {
+                name: String::from("lookup_weather"),
+                arguments: String::from("{\"city\":\"Tokyo\"}"),
+            },
+        }]);
+
+        assert_eq!(message.role, "assistant");
+        assert!(message.content.is_none());
+        assert_eq!(
+            message.tool_calls.as_ref().expect("tool calls")[0]
+                .function
+                .name,
+            "lookup_weather"
+        );
     }
 
     #[test]

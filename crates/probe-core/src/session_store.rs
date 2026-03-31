@@ -52,6 +52,9 @@ impl From<serde_json::Error> for SessionStoreError {
 pub struct NewItem {
     pub kind: TranscriptItemKind,
     pub text: String,
+    pub name: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub arguments: Option<serde_json::Value>,
 }
 
 impl NewItem {
@@ -60,6 +63,40 @@ impl NewItem {
         Self {
             kind,
             text: text.into(),
+            name: None,
+            tool_call_id: None,
+            arguments: None,
+        }
+    }
+
+    #[must_use]
+    pub fn tool_call(
+        name: impl Into<String>,
+        tool_call_id: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self {
+            kind: TranscriptItemKind::ToolCall,
+            text: serde_json::to_string(&arguments)
+                .unwrap_or_else(|_| String::from("{\"error\":\"tool arguments encode failed\"}")),
+            name: Some(name.into()),
+            tool_call_id: Some(tool_call_id.into()),
+            arguments: Some(arguments),
+        }
+    }
+
+    #[must_use]
+    pub fn tool_result(
+        name: impl Into<String>,
+        tool_call_id: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: TranscriptItemKind::ToolResult,
+            text: text.into(),
+            name: Some(name.into()),
+            tool_call_id: Some(tool_call_id.into()),
+            arguments: None,
         }
     }
 }
@@ -172,6 +209,9 @@ impl FilesystemSessionStore {
                 sequence: index as u32,
                 kind: item.kind,
                 text: item.text.clone(),
+                name: item.name.clone(),
+                tool_call_id: item.tool_call_id.clone(),
+                arguments: item.arguments.clone(),
             })
             .collect::<Vec<_>>();
         let turn = SessionTurn {

@@ -59,6 +59,12 @@ The first interactive lane is `probe chat`, which:
 - supports resuming a prior session by id
 - rebuilds conversation context from the persisted transcript before each turn
 
+The first tool-enabled lane now exists on both `probe exec` and `probe chat`:
+
+- enable the built-in retained demo tool set with `--tool-set weather`
+- control tool policy with `--tool-choice`
+- enable same-turn batches with `--parallel-tool-calls`
+
 ## Non-Goals For The First Milestone
 
 - a large plugin marketplace

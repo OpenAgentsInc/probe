@@ -1,6 +1,7 @@
 pub mod backend_profiles;
 pub mod runtime;
 pub mod session_store;
+pub mod tools;
 
 use probe_protocol::ProtocolDescriptor;
 

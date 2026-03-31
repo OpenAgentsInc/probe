@@ -8,6 +8,7 @@ use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, current_working_dir,
     default_probe_home,
 };
+use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
 use probe_protocol::session::SessionId;
 
 #[derive(Parser, Debug)]
@@ -37,6 +38,12 @@ struct ExecArgs {
     system: Option<String>,
     #[arg(long)]
     probe_home: Option<PathBuf>,
+    #[arg(long)]
+    tool_set: Option<String>,
+    #[arg(long, default_value = "auto")]
+    tool_choice: String,
+    #[arg(long, default_value_t = false)]
+    parallel_tool_calls: bool,
     #[arg(required = true)]
     prompt: Vec<String>,
 }
@@ -55,6 +62,12 @@ struct ChatArgs {
     system: Option<String>,
     #[arg(long)]
     probe_home: Option<PathBuf>,
+    #[arg(long)]
+    tool_set: Option<String>,
+    #[arg(long, default_value = "auto")]
+    tool_choice: String,
+    #[arg(long, default_value_t = false)]
+    parallel_tool_calls: bool,
 }
 
 fn main() -> ExitCode {
@@ -78,6 +91,11 @@ fn run() -> Result<(), String> {
 fn run_exec(args: ExecArgs) -> Result<(), String> {
     let profile = named_profile(args.profile.as_str())?;
     let runtime = resolve_runtime(args.probe_home)?;
+    let tool_loop = resolve_tool_loop(
+        args.tool_set.as_deref(),
+        args.tool_choice.as_str(),
+        args.parallel_tool_calls,
+    )?;
     let outcome = runtime
         .exec_plain_text(PlainTextExecRequest {
             profile,
@@ -87,6 +105,7 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
                 .cwd
                 .unwrap_or(current_working_dir().map_err(|error| error.to_string())?),
             system_prompt: args.system,
+            tool_loop,
         })
         .map_err(|error| error.to_string())?;
 
@@ -109,6 +128,9 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
             usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
         );
     }
+    if outcome.executed_tool_calls > 0 {
+        eprintln!("tool_calls executed={}", outcome.executed_tool_calls);
+    }
     Ok(())
 }
 
@@ -120,6 +142,11 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
     }
 
     let runtime = resolve_runtime(args.probe_home)?;
+    let tool_loop = resolve_tool_loop(
+        args.tool_set.as_deref(),
+        args.tool_choice.as_str(),
+        args.parallel_tool_calls,
+    )?;
     let cwd = args
         .cwd
         .unwrap_or(current_working_dir().map_err(|error| error.to_string())?);
@@ -184,6 +211,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
                     session_id: active_session_id.clone(),
                     profile,
                     prompt: String::from(prompt),
+                    tool_loop: tool_loop.clone(),
                 })
                 .map_err(|error| error.to_string())?
         } else {
@@ -194,6 +222,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
                     title: args.title.clone(),
                     cwd: cwd.clone(),
                     system_prompt: args.system.clone(),
+                    tool_loop: tool_loop.clone(),
                 })
                 .map_err(|error| error.to_string())?
         };
@@ -209,6 +238,9 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
             outcome.session.id.as_str(),
             outcome.turn.index
         );
+        if outcome.executed_tool_calls > 0 {
+            eprintln!("tool_calls executed={}", outcome.executed_tool_calls);
+        }
     }
 
     Ok(())
@@ -222,4 +254,26 @@ fn resolve_runtime(probe_home: Option<PathBuf>) -> Result<ProbeRuntime, String> 
     Ok(ProbeRuntime::new(probe_home.unwrap_or(
         default_probe_home().map_err(|error| error.to_string())?,
     )))
+}
+
+fn resolve_tool_loop(
+    tool_set: Option<&str>,
+    tool_choice: &str,
+    parallel_tool_calls: bool,
+) -> Result<Option<ToolLoopConfig>, String> {
+    let has_non_default_tool_flags = tool_choice != "auto" || parallel_tool_calls;
+    match tool_set {
+        Some("weather") => {
+            let tool_choice = ProbeToolChoice::parse(tool_choice)?;
+            Ok(Some(ToolLoopConfig::weather_demo(
+                tool_choice,
+                parallel_tool_calls,
+            )))
+        }
+        Some(other) => Err(format!("unknown tool set: {other}")),
+        None if has_non_default_tool_flags => Err(String::from(
+            "tool flags require --tool-set; the first supported value is `weather`",
+        )),
+        None => Ok(None),
+    }
 }

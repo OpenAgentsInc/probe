@@ -25,3 +25,6 @@ This folder holds technical planning docs for the Probe runtime.
     transcript persistence
 - `08-interactive-cli-and-resume.md`
   - the first interactive session loop and transcript-backed resume flow
+- `09-tool-loop-and-local-tools.md`
+  - the first bounded local tool runtime, batch execution path, and replay
+    contract

@@ -7,11 +7,12 @@ use probe_protocol::session::{
     SessionBackendTarget, SessionId, SessionMetadata, SessionTurn, TranscriptItemKind,
 };
 use probe_provider_openai::{
-    ChatCompletionUsage, ChatMessage, OpenAiProviderClient, OpenAiProviderConfig,
-    OpenAiProviderError,
+    ChatCompletionRequest, ChatCompletionUsage, ChatMessage, ChatToolCall, OpenAiProviderClient,
+    OpenAiProviderConfig, OpenAiProviderError,
 };
 
 use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionStoreError};
+use crate::tools::ToolLoopConfig;
 
 const DEFAULT_PROBE_HOME_DIR: &str = ".probe";
 
@@ -22,6 +23,7 @@ pub struct PlainTextExecRequest {
     pub title: Option<String>,
     pub cwd: PathBuf,
     pub system_prompt: Option<String>,
+    pub tool_loop: Option<ToolLoopConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -29,6 +31,7 @@ pub struct PlainTextResumeRequest {
     pub session_id: SessionId,
     pub profile: BackendProfile,
     pub prompt: String,
+    pub tool_loop: Option<ToolLoopConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -39,6 +42,7 @@ pub struct PlainTextExecOutcome {
     pub response_id: String,
     pub response_model: String,
     pub usage: Option<ChatCompletionUsage>,
+    pub executed_tool_calls: usize,
 }
 
 #[derive(Debug)]
@@ -55,6 +59,11 @@ pub enum RuntimeError {
         session_id: SessionId,
         response_id: String,
     },
+    MaxToolRoundTrips {
+        session_id: SessionId,
+        max_round_trips: usize,
+    },
+    MalformedTranscript(String),
 }
 
 impl Display for RuntimeError {
@@ -81,6 +90,16 @@ impl Display for RuntimeError {
                 "backend response {response_id} for session {} did not include assistant text",
                 session_id.as_str()
             ),
+            Self::MaxToolRoundTrips {
+                session_id,
+                max_round_trips,
+            } => write!(
+                f,
+                "session {} exceeded the configured tool loop bound of {} model round trips",
+                session_id.as_str(),
+                max_round_trips
+            ),
+            Self::MalformedTranscript(message) => write!(f, "{message}"),
         }
     }
 }
@@ -135,7 +154,7 @@ impl ProbeRuntime {
             }),
         )?;
 
-        self.run_plain_text_turn(session, request.profile, request.prompt)
+        self.run_plain_text_turn(session, request.profile, request.prompt, request.tool_loop)
     }
 
     pub fn continue_plain_text_session(
@@ -143,7 +162,7 @@ impl ProbeRuntime {
         request: PlainTextResumeRequest,
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
         let session = self.session_store.read_metadata(&request.session_id)?;
-        self.run_plain_text_turn(session, request.profile, request.prompt)
+        self.run_plain_text_turn(session, request.profile, request.prompt, request.tool_loop)
     }
 }
 
@@ -182,59 +201,123 @@ impl ProbeRuntime {
         session: SessionMetadata,
         profile: BackendProfile,
         prompt: String,
+        tool_loop: Option<ToolLoopConfig>,
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
         let provider_config = OpenAiProviderConfig::from_backend_profile(&profile);
-        let provider =
-            OpenAiProviderClient::new(provider_config).map_err(RuntimeError::ProviderBuild)?;
+        let provider = OpenAiProviderClient::new(provider_config.clone())
+            .map_err(RuntimeError::ProviderBuild)?;
         let mut messages = self.replay_messages(&session)?;
-        messages.push(ChatMessage::user(prompt.clone()));
+        let mut pending_user_prompt = Some(prompt);
+        let mut executed_tool_calls = 0_usize;
+        let tool_loop = tool_loop.filter(|config| !config.registry.is_empty());
+        let max_round_trips = tool_loop
+            .as_ref()
+            .map(|config| config.max_model_round_trips)
+            .unwrap_or(1);
 
-        let response =
-            provider
-                .chat_completion(messages)
-                .map_err(|source| RuntimeError::ProviderRequest {
-                    session_id: session.id.clone(),
-                    source,
-                });
-
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                let _ = self.session_store.append_turn(
-                    &session.id,
-                    &[
-                        NewItem::new(TranscriptItemKind::UserMessage, prompt),
-                        NewItem::new(TranscriptItemKind::Note, error.to_string()),
-                    ],
-                );
-                return Err(error);
+        for _ in 0..max_round_trips {
+            let next_user_prompt = pending_user_prompt.as_ref().cloned();
+            if let Some(user_prompt) = next_user_prompt {
+                messages.push(ChatMessage::user(user_prompt));
             }
-        };
 
-        let assistant_text = response
-            .first_message_text()
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| RuntimeError::MissingAssistantMessage {
+            let response = if let Some(tool_loop) = tool_loop.as_ref() {
+                let request =
+                    ChatCompletionRequest::from_config(&provider_config, messages.clone())
+                        .with_tools(
+                            tool_loop.registry.declared_tools(),
+                            tool_loop.tool_choice.to_provider_choice(),
+                            Some(tool_loop.parallel_tool_calls),
+                        );
+                provider.send_chat_completion(&request)
+            } else {
+                provider.chat_completion(messages.clone())
+            }
+            .map_err(|source| RuntimeError::ProviderRequest {
                 session_id: session.id.clone(),
-                response_id: response.id.clone(),
-            })?;
+                source,
+            });
 
-        let turn = self.session_store.append_turn(
-            &session.id,
-            &[
-                NewItem::new(TranscriptItemKind::UserMessage, prompt),
-                NewItem::new(TranscriptItemKind::AssistantMessage, assistant_text.clone()),
-            ],
-        )?;
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    let mut items = Vec::new();
+                    if let Some(user_prompt) = pending_user_prompt.take() {
+                        items.push(NewItem::new(TranscriptItemKind::UserMessage, user_prompt));
+                    }
+                    items.push(NewItem::new(TranscriptItemKind::Note, error.to_string()));
+                    let _ = self.session_store.append_turn(&session.id, &items);
+                    return Err(error);
+                }
+            };
 
-        let session = self.session_store.read_metadata(&session.id)?;
-        Ok(PlainTextExecOutcome {
-            session,
-            turn,
-            assistant_text,
-            response_id: response.id,
-            response_model: response.model,
-            usage: response.usage,
+            if let Some(tool_calls) = response.first_tool_calls()
+                && !tool_calls.is_empty()
+            {
+                let tool_calls = tool_calls.to_vec();
+                let tool_call_turn = self.append_tool_call_turn(
+                    &session.id,
+                    pending_user_prompt.take(),
+                    &tool_calls,
+                )?;
+                let _ = tool_call_turn;
+
+                let Some(tool_loop) = tool_loop.as_ref() else {
+                    return Err(RuntimeError::MissingAssistantMessage {
+                        session_id: session.id.clone(),
+                        response_id: response.id,
+                    });
+                };
+                let executed = tool_loop.registry.execute_batch(&tool_calls);
+                executed_tool_calls += executed.len();
+                let tool_result_turn = self.append_tool_result_turn(&session.id, &executed)?;
+                let _ = tool_result_turn;
+
+                messages.push(ChatMessage::assistant_tool_calls(tool_calls));
+                for tool_result in executed {
+                    messages.push(ChatMessage::tool(
+                        tool_result.name,
+                        tool_result.call_id,
+                        serde_json::to_string(&tool_result.output).unwrap_or_else(|_| {
+                            String::from("{\"error\":\"tool output encode failed\"}")
+                        }),
+                    ));
+                }
+                continue;
+            }
+
+            let assistant_text = response
+                .first_message_text()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| RuntimeError::MissingAssistantMessage {
+                    session_id: session.id.clone(),
+                    response_id: response.id.clone(),
+                })?;
+
+            let mut items = Vec::new();
+            if let Some(user_prompt) = pending_user_prompt.take() {
+                items.push(NewItem::new(TranscriptItemKind::UserMessage, user_prompt));
+            }
+            items.push(NewItem::new(
+                TranscriptItemKind::AssistantMessage,
+                assistant_text.clone(),
+            ));
+            let turn = self.session_store.append_turn(&session.id, &items)?;
+            let session = self.session_store.read_metadata(&session.id)?;
+            return Ok(PlainTextExecOutcome {
+                session,
+                turn,
+                assistant_text,
+                response_id: response.id,
+                response_model: response.model,
+                usage: response.usage,
+                executed_tool_calls,
+            });
+        }
+
+        Err(RuntimeError::MaxToolRoundTrips {
+            session_id: session.id,
+            max_round_trips,
         })
     }
 
@@ -245,20 +328,139 @@ impl ProbeRuntime {
         }
 
         for event in self.session_store.read_transcript(&session.id)? {
+            let mut pending_tool_calls = Vec::new();
             for item in event.turn.items {
                 match item.kind {
-                    TranscriptItemKind::UserMessage => messages.push(ChatMessage::user(item.text)),
+                    TranscriptItemKind::UserMessage => {
+                        if !pending_tool_calls.is_empty() {
+                            messages.push(ChatMessage::assistant_tool_calls(std::mem::take(
+                                &mut pending_tool_calls,
+                            )));
+                        }
+                        messages.push(ChatMessage::user(item.text));
+                    }
                     TranscriptItemKind::AssistantMessage => {
+                        if !pending_tool_calls.is_empty() {
+                            messages.push(ChatMessage::assistant_tool_calls(std::mem::take(
+                                &mut pending_tool_calls,
+                            )));
+                        }
                         messages.push(ChatMessage::assistant(item.text))
                     }
-                    TranscriptItemKind::ToolCall
-                    | TranscriptItemKind::ToolResult
-                    | TranscriptItemKind::Note => {}
+                    TranscriptItemKind::ToolCall => {
+                        let name = item.name.ok_or_else(|| {
+                            RuntimeError::MalformedTranscript(String::from(
+                                "tool call transcript items require a tool name",
+                            ))
+                        })?;
+                        let tool_call_id = item.tool_call_id.ok_or_else(|| {
+                            RuntimeError::MalformedTranscript(String::from(
+                                "tool call transcript items require a tool_call_id",
+                            ))
+                        })?;
+                        let arguments = item.arguments.ok_or_else(|| {
+                            RuntimeError::MalformedTranscript(String::from(
+                                "tool call transcript items require structured arguments",
+                            ))
+                        })?;
+                        pending_tool_calls.push(ChatToolCall {
+                            id: tool_call_id,
+                            kind: String::from("function"),
+                            function: probe_provider_openai::ChatToolCallFunction {
+                                name,
+                                arguments: serde_json::to_string(&arguments).map_err(|error| {
+                                    RuntimeError::MalformedTranscript(format!(
+                                        "failed to encode stored tool arguments: {error}"
+                                    ))
+                                })?,
+                            },
+                        });
+                    }
+                    TranscriptItemKind::ToolResult => {
+                        if !pending_tool_calls.is_empty() {
+                            messages.push(ChatMessage::assistant_tool_calls(std::mem::take(
+                                &mut pending_tool_calls,
+                            )));
+                        }
+                        let name = item.name.ok_or_else(|| {
+                            RuntimeError::MalformedTranscript(String::from(
+                                "tool result transcript items require a tool name",
+                            ))
+                        })?;
+                        let tool_call_id = item.tool_call_id.ok_or_else(|| {
+                            RuntimeError::MalformedTranscript(String::from(
+                                "tool result transcript items require a tool_call_id",
+                            ))
+                        })?;
+                        messages.push(ChatMessage::tool(name, tool_call_id, item.text));
+                    }
+                    TranscriptItemKind::Note => {
+                        if !pending_tool_calls.is_empty() {
+                            messages.push(ChatMessage::assistant_tool_calls(std::mem::take(
+                                &mut pending_tool_calls,
+                            )));
+                        }
+                    }
                 }
+            }
+            if !pending_tool_calls.is_empty() {
+                messages.push(ChatMessage::assistant_tool_calls(pending_tool_calls));
             }
         }
 
         Ok(messages)
+    }
+
+    fn append_tool_call_turn(
+        &self,
+        session_id: &SessionId,
+        user_prompt: Option<String>,
+        tool_calls: &[ChatToolCall],
+    ) -> Result<SessionTurn, RuntimeError> {
+        let mut items = Vec::new();
+        if let Some(user_prompt) = user_prompt {
+            items.push(NewItem::new(TranscriptItemKind::UserMessage, user_prompt));
+        }
+        for tool_call in tool_calls {
+            let arguments =
+                serde_json::from_str::<serde_json::Value>(tool_call.function.arguments.as_str())
+                    .map_err(|error| {
+                        RuntimeError::MalformedTranscript(format!(
+                            "tool call `{}` returned non-JSON arguments: {error}",
+                            tool_call.function.name
+                        ))
+                    })?;
+            items.push(NewItem::tool_call(
+                tool_call.function.name.clone(),
+                tool_call.id.clone(),
+                arguments,
+            ));
+        }
+        self.session_store
+            .append_turn(session_id, &items)
+            .map_err(RuntimeError::from)
+    }
+
+    fn append_tool_result_turn(
+        &self,
+        session_id: &SessionId,
+        executed_tool_calls: &[crate::tools::ExecutedToolCall],
+    ) -> Result<SessionTurn, RuntimeError> {
+        let items = executed_tool_calls
+            .iter()
+            .map(|tool_call| {
+                NewItem::tool_result(
+                    tool_call.name.clone(),
+                    tool_call.call_id.clone(),
+                    serde_json::to_string(&tool_call.output).unwrap_or_else(|_| {
+                        String::from("{\"error\":\"tool output encode failed\"}")
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.session_store
+            .append_turn(session_id, &items)
+            .map_err(RuntimeError::from)
     }
 }
 
@@ -269,6 +471,8 @@ mod tests {
     use std::thread;
 
     use crate::backend_profiles::psionic_qwen35_2b_q8_registry;
+    use crate::tools::{ProbeToolChoice, ToolLoopConfig};
+    use probe_protocol::session::TranscriptItemKind;
 
     use super::{
         PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, default_session_title,
@@ -327,6 +531,7 @@ mod tests {
                 title: Some(String::from("Exec Test")),
                 cwd: temp.path().to_path_buf(),
                 system_prompt: None,
+                tool_loop: None,
             })
             .expect("exec should succeed");
 
@@ -411,6 +616,7 @@ mod tests {
                 title: Some(String::from("Interactive Test")),
                 cwd: temp.path().to_path_buf(),
                 system_prompt: Some(String::from("You are helpful")),
+                tool_loop: None,
             })
             .expect("first turn should succeed");
 
@@ -419,6 +625,7 @@ mod tests {
                 session_id: first.session.id.clone(),
                 profile,
                 prompt: String::from("second prompt"),
+                tool_loop: None,
             })
             .expect("second turn should succeed");
 
@@ -439,6 +646,236 @@ mod tests {
             .expect("read transcript");
         assert_eq!(transcript.len(), 2);
         assert_eq!(transcript[1].turn.items[0].text, "second prompt");
+
+        handle.join().expect("server thread should exit cleanly");
+    }
+
+    #[test]
+    fn tool_loop_executes_required_single_tool_and_replays_result() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let address = listener.local_addr().expect("listener addr");
+        let handle = thread::spawn(move || {
+            for step in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept connection");
+                let mut buffer = [0_u8; 8192];
+                let bytes = stream.read(&mut buffer).expect("read request");
+                let request_body = String::from_utf8_lossy(&buffer[..bytes]);
+                if step == 0 {
+                    assert!(request_body.contains("\"tools\""));
+                    assert!(request_body.contains("\"tool_choice\":\"required\""));
+                    assert!(request_body.contains("\"parallel_tool_calls\":false"));
+                } else {
+                    assert!(request_body.contains("\"tool_calls\""));
+                    assert!(request_body.contains("\"lookup_weather\""));
+                    assert!(request_body.contains("Paris"));
+                    assert!(request_body.contains("temperature_c"));
+                }
+                let body = if step == 0 {
+                    serde_json::json!({
+                        "id": "chatcmpl_tool_required",
+                        "model": "qwen3.5-2b-q8_0-registry.gguf",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_weather_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "lookup_weather",
+                                                "arguments": "{\"city\":\"Paris\"}"
+                                            }
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls"
+                            }
+                        ]
+                    })
+                } else {
+                    serde_json::json!({
+                        "id": "chatcmpl_tool_final",
+                        "model": "qwen3.5-2b-q8_0-registry.gguf",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Paris is sunny at 18C."
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 20,
+                            "completion_tokens": 6,
+                            "total_tokens": 26
+                        }
+                    })
+                }
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let runtime = ProbeRuntime::new(temp.path().join(".probe"));
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = format!("http://{address}/v1");
+
+        let outcome = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile,
+                prompt: String::from("what is the weather in Paris?"),
+                title: Some(String::from("Tool Test")),
+                cwd: temp.path().to_path_buf(),
+                system_prompt: None,
+                tool_loop: Some(ToolLoopConfig::weather_demo(
+                    ProbeToolChoice::Required,
+                    false,
+                )),
+            })
+            .expect("tool loop should succeed");
+
+        assert_eq!(outcome.assistant_text, "Paris is sunny at 18C.");
+        assert_eq!(outcome.executed_tool_calls, 1);
+
+        let transcript = runtime
+            .session_store()
+            .read_transcript(&outcome.session.id)
+            .expect("read transcript");
+        assert_eq!(transcript.len(), 3);
+        assert!(matches!(
+            transcript[0].turn.items[1].kind,
+            TranscriptItemKind::ToolCall
+        ));
+        assert!(matches!(
+            transcript[1].turn.items[0].kind,
+            TranscriptItemKind::ToolResult
+        ));
+        assert_eq!(transcript[2].turn.items[0].text, "Paris is sunny at 18C.");
+
+        handle.join().expect("server thread should exit cleanly");
+    }
+
+    #[test]
+    fn tool_loop_executes_parallel_tool_batches() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let address = listener.local_addr().expect("listener addr");
+        let handle = thread::spawn(move || {
+            for step in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept connection");
+                let mut buffer = [0_u8; 8192];
+                let bytes = stream.read(&mut buffer).expect("read request");
+                let request_body = String::from_utf8_lossy(&buffer[..bytes]);
+                if step == 0 {
+                    assert!(request_body.contains("\"parallel_tool_calls\":true"));
+                } else {
+                    assert!(request_body.contains("\"call_weather_paris\""));
+                    assert!(request_body.contains("\"call_weather_tokyo\""));
+                    assert!(request_body.contains("Tokyo"));
+                }
+                let body = if step == 0 {
+                    serde_json::json!({
+                        "id": "chatcmpl_parallel_tools",
+                        "model": "qwen3.5-2b-q8_0-registry.gguf",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_weather_paris",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "lookup_weather",
+                                                "arguments": "{\"city\":\"Paris\"}"
+                                            }
+                                        },
+                                        {
+                                            "id": "call_weather_tokyo",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "lookup_weather",
+                                                "arguments": "{\"city\":\"Tokyo\"}"
+                                            }
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls"
+                            }
+                        ]
+                    })
+                } else {
+                    serde_json::json!({
+                        "id": "chatcmpl_parallel_final",
+                        "model": "qwen3.5-2b-q8_0-registry.gguf",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Paris is sunny at 18C. Tokyo is rainy at 12C."
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ]
+                    })
+                }
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let runtime = ProbeRuntime::new(temp.path().join(".probe"));
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = format!("http://{address}/v1");
+
+        let outcome = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile,
+                prompt: String::from("check Paris and Tokyo"),
+                title: Some(String::from("Parallel Tool Test")),
+                cwd: temp.path().to_path_buf(),
+                system_prompt: None,
+                tool_loop: Some(ToolLoopConfig::weather_demo(
+                    ProbeToolChoice::Required,
+                    true,
+                )),
+            })
+            .expect("parallel tool loop should succeed");
+
+        assert_eq!(outcome.executed_tool_calls, 2);
+        assert_eq!(
+            outcome.assistant_text,
+            "Paris is sunny at 18C. Tokyo is rainy at 12C."
+        );
+
+        let transcript = runtime
+            .session_store()
+            .read_transcript(&outcome.session.id)
+            .expect("read transcript");
+        assert_eq!(transcript.len(), 3);
+        assert_eq!(transcript[0].turn.items.len(), 3);
+        assert_eq!(transcript[1].turn.items.len(), 2);
 
         handle.join().expect("server thread should exit cleanly");
     }
