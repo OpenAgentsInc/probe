@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Padding, Paragraph};
+use ratatui::Frame;
 
 use crate::event::UiEvent;
 use crate::message::{
@@ -11,7 +11,7 @@ use crate::message::{
     AppleFmFailureSummary, AppleFmUsageSummary,
 };
 use crate::transcript::{ActiveTurn, RetainedTranscript, TranscriptEntry, TranscriptRole};
-use crate::widgets::{InfoPanel, ModalCard, SidebarPanel, TabStrip, padded_title};
+use crate::widgets::{padded_title, InfoPanel, ModalCard, SidebarPanel, TabStrip};
 
 const MAX_EVENT_LOG: usize = 8;
 
@@ -208,16 +208,6 @@ impl Default for ChatScreen {
             transcript: RetainedTranscript::new(),
             setup: AppleFmSetupState::default(),
         };
-        screen.transcript.push_entry(TranscriptEntry::new(
-            TranscriptRole::System,
-            "Shell Ready",
-            vec![
-                String::from(
-                    "Probe selected a retained transcript widget as the initial TUI model.",
-                ),
-                String::from("Press Ctrl+R to start or rerun the Apple FM prove-out."),
-            ],
-        ));
         screen.record_event("probe tui ready");
         screen.record_event("press Ctrl+R to rerun Apple FM setup");
         screen.record_event("press F1 for help");
@@ -265,6 +255,21 @@ impl ChatScreen {
         }
     }
 
+    pub fn submit_user_turn(&mut self, submitted: &str) {
+        self.transcript.push_entry(TranscriptEntry::new(
+            TranscriptRole::User,
+            "You",
+            submitted
+                .split('\n')
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>(),
+        ));
+        self.record_event(format!(
+            "submitted chat turn ({} chars)",
+            submitted.chars().count()
+        ));
+    }
+
     pub fn prepare_for_setup(&mut self, backend: AppleFmBackendSummary) {
         self.setup = AppleFmSetupState {
             phase: TaskPhase::Queued,
@@ -290,6 +295,21 @@ impl ChatScreen {
 
     pub fn apply_message(&mut self, message: AppMessage) -> String {
         match message {
+            AppMessage::TranscriptActiveTurnSet { turn } => {
+                let role = turn.role().label().to_string();
+                let title = turn.title().to_string();
+                self.transcript.set_active_turn(turn);
+                self.record_worker_event(format!("updated active {role} turn: {title}"));
+                format!("updated active {role} turn")
+            }
+            AppMessage::TranscriptEntryCommitted { entry } => {
+                let role = entry.role().label().to_string();
+                let title = entry.title().to_string();
+                self.transcript.clear_active_turn();
+                self.transcript.push_entry(entry);
+                self.record_worker_event(format!("committed {role} turn: {title}"));
+                format!("committed {role} turn")
+            }
             AppMessage::AppleFmSetupStarted { backend } => {
                 self.setup.backend = Some(backend.clone());
                 self.setup.phase = TaskPhase::CheckingAvailability;
@@ -525,7 +545,7 @@ impl ChatScreen {
     }
 
     fn render_chat_shell(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
-        let columns = Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)])
+        let columns = Layout::horizontal([Constraint::Percentage(79), Constraint::Percentage(21)])
             .spacing(1)
             .split(area);
         let focus_name = if stack_depth > 1 {
@@ -535,20 +555,15 @@ impl ChatScreen {
         };
         InfoPanel::new("Transcript", self.render_primary_body()).render(frame, columns[0]);
 
-        let sidebar = Layout::vertical([
-            Constraint::Length(7),
-            Constraint::Length(6),
-            Constraint::Min(0),
-        ])
-        .spacing(1)
-        .split(columns[1]);
+        let sidebar = Layout::vertical([Constraint::Length(8), Constraint::Min(0)])
+            .spacing(1)
+            .split(columns[1]);
         SidebarPanel::new(
-            "Shell Status",
-            self.render_status_lines(focus_name, stack_depth),
+            "Shell",
+            self.render_chat_shell_lines(focus_name, stack_depth),
         )
         .render(frame, sidebar[0]);
-        SidebarPanel::new("Bridge", self.render_backend_lines()).render(frame, sidebar[1]);
-        SidebarPanel::new("Setup Entry", self.render_chat_setup_lines()).render(frame, sidebar[2]);
+        SidebarPanel::new("Apple FM", self.render_chat_setup_lines()).render(frame, sidebar[1]);
     }
 
     fn render_setup(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
@@ -635,39 +650,74 @@ impl ChatScreen {
     fn render_primary_body(&self) -> Text<'static> {
         if self.emphasized_copy {
             return Text::from(vec![
-                Line::from("Initial transcript model: retained full-screen widget."),
+                Line::from("Probe now renders real user, tool, and assistant turns."),
                 Line::from(""),
                 Line::from(
                     "Committed transcript entries stay in app state rather than terminal scrollback.",
                 ),
                 Line::from(
-                    "A single explicit active-turn cell renders in-flight work at the bottom of the transcript.",
+                    "A single explicit active-turn cell renders in-flight runtime or assistant work.",
                 ),
                 Line::from(
-                    "This keeps Probe compatible with ratatui while the real chat shell is still being built.",
+                    "Composer submission now lands a user turn and drives a worker-backed assistant demo reply.",
                 ),
                 Line::from(
-                    "Issue #35 chooses this model deliberately before `ChatScreen` and the composer land.",
+                    "Issue #38 makes the transcript the primary shell surface instead of a setup dashboard.",
                 ),
             ]);
         }
         self.transcript.as_text()
     }
 
-    fn render_chat_setup_lines(&self) -> Vec<String> {
-        let phase = match self.setup.phase {
-            TaskPhase::Idle => "idle",
-            TaskPhase::Queued => "queued",
-            TaskPhase::CheckingAvailability => "checking",
-            TaskPhase::Unavailable => "unavailable",
-            TaskPhase::Running => "running",
-            TaskPhase::Completed => "completed",
-            TaskPhase::Failed => "failed",
-        };
+    fn render_chat_shell_lines(&self, focus_name: &str, stack_depth: usize) -> Vec<String> {
+        let active_turn = self
+            .transcript
+            .active_turn()
+            .map(|turn| turn.role().label().to_string())
+            .unwrap_or_else(|| String::from("none"));
         vec![
-            format!("setup_phase: {phase}"),
-            String::from("Tab to Setup for the full Apple FM prove-out surface."),
-            String::from("Ctrl+R reruns the Apple FM setup flow from the shell."),
+            format!(
+                "focus: {}",
+                if focus_name == "chat shell" {
+                    "chat"
+                } else {
+                    "help"
+                }
+            ),
+            format!("stack: {stack_depth}"),
+            format!("turns: {}", self.transcript.entries().len()),
+            format!("active: {active_turn}"),
+            format!("setup: {}", self.render_phase_label()),
+        ]
+    }
+
+    fn render_chat_setup_lines(&self) -> Vec<String> {
+        let backend = self
+            .setup
+            .backend
+            .as_ref()
+            .map(|backend| backend.profile_name.clone())
+            .unwrap_or_else(|| String::from("pending"));
+        let availability = self
+            .setup
+            .availability
+            .as_ref()
+            .map(|availability| availability.ready.to_string())
+            .unwrap_or_else(|| match self.setup.phase {
+                TaskPhase::Failed => String::from("failed"),
+                TaskPhase::Unavailable => String::from("false"),
+                TaskPhase::Idle => String::from("idle"),
+                TaskPhase::Queued | TaskPhase::CheckingAvailability | TaskPhase::Running => {
+                    String::from("pending")
+                }
+                TaskPhase::Completed => String::from("true"),
+            });
+        vec![
+            format!("state: {}", self.render_phase_label()),
+            format!("backend: {backend}"),
+            format!("ready: {availability}"),
+            String::from("Ctrl+R reruns"),
+            String::from("Tab -> Setup"),
         ]
     }
 
@@ -792,15 +842,6 @@ impl ChatScreen {
     }
 
     fn render_status_lines(&self, focus_name: &str, stack_depth: usize) -> Vec<String> {
-        let phase = match self.setup.phase {
-            TaskPhase::Idle => "idle",
-            TaskPhase::Queued => "queued",
-            TaskPhase::CheckingAvailability => "checking_availability",
-            TaskPhase::Unavailable => "unavailable",
-            TaskPhase::Running => "running",
-            TaskPhase::Completed => "completed",
-            TaskPhase::Failed => "failed",
-        };
         let progress = if let Some(active_call) = &self.setup.active_call {
             format!("call: {}/{}", active_call.index, active_call.total_calls)
         } else {
@@ -816,7 +857,7 @@ impl ChatScreen {
             },
         };
         vec![
-            format!("phase: {phase}"),
+            format!("phase: {}", self.render_phase_label()),
             progress,
             format!("focus: {focus_name}"),
             format!("stack_depth: {stack_depth}"),
@@ -891,6 +932,18 @@ impl ChatScreen {
                     .unwrap_or_else(|| String::from("none"))
             ),
         ]
+    }
+
+    fn render_phase_label(&self) -> &'static str {
+        match self.setup.phase {
+            TaskPhase::Idle => "idle",
+            TaskPhase::Queued => "queued",
+            TaskPhase::CheckingAvailability => "checking",
+            TaskPhase::Unavailable => "unavailable",
+            TaskPhase::Running => "running",
+            TaskPhase::Completed => "completed",
+            TaskPhase::Failed => "failed",
+        }
     }
 }
 

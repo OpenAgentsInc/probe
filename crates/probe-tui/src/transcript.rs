@@ -10,7 +10,7 @@ pub enum TranscriptRole {
 }
 
 impl TranscriptRole {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::System => "system",
             Self::Status => "status",
@@ -36,6 +36,21 @@ impl TranscriptEntry {
             title: title.into(),
             body,
         }
+    }
+
+    #[must_use]
+    pub const fn role(&self) -> TranscriptRole {
+        self.role
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &str {
+        self.title.as_str()
+    }
+
+    #[must_use]
+    pub fn body(&self) -> &[String] {
+        self.body.as_slice()
     }
 
     fn render_lines(&self) -> Vec<Line<'static>> {
@@ -66,6 +81,21 @@ impl ActiveTurn {
             title: title.into(),
             body,
         }
+    }
+
+    #[must_use]
+    pub const fn role(&self) -> TranscriptRole {
+        self.role
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &str {
+        self.title.as_str()
+    }
+
+    #[must_use]
+    pub fn body(&self) -> &[String] {
+        self.body.as_slice()
     }
 
     fn render_lines(&self) -> Vec<Line<'static>> {
@@ -122,7 +152,10 @@ impl RetainedTranscript {
             lines.push(Line::from("Transcript is empty."));
             lines.push(Line::from(""));
             lines.push(Line::from(
-                "Probe selected a retained transcript widget as the initial TUI model.",
+                "Type in the composer to start a real chat turn.",
+            ));
+            lines.push(Line::from(
+                "Committed turns stay in app state while one explicit active turn renders live work.",
             ));
             return Text::from(lines);
         }
@@ -183,6 +216,6 @@ mod tests {
         let transcript = RetainedTranscript::new();
         let rendered = lines_to_plain_text(&transcript);
         assert!(rendered.contains("Transcript is empty."));
-        assert!(rendered.contains("retained transcript widget"));
+        assert!(rendered.contains("Type in the composer"));
     }
 }

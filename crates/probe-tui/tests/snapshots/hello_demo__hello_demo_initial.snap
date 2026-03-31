@@ -7,18 +7,18 @@ expression: snapshot
 │  Chat │ Setup │ Events                                                       │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌─ Transcript ──────────────────────────────────────┐ ┌─ Shell Status ─────────┐
-│ [system] Shell Ready                              │ │ phase: idle            │
-│   Probe selected a retained transcript widget as  │ │ calls_done: 0          │
-│ the initial TUI model.                            │ │ focus: chat shell      │
-│   Press Ctrl+R to start or rerun the Apple FM     │ └────────────────────────┘
-│ prove-out.                                        │
-│                                                   │ ┌─ Bridge ───────────────┐
-│                                                   │ │ profile: pending       │
-│                                                   │ │ base_url: pending      │
-│                                                   │ │ model: pending         │
-│                                                   │ └────────────────────────┘
-└───────────────────────────────────────────────────┘
+┌─ Transcript ───────────────────────────────────────────────┐ ┌─ Shell ───────┐
+│ Transcript is empty.                                       │ │ focus: chat   │
+│                                                            │ │ stack: 1      │
+│ Type in the composer to start a real chat turn.            │ │ turns: 0      │
+│ Committed turns stay in app state while one explicit       │ │ active: none  │
+│ active turn renders live work.                             │ │ setup: idle   │
+│                                                            │ │               │
+│                                                            │ └───────────────┘
+│                                                            │
+│                                                            │ ┌─ Apple FM ────┐
+│                                                            │ │ state: idle   │
+└────────────────────────────────────────────────────────────┘ └───────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ status: probe tui launched | Tab/Shift+Tab | Ctrl+R | F1 | Ctrl+C            │

@@ -1,6 +1,6 @@
 ---
 source: crates/probe-tui/tests/hello_demo.rs
-assertion_line: 113
+assertion_line: 89
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -8,20 +8,20 @@ expression: snapshot
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Transcript ───────────────────────────────────────────────┐ ┌─ Shell ───────┐
-│ [status] Availability Unavailable                          │ │ focus: chat   │
-│   reason: model_not_ready                                  │ │ stack: 1      │
-│   Probe stopped before issuing any inference call.         │ │ turns: 1      │
-│                                                            │ │ active: none  │
-│                                                            │ │ setup: unavai │
-│                                                            │ │               │
+│ [user] You                                                 │ │ focus: chat   │
+│   Summarize what Probe owns.                               │ │ stack: 1      │
+│                                                            │ │ turns: 3      │
+│ [tool] Runtime dispatch                                    │ │ active: none  │
+│   Probe accepted the latest composer submission.           │ │ setup: idle   │
+│   prompt_chars: 27                                         │ │               │
 │                                                            │ └───────────────┘
-│                                                            │
-│                                                            │ ┌─ Apple FM ────┐
-│                                                            │ │ state: unavai │
+│ [assistant] Probe                                          │
+│   Probe owns the coding-agent runtime: sessions,           │ ┌─ Apple FM ────┐
+│ transcripts, tools, approvals, and CLI/TUI surfaces.       │ │ state: idle   │
 └────────────────────────────────────────────────────────────┘ └───────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: Apple FM unavailable | Tab/Shift+Tab | Ctrl+R | F1 | Ctrl+C          │
+│ status: committed assistant turn | Tab/Shift+Tab | Ctrl+R | F1 | Ctrl+C      │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer ───────────────────────────────────────────────────────────────────┐

@@ -1,24 +1,24 @@
 ---
 source: crates/probe-tui/tests/hello_demo.rs
-assertion_line: 211
+assertion_line: 281
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  Chat │ Setup │ Events                                                       │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌─ Transcript ──────────────────────────────────────┐ ┌─ Shell Status ─────────┐
-│ [system] Shell Ready                              │ │ phase: completed       │
-│   Probe selected a retained transcript widget as  │ │ calls_done: 3          │
-│ the initial TUI model.                            │ │ focus: chat shell      │
-│   Press Ctrl+R to start or rerun the Apple FM     │ └────────────────────────┘
-│ prove-out.                                        │
-│                                                   │ ┌─ Bridge ───────────────┐
-│ [status] Availability Ready                       │ │ profile: psionic-apple │
-│   platform: macOS                                 │ │ base_url: http://127.0 │
-│   Apple FM admitted this machine for the setup    │ │ model: apple-foundatio │
-│ prove-out.                                        │ └────────────────────────┘
-└───────────────────────────────────────────────────┘
+┌─ Transcript ───────────────────────────────────────────────┐ ┌─ Shell ───────┐
+│ [status] Availability Ready                                │ │ focus: chat   │
+│   platform: macOS                                          │ │ stack: 1      │
+│   Apple FM admitted this machine for the setup prove-out.  │ │ turns: 5      │
+│                                                            │ │ active: none  │
+│ [tool] Call 1/3: Sanity Check                              │ │ setup: comple │
+│   Prompt                                                   │ │               │
+│   Reply with exactly READY.                                │ └───────────────┘
+│   Response                                                 │
+│   READY                                                    │ ┌─ Apple FM ────┐
+│   response_id: resp-1                                      │ │ state: comple │
+└────────────────────────────────────────────────────────────┘ └───────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ status: Apple FM setup completed | Tab/Shift+Tab | Ctrl+R | F1 | Ctrl+C      │

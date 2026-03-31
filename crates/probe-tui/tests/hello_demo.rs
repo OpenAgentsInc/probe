@@ -1,7 +1,7 @@
 use insta::assert_snapshot;
 use probe_tui::{
-    AppMessage, AppShell, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
-    AppleFmUsageSummary, UiEvent,
+    ActiveTurn, AppMessage, AppShell, AppleFmAvailabilitySummary, AppleFmBackendSummary,
+    AppleFmCallRecord, AppleFmUsageSummary, TranscriptEntry, TranscriptRole, UiEvent,
 };
 
 #[test]
@@ -17,6 +17,76 @@ fn help_modal_snapshot_is_stable() {
     app.dispatch(UiEvent::OpenHelp);
     let snapshot = app.render_to_string(80, 24);
     assert_snapshot!("hello_demo_help_modal", snapshot);
+}
+
+#[test]
+fn transcript_running_turn_snapshot_is_stable() {
+    let mut app = AppShell::new_for_tests();
+    app.apply_message(AppMessage::TranscriptEntryCommitted {
+        entry: TranscriptEntry::new(
+            TranscriptRole::User,
+            "You",
+            vec![String::from("Summarize what Probe owns.")],
+        ),
+    });
+    app.apply_message(AppMessage::TranscriptEntryCommitted {
+        entry: TranscriptEntry::new(
+            TranscriptRole::Tool,
+            "Runtime dispatch",
+            vec![
+                String::from("Probe accepted the latest composer submission."),
+                String::from("prompt_chars: 27"),
+            ],
+        ),
+    });
+    app.apply_message(AppMessage::TranscriptActiveTurnSet {
+        turn: ActiveTurn::new(
+            TranscriptRole::Assistant,
+            "Probe",
+            vec![
+                String::from("Drafting a reply through the background worker seam."),
+                String::from("This is the live active-turn cell."),
+            ],
+        ),
+    });
+
+    let snapshot = app.render_to_string(80, 24);
+    assert_snapshot!("hello_demo_transcript_running_turn", snapshot);
+}
+
+#[test]
+fn transcript_committed_turn_snapshot_is_stable() {
+    let mut app = AppShell::new_for_tests();
+    app.apply_message(AppMessage::TranscriptEntryCommitted {
+        entry: TranscriptEntry::new(
+            TranscriptRole::User,
+            "You",
+            vec![String::from("Summarize what Probe owns.")],
+        ),
+    });
+    app.apply_message(AppMessage::TranscriptEntryCommitted {
+        entry: TranscriptEntry::new(
+            TranscriptRole::Tool,
+            "Runtime dispatch",
+            vec![
+                String::from("Probe accepted the latest composer submission."),
+                String::from("prompt_chars: 27"),
+            ],
+        ),
+    });
+    app.apply_message(AppMessage::TranscriptEntryCommitted {
+        entry: TranscriptEntry::new(
+            TranscriptRole::Assistant,
+            "Probe",
+            vec![
+                String::from("Probe owns the coding-agent runtime: sessions, transcripts, tools, approvals, and CLI/TUI surfaces."),
+                String::from("Next step: wire this transcript shell into the real controller turn loop."),
+            ],
+        ),
+    });
+
+    let snapshot = app.render_to_string(80, 24);
+    assert_snapshot!("hello_demo_transcript_committed_turn", snapshot);
 }
 
 #[test]

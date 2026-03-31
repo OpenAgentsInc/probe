@@ -130,14 +130,18 @@ impl AppShell {
             {
                 let pane_state = self.bottom_pane_state();
                 if let Some(submitted) = self.bottom_pane.handle_event(event, &pane_state) {
+                    self.base_screen_mut().submit_user_turn(submitted.as_str());
                     self.base_screen_mut().record_event(format!(
-                        "captured composer submission: {}",
+                        "queued assistant demo reply: {}",
                         preview(submitted.as_str(), 48)
                     ));
-                    self.last_status = format!(
-                        "captured composer submission ({} chars)",
-                        submitted.chars().count()
-                    );
+                    self.last_status =
+                        format!("submitted chat turn ({} chars)", submitted.chars().count());
+                    if let Err(error) = self.submit_background_task(
+                        BackgroundTaskRequest::transcript_demo_reply(submitted),
+                    ) {
+                        self.last_status = error;
+                    }
                 }
             }
             _ => {
@@ -180,8 +184,9 @@ impl AppShell {
     }
 
     pub fn submit_background_task(&mut self, request: BackgroundTaskRequest) -> Result<(), String> {
-        let backend = request.backend();
-        self.base_screen_mut().prepare_for_setup(backend);
+        if let Some(backend) = request.setup_backend() {
+            self.base_screen_mut().prepare_for_setup(backend);
+        }
         self.last_status = format!("queued {}", request.title());
         self.worker.submit(request)
     }
@@ -417,12 +422,52 @@ mod tests {
         app.dispatch(UiEvent::ComposerInsert('!'));
         app.dispatch(UiEvent::ComposerSubmit);
 
-        assert_eq!(app.last_status(), "captured composer submission (4 chars)");
+        let rendered = app.render_to_string(120, 32);
+        assert!(rendered.contains("[user] You"));
+        assert!(rendered.contains("hi"));
+        assert!(rendered.contains("!"));
         assert!(
             app.recent_events()
                 .iter()
-                .any(|entry| entry.contains("captured composer submission: hi"))
+                .any(|entry| entry.contains("queued assistant demo reply: hi"))
         );
+    }
+
+    #[test]
+    fn composer_submission_drives_live_active_turn_then_commits_reply() {
+        let mut app = AppShell::new_for_tests();
+
+        for event in [
+            UiEvent::ComposerInsert('h'),
+            UiEvent::ComposerInsert('e'),
+            UiEvent::ComposerInsert('l'),
+            UiEvent::ComposerInsert('l'),
+            UiEvent::ComposerInsert('o'),
+            UiEvent::ComposerSubmit,
+        ] {
+            app.dispatch(event);
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_active_turn = false;
+        while Instant::now() < deadline {
+            app.poll_background_messages();
+            let rendered = app.render_to_string(120, 32);
+            if rendered.contains("[active assistant] Probe") {
+                saw_active_turn = true;
+            }
+            if app
+                .worker_events()
+                .iter()
+                .any(|entry| entry.contains("committed assistant turn: Probe"))
+            {
+                assert!(saw_active_turn);
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!("timed out waiting for live assistant turn to commit");
     }
 
     #[test]

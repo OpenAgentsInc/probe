@@ -109,3 +109,7 @@ This folder holds technical planning docs for the Probe runtime.
   - the first real bottom-pane seam for Probe TUI input: a cursor-bearing
     composer, modifier-based global shell commands, explicit disabled/busy
     states, and bottom-pane-owned status rendering instead of a passive footer
+- `38-probe-tui-transcript-turn-rendering.md`
+  - the first real chat transcript turn model for Probe TUI, including visible
+    user/tool/assistant entries, a worker-driven active-turn cell, and a more
+    transcript-dominant shell layout

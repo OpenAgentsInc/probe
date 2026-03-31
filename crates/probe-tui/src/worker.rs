@@ -1,9 +1,10 @@
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use probe_core::provider::{
-    PlainTextMessage, PlainTextProviderResponse, ProviderError, ProviderUsageTruth,
-    complete_plain_text,
+    complete_plain_text, PlainTextMessage, PlainTextProviderResponse, ProviderError,
+    ProviderUsageTruth,
 };
 use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError};
 use psionic_apple_fm::AppleFmSystemLanguageModelAvailability;
@@ -12,6 +13,7 @@ use crate::message::{
     AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
     AppleFmFailureSummary, AppleFmUsageSummary, BackgroundTaskRequest,
 };
+use crate::transcript::{ActiveTurn, TranscriptEntry, TranscriptRole};
 
 const APPLE_FM_SETUP_SYSTEM_PROMPT: &str = "You are Probe's Apple Foundation Models setup check. Keep responses short and follow explicit formatting requests exactly.";
 const APPLE_FM_SETUP_PROMPTS: [(&str, &str); 3] = [
@@ -98,7 +100,86 @@ fn worker_loop(command_rx: Receiver<WorkerCommand>, message_tx: Sender<AppMessag
 fn run_request(request: BackgroundTaskRequest, message_tx: &Sender<AppMessage>) {
     match request {
         BackgroundTaskRequest::AppleFmSetup { profile } => run_apple_fm_setup(profile, message_tx),
+        BackgroundTaskRequest::TranscriptDemoReply { prompt } => {
+            run_transcript_demo_reply(prompt.as_str(), message_tx)
+        }
     }
+}
+
+fn run_transcript_demo_reply(prompt: &str, message_tx: &Sender<AppMessage>) {
+    let prompt_preview = inline_preview(prompt, 56);
+    let prompt_lines = prompt.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+
+    if message_tx
+        .send(AppMessage::TranscriptEntryCommitted {
+            entry: TranscriptEntry::new(
+                TranscriptRole::Tool,
+                "Runtime dispatch",
+                vec![
+                    String::from("Probe accepted the latest composer submission."),
+                    format!("prompt_chars: {}", prompt.chars().count()),
+                    format!("prompt_preview: {prompt_preview}"),
+                ],
+            ),
+        })
+        .is_err()
+    {
+        return;
+    }
+
+    if message_tx
+        .send(AppMessage::TranscriptActiveTurnSet {
+            turn: ActiveTurn::new(
+                TranscriptRole::Assistant,
+                "Probe",
+                vec![
+                    String::from("Drafting a reply through the background worker seam."),
+                    format!("Prompt preview: {prompt_preview}"),
+                ],
+            ),
+        })
+        .is_err()
+    {
+        return;
+    }
+
+    thread::sleep(Duration::from_millis(120));
+
+    if message_tx
+        .send(AppMessage::TranscriptActiveTurnSet {
+            turn: ActiveTurn::new(
+                TranscriptRole::Assistant,
+                "Probe",
+                vec![
+                    String::from("Committing the first real chat-shell transcript turn."),
+                    String::from(
+                        "This active cell mutates before the final assistant entry lands.",
+                    ),
+                ],
+            ),
+        })
+        .is_err()
+    {
+        return;
+    }
+
+    thread::sleep(Duration::from_millis(120));
+
+    let mut response_lines = vec![
+        String::from("Probe captured your message as a user turn and routed it through the retained transcript shell."),
+        String::from("This assistant reply is still deterministic demo logic behind the worker boundary."),
+    ];
+    if !prompt_lines.is_empty() {
+        response_lines.push(String::from("Prompt"));
+        response_lines.extend(prompt_lines);
+    }
+    response_lines.push(String::from(
+        "Next step: replace this demo reply path with the real Probe controller turn loop.",
+    ));
+
+    let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
+        entry: TranscriptEntry::new(TranscriptRole::Assistant, "Probe", response_lines),
+    });
 }
 
 fn run_apple_fm_setup(
@@ -115,18 +196,17 @@ fn run_apple_fm_setup(
         return;
     }
 
-    let provider = match AppleFmProviderClient::new(AppleFmProviderConfig::from_backend_profile(
-        &profile,
-    )) {
-        Ok(provider) => provider,
-        Err(error) => {
-            let _ = message_tx.send(AppMessage::AppleFmSetupFailed {
-                backend,
-                failure: failure_from_availability_error("provider_init", &error),
-            });
-            return;
-        }
-    };
+    let provider =
+        match AppleFmProviderClient::new(AppleFmProviderConfig::from_backend_profile(&profile)) {
+            Ok(provider) => provider,
+            Err(error) => {
+                let _ = message_tx.send(AppMessage::AppleFmSetupFailed {
+                    backend,
+                    failure: failure_from_availability_error("provider_init", &error),
+                });
+                return;
+            }
+        };
 
     let availability = match provider.system_model_availability() {
         Ok(availability) => availability,
@@ -184,7 +264,10 @@ fn run_apple_fm_setup(
                 let _ = message_tx.send(AppMessage::AppleFmSetupFailed {
                     backend,
                     failure: failure_from_provider_error(
-                        format!("call_{call_index}_{}", title.to_lowercase().replace(' ', "_")),
+                        format!(
+                            "call_{call_index}_{}",
+                            title.to_lowercase().replace(' ', "_")
+                        ),
                         &error,
                     ),
                 });
@@ -251,7 +334,10 @@ fn usage_summary_from_response(
         return AppleFmUsageSummary::default();
     };
     AppleFmUsageSummary {
-        prompt_tokens: usage.prompt_tokens_detail.as_ref().map(|detail| detail.value),
+        prompt_tokens: usage
+            .prompt_tokens_detail
+            .as_ref()
+            .map(|detail| detail.value),
         prompt_truth: usage.prompt_tokens_detail.as_ref().map(usage_truth_label),
         completion_tokens: usage
             .completion_tokens_detail
@@ -261,7 +347,10 @@ fn usage_summary_from_response(
             .completion_tokens_detail
             .as_ref()
             .map(usage_truth_label),
-        total_tokens: usage.total_tokens_detail.as_ref().map(|detail| detail.value),
+        total_tokens: usage
+            .total_tokens_detail
+            .as_ref()
+            .map(|detail| detail.value),
         total_truth: usage.total_tokens_detail.as_ref().map(usage_truth_label),
     }
 }
@@ -288,7 +377,10 @@ fn failure_from_availability_error(
     }
 }
 
-fn failure_from_provider_error(stage: impl Into<String>, error: &ProviderError) -> AppleFmFailureSummary {
+fn failure_from_provider_error(
+    stage: impl Into<String>,
+    error: &ProviderError,
+) -> AppleFmFailureSummary {
     let receipt = error.backend_turn_receipt();
     let failure = receipt.and_then(|receipt| receipt.failure);
     AppleFmFailureSummary {
@@ -296,9 +388,24 @@ fn failure_from_provider_error(stage: impl Into<String>, error: &ProviderError) 
         detail: error.to_string(),
         reason_code: failure.as_ref().and_then(|failure| failure.code.clone()),
         retryable: failure.as_ref().and_then(|failure| failure.retryable),
-        failure_reason: failure.as_ref().and_then(|failure| failure.failure_reason.clone()),
+        failure_reason: failure
+            .as_ref()
+            .and_then(|failure| failure.failure_reason.clone()),
         recovery_suggestion: failure
             .as_ref()
             .and_then(|failure| failure.recovery_suggestion.clone()),
     }
+}
+
+fn inline_preview(value: &str, max_chars: usize) -> String {
+    let mut preview = String::new();
+    for ch in value.chars() {
+        let ch = if ch == '\n' { ' ' } else { ch };
+        if preview.chars().count() >= max_chars {
+            preview.push_str("...");
+            return preview;
+        }
+        preview.push(ch);
+    }
+    preview
 }

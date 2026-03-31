@@ -1,8 +1,11 @@
 use probe_protocol::backend::BackendProfile;
 
+use crate::transcript::{ActiveTurn, TranscriptEntry};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackgroundTaskRequest {
     AppleFmSetup { profile: BackendProfile },
+    TranscriptDemoReply { prompt: String },
 }
 
 impl BackgroundTaskRequest {
@@ -12,16 +15,33 @@ impl BackgroundTaskRequest {
     }
 
     #[must_use]
-    pub fn backend(&self) -> AppleFmBackendSummary {
-        match self {
-            Self::AppleFmSetup { profile } => AppleFmBackendSummary::from_profile(profile),
+    pub fn transcript_demo_reply(prompt: impl Into<String>) -> Self {
+        Self::TranscriptDemoReply {
+            prompt: prompt.into(),
         }
     }
 
     #[must_use]
-    pub fn profile(&self) -> &BackendProfile {
+    pub fn setup_backend(&self) -> Option<AppleFmBackendSummary> {
         match self {
-            Self::AppleFmSetup { profile } => profile,
+            Self::AppleFmSetup { profile } => Some(AppleFmBackendSummary::from_profile(profile)),
+            Self::TranscriptDemoReply { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn prompt(&self) -> Option<&str> {
+        match self {
+            Self::AppleFmSetup { .. } => None,
+            Self::TranscriptDemoReply { prompt } => Some(prompt.as_str()),
+        }
+    }
+
+    #[must_use]
+    pub fn profile(&self) -> Option<&BackendProfile> {
+        match self {
+            Self::AppleFmSetup { profile } => Some(profile),
+            Self::TranscriptDemoReply { .. } => None,
         }
     }
 
@@ -29,6 +49,7 @@ impl BackgroundTaskRequest {
     pub const fn title(&self) -> &'static str {
         match self {
             Self::AppleFmSetup { .. } => "Apple FM setup demo",
+            Self::TranscriptDemoReply { .. } => "transcript demo reply",
         }
     }
 }
@@ -94,6 +115,12 @@ pub struct AppleFmFailureSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppMessage {
+    TranscriptActiveTurnSet {
+        turn: ActiveTurn,
+    },
+    TranscriptEntryCommitted {
+        entry: TranscriptEntry,
+    },
     AppleFmSetupStarted {
         backend: AppleFmBackendSummary,
     },
