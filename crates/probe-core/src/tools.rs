@@ -1657,9 +1657,7 @@ fn denied_by_policy(
     tool_name: &str,
     class_name: &str,
 ) -> (ToolPolicyDecision, ToolApprovalState, Option<String>) {
-    let reason = Some(format!(
-        "tool `{tool_name}` requires {class_name} approval under the active local policy"
-    ));
+    let reason = Some(format!("tool `{tool_name}` requires {class_name} approval"));
     match approval.denied_action {
         ToolDeniedAction::Refuse => (
             ToolPolicyDecision::Refused,

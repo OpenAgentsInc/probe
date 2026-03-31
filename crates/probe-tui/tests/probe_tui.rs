@@ -51,9 +51,7 @@ fn approval_overlay_snapshot_is_stable() {
                 "new_text": "probe"
             }),
             risk_class: ToolRiskClass::Write,
-            reason: Some(String::from(
-                "tool `apply_patch` requires write approval under the active local policy",
-            )),
+            reason: Some(String::from("tool `apply_patch` requires write approval")),
             tool_call_turn_index: 1,
             paused_result_turn_index: 2,
             requested_at_ms: 1,

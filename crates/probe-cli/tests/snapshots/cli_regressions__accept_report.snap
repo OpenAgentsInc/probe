@@ -435,7 +435,7 @@ expression: report
         {
           "assistant_text": null,
           "attempt_index": 0,
-          "error": "session <session-id> paused for approval on tool `apply_patch` (call_blocked_patch_1): tool `apply_patch` requires write approval under the active local policy",
+          "error": "session <session-id> paused for approval on tool `apply_patch` (call_blocked_patch_1): tool `apply_patch` requires write approval",
           "executed_tool_calls": 0,
           "failure_category": null,
           "observability": {
@@ -459,7 +459,7 @@ expression: report
         {
           "assistant_text": null,
           "attempt_index": 1,
-          "error": "session <session-id> paused for approval on tool `apply_patch` (call_blocked_patch_2): tool `apply_patch` requires write approval under the active local policy",
+          "error": "session <session-id> paused for approval on tool `apply_patch` (call_blocked_patch_2): tool `apply_patch` requires write approval",
           "executed_tool_calls": 0,
           "failure_category": null,
           "observability": {
@@ -483,7 +483,7 @@ expression: report
       ],
       "case_index": 5,
       "case_name": "approval_pause_or_refusal",
-      "error": "session <session-id> paused for approval on tool `apply_patch` (call_blocked_patch_1): tool `apply_patch` requires write approval under the active local policy",
+      "error": "session <session-id> paused for approval on tool `apply_patch` (call_blocked_patch_1): tool `apply_patch` requires write approval",
       "failed_attempts": 0,
       "failure_category": null,
       "latest_assistant_text": null,

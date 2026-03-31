@@ -3608,7 +3608,7 @@ mod tests {
                 assert_eq!(tool.tool_execution.approval_state, ToolApprovalState::Pending);
                 assert_eq!(
                     tool.tool_execution.reason.as_deref(),
-                    Some("tool `apply_patch` requires write approval under the active local policy")
+                    Some("tool `apply_patch` requires write approval")
                 );
                 assert_eq!(tool.output["error"], "tool execution blocked by local approval policy");
             }

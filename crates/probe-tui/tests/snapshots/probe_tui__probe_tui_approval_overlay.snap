@@ -13,7 +13,6 @@ expression: snapshot
            │ requested_turn: 1                                      │
            │ paused_turn: 2                                         │
            │ reason: tool `apply_patch` requires write approval     │
-           │ under the active local policy                          │
            │                                                        │
            │ arguments                                              │
            │   {                                                    │
@@ -21,4 +20,5 @@ expression: snapshot
            │     "old_text": "world",                               │
            │     "path": "hello.txt"                                │
            │   }                                                    │
+           │                                                        │
            └────────────────────────────────────────────────────────┘
