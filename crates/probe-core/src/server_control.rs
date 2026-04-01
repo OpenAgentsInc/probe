@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::backend_profiles::{PSIONIC_APPLE_FM_MODEL, PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL};
 
 const DEFAULT_SERVER_CONFIG_PATH: &str = "server/psionic-local.json";
+const DEFAULT_OPENAI_SERVER_CONFIG_PATH: &str = "server/psionic-openai-chat-completions.json";
+const DEFAULT_APPLE_FM_SERVER_CONFIG_PATH: &str = "server/psionic-apple-fm.json";
 const DEFAULT_SERVER_HOST: &str = "127.0.0.1";
 const DEFAULT_OPENAI_SERVER_PORT: u16 = 8080;
 const DEFAULT_APPLE_FM_SERVER_PORT: u16 = 11435;
@@ -175,6 +177,14 @@ impl PsionicServerConfig {
     }
 
     #[must_use]
+    pub fn backend_config_path(probe_home: &Path, api_kind: BackendKind) -> PathBuf {
+        probe_home.join(match api_kind {
+            BackendKind::OpenAiChatCompletions => DEFAULT_OPENAI_SERVER_CONFIG_PATH,
+            BackendKind::AppleFmBridge => DEFAULT_APPLE_FM_SERVER_CONFIG_PATH,
+        })
+    }
+
+    #[must_use]
     pub fn base_url(&self) -> String {
         match self.api_kind {
             BackendKind::OpenAiChatCompletions => format!("http://{}:{}/v1", self.host, self.port),
@@ -240,6 +250,21 @@ impl PsionicServerConfig {
 
         let config = Self::default();
         config.save(path)?;
+        Ok(config)
+    }
+
+    pub fn load_or_default_for_backend(
+        probe_home: &Path,
+        api_kind: BackendKind,
+    ) -> Result<Self, ServerControlError> {
+        let path = Self::backend_config_path(probe_home, api_kind);
+        let mut config = if path.exists() {
+            let file = fs::File::open(path)?;
+            serde_json::from_reader(file)?
+        } else {
+            Self::default()
+        };
+        config.set_api_kind(api_kind);
         Ok(config)
     }
 
@@ -543,8 +568,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        PsionicServerConfig, PsionicServerMode, ServerConfigOverrides, ServerProcessGuard,
-        ServerTargetKind,
+        DEFAULT_APPLE_FM_SERVER_PORT, PSIONIC_APPLE_FM_MODEL, PsionicServerConfig,
+        PsionicServerMode, ServerConfigOverrides, ServerProcessGuard, ServerTargetKind,
     };
 
     #[test]
@@ -600,6 +625,61 @@ mod tests {
         .operator_summary();
         assert_eq!(launched.target_kind, ServerTargetKind::ManagedLaunch);
         assert_eq!(launched.attach_mode_label(), "launch");
+    }
+
+    #[test]
+    fn backend_config_paths_are_backend_specific() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        assert_eq!(
+            PsionicServerConfig::backend_config_path(
+                temp.path(),
+                BackendKind::OpenAiChatCompletions
+            ),
+            temp.path().join("server/psionic-openai-chat-completions.json")
+        );
+        assert_eq!(
+            PsionicServerConfig::backend_config_path(temp.path(), BackendKind::AppleFmBridge),
+            temp.path().join("server/psionic-apple-fm.json")
+        );
+    }
+
+    #[test]
+    fn load_or_default_for_backend_uses_saved_backend_snapshot() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut qwen = PsionicServerConfig::default();
+        qwen.host = String::from("100.108.56.85");
+        qwen.port = 8080;
+        qwen.model_id = Some(String::from("remote-qwen.gguf"));
+        qwen
+            .save(
+                PsionicServerConfig::backend_config_path(
+                    temp.path(),
+                    BackendKind::OpenAiChatCompletions,
+                )
+                .as_path(),
+            )
+            .expect("save qwen snapshot");
+
+        let loaded = PsionicServerConfig::load_or_default_for_backend(
+            temp.path(),
+            BackendKind::OpenAiChatCompletions,
+        )
+        .expect("load saved qwen snapshot");
+        assert_eq!(loaded.host, "100.108.56.85");
+        assert_eq!(loaded.port, 8080);
+        assert_eq!(loaded.resolved_model_id().as_deref(), Some("remote-qwen.gguf"));
+
+        let apple = PsionicServerConfig::load_or_default_for_backend(
+            temp.path(),
+            BackendKind::AppleFmBridge,
+        )
+        .expect("default apple fm snapshot");
+        assert_eq!(apple.api_kind, BackendKind::AppleFmBridge);
+        assert_eq!(apple.port, DEFAULT_APPLE_FM_SERVER_PORT);
+        assert_eq!(
+            apple.resolved_model_id().as_deref(),
+            Some(PSIONIC_APPLE_FM_MODEL)
+        );
     }
 
     #[test]

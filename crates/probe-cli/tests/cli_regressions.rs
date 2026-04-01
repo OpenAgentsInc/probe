@@ -172,7 +172,9 @@ fn write_attach_server_config(
 fn normalize_exec_stderr(raw: &str, environment: &ProbeTestEnvironment) -> String {
     raw.lines()
         .map(|line| {
-            if line.starts_with("session=") {
+            if line.starts_with("backend_target ") {
+                normalize_backend_target_line(line)
+            } else if line.starts_with("session=") {
                 normalize_session_line(line, environment)
             } else if line.starts_with("observability ") {
                 normalize_observability_line(line)
@@ -182,6 +184,21 @@ fn normalize_exec_stderr(raw: &str, environment: &ProbeTestEnvironment) -> Strin
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn normalize_backend_target_line(line: &str) -> String {
+    line.split_whitespace()
+        .map(|field| {
+            if field.starts_with("target=") {
+                String::from("target=<target>")
+            } else if field.starts_with("base_url=") {
+                String::from("base_url=<base-url>")
+            } else {
+                field.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn normalize_session_line(line: &str, environment: &ProbeTestEnvironment) -> String {

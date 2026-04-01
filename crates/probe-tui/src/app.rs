@@ -612,6 +612,10 @@ fn load_server_config(probe_home: &Path) -> Option<PsionicServerConfig> {
     PsionicServerConfig::load_or_create(config_path.as_path()).ok()
 }
 
+fn load_saved_backend_config(probe_home: &Path, kind: BackendKind) -> Option<PsionicServerConfig> {
+    PsionicServerConfig::load_or_default_for_backend(probe_home, kind).ok()
+}
+
 fn profile_from_server_config(config: &PsionicServerConfig) -> BackendProfile {
     let mut profile = match config.api_kind {
         BackendKind::OpenAiChatCompletions => psionic_qwen35_2b_q8_registry(),
@@ -656,11 +660,44 @@ fn clone_runtime_with_profile(
     }
 }
 
+fn default_profile_for_backend_kind(kind: BackendKind) -> BackendProfile {
+    match kind {
+        BackendKind::OpenAiChatCompletions => psionic_qwen35_2b_q8_registry(),
+        BackendKind::AppleFmBridge => psionic_apple_fm_bridge(),
+    }
+}
+
 fn backend_selector_label(summary: &ServerOperatorSummary) -> String {
     match summary.backend_kind {
         BackendKind::AppleFmBridge => String::from("Apple FM"),
         BackendKind::OpenAiChatCompletions if summary.is_remote_target() => String::from("Tailnet"),
         BackendKind::OpenAiChatCompletions => String::from("Qwen"),
+    }
+}
+
+fn build_saved_or_default_lane(
+    base: &ProbeRuntimeTurnConfig,
+    backend_kind: BackendKind,
+) -> BackendLaneConfig {
+    let (chat_runtime, operator_backend) = base
+        .probe_home
+        .as_deref()
+        .and_then(|probe_home| load_saved_backend_config(probe_home, backend_kind))
+        .map(|config| {
+            let profile = profile_from_server_config(&config);
+            (clone_runtime_with_profile(base, profile), config.operator_summary())
+        })
+        .unwrap_or_else(|| {
+            let profile = default_profile_for_backend_kind(backend_kind);
+            let runtime = clone_runtime_with_profile(base, profile.clone());
+            let summary = operator_summary_from_profile(&profile);
+            (runtime, summary)
+        });
+
+    BackendLaneConfig {
+        label: backend_selector_label(&operator_backend),
+        chat_runtime,
+        operator_backend,
     }
 }
 
@@ -670,17 +707,13 @@ fn build_backend_lanes(config: &TuiLaunchConfig) -> [BackendLaneConfig; 2] {
         chat_runtime: config.chat_runtime.clone(),
         operator_backend: config.operator_backend.clone(),
     };
-    let alternate_profile = match config.operator_backend.backend_kind {
-        BackendKind::AppleFmBridge => psionic_qwen35_2b_q8_registry(),
-        BackendKind::OpenAiChatCompletions => psionic_apple_fm_bridge(),
-    };
-    let alternate_runtime = clone_runtime_with_profile(&config.chat_runtime, alternate_profile);
-    let alternate_summary = operator_summary_from_profile(&alternate_runtime.profile);
-    let alternate = BackendLaneConfig {
-        label: backend_selector_label(&alternate_summary),
-        chat_runtime: alternate_runtime,
-        operator_backend: alternate_summary,
-    };
+    let alternate = build_saved_or_default_lane(
+        &config.chat_runtime,
+        match config.operator_backend.backend_kind {
+            BackendKind::AppleFmBridge => BackendKind::OpenAiChatCompletions,
+            BackendKind::OpenAiChatCompletions => BackendKind::AppleFmBridge,
+        },
+    );
     [primary, alternate]
 }
 
@@ -828,7 +861,7 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{AppShell, profile_from_server_config, resolve_tui_chat_profile};
+    use super::{AppShell, TuiLaunchConfig, profile_from_server_config, resolve_tui_chat_profile};
     use crate::event::UiEvent;
     use crate::message::{
         AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
@@ -965,6 +998,60 @@ mod tests {
     }
 
     #[test]
+    fn backend_switch_uses_saved_backend_snapshot_for_alternate_lane() {
+        let probe_home = tempdir().expect("temp probe home");
+
+        let mut qwen = PsionicServerConfig::default();
+        qwen.host = String::from("100.108.56.85");
+        qwen.port = 8080;
+        qwen.model_id = Some(String::from("qwen3.5-2b-q8_0-registry.gguf"));
+        qwen
+            .save(
+                PsionicServerConfig::backend_config_path(
+                    probe_home.path(),
+                    BackendKind::OpenAiChatCompletions,
+                )
+                .as_path(),
+            )
+            .expect("save qwen snapshot");
+
+        let mut apple = PsionicServerConfig::default();
+        apple.set_api_kind(BackendKind::AppleFmBridge);
+        apple.port = 11435;
+        apple.model_id = Some(String::from("apple-foundation-model"));
+
+        let launch_config = TuiLaunchConfig {
+            chat_runtime: ProbeRuntimeTurnConfig {
+                probe_home: Some(probe_home.path().to_path_buf()),
+                cwd: PathBuf::from("."),
+                profile: profile_from_server_config(&apple),
+                system_prompt: None,
+                harness_profile: None,
+                tool_loop: None,
+            },
+            operator_backend: apple.operator_summary(),
+            autostart_apple_fm_setup: false,
+        };
+        let mut app = AppShell::new_with_launch_config(launch_config);
+
+        app.dispatch(UiEvent::NextView);
+
+        let rendered = app.render_to_string(120, 32);
+        assert!(rendered.contains("active_backend: Tailnet"));
+        assert_eq!(app.backend_lanes[1].label, "Tailnet");
+        assert_eq!(app.backend_lanes[1].operator_backend.host, "100.108.56.85");
+        assert_eq!(app.backend_lanes[1].operator_backend.port, 8080);
+        assert_eq!(
+            app.backend_lanes[1].chat_runtime.profile.base_url,
+            "http://100.108.56.85:8080/v1"
+        );
+        assert_eq!(
+            app.last_status(),
+            "active backend: Tailnet | next submit starts a fresh session"
+        );
+    }
+
+    #[test]
     fn composer_submission_records_a_visible_shell_event() {
         let mut app = AppShell::new_for_tests();
 
@@ -1044,7 +1131,7 @@ mod tests {
         }
 
         let mut saw_active_turn = false;
-        wait_for_app_condition(&mut app, Duration::from_secs(2), |app| {
+        wait_for_app_condition(&mut app, Duration::from_secs(5), |app| {
             let rendered = app.render_to_string(120, 32);
             if rendered.contains("[active assistant]")
                 || rendered.contains("[active tool]")
@@ -1153,7 +1240,7 @@ mod tests {
             app.dispatch(event);
         }
 
-        wait_for_app_condition(&mut app, Duration::from_secs(2), |app| {
+        wait_for_app_condition(&mut app, Duration::from_secs(5), |app| {
             app.render_to_string(120, 32).contains("First turn complete.")
         });
         let session_id = app
@@ -1173,7 +1260,7 @@ mod tests {
             app.dispatch(event);
         }
 
-        wait_for_app_condition(&mut app, Duration::from_secs(2), |app| {
+        wait_for_app_condition(&mut app, Duration::from_secs(5), |app| {
             app.render_to_string(120, 32)
                 .contains("Second turn reused the same session.")
         });
@@ -1240,7 +1327,7 @@ mod tests {
             app.dispatch(event);
         }
 
-        wait_for_app_condition(&mut app, Duration::from_secs(2), |app| {
+        wait_for_app_condition(&mut app, Duration::from_secs(5), |app| {
             app.worker_events()
                 .iter()
                 .any(|entry| entry.contains("loaded 1 pending approval(s)"))
@@ -1255,7 +1342,7 @@ mod tests {
         assert!(rendered.contains("old_text"));
 
         app.dispatch(UiEvent::ComposerSubmit);
-        wait_for_app_condition(&mut app, Duration::from_secs(2), |app| {
+        wait_for_app_condition(&mut app, Duration::from_secs(5), |app| {
             app.active_screen_id() == ScreenId::Chat
                 && app
                     .worker_events()

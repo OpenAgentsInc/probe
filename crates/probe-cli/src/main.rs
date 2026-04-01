@@ -1056,6 +1056,9 @@ fn prepare_server(
         .save(config_path.as_path())
         .map_err(|error| error.to_string())?;
     config
+        .save(PsionicServerConfig::backend_config_path(probe_home, desired_backend_kind).as_path())
+        .map_err(|error| error.to_string())?;
+    config
         .prepare(Duration::from_secs(15))
         .map_err(|error| error.to_string())
 }

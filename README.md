@@ -111,6 +111,10 @@ transcript-first home shell on screen at a time, and `Tab` flips the active
 runtime between the current Qwen or Tailnet lane and the Apple FM lane. When
 the backend changes, Probe resets the chat surface so the next submit starts a
 fresh session on that backend instead of continuing the previous runtime lane.
+Each backend lane now keeps its own saved attach config under
+`~/.probe/server/psionic-openai-chat-completions.json` or
+`~/.probe/server/psionic-apple-fm.json`, so switching back does not fabricate a
+fresh localhost target.
 
 Keys:
 

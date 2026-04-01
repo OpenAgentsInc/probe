@@ -2,7 +2,7 @@
 source: crates/probe-cli/tests/cli_regressions.rs
 expression: stderr
 ---
-backend_target surface=exec kind=openai_chat_completions attach_mode=attach transport=loopback_or_ssh_forward target=127.0.0.1:61205 model=tiny-qwen35 base_url=http://127.0.0.1:61205/v1
+backend_target surface=exec kind=openai_chat_completions attach_mode=attach transport=loopback_or_ssh_forward target=<target> model=tiny-qwen35 base_url=<base-url>
 session=<session-id> profile=psionic-qwen35-2b-q8-registry model=tiny-qwen35 transcript=$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl
 harness_profile=coding_bootstrap_default@v1
 observability wallclock_ms=<dynamic> cache_signal=cold_start model_output_ms=<dynamic> prompt_tokens=42(exact) completion_tokens=3(exact) total_tokens=45(exact) completion_tps=<dynamic>
