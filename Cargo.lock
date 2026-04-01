@@ -1544,9 +1544,11 @@ dependencies = [
 name = "probe-decisions"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "probe-core",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

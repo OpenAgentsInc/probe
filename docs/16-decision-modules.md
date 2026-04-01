@@ -36,11 +36,12 @@ The first shipped module families are:
   - decides whether a bounded repo-analysis escalation is justified or whether
     the session should stay on the normal coding lane
 
-Both modules currently ship as simple heuristic baselines rather than learned
-artifacts.
+The current baseline and candidate variants now live as serializable manifest
+artifacts rather than only unit structs in Rust.
 
-That is intentional. The point of this issue is to establish the boundary and
-typed surfaces first.
+Rust still stays authoritative for evaluation and decision execution. The
+manifests make the candidate family optimizer-visible without moving runtime
+truth out of Probe.
 
 ## Offline Evaluation Path
 
@@ -50,22 +51,36 @@ Probe now supports an offline evaluation loop:
 
 ```bash
 cargo run -p probe-cli -- export \
-  --dataset decision \
-  --output ~/.probe/reports/probe_decision.jsonl
+  --dataset decision-cases \
+  --output ~/.probe/reports/probe_decision_cases
 ```
 
 2. evaluate the current heuristic modules against that dataset:
 
 ```bash
 cargo run -p probe-cli -- module-eval \
-  --dataset ~/.probe/reports/probe_decision.jsonl
+  --dataset ~/.probe/reports/probe_decision_cases
 ```
 
-The current CLI prints simple scorecards for:
+The current CLI can still read the old per-session summary JSONL, but the
+canonical path is now the decision-case bundle with train or validation
+membership and transcript provenance.
+
+The current built-in candidate manifests cover:
 
 - `heuristic_tool_route_v1`
+- `aggressive_tool_route_v2`
 - `heuristic_patch_readiness_v1`
+- `strict_patch_readiness_v2`
 - `heuristic_long_context_escalation_v1`
+
+Each manifest carries:
+
+- a stable candidate id
+- a family id
+- typed rule schemas
+- a stable manifest digest
+- a Rust evaluator that scores real exported decision cases
 
 ## Why This Matters
 

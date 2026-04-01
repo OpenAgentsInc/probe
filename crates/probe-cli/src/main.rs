@@ -18,7 +18,7 @@ use probe_core::backend_profiles::{
     named_backend_profile,
 };
 use probe_core::dataset_export::{
-    DatasetExportConfig, DatasetKind, DecisionSessionSummary, export_dataset,
+    DatasetExportConfig, DatasetKind, DecisionCaseRecord, DecisionSessionSummary, export_dataset,
 };
 use probe_core::harness::{render_harness_profile, resolve_harness_profile};
 use probe_core::runtime::{
@@ -34,8 +34,9 @@ use probe_core::tools::{
 };
 use probe_decisions::{
     AggressiveToolRouteModule, HeuristicLongContextEscalationModule, HeuristicPatchReadinessModule,
-    HeuristicToolRouteModule, StrictPatchReadinessModule, evaluate_long_context_module,
-    evaluate_patch_readiness_module, evaluate_tool_route_module,
+    HeuristicToolRouteModule, StrictPatchReadinessModule, builtin_decision_module_manifests,
+    evaluate_candidate_manifest, evaluate_long_context_module, evaluate_patch_readiness_module,
+    evaluate_tool_route_module,
 };
 use probe_optimizer::{
     CandidateComparisonReport, OptimizationScorecard, OptimizationTargetKind, PromotionRule,
@@ -801,6 +802,21 @@ fn run_export(args: ExportArgs) -> Result<(), String> {
 }
 
 fn run_module_eval(args: ModuleEvalArgs) -> Result<(), String> {
+    if let Ok(cases) = read_decision_case_dataset(args.dataset.as_path()) {
+        for manifest in builtin_decision_module_manifests() {
+            let scorecard = evaluate_candidate_manifest(
+                &cases,
+                &manifest,
+                &probe_decisions::DecisionModuleEvalSpec::all_splits(manifest.family),
+            )?;
+            eprintln!(
+                "module={} matched={} total={}",
+                scorecard.module_id, scorecard.matched_cases, scorecard.total_cases
+            );
+        }
+        return Ok(());
+    }
+
     let summaries = read_decision_dataset(args.dataset.as_path())?;
     let tool_route = evaluate_tool_route_module(&summaries, &HeuristicToolRouteModule);
     let patch_readiness =
@@ -904,6 +920,21 @@ fn read_decision_dataset(path: &Path) -> Result<Vec<DecisionSessionSummary>, Str
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
             serde_json::from_str::<DecisionSessionSummary>(line).map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+fn read_decision_case_dataset(path: &Path) -> Result<Vec<DecisionCaseRecord>, String> {
+    let dataset_path = if path.is_dir() {
+        path.join("decision_cases_all.jsonl")
+    } else {
+        path.to_path_buf()
+    };
+    let body = std::fs::read_to_string(&dataset_path).map_err(|error| error.to_string())?;
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<DecisionCaseRecord>(line).map_err(|error| error.to_string())
         })
         .collect()
 }
