@@ -29,6 +29,22 @@ The first adoption points now are:
 - `probe-cli` regression tests
 - `probe-tui` snapshot tests
 
+Probe now also has explicit top-level suite files for the runtime-facing test
+domains that were previously mostly trapped inside large inline modules:
+
+- `crates/probe-core/tests/runtime_suite.rs`
+- `crates/probe-core/tests/tool_suite.rs`
+- `crates/probe-core/tests/policy_suite.rs`
+- `crates/probe-core/tests/server_suite.rs`
+- `crates/probe-provider-openai/tests/provider_suite.rs`
+- `crates/probe-provider-apple-fm/tests/provider_suite.rs`
+- `crates/probe-tui/tests/runtime_suite.rs`
+
+Those suites are intentionally coarse-grained and ownership-oriented. The goal
+is to give future patches a stable landing zone for runtime, provider, tool,
+policy, server-control, and TUI coverage before we decide whether more of the
+remaining inline tests should migrate out.
+
 Those are the highest-value places because they drive most of the backend,
 session-loop, binary, and UI behavior that later acceptance, self-test, and
 matrix suites depend on.
@@ -82,6 +98,7 @@ This patch is the testing substrate for the next steps:
 - stable snapshot receipts
 - richer acceptance-report metadata
 - clearer local test-tier orchestration
+- domain-partitioned suite ownership across runtime, providers, policy, and UI
 
 Without a shared support crate, each of those would keep growing ad hoc test
 scaffolding inside unrelated crates.

@@ -32,6 +32,18 @@ CLI. It is useful when iterating on command output, transcript receipts,
 acceptance report shape, or other operator-visible behavior without rerunning
 everything else.
 
+The adjacent crate-level integration suites now cover:
+
+- runtime and session-loop behavior
+- tool and tool-policy behavior
+- server-control behavior
+- provider adapters
+- retained TUI runtime rendering
+
+Those suites still run under the normal workspace `test` lane, but the docs now
+name them explicitly so contributors stop treating the whole repo as one
+undifferentiated cargo-test bucket.
+
 ## Tier 3: Live Acceptance Path
 
 Use:
