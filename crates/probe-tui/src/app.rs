@@ -1129,7 +1129,7 @@ mod tests {
         );
         assert_eq!(app.runtime_session_id(), None);
         let rendered = app.render_to_string(120, 32);
-        assert!(rendered.contains("Transcript is empty."));
+        assert!(!rendered.contains("Transcript is empty."));
         assert!(!rendered.contains("codex lane message"));
         assert_eq!(app.last_status(), "codex reasoning level: xhigh");
     }
@@ -1176,7 +1176,7 @@ mod tests {
         assert_eq!(app.active_tab(), ActiveTab::Primary);
         assert_eq!(app.runtime_session_id(), None);
         let rendered_secondary = app.render_to_string(120, 32);
-        assert!(rendered_secondary.contains("Transcript is empty."));
+        assert!(!rendered_secondary.contains("Transcript is empty."));
         assert!(!rendered_secondary.contains("primary lane message"));
         app.apply_message(AppMessage::ProbeRuntimeSessionReady {
             session_id: String::from("sess_codex"),

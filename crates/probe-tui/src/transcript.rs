@@ -212,14 +212,6 @@ impl RetainedTranscript {
     pub fn as_text(&self) -> Text<'static> {
         let mut lines = Vec::new();
         if self.entries.is_empty() && self.active_turn.is_none() {
-            lines.push(Line::from("Transcript is empty."));
-            lines.push(Line::from(""));
-            lines.push(Line::from(
-                "Type in the composer to start a real chat turn.",
-            ));
-            lines.push(Line::from(
-                "Committed turns stay in app state while one explicit active turn renders live work.",
-            ));
             return Text::from(lines);
         }
 
@@ -275,10 +267,9 @@ mod tests {
     }
 
     #[test]
-    fn retained_transcript_has_explicit_empty_state() {
+    fn retained_transcript_is_blank_when_empty() {
         let transcript = RetainedTranscript::new();
         let rendered = lines_to_plain_text(&transcript);
-        assert!(rendered.contains("Transcript is empty."));
-        assert!(rendered.contains("Type in the composer"));
+        assert!(rendered.is_empty());
     }
 }
