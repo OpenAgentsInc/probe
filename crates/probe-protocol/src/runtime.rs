@@ -100,6 +100,7 @@ pub struct RuntimeCapabilities {
     pub supports_interrupt_requests: bool,
     pub supports_queued_turns: bool,
     pub supports_detached_session_registry: bool,
+    pub supports_detached_watch_subscriptions: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +244,42 @@ pub struct DetachedSessionSummary {
     pub recovery_note: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetachedSessionEventTruth {
+    Authoritative,
+    BestEffort,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DetachedSessionEventPayload {
+    SummaryUpdated {
+        summary: DetachedSessionSummary,
+        turn_control: InspectSessionTurnsResponse,
+    },
+    RuntimeProgress {
+        delivery: EventDeliveryGuarantee,
+        event: RuntimeProgressEvent,
+    },
+    PendingApprovalsUpdated {
+        approvals: Vec<PendingToolApproval>,
+    },
+    Note {
+        code: String,
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetachedSessionEventRecord {
+    pub cursor: u64,
+    pub session_id: SessionId,
+    pub timestamp_ms: TimestampMs,
+    pub truth: DetachedSessionEventTruth,
+    pub payload: DetachedSessionEventPayload,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelQueuedTurnRequest {
     pub session_id: SessionId,
@@ -373,6 +410,23 @@ pub struct ListDetachedSessionsResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadDetachedSessionLogRequest {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_cursor: Option<u64>,
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadDetachedSessionLogResponse {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<DetachedSessionEventRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_cursor: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListPendingApprovalsResponse {
     pub approvals: Vec<PendingToolApproval>,
 }
@@ -382,6 +436,22 @@ pub struct InspectDetachedSessionResponse {
     pub summary: DetachedSessionSummary,
     pub session: SessionSnapshot,
     pub turn_control: InspectSessionTurnsResponse,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchDetachedSessionRequest {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_cursor: Option<u64>,
+    pub replay_limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchDetachedSessionResponse {
+    pub session_id: SessionId,
+    pub replayed_events: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_cursor: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -508,6 +578,9 @@ pub enum ServerEvent {
         session_id: SessionId,
         approvals: Vec<PendingToolApproval>,
     },
+    DetachedSessionStream {
+        record: DetachedSessionEventRecord,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -524,8 +597,10 @@ pub enum RuntimeRequest {
     ResumeSession(SessionLookupRequest),
     ListSessions,
     ListDetachedSessions,
+    ReadDetachedSessionLog(ReadDetachedSessionLogRequest),
     InspectSession(SessionLookupRequest),
     InspectDetachedSession(SessionLookupRequest),
+    WatchDetachedSession(WatchDetachedSessionRequest),
     StartTurn(TurnRequest),
     ContinueTurn(TurnRequest),
     QueueTurn(TurnRequest),
@@ -545,8 +620,10 @@ pub enum RuntimeResponse {
     ResumeSession(SessionSnapshot),
     ListSessions(ListSessionsResponse),
     ListDetachedSessions(ListDetachedSessionsResponse),
+    ReadDetachedSessionLog(ReadDetachedSessionLogResponse),
     InspectSession(SessionSnapshot),
     InspectDetachedSession(InspectDetachedSessionResponse),
+    WatchDetachedSession(WatchDetachedSessionResponse),
     StartTurn(TurnResponse),
     ContinueTurn(TurnResponse),
     QueueTurn(QueueTurnResponse),
@@ -691,6 +768,7 @@ mod tests {
             supports_interrupt_requests: true,
             supports_queued_turns: true,
             supports_detached_session_registry: false,
+            supports_detached_watch_subscriptions: false,
         };
 
         let response_json = serde_json::to_value(&response).expect("response should encode");

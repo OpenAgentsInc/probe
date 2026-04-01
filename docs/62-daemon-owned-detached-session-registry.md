@@ -80,11 +80,13 @@ That keeps restart behavior honest:
 
 ## Current Limit
 
-This layer is still summary and inspection only.
+This layer is no longer summary-only.
 
-It does not yet add:
+Detached watch and log subscriptions now exist above it in
+`63-detached-session-watch-and-log-subscriptions.md`.
 
-- push watch or log subscriptions
+The remaining gap is now above the registry and watch substrate:
+
 - operator `probe ps|attach|logs|stop` commands
 - timeout or watchdog policy
 - first-party chat or TUI default attach flows

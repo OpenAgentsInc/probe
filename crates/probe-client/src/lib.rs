@@ -13,16 +13,17 @@ use probe_core::runtime::{
 };
 use probe_core::tools::{ExecutedToolCall, ProbeToolChoice, ToolDeniedAction, ToolLoopConfig};
 use probe_protocol::runtime::{
-    CancelQueuedTurnRequest, CancelQueuedTurnResponse, ClientMessage, DetachedSessionSummary,
-    EventEnvelope, InitializeRequest, InspectDetachedSessionResponse, InspectSessionTurnsResponse,
-    InterruptTurnResponse, ListDetachedSessionsResponse, ListSessionsResponse, QueueTurnResponse,
-    RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope,
-    RuntimeProgressEvent, RuntimeProtocolError, RuntimeRequest, RuntimeResponse,
+    CancelQueuedTurnRequest, CancelQueuedTurnResponse, ClientMessage, DetachedSessionEventRecord,
+    DetachedSessionSummary, EventEnvelope, InitializeRequest, InspectDetachedSessionResponse,
+    InspectSessionTurnsResponse, InterruptTurnResponse, ListDetachedSessionsResponse,
+    ListSessionsResponse, QueueTurnResponse, ReadDetachedSessionLogRequest,
+    ReadDetachedSessionLogResponse, RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody,
+    ResponseEnvelope, RuntimeProgressEvent, RuntimeProtocolError, RuntimeRequest, RuntimeResponse,
     RuntimeToolCallDelta, RuntimeUsage, ServerEvent, ServerMessage, SessionLookupRequest,
     SessionSnapshot, StartSessionRequest, ToolApprovalRecipe, ToolCallResult, ToolChoice,
     ToolDeniedAction as ProtocolDeniedAction, ToolLongContextRecipe, ToolLoopRecipe,
     ToolOracleRecipe, ToolSetKind, TurnAuthor, TurnCompleted, TurnPaused, TurnRequest,
-    TurnResponse,
+    TurnResponse, WatchDetachedSessionRequest, WatchDetachedSessionResponse,
 };
 use probe_protocol::session::{
     PendingToolApproval, SessionId, SessionMetadata, UsageMeasurement, UsageTruth,
@@ -446,6 +447,75 @@ impl ProbeClient {
             other => Err(ProbeClientError::UnexpectedServerMessage(format!(
                 "expected inspect_detached_session response, got {other:?}"
             ))),
+        }
+    }
+
+    pub fn read_detached_session_log(
+        &mut self,
+        session_id: &SessionId,
+        after_cursor: Option<u64>,
+        limit: usize,
+    ) -> Result<ReadDetachedSessionLogResponse, ProbeClientError> {
+        match self.send_request(
+            RuntimeRequest::ReadDetachedSessionLog(ReadDetachedSessionLogRequest {
+                session_id: session_id.clone(),
+                after_cursor,
+                limit,
+            }),
+            None,
+        )? {
+            RuntimeResponse::ReadDetachedSessionLog(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected read_detached_session_log response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub fn watch_detached_session<F>(
+        mut self,
+        request: WatchDetachedSessionRequest,
+        mut on_event: F,
+    ) -> Result<Option<WatchDetachedSessionResponse>, ProbeClientError>
+    where
+        F: FnMut(DetachedSessionEventRecord) -> bool,
+    {
+        let request_id = self.next_request_id();
+        self.write_request(
+            request_id.as_str(),
+            RuntimeRequest::WatchDetachedSession(request),
+        )?;
+        loop {
+            match self.read_message()? {
+                ServerMessage::Event(EventEnvelope {
+                    request_id: event_id,
+                    event: ServerEvent::DetachedSessionStream { record },
+                }) if event_id == request_id => {
+                    if !on_event(record) {
+                        return Ok(None);
+                    }
+                }
+                ServerMessage::Response(ResponseEnvelope {
+                    request_id: response_id,
+                    body,
+                }) if response_id == request_id => {
+                    return match body {
+                        ResponseBody::Ok {
+                            response: RuntimeResponse::WatchDetachedSession(response),
+                        } => Ok(Some(response)),
+                        ResponseBody::Error { error } => Err(ProbeClientError::Protocol(error)),
+                        ResponseBody::Ok { response } => {
+                            Err(ProbeClientError::UnexpectedServerMessage(format!(
+                                "expected watch_detached_session response, got {response:?}"
+                            )))
+                        }
+                    };
+                }
+                message => {
+                    return Err(ProbeClientError::UnexpectedServerMessage(format!(
+                        "received unexpected server message while watching detached session {request_id}: {message:?}"
+                    )));
+                }
+            }
         }
     }
 

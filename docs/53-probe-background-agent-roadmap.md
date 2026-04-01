@@ -418,10 +418,9 @@ Probe now ships a canonical local `probe-server` path for:
 - a local `probe-daemon` socket transport that reuses the same protocol
 - a daemon-owned detached-session registry with restart reconciliation
 
-The remaining gap is no longer "add a daemon transport" or "add a detached
-registry." It is:
+The remaining gap is no longer "add a daemon transport," "add a detached
+registry," or "add detached watch." It is:
 
-- push watch and log subscriptions
 - operator CLI surfaces above the daemon
 - watchdog and timeout policy
 - first-party chat and TUI adoption of daemon attach flows
@@ -471,12 +470,17 @@ Probe already ships the first real queue model:
 - cancellation state
 - per-turn author metadata and queue-position semantics
 
-The remaining gap is around detached supervision:
+Detached supervision is now partly real:
 
-- background status push instead of poll-only inspection
+- bounded detached log replay
+- push-style detached session watch
+- approval-paused and runtime-progress visibility in daemon event logs
+
+The remaining gap is around operating that supervision safely:
+
 - timeout and watchdog enforcement for stuck detached turns
 - recurring-run discipline once automation exists
-- daemon-owned execution that survives the client process cleanly
+- operator CLI surfaces above the daemon-owned watch and control seam
 
 ## 5. No branch or PR closure lane yet
 

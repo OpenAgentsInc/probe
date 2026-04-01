@@ -35,13 +35,17 @@ for that operation echo the same `request_id`.
 
 ## Core Operations
 
-The Phase 1 stdio contract currently ships these typed operations:
+The shared protocol currently ships these typed operations:
 
 - `initialize`
 - `start_session`
 - `resume_session`
 - `list_sessions`
+- `list_detached_sessions`
+- `read_detached_session_log`
 - `inspect_session`
+- `inspect_detached_session`
+- `watch_detached_session`
 - `start_turn`
 - `continue_turn`
 - `queue_turn`
@@ -80,12 +84,13 @@ Queued follow-up work is now explicit.
 - `cancel_queued_turn` can remove queued work before it starts and appends an
   honest note into the transcript
 
-The first cut is still honest about its limits:
+The direct turn and queue contract is still honest about its limits:
 
 - direct `start_turn` and `continue_turn` requests remain single-turn request or
   response flows, so a second direct turn request still returns `session_busy`
-- queued background turns are queryable through `inspect_session_turns`; they
-  are not yet pushed over a detached subscription channel
+- stdio transport keeps queued background progress on explicit inspect calls
+- daemon transport adds detached log replay and watch subscriptions on top of
+  the same request and response model
 - `interrupt_turn` can cancel an approval-paused active turn, reject its
   pending approvals, and then let the queue continue
 - `interrupt_turn` still cannot preempt an in-flight model call that is inside
@@ -117,6 +122,14 @@ Current policy:
 Clients should treat `best_effort` events as coalescible progress updates and
 should not build correctness on receiving every single one. `lossless` events
 are the durable lifecycle edges.
+
+Detached daemon watch now reuses the same distinction through:
+
+- `DetachedSessionEventTruth::Authoritative`
+- `DetachedSessionEventTruth::BestEffort`
+
+That mapping keeps detached logs and subscriptions honest about what can be
+used as lifecycle truth versus transient progress.
 
 ## Tool Loop Shape
 
@@ -156,7 +169,7 @@ inside it. `SessionSnapshot` remains the transcript plus approval view, while
 Request:
 
 ```json
-{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":3}}
+{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":4}}
 ```
 
 Event:
@@ -183,3 +196,9 @@ It is intentionally not yet:
 Detached local daemon transport now exists in Phase 2, but it is still the same
 runtime protocol rather than a second API surface. Remote-worker and
 browser-facing layers still do not exist.
+
+The main detached-only additions on top of this contract are documented in:
+
+- `61-probe-daemon-and-local-socket-transport.md`
+- `62-daemon-owned-detached-session-registry.md`
+- `63-detached-session-watch-and-log-subscriptions.md`

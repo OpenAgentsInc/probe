@@ -1,3 +1,4 @@
+pub mod detached_events;
 pub mod detached_registry;
 pub mod server;
 pub mod turn_control;

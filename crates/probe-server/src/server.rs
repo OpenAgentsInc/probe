@@ -5,6 +5,7 @@ use std::io::{self, BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use probe_core::runtime::{
     PlainTextResumeRequest, ProbeRuntime, ResolvePendingToolApprovalOutcome,
@@ -18,24 +19,27 @@ use probe_core::tools::{
 };
 use probe_protocol::default_local_daemon_socket_path;
 use probe_protocol::runtime::{
-    CancelQueuedTurnRequest, CancelQueuedTurnResponse, ClientMessage, DetachedSessionRecoveryState,
-    DetachedSessionStatus, DetachedSessionSummary, EventDeliveryGuarantee, EventEnvelope,
-    InitializeResponse, InspectDetachedSessionResponse, InspectSessionTurnsResponse,
-    InterruptTurnResponse, ListDetachedSessionsResponse, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, ListSessionsResponse, QueueTurnResponse, QueuedTurnStatus,
-    RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope,
-    RuntimeCapabilities, RuntimeProgressEvent, RuntimeProtocolError, RuntimeRequest,
-    RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage, ServerEvent, ServerMessage,
-    SessionLookupRequest, SessionSnapshot, ShutdownResponse, StartSessionRequest,
+    CancelQueuedTurnRequest, CancelQueuedTurnResponse, ClientMessage, DetachedSessionEventPayload,
+    DetachedSessionEventTruth, DetachedSessionRecoveryState, DetachedSessionStatus,
+    DetachedSessionSummary, EventDeliveryGuarantee, EventEnvelope, InitializeResponse,
+    InspectDetachedSessionResponse, InspectSessionTurnsResponse, InterruptTurnResponse,
+    ListDetachedSessionsResponse, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListSessionsResponse, QueueTurnResponse, QueuedTurnStatus, ReadDetachedSessionLogRequest,
+    ReadDetachedSessionLogResponse, RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody,
+    ResponseEnvelope, RuntimeCapabilities, RuntimeProgressEvent, RuntimeProtocolError,
+    RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage, ServerEvent,
+    ServerMessage, SessionLookupRequest, SessionSnapshot, ShutdownResponse, StartSessionRequest,
     ToolApprovalRecipe, ToolCallResult, ToolChoice, ToolDeniedAction, ToolLongContextRecipe,
     ToolLoopRecipe, ToolOracleRecipe, ToolSetKind, TransportKind, TurnCompleted, TurnPaused,
-    TurnRequest, TurnResponse, TurnSubmissionKind,
+    TurnRequest, TurnResponse, TurnSubmissionKind, WatchDetachedSessionRequest,
+    WatchDetachedSessionResponse,
 };
 use probe_protocol::session::{
     SessionBackendTarget, SessionId, SessionMetadata, UsageMeasurement, UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
 
+use crate::detached_events::{DetachedEventError, DetachedSessionEventHub};
 use crate::detached_registry::{DetachedRegistryError, DetachedSessionRegistry};
 use crate::turn_control::{SessionTurnControlState, StoredTurnControlRecord, now_ms};
 
@@ -255,6 +259,7 @@ pub struct ProbeServerCore {
     runtime: ProbeRuntime,
     turn_control: Arc<TurnControlPlane>,
     detached_registry: Option<Arc<DetachedSessionRegistry>>,
+    detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
 }
 
 struct ProbeServerConnection {
@@ -278,6 +283,7 @@ struct TurnControlPlane {
     runtime: ProbeRuntime,
     coordination: Arc<Mutex<HashSet<String>>>,
     detached_registry: Option<Arc<DetachedSessionRegistry>>,
+    detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
 }
 
 struct QueuedTurnReservation {
@@ -310,13 +316,18 @@ impl ProbeServerCore {
         let detached_registry = mode
             .is_daemon()
             .then(|| Arc::new(DetachedSessionRegistry::new(runtime.session_store().root())));
+        let detached_event_hub = mode
+            .is_daemon()
+            .then(|| Arc::new(DetachedSessionEventHub::new(runtime.session_store().root())));
         Self {
             turn_control: Arc::new(TurnControlPlane::new(
                 runtime.clone(),
                 detached_registry.clone(),
+                detached_event_hub.clone(),
             )),
             runtime,
             detached_registry,
+            detached_event_hub,
         }
     }
 
@@ -439,6 +450,30 @@ impl ProbeServerCore {
             turn_control,
         })
     }
+
+    fn read_detached_session_log(
+        &self,
+        request: ReadDetachedSessionLogRequest,
+    ) -> Result<ReadDetachedSessionLogResponse, RuntimeProtocolError> {
+        let Some(event_hub) = self.detached_event_hub.as_ref() else {
+            return Err(protocol_error(
+                "unsupported_transport",
+                "detached session event logs are only available through the daemon transport",
+            ));
+        };
+        self.ensure_detached_session_registered_by_id(&request.session_id)?;
+        let events = event_hub
+            .read(&request.session_id, request.after_cursor, request.limit)
+            .map_err(detached_event_error_to_protocol)?;
+        let newest_cursor = event_hub
+            .newest_cursor(&request.session_id)
+            .map_err(detached_event_error_to_protocol)?;
+        Ok(ReadDetachedSessionLogResponse {
+            session_id: request.session_id,
+            events,
+            newest_cursor,
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -454,11 +489,16 @@ impl ServerOwnershipMode {
 }
 
 impl TurnControlPlane {
-    fn new(runtime: ProbeRuntime, detached_registry: Option<Arc<DetachedSessionRegistry>>) -> Self {
+    fn new(
+        runtime: ProbeRuntime,
+        detached_registry: Option<Arc<DetachedSessionRegistry>>,
+        detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
+    ) -> Self {
         Self {
             runtime,
             coordination: Arc::new(Mutex::new(HashSet::new())),
             detached_registry,
+            detached_event_hub,
         }
     }
 
@@ -501,9 +541,24 @@ impl TurnControlPlane {
             previous.as_ref(),
             now_ms(),
         );
+        let turn_control = state.inspect_view(session_id);
         registry
-            .upsert(summary)
-            .map_err(detached_registry_error_to_protocol)
+            .upsert(summary.clone())
+            .map_err(detached_registry_error_to_protocol)?;
+        if let Some(event_hub) = self.detached_event_hub.as_ref() {
+            event_hub
+                .append(
+                    session_id,
+                    DetachedSessionEventTruth::Authoritative,
+                    DetachedSessionEventPayload::SummaryUpdated {
+                        summary,
+                        turn_control,
+                    },
+                    now_ms(),
+                )
+                .map_err(detached_event_error_to_protocol)?;
+        }
+        Ok(())
     }
 
     fn sync_detached_session_if_tracked(
@@ -1050,6 +1105,10 @@ impl ProbeServerConnection {
                                     .core
                                     .detached_registry
                                     .is_some(),
+                                supports_detached_watch_subscriptions: self
+                                    .core
+                                    .detached_event_hub
+                                    .is_some(),
                             },
                         }),
                     )?;
@@ -1105,6 +1164,18 @@ impl ProbeServerConnection {
                 }
                 Ok(RequestHandlingOutcome::Continue)
             }
+            RuntimeRequest::ReadDetachedSessionLog(request) => {
+                match self.core.read_detached_session_log(request) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::ReadDetachedSessionLog(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
             RuntimeRequest::InspectSession(SessionLookupRequest { session_id }) => {
                 match self.session_snapshot(&session_id) {
                     Ok(snapshot) => self.writer.send_response_ok(
@@ -1127,6 +1198,10 @@ impl ProbeServerConnection {
                         .writer
                         .send_response_error(request_id.as_str(), error)?,
                 }
+                Ok(RequestHandlingOutcome::Continue)
+            }
+            RuntimeRequest::WatchDetachedSession(request) => {
+                self.watch_detached_session(request_id, request)?;
                 Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::StartTurn(request) => {
@@ -1303,6 +1378,7 @@ impl ProbeServerConnection {
                 Arc::clone(&self.core.turn_control),
                 self.core.runtime.clone(),
                 self.writer.clone(),
+                self.core.detached_event_hub.clone(),
                 None,
                 request,
                 TurnMode::Continue,
@@ -1330,6 +1406,7 @@ impl ProbeServerConnection {
                 Arc::clone(&self.core.turn_control),
                 self.core.runtime.clone(),
                 self.writer.clone(),
+                self.core.detached_event_hub.clone(),
                 session_id,
             );
         }
@@ -1343,6 +1420,102 @@ impl ProbeServerConnection {
         self.core
             .ensure_detached_session_registered_by_id(&request.session_id)?;
         self.core.turn_control.cancel_queued_turn(request)
+    }
+
+    fn watch_detached_session(
+        &self,
+        request_id: String,
+        request: WatchDetachedSessionRequest,
+    ) -> Result<(), ServerError> {
+        let Some(event_hub) = self.core.detached_event_hub.as_ref() else {
+            self.writer.send_response_error(
+                request_id.as_str(),
+                protocol_error(
+                    "unsupported_transport",
+                    "detached session watch is only available through the daemon transport",
+                ),
+            )?;
+            return Ok(());
+        };
+        if let Err(error) = self
+            .core
+            .ensure_detached_session_registered_by_id(&request.session_id)
+        {
+            self.writer
+                .send_response_error(request_id.as_str(), error)?;
+            return Ok(());
+        }
+        let receiver = event_hub.subscribe(&request.session_id);
+        if let Err(error) = self
+            .core
+            .sync_detached_session_if_tracked(&request.session_id)
+        {
+            self.writer
+                .send_response_error(request_id.as_str(), error)?;
+            return Ok(());
+        }
+        let replay = match self
+            .core
+            .read_detached_session_log(ReadDetachedSessionLogRequest {
+                session_id: request.session_id.clone(),
+                after_cursor: request.after_cursor,
+                limit: request.replay_limit,
+            }) {
+            Ok(replay) => replay,
+            Err(error) => {
+                self.writer
+                    .send_response_error(request_id.as_str(), error)?;
+                return Ok(());
+            }
+        };
+        for record in &replay.events {
+            if self
+                .writer
+                .send_event(
+                    request_id.as_str(),
+                    ServerEvent::DetachedSessionStream {
+                        record: record.clone(),
+                    },
+                )
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+
+        let mut last_cursor = replay.newest_cursor;
+        loop {
+            match receiver.recv_timeout(Duration::from_millis(250)) {
+                Ok(record) => {
+                    if last_cursor.is_some_and(|cursor| record.cursor <= cursor) {
+                        continue;
+                    }
+                    last_cursor = Some(record.cursor);
+                    if self
+                        .writer
+                        .send_event(
+                            request_id.as_str(),
+                            ServerEvent::DetachedSessionStream { record },
+                        )
+                        .is_err()
+                    {
+                        return Ok(());
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        self.writer.send_response_ok(
+            request_id.as_str(),
+            RuntimeResponse::WatchDetachedSession(WatchDetachedSessionResponse {
+                session_id: request.session_id,
+                replayed_events: replay.events.len(),
+                last_cursor,
+            }),
+        )?;
+        Ok(())
     }
 
     fn spawn_turn_request(
@@ -1372,6 +1545,7 @@ impl ProbeServerConnection {
             Arc::clone(&self.core.turn_control),
             self.core.runtime.clone(),
             self.writer.clone(),
+            self.core.detached_event_hub.clone(),
             Some(request_id.clone()),
             request.clone(),
             mode,
@@ -1423,6 +1597,7 @@ impl ProbeServerConnection {
             Arc::clone(&self.core.turn_control),
             self.core.runtime.clone(),
             self.writer.clone(),
+            self.core.detached_event_hub.clone(),
             request_id.clone(),
             request.clone(),
             turn_id.clone(),
@@ -1466,6 +1641,7 @@ fn spawn_turn_worker(
     turn_control: Arc<TurnControlPlane>,
     runtime: ProbeRuntime,
     writer: SharedJsonlWriter,
+    detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
     request_id: Option<String>,
     request: TurnRequest,
     mode: TurnMode,
@@ -1474,7 +1650,14 @@ fn spawn_turn_worker(
     let session_id = request.session_id.clone();
     let thread_name = format!("probe-server-turn-{}", session_id.as_str());
     thread::Builder::new().name(thread_name).spawn(move || {
-        let response = run_turn_request(&runtime, &writer, request_id.as_deref(), request, mode);
+        let response = run_turn_request(
+            &runtime,
+            &writer,
+            detached_event_hub.clone(),
+            request_id.as_deref(),
+            request,
+            mode,
+        );
 
         let should_start_next = match &response {
             Ok(RuntimeResponse::StartTurn(TurnResponse::Completed(_)))
@@ -1511,7 +1694,13 @@ fn spawn_turn_worker(
         }
 
         if should_start_next {
-            spawn_next_queued_turn_if_ready(turn_control, runtime, writer, session_id);
+            spawn_next_queued_turn_if_ready(
+                turn_control,
+                runtime,
+                writer,
+                detached_event_hub,
+                session_id,
+            );
         }
     })?;
     Ok(())
@@ -1521,6 +1710,7 @@ fn spawn_approval_resolution_worker(
     turn_control: Arc<TurnControlPlane>,
     runtime: ProbeRuntime,
     writer: SharedJsonlWriter,
+    detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
     request_id: String,
     request: probe_protocol::runtime::ResolvePendingApprovalRequest,
     turn_id: String,
@@ -1528,8 +1718,13 @@ fn spawn_approval_resolution_worker(
     let session_id = request.session_id.clone();
     let thread_name = format!("probe-server-approval-{}", session_id.as_str());
     thread::Builder::new().name(thread_name).spawn(move || {
-        let response =
-            run_pending_approval_resolution(&runtime, &writer, Some(request_id.as_str()), request);
+        let response = run_pending_approval_resolution(
+            &runtime,
+            &writer,
+            detached_event_hub.clone(),
+            Some(request_id.as_str()),
+            request,
+        );
 
         let should_start_next = match &response {
             Ok(RuntimeResponse::ResolvePendingApproval(
@@ -1570,7 +1765,13 @@ fn spawn_approval_resolution_worker(
         }
 
         if should_start_next {
-            spawn_next_queued_turn_if_ready(turn_control, runtime, writer, session_id);
+            spawn_next_queued_turn_if_ready(
+                turn_control,
+                runtime,
+                writer,
+                detached_event_hub,
+                session_id,
+            );
         }
     })?;
     Ok(())
@@ -1580,6 +1781,7 @@ fn spawn_next_queued_turn_if_ready(
     turn_control: Arc<TurnControlPlane>,
     runtime: ProbeRuntime,
     writer: SharedJsonlWriter,
+    detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
     session_id: SessionId,
 ) {
     let work_item = match turn_control.maybe_start_next_queued_turn(&session_id) {
@@ -1591,6 +1793,7 @@ fn spawn_next_queued_turn_if_ready(
             Arc::clone(&turn_control),
             runtime,
             writer,
+            detached_event_hub,
             None,
             work_item.request,
             work_item.mode,
@@ -1654,26 +1857,43 @@ fn render_prompt_excerpt(prompt: &str) -> String {
 fn run_turn_request(
     runtime: &ProbeRuntime,
     writer: &SharedJsonlWriter,
+    detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
     request_id: Option<&str>,
     request: TurnRequest,
     mode: TurnMode,
 ) -> Result<RuntimeResponse, RuntimeProtocolError> {
     let tool_loop = request.tool_loop.map(tool_loop_from_recipe).transpose()?;
-    let event_sink = request_id.map(|request_id| {
-        let writer_for_events = writer.clone();
-        let request_id_for_events = String::from(request_id);
-        Arc::new(move |event| {
-            let delivery = delivery_for_runtime_event(&event);
-            let encoded = encode_runtime_event(event);
-            let _ = writer_for_events.send_event(
-                request_id_for_events.as_str(),
-                ServerEvent::RuntimeProgress {
-                    delivery,
-                    event: encoded,
-                },
-            );
-        }) as Arc<dyn RuntimeEventSink>
-    });
+    let event_sink = request_id
+        .map(|request_id| (Some(String::from(request_id)), detached_event_hub.clone()))
+        .or_else(|| detached_event_hub.clone().map(|hub| (None, Some(hub))))
+        .map(|(request_id, detached_event_hub)| {
+            let writer_for_events = writer.clone();
+            let session_id_for_events = request.session_id.clone();
+            Arc::new(move |event| {
+                let delivery = delivery_for_runtime_event(&event);
+                let encoded = encode_runtime_event(event);
+                if let Some(request_id_for_events) = request_id.as_ref() {
+                    let _ = writer_for_events.send_event(
+                        request_id_for_events.as_str(),
+                        ServerEvent::RuntimeProgress {
+                            delivery,
+                            event: encoded.clone(),
+                        },
+                    );
+                }
+                if let Some(detached_event_hub) = detached_event_hub.as_ref() {
+                    let _ = detached_event_hub.append(
+                        &session_id_for_events,
+                        detached_event_truth_from_delivery(delivery),
+                        DetachedSessionEventPayload::RuntimeProgress {
+                            delivery,
+                            event: encoded,
+                        },
+                        now_ms(),
+                    );
+                }
+            }) as Arc<dyn RuntimeEventSink>
+        });
 
     let resume_request = PlainTextResumeRequest {
         session_id: request.session_id.clone(),
@@ -1714,6 +1934,18 @@ fn run_turn_request(
                     )
                     .map_err(|error| protocol_error("event_write_failed", error.to_string()))?;
             }
+            if let Some(detached_event_hub) = detached_event_hub.as_ref() {
+                detached_event_hub
+                    .append(
+                        &session_id,
+                        DetachedSessionEventTruth::Authoritative,
+                        DetachedSessionEventPayload::PendingApprovalsUpdated {
+                            approvals: pending_approvals.clone(),
+                        },
+                        now_ms(),
+                    )
+                    .map_err(detached_event_error_to_protocol)?;
+            }
             let session = runtime
                 .session_store()
                 .read_metadata(&session_id)
@@ -1737,25 +1969,42 @@ fn run_turn_request(
 fn run_pending_approval_resolution(
     runtime: &ProbeRuntime,
     writer: &SharedJsonlWriter,
+    detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
     request_id: Option<&str>,
     request: probe_protocol::runtime::ResolvePendingApprovalRequest,
 ) -> Result<RuntimeResponse, RuntimeProtocolError> {
     let tool_loop = tool_loop_from_recipe(request.tool_loop)?;
-    let event_sink = request_id.map(|request_id| {
-        let writer_for_events = writer.clone();
-        let request_id_for_events = String::from(request_id);
-        Arc::new(move |event| {
-            let delivery = delivery_for_runtime_event(&event);
-            let encoded = encode_runtime_event(event);
-            let _ = writer_for_events.send_event(
-                request_id_for_events.as_str(),
-                ServerEvent::RuntimeProgress {
-                    delivery,
-                    event: encoded,
-                },
-            );
-        }) as Arc<dyn RuntimeEventSink>
-    });
+    let event_sink = request_id
+        .map(|request_id| (Some(String::from(request_id)), detached_event_hub.clone()))
+        .or_else(|| detached_event_hub.clone().map(|hub| (None, Some(hub))))
+        .map(|(request_id, detached_event_hub)| {
+            let writer_for_events = writer.clone();
+            let session_id_for_events = request.session_id.clone();
+            Arc::new(move |event| {
+                let delivery = delivery_for_runtime_event(&event);
+                let encoded = encode_runtime_event(event);
+                if let Some(request_id_for_events) = request_id.as_ref() {
+                    let _ = writer_for_events.send_event(
+                        request_id_for_events.as_str(),
+                        ServerEvent::RuntimeProgress {
+                            delivery,
+                            event: encoded.clone(),
+                        },
+                    );
+                }
+                if let Some(detached_event_hub) = detached_event_hub.as_ref() {
+                    let _ = detached_event_hub.append(
+                        &session_id_for_events,
+                        detached_event_truth_from_delivery(delivery),
+                        DetachedSessionEventPayload::RuntimeProgress {
+                            delivery,
+                            event: encoded,
+                        },
+                        now_ms(),
+                    );
+                }
+            }) as Arc<dyn RuntimeEventSink>
+        });
 
     let approval_request = ResolvePendingToolApprovalRequest {
         session_id: request.session_id.clone(),
@@ -1787,6 +2036,18 @@ fn run_pending_approval_resolution(
                         },
                     )
                     .map_err(|error| protocol_error("event_write_failed", error.to_string()))?;
+            }
+            if let Some(detached_event_hub) = detached_event_hub.as_ref() {
+                detached_event_hub
+                    .append(
+                        &session.id,
+                        DetachedSessionEventTruth::Authoritative,
+                        DetachedSessionEventPayload::PendingApprovalsUpdated {
+                            approvals: pending_approvals.clone(),
+                        },
+                        now_ms(),
+                    )
+                    .map_err(detached_event_error_to_protocol)?;
             }
             Ok(RuntimeResponse::ResolvePendingApproval(
                 ResolvePendingApprovalResponse::StillPending {
@@ -1985,6 +2246,15 @@ fn delivery_for_runtime_event(event: &RuntimeEvent) -> EventDeliveryGuarantee {
         | RuntimeEvent::AssistantStreamFinished { .. }
         | RuntimeEvent::ModelRequestFailed { .. }
         | RuntimeEvent::AssistantTurnCommitted { .. } => EventDeliveryGuarantee::Lossless,
+    }
+}
+
+fn detached_event_truth_from_delivery(
+    delivery: EventDeliveryGuarantee,
+) -> DetachedSessionEventTruth {
+    match delivery {
+        EventDeliveryGuarantee::Lossless => DetachedSessionEventTruth::Authoritative,
+        EventDeliveryGuarantee::BestEffort => DetachedSessionEventTruth::BestEffort,
     }
 }
 
@@ -2285,6 +2555,10 @@ fn session_store_error_to_protocol(error: SessionStoreError) -> RuntimeProtocolE
 
 fn detached_registry_error_to_protocol(error: DetachedRegistryError) -> RuntimeProtocolError {
     protocol_error("detached_registry_error", error.to_string())
+}
+
+fn detached_event_error_to_protocol(error: DetachedEventError) -> RuntimeProtocolError {
+    protocol_error("detached_event_error", error.to_string())
 }
 
 fn runtime_error_to_protocol(error: RuntimeError) -> RuntimeProtocolError {

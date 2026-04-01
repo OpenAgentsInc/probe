@@ -212,3 +212,8 @@ This folder holds technical planning docs for the Probe runtime.
     typed `list_detached_sessions` or `inspect_detached_session` protocol
     calls, persisted session-control summaries, and explicit resumable versus
     terminal restart outcomes
+- `63-detached-session-watch-and-log-subscriptions.md`
+  - the detached-session log and watch lane for Phase 2, including append-only
+    daemon event logs, cursor-based replay, authoritative versus best-effort
+    truth labels, daemon watch subscriptions, and the shared `probe-client`
+    helpers above that event stream

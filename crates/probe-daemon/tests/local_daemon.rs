@@ -14,7 +14,8 @@ use probe_core::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, T
 use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
 use probe_protocol::default_local_daemon_socket_path;
 use probe_protocol::runtime::{
-    DetachedSessionRecoveryState, DetachedSessionStatus, StartSessionRequest,
+    DetachedSessionEventPayload, DetachedSessionEventTruth, DetachedSessionRecoveryState,
+    DetachedSessionStatus, StartSessionRequest, WatchDetachedSessionRequest,
 };
 use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
@@ -286,6 +287,176 @@ fn daemon_restart_marks_running_turns_as_failed_when_the_process_dies() {
     restarted.stop();
 }
 
+#[test]
+fn detached_session_log_replays_recent_events_with_resume_cursor() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let fake_backend = delayed_streaming_backend(Duration::from_millis(100));
+    let profile = test_profile(fake_backend.base_url());
+    let mut daemon = DaemonProcess::start(environment.probe_home());
+    let mut client = daemon_client(environment.probe_home());
+    let session = client
+        .start_session(StartSessionRequest {
+            title: Some(String::from("detached log replay")),
+            cwd: environment.workspace().to_path_buf(),
+            profile: profile.clone(),
+            system_prompt: None,
+            harness_profile: None,
+        })
+        .expect("daemon should start session");
+    let session_id = session.session.id.clone();
+
+    client
+        .queue_plain_text_session_turn(PlainTextResumeRequest {
+            session_id: session_id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("stream a detached answer"),
+            tool_loop: None,
+        })
+        .expect("queue turn should be accepted");
+    drop(client);
+
+    wait_for_detached_status(
+        environment.probe_home(),
+        &session_id,
+        DetachedSessionStatus::Completed,
+    );
+
+    let mut replay_client = daemon_client(environment.probe_home());
+    let replay = replay_client
+        .read_detached_session_log(&session_id, None, 64)
+        .expect("recent detached session log should replay");
+    assert_eq!(replay.session_id, session_id);
+    assert!(!replay.events.is_empty());
+    assert!(replay.newest_cursor.is_some_and(|cursor| {
+        cursor
+            >= replay
+                .events
+                .last()
+                .expect("replay should not be empty")
+                .cursor
+    }));
+    assert!(replay.events.iter().any(|record| {
+        record.truth == DetachedSessionEventTruth::Authoritative
+            && matches!(
+                record.payload,
+                DetachedSessionEventPayload::SummaryUpdated { .. }
+            )
+    }));
+    assert!(replay.events.iter().any(|record| {
+        record.truth == DetachedSessionEventTruth::BestEffort
+            && matches!(
+                record.payload,
+                DetachedSessionEventPayload::RuntimeProgress { .. }
+            )
+    }));
+
+    let checkpoint = replay.events[0].cursor;
+    let resumed = replay_client
+        .read_detached_session_log(&session_id, Some(checkpoint), 64)
+        .expect("log replay after a cursor should succeed");
+    assert!(
+        resumed
+            .events
+            .iter()
+            .all(|record| record.cursor > checkpoint)
+    );
+    assert!(resumed.newest_cursor.is_some_and(|cursor| {
+        replay
+            .newest_cursor
+            .is_some_and(|baseline| cursor >= baseline)
+    }));
+
+    drop(replay_client);
+    daemon.stop();
+}
+
+#[test]
+fn detached_session_watch_surfaces_approval_pause_updates_without_polling() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let fake_backend = approval_pause_backend(Duration::from_millis(250));
+    let profile = test_profile(fake_backend.base_url());
+    let mut daemon = DaemonProcess::start(environment.probe_home());
+    let mut client = daemon_client(environment.probe_home());
+    let session = client
+        .start_session(StartSessionRequest {
+            title: Some(String::from("watch approval pause")),
+            cwd: environment.workspace().to_path_buf(),
+            profile: profile.clone(),
+            system_prompt: None,
+            harness_profile: None,
+        })
+        .expect("daemon should start session");
+    let session_id = session.session.id.clone();
+
+    client
+        .queue_plain_text_session_turn(PlainTextResumeRequest {
+            session_id: session_id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("pause on a patch tool call"),
+            tool_loop: Some(approval_pause_tool_loop()),
+        })
+        .expect("queue turn should be accepted");
+    let mut seen_events = Vec::new();
+    let outcome = client
+        .watch_detached_session(
+            WatchDetachedSessionRequest {
+                session_id: session_id.clone(),
+                after_cursor: None,
+                replay_limit: 64,
+            },
+            |record| {
+                let stop = matches!(
+                    record.payload,
+                    DetachedSessionEventPayload::PendingApprovalsUpdated { .. }
+                ) || matches!(
+                    record.payload,
+                    DetachedSessionEventPayload::SummaryUpdated { ref summary, .. }
+                        if summary.status == DetachedSessionStatus::ApprovalPaused
+                );
+                seen_events.push(record);
+                !stop
+            },
+        )
+        .expect("detached watch should stream approval pause updates");
+    assert!(
+        outcome.is_none(),
+        "client-ended watch should return no final response"
+    );
+    assert!(seen_events.iter().any(|record| {
+        record.truth == DetachedSessionEventTruth::Authoritative
+            && matches!(
+                record.payload,
+                DetachedSessionEventPayload::PendingApprovalsUpdated { .. }
+            )
+    }));
+
+    let mut followup_client = daemon_client(environment.probe_home());
+    let log = followup_client
+        .read_detached_session_log(&session_id, None, 64)
+        .expect("approval-paused session log should remain readable after watch detach");
+    assert!(log.events.iter().any(|record| {
+        matches!(
+            record.payload,
+            DetachedSessionEventPayload::SummaryUpdated { ref summary, .. }
+                if summary.status == DetachedSessionStatus::ApprovalPaused
+        )
+    }));
+
+    let inspected = followup_client
+        .inspect_detached_session(&session_id)
+        .expect("approval-paused session should remain inspectable after watch detach");
+    assert_eq!(
+        inspected.summary.status,
+        DetachedSessionStatus::ApprovalPaused
+    );
+    assert_eq!(inspected.summary.pending_approval_count, 1);
+
+    drop(followup_client);
+    daemon.kill_ungraceful();
+}
+
 struct DaemonProcess {
     child: Child,
     probe_home: PathBuf,
@@ -317,9 +488,10 @@ impl DaemonProcess {
         {
             return;
         }
-        if let Ok(mut client) = try_daemon_client(self.probe_home.as_path()) {
-            let _ = client.shutdown();
-        } else {
+        let graceful_shutdown = try_daemon_client(self.probe_home.as_path())
+            .and_then(|mut client| client.shutdown())
+            .is_ok();
+        if !graceful_shutdown {
             let _ = self.child.kill();
         }
         let _ = self.child.wait();
@@ -430,6 +602,21 @@ fn delayed_completion_backend(delay: Duration, assistant_text: &str) -> FakeOpen
                 "total_tokens": 6
             }
         }))
+    })
+}
+
+fn delayed_streaming_backend(delay: Duration) -> FakeOpenAiServer {
+    FakeOpenAiServer::from_handler(move |_request| {
+        thread::sleep(delay);
+        FakeHttpResponse::text_event_stream(
+            200,
+            concat!(
+                "data: {\"id\":\"chatcmpl_detached_watch\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_detached_watch\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" from\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_detached_watch\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" detached\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_detached_watch\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":3,\"total_tokens\":6}}\n\n"
+            ),
+        )
     })
 }
 

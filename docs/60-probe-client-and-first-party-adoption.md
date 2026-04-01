@@ -28,6 +28,7 @@ instead of letting `probe exec`, `probe chat`, and the TUI each wire
 - inline event draining during active turn or approval requests
 - queued-turn submission and inspection helpers
 - detached-session listing and inspection helpers for daemon mode
+- detached-session log replay and watch helpers for daemon mode
 - shutdown on drop
 
 Transport selection is now explicit:
@@ -96,8 +97,8 @@ Current implications:
   smuggled through direct turn requests
 - direct `start_turn` and `continue_turn` requests still return `session_busy`
   when a session already has active or queued work
-- queued background progress is still polled through `inspect_session_turns`
-  rather than pushed through a detached subscription lane
+- queued background progress can now be polled through
+  `inspect_session_turns` or watched through the detached daemon event stream
 
 ## Hidden Internal Server Mode
 
@@ -122,6 +123,8 @@ The shared client also now exposes the first daemon-owned session helpers:
 - explicit session creation through `start_session`
 - `list_detached_sessions`
 - `inspect_detached_session`
+- `read_detached_session_log`
+- `watch_detached_session`
 
 That keeps later `probe ps` and attach work on the same shared client seam
 instead of growing a second daemon-only control client.
