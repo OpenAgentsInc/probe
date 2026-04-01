@@ -384,27 +384,41 @@ Probe should copy these operational rules when it eventually adds recurring
 background tasks. The first automation lane should stay conservative instead of
 trying to overlap many runs on one repo by default.
 
-## Current Gap
+## Remaining Gap After Recent Landings
 
-Probe's current docs and codebase already define the right runtime boundary,
-but several background-agent requirements are still missing.
+Probe's current docs and codebase now have much more of the background-agent
+foundation than this roadmap originally assumed.
 
-## 1. No shipped `probe-server` control plane yet
+Recently closed work changed the real starting point:
 
-The workspace docs already recommend a first-class `probe-server`.
+- `#55` through `#57`
+  - the offline optimizer, promotion-ledger, and skill-pack substrate is live
+- `#66` through `#70`
+  - the local server seam, shared client adoption, workspace lifecycle
+    decisions, and queued-turn control contract are live
+- `#71` through `#74`
+  - the hosted Codex auth, transport, and third Probe backend lane are live
 
-That server does not yet exist as the canonical path for:
+That means the next phases should optimize for daemonization, remote execution,
+delivery, and consumer adoption rather than reopening local client or backend
+foundation work.
+
+## 1. `probe-server` is shipped locally, but it is not daemonized yet
+
+The earlier roadmap gap here is no longer the server seam itself.
+
+Probe now ships a canonical local `probe-server` path for:
 
 - session creation
 - turn submission
-- attach or detach
 - status inspection
 - approval resolution
 - interrupt or cancel
-- task spawn
+- queued follow-up turns
 
-Without that server seam, Probe is still mostly a foreground local app with
-durable files, not a true background runtime.
+The remaining gap is that this is still a foreground child-process control
+plane rather than a durable detached daemon with its own long-lived operator
+surface.
 
 ## 2. Remote inference is not remote execution
 
@@ -440,22 +454,23 @@ Probe still needs a real prepared-environment story for:
 - reusing prepared baselines across sessions
 - restoring or resuming detached workspaces
 
-## 4. No detached session queue model yet
+## 4. Queue state exists now, but detached supervision is still thin
 
-Current Probe sessions persist well, but the docs still center mostly on:
-
-- one foreground interactive session
-- one TUI worker
-- one local command execution flow
-
-Background mode needs a broader session-state machine with explicit:
+Probe already ships the first real queue model:
 
 - queued prompts
 - running prompts
 - pending approvals
-- paused or blocked state
 - completed or failed tasks
-- cancellation and timeout state
+- cancellation state
+- per-turn author metadata and queue-position semantics
+
+The remaining gap is around detached supervision:
+
+- background status push instead of poll-only inspection
+- timeout and watchdog enforcement for stuck detached turns
+- recurring-run discipline once automation exists
+- daemon-owned execution that survives the client process cleanly
 
 ## 5. No branch or PR closure lane yet
 
@@ -720,12 +735,20 @@ Status:
     or cancelled state
   - queue-position semantics and per-turn author metadata
   - pure workspace-lifecycle decision functions
+  - the Probe-owned Codex subscription lane is also live, so detached phases
+    can assume three real backend families instead of one local-model-only
+    baseline
+  - the optimizer and promotion-ledger lane is also live, so later delivery
+    phases can reuse retained evidence and adoption state instead of inventing
+    them from scratch
 - still split out
   - Autopilot-side consumption in `openagents`
 
 Success condition:
 
-- CLI, TUI, and Autopilot can all talk to the same Probe runtime contract.
+- Probe's own clients now talk to the same runtime contract.
+- the next consumer milestone is Autopilot-side consumption in `openagents`,
+  not more Probe-local server foundation work.
 
 ## Phase 2: Detached local daemon mode
 
@@ -733,14 +756,21 @@ Ship:
 
 - a long-lived local Probe daemon
 - detached session execution away from the foreground terminal
+- a local socket or equivalent daemon transport on top of the shipped stdio
+  contract
 - `probe ps`, `probe attach`, `probe logs`, `probe stop`
 - detached queued follow-up prompts away from the foreground client process
+- push-style session status updates for detached work instead of poll-only
+  queue inspection
 - stop and timeout watchdog behavior for stuck turns
+- first consumer adoption from Autopilot sidecar launch in `openagents`
 
 Success condition:
 
 - a user can start a Probe session, close the client, and return later without
-  losing runtime state.
+  losing runtime state
+- a second first-party client can reattach to the same daemon-owned session
+  without fabricating a second runtime
 
 ## Phase 3: Remote worker mode
 
@@ -753,6 +783,8 @@ Ship:
 - workspace sync state and write gating
 - explicit workspace boot modes for fresh, restored, and baseline-backed starts
 - graceful fallback from prepared baselines to fresh workspace start
+- backend-aware worker config handoff so detached workers can preserve the
+  Probe-selected backend contract, including hosted Codex where appropriate
 
 Success condition:
 
@@ -771,6 +803,8 @@ Ship:
   available
 - deterministic branch resolution and sanitized head-branch handling
 - branch-only fallback artifacts when PR creation cannot proceed
+- reuse of the already-landed Probe receipt, harness, and promotion artifacts
+  as delivery evidence instead of inventing a second evidence schema
 
 Success condition:
 
@@ -782,7 +816,8 @@ Ship:
 
 - session-spawn tools
 - child-session status tools
-- authorship-aware prompt records
+- child-session authorship and delivery attribution on top of the already-live
+  per-turn author metadata
 - minimal multi-client collaboration semantics
 - same-repo default child-session guardrails plus depth and count limits
 
@@ -834,7 +869,9 @@ runtime it already has, not by copying Ramp's outer product shell.
 
 The correct Probe move is:
 
-- build `probe-server`
+- treat the shipped `probe-server` and queued-turn control plane as the
+  foundation
+- build detached daemon ownership on top of that local server seam
 - make detached session workers first-class
 - run those workers in prepared isolated workspaces
 - keep Probe CLI, Probe TUI, and Autopilot attached to the same session truth

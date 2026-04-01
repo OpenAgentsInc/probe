@@ -168,7 +168,9 @@ This folder holds technical planning docs for the Probe runtime.
 - `53-probe-background-agent-roadmap.md`
   - Probe-specific plan for becoming a real background coding agent with a
     server-first runtime, detached session workers, prepared workspaces, and
-    CLI/TUI plus Autopilot as the first client set
+    CLI/TUI plus Autopilot as the first client set, updated after the shipped
+    server, queue, Codex, and optimizer lanes so the next work starts from the
+    real post-Phase-1 baseline
 - `54-openai-codex-subscription-auth.md`
   - Probe-owned browser PKCE and headless device auth for ChatGPT/Codex
     subscriptions, including persisted token state, CLI commands, TUI backend
