@@ -224,7 +224,9 @@ pub fn complete_openai_plain_text_with_callback(
             .chat_completion(request_messages)
             .map_err(ProviderError::OpenAi)?,
     };
-    let assistant_text = response.first_message_text().map(ToOwned::to_owned);
+    let assistant_text = response
+        .first_message_text()
+        .map(normalize_openai_assistant_text);
     Ok(PlainTextProviderResponse {
         response_id: response.id,
         response_model: response.model,
@@ -375,7 +377,9 @@ pub fn openai_tool_loop_response_with_callback(
             .map_err(ProviderError::OpenAi)?,
     };
     let tool_calls = response.first_tool_calls().map(ToOwned::to_owned);
-    let assistant_text = response.first_message_text().map(ToOwned::to_owned);
+    let assistant_text = response
+        .first_message_text()
+        .map(normalize_openai_assistant_text);
     Ok(ToolLoopProviderResponse {
         response_id: response.id,
         response_model: response.model,
@@ -464,6 +468,99 @@ fn plain_text_provider_response_from_apple_session(
     }
 }
 
+#[must_use]
+pub fn normalize_openai_assistant_text(raw: &str) -> String {
+    normalized_message_envelope_content(raw).unwrap_or_else(|| raw.to_string())
+}
+
+#[must_use]
+pub fn normalize_openai_stream_display_text(raw: &str) -> String {
+    normalized_message_envelope_content(raw)
+        .or_else(|| partial_message_envelope_content(raw))
+        .unwrap_or_else(|| raw.to_string())
+}
+
+fn normalized_message_envelope_content(raw: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let object = parsed.as_object()?;
+    if object.get("kind").and_then(|value| value.as_str()) != Some("message") {
+        return None;
+    }
+    object
+        .get("content")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+}
+
+fn partial_message_envelope_content(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_start();
+    if !looks_like_message_envelope_prefix(trimmed) {
+        return None;
+    }
+
+    let Some(content_key_index) = trimmed.find("\"content\"") else {
+        return Some(String::new());
+    };
+    let after_key = &trimmed[content_key_index + "\"content\"".len()..];
+    let colon_index = after_key.find(':')?;
+    let after_colon = after_key[colon_index + 1..].trim_start();
+    let quoted = after_colon.strip_prefix('"')?;
+    Some(decode_partial_json_string(quoted))
+}
+
+fn looks_like_message_envelope_prefix(raw: &str) -> bool {
+    let trimmed = raw.trim_start();
+    trimmed.starts_with("{\"kind\":\"message")
+        || trimmed.starts_with("{ \"kind\":\"message")
+        || trimmed.starts_with("{\"kind\": \"message")
+        || trimmed.starts_with("{ \"kind\": \"message")
+}
+
+fn decode_partial_json_string(raw: &str) -> String {
+    let chars = raw.chars().collect::<Vec<_>>();
+    let mut decoded = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '"' => break,
+            '\\' => {
+                index += 1;
+                if index >= chars.len() {
+                    break;
+                }
+                match chars[index] {
+                    '"' => decoded.push('"'),
+                    '\\' => decoded.push('\\'),
+                    '/' => decoded.push('/'),
+                    'b' => decoded.push('\u{0008}'),
+                    'f' => decoded.push('\u{000C}'),
+                    'n' => decoded.push('\n'),
+                    'r' => decoded.push('\r'),
+                    't' => decoded.push('\t'),
+                    'u' => {
+                        if index + 4 >= chars.len() {
+                            break;
+                        }
+                        let hex = chars[index + 1..=index + 4].iter().collect::<String>();
+                        if let Ok(codepoint) = u32::from_str_radix(hex.as_str(), 16)
+                            && let Some(value) = char::from_u32(codepoint)
+                        {
+                            decoded.push(value);
+                            index += 4;
+                        } else {
+                            break;
+                        }
+                    }
+                    other => decoded.push(other),
+                }
+            }
+            character => decoded.push(character),
+        }
+        index += 1;
+    }
+    decoded
+}
+
 fn provider_usage_from_openai(
     usage: probe_provider_openai::ChatCompletionUsage,
 ) -> ProviderUsage {
@@ -483,5 +580,40 @@ fn provider_usage_from_openai(
             value: u64::from(usage.total_tokens),
             truth: ProviderUsageTruth::Exact,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        normalize_openai_assistant_text, normalize_openai_stream_display_text,
+    };
+
+    #[test]
+    fn openai_assistant_text_unwraps_message_envelope() {
+        let raw = r#"{"kind":"message","content":"hello from qwen"}"#;
+        assert_eq!(normalize_openai_assistant_text(raw), "hello from qwen");
+    }
+
+    #[test]
+    fn openai_stream_display_text_suppresses_envelope_prefix_until_content_arrives() {
+        assert_eq!(
+            normalize_openai_stream_display_text(r#"{"kind":"message","#),
+            ""
+        );
+        assert_eq!(
+            normalize_openai_stream_display_text(
+                r#"{"kind":"message","content":"hello\nwor"#
+            ),
+            "hello\nwor"
+        );
+    }
+
+    #[test]
+    fn openai_assistant_text_leaves_plain_content_alone() {
+        assert_eq!(
+            normalize_openai_assistant_text("plain assistant text"),
+            "plain assistant text"
+        );
     }
 }

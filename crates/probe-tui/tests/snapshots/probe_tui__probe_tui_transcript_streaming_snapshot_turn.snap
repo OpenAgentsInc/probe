@@ -10,14 +10,14 @@ expression: snapshot
 │ [user] You                                                                                       │
 │   Reply with the next honest proof target.                                                       │
 │                                                                                                  │
-│ [active assistant] Assistant Snapshot                                                            │
-│   round_trip: 1                                                                                  │
-│   response_id: sess_tui_stream_snapshot                                                          │
-│   model: apple-foundation-model                                                                  │
-│   mode: snapshot                                                                                 │
-│   backend: openai_chat_completions                                                               │
-│   response                                                                                       │
+│ [active assistant] Probe                                                                         │
 │   Stream remote Qwen tokens into the retained transcript.                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

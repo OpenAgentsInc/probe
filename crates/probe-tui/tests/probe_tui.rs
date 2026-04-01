@@ -209,6 +209,43 @@ fn transcript_streaming_delta_turn_snapshot_is_stable() {
 }
 
 #[test]
+fn streaming_message_envelope_stays_condensed_until_plain_text_is_visible() {
+    let mut app = AppShell::new_for_tests();
+    app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+        session_id: String::from("sess_tui_stream_envelope"),
+        profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+        model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+        cwd: String::from("/tmp/probe-workspace"),
+    });
+    app.apply_message(AppMessage::AssistantStreamStarted {
+        session_id: String::from("sess_tui_stream_envelope"),
+        round_trip: 1,
+        response_id: String::from("chatcmpl_stream_envelope"),
+        response_model: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+    });
+    app.apply_message(AppMessage::AssistantDeltaAppended {
+        session_id: String::from("sess_tui_stream_envelope"),
+        round_trip: 1,
+        delta: String::from(r#"{"kind":"message","#),
+    });
+
+    let waiting = app.render_to_string(100, 24);
+    assert!(waiting.contains("waiting for backend reply"));
+    assert!(!waiting.contains("\"kind\""));
+
+    app.apply_message(AppMessage::AssistantDeltaAppended {
+        session_id: String::from("sess_tui_stream_envelope"),
+        round_trip: 1,
+        delta: String::from(r#""content":"hello world"}"#),
+    });
+
+    let rendered = app.render_to_string(100, 24);
+    assert!(rendered.contains("hello world"));
+    assert!(!rendered.contains("\"kind\""));
+    assert!(!rendered.contains("waiting for backend reply"));
+}
+
+#[test]
 fn transcript_streaming_snapshot_turn_snapshot_is_stable() {
     let mut app = AppShell::new_for_tests();
     app.apply_message(AppMessage::ProbeRuntimeSessionReady {

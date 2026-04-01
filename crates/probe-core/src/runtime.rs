@@ -3747,6 +3747,51 @@ mod tests {
     }
 
     #[test]
+    fn eventful_plain_openai_turn_unwraps_message_envelope_text() {
+        let environment = ProbeTestEnvironment::new();
+        let server = FakeOpenAiServer::from_responses(vec![FakeHttpResponse::text_event_stream(
+            200,
+            concat!(
+                "data: {\"id\":\"chatcmpl_stream_envelope\",\"model\":\"qwen3.5-2b-q8_0-registry.gguf\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"{\\\"kind\\\":\\\"message\\\",\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_stream_envelope\",\"model\":\"qwen3.5-2b-q8_0-registry.gguf\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\\"content\\\":\\\"hello world\\\"}\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_stream_envelope\",\"model\":\"qwen3.5-2b-q8_0-registry.gguf\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\n",
+                "data: [DONE]\n\n",
+            ),
+        )]);
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = server.base_url().to_string();
+        let collector = Arc::new(TestRuntimeEventCollector::default());
+
+        let outcome = runtime
+            .exec_plain_text_with_events(
+                PlainTextExecRequest {
+                    profile,
+                    prompt: String::from("say hello"),
+                    title: Some(String::from("Envelope Plain Turn")),
+                    cwd: environment.workspace().to_path_buf(),
+                    system_prompt: None,
+                    harness_profile: None,
+                    tool_loop: None,
+                },
+                collector.clone(),
+            )
+            .expect("streamed envelope turn should succeed");
+
+        assert_eq!(outcome.assistant_text, "hello world");
+        let events = collector.snapshot();
+        let session_id = outcome.session.id.clone();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::AssistantTurnCommitted {
+                session_id: event_session,
+                assistant_text,
+                ..
+            } if event_session == &session_id && assistant_text == "hello world"
+        )));
+    }
+
+    #[test]
     fn eventful_openai_tool_loop_emits_streamed_tool_call_deltas() {
         let environment = ProbeTestEnvironment::new();
         environment.seed_coding_workspace();

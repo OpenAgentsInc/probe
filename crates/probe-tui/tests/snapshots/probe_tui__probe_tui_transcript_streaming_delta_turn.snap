@@ -10,15 +10,15 @@ expression: snapshot
 │ [user] You                                                                                       │
 │   Inspect README and summarize Probe.                                                            │
 │                                                                                                  │
-│ [active assistant] Assistant Stream                                                              │
-│   round_trip: 1                                                                                  │
-│   response_id: chatcmpl_stream_delta_1                                                           │
-│   model: qwen3.5-2b-q8_0-registry.gguf                                                           │
-│   mode: delta                                                                                    │
-│   backend: openai_chat_completions                                                               │
-│   ttft_ms: 73                                                                                    │
-│   response                                                                                       │
+│ [active assistant] Probe                                                                         │
 │   Probe owns the coding-agent runtime, including sessions, tools, approvals, and transcripts.    │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 

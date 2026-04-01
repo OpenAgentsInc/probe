@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use probe_core::provider::normalize_openai_stream_display_text;
 use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_core::server_control::ServerOperatorSummary;
 use probe_core::tools::tool_result_model_text;
@@ -2059,51 +2060,35 @@ impl ApprovalOverlay {
 }
 
 fn render_stream_active_turn(stream: &AssistantStreamState) -> ActiveTurn {
-    let mut body = vec![
-        format!("round_trip: {}", stream.round_trip),
-        format!("response_id: {}", preview(stream.response_id.as_str(), 48)),
-        format!("model: {}", preview(stream.response_model.as_str(), 48)),
-        format!("mode: {}", stream.mode.label()),
-    ];
-    if let Some(backend_kind) = stream.backend_kind.as_deref() {
-        body.push(format!("backend: {backend_kind}"));
-    }
-    if let Some(milliseconds) = stream.first_chunk_ms {
-        body.push(format!("ttft_ms: {milliseconds}"));
-    }
-    if let Some(finish_reason) = stream.finish_reason.as_deref() {
-        body.push(format!("finish_reason: {finish_reason}"));
-    }
+    let display_text = normalize_openai_stream_display_text(stream.assistant_text.as_str());
+    let mut body = Vec::new();
     if let Some(error) = stream.failure.as_deref() {
-        body.push(format!("failure: {}", preview(error, 120)));
+        body.push(format!("backend request failed: {error}"));
     }
 
     if !stream.tool_calls.is_empty() {
-        body.push(String::from("tool_calls"));
         for tool in &stream.tool_calls {
             body.push(format!(
-                "tool[{}]: {}",
-                tool.tool_index,
+                "{} {}",
+                tool.tool_index + 1,
                 tool.tool_name.as_deref().unwrap_or("unknown")
             ));
             if let Some(call_id) = tool.call_id.as_deref() {
-                body.push(format!("call_id: {}", preview(call_id, 48)));
+                body.push(format!("call: {}", preview(call_id, 48)));
             }
             if !tool.arguments.is_empty() {
-                body.push(String::from("arguments"));
-                body.extend(split_text_lines(tool.arguments.as_str()));
+                body.push(format!("args: {}", tool.arguments));
             }
         }
     }
 
-    if !stream.assistant_text.is_empty() {
-        body.push(String::from("response"));
-        body.extend(split_text_lines(stream.assistant_text.as_str()));
-    } else if stream.failure.is_none() {
-        body.push(String::from("[waiting for backend reply]"));
+    if !display_text.is_empty() {
+        body.extend(split_text_lines(display_text.as_str()));
+    } else if stream.failure.is_none() && stream.tool_calls.is_empty() {
+        body.push(String::from("waiting for backend reply"));
     }
 
-    let role = if stream.assistant_text.is_empty() && !stream.tool_calls.is_empty() {
+    let role = if display_text.is_empty() && !stream.tool_calls.is_empty() {
         TranscriptRole::Tool
     } else if stream.failure.is_some() {
         TranscriptRole::Status
@@ -2112,14 +2097,10 @@ fn render_stream_active_turn(stream: &AssistantStreamState) -> ActiveTurn {
     };
     let title = if stream.failure.is_some() {
         "Assistant Stream Failed"
-    } else if stream.finish_reason.is_some() {
-        "Assistant Stream Complete"
-    } else if matches!(stream.mode, AssistantStreamMode::Snapshot) {
-        "Assistant Snapshot"
-    } else if stream.assistant_text.is_empty() && !stream.tool_calls.is_empty() {
+    } else if display_text.is_empty() && !stream.tool_calls.is_empty() {
         "Streaming Tool Call"
     } else {
-        "Assistant Stream"
+        "Probe"
     };
     ActiveTurn::new(role, title, body)
 }

@@ -3,8 +3,8 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use probe_core::provider::{
-    complete_plain_text, PlainTextMessage, PlainTextProviderResponse, ProviderError,
-    ProviderUsageTruth,
+    complete_plain_text, normalize_openai_assistant_text, PlainTextMessage,
+    PlainTextProviderResponse, ProviderError, ProviderUsageTruth,
 };
 use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, ResolvePendingToolApprovalOutcome,
@@ -609,7 +609,7 @@ fn transcript_entry_from_item(turn_index: u64, item: &TranscriptItem) -> Option<
         TranscriptItemKind::AssistantMessage => Some(TranscriptEntry::new(
             TranscriptRole::Assistant,
             "Probe",
-            split_body_lines(item.text.as_str()),
+            split_body_lines(normalize_openai_assistant_text(item.text.as_str()).as_str()),
         )),
         TranscriptItemKind::ToolCall => Some(TranscriptEntry::tool_call(
             item.name.as_deref().unwrap_or("unknown_tool"),
