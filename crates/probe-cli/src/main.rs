@@ -20,7 +20,10 @@ use probe_core::backend_profiles::{
 use probe_core::dataset_export::{
     DatasetExportConfig, DatasetKind, DecisionCaseRecord, DecisionSessionSummary, export_dataset,
 };
-use probe_core::harness::{render_harness_profile, resolve_harness_profile};
+use probe_core::harness::{
+    HarnessCandidateManifest, builtin_harness_candidate_manifests, render_harness_profile,
+    resolve_harness_profile,
+};
 use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, current_working_dir,
     default_probe_home,
@@ -38,8 +41,9 @@ use probe_decisions::{
     evaluate_long_context_module, evaluate_patch_readiness_module, evaluate_tool_route_module,
 };
 use probe_optimizer::{
-    CandidateComparisonReport, DecisionModuleOptimizationBundle, OptimizationScorecard,
-    OptimizationTargetKind, PromotionRule, compare_candidate, optimize_decision_modules,
+    DecisionModuleOptimizationBundle, HarnessCandidateEvaluationInput, HarnessEvaluationCase,
+    HarnessOptimizationBundle, OptimizationScorecard, OptimizationTargetKind, PromotionRule,
+    optimize_decision_modules, optimize_harness_profiles,
 };
 use probe_protocol::backend::BackendKind;
 use probe_protocol::session::{
@@ -244,9 +248,11 @@ struct OptimizeModulesArgs {
 #[derive(clap::Args, Debug)]
 struct OptimizeHarnessArgs {
     #[arg(long)]
-    baseline_report: PathBuf,
+    baseline_report: Option<PathBuf>,
     #[arg(long)]
-    candidate_report: PathBuf,
+    candidate_report: Vec<PathBuf>,
+    #[arg(long)]
+    artifact_bundle: Option<PathBuf>,
     #[arg(long)]
     output: PathBuf,
 }
@@ -878,35 +884,48 @@ fn run_optimize_modules(args: OptimizeModulesArgs) -> Result<(), String> {
 }
 
 fn run_optimize_harness(args: OptimizeHarnessArgs) -> Result<(), String> {
-    let baseline = read_acceptance_report(args.baseline_report.as_path())?;
-    let candidate = read_acceptance_report(args.candidate_report.as_path())?;
-    let baseline_id = args
-        .baseline_report
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("baseline")
-        .to_string();
-    let candidate_id = args
-        .candidate_report
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("candidate")
-        .to_string();
-    let report = compare_candidate(
-        OptimizationTargetKind::HarnessProfile,
-        baseline_id,
-        candidate_id,
-        optimization_scorecard_from_acceptance(&baseline),
-        optimization_scorecard_from_acceptance(&candidate),
-        PromotionRule::gepa_default(),
-    );
-    write_optimizer_report(args.output.as_path(), &[report.clone()])?;
+    let bundle = if let Some(artifact_bundle) = args.artifact_bundle.as_ref() {
+        HarnessOptimizationBundle::read_json(artifact_bundle)?
+    } else {
+        let baseline_report_path = args.baseline_report.as_ref().ok_or_else(|| {
+            String::from(
+                "optimize-harness requires either --artifact-bundle <bundle.json> or --baseline-report plus one or more --candidate-report values",
+            )
+        })?;
+        if args.candidate_report.is_empty() {
+            return Err(String::from(
+                "optimize-harness requires at least one --candidate-report when launching a new optimization run",
+            ));
+        }
+        let baseline_report = read_acceptance_report(baseline_report_path.as_path())?;
+        let baseline_input =
+            harness_candidate_input_from_acceptance_report(baseline_report_path, &baseline_report)?;
+        let candidate_inputs = args
+            .candidate_report
+            .iter()
+            .map(|path| {
+                let report = read_acceptance_report(path.as_path())?;
+                harness_candidate_input_from_acceptance_report(path, &report)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        optimize_harness_profiles(
+            baseline_report_path.display().to_string(),
+            baseline_input,
+            candidate_inputs,
+            Some("OpenAgentsInc/probe#55"),
+            PromotionRule::gepa_default(),
+        )?
+    };
+
+    bundle.write_json(args.output.as_path())?;
+    let report = &bundle.promotion_report;
     eprintln!(
-        "target={} baseline={} candidate={} promoted={} reason={}",
+        "target={} baseline={} candidate={} promoted={} run={} reason={}",
         render_optimization_target(report.target_kind),
         report.baseline_id,
         report.candidate_id,
         report.promoted,
+        bundle.psionic_artifacts.refs.run_id,
         report.reason
     );
     Ok(())
@@ -940,6 +959,92 @@ fn read_decision_case_dataset(path: &Path) -> Result<Vec<DecisionCaseRecord>, St
 fn read_acceptance_report(path: &Path) -> Result<acceptance::AcceptanceRunReport, String> {
     let body = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     serde_json::from_str(&body).map_err(|error| error.to_string())
+}
+
+fn harness_candidate_input_from_acceptance_report(
+    report_path: &Path,
+    report: &acceptance::AcceptanceRunReport,
+) -> Result<HarnessCandidateEvaluationInput, String> {
+    let manifest = resolve_harness_candidate_manifest(
+        report.harness.profile_name.as_str(),
+        report.harness.profile_version.as_str(),
+    )?;
+    let cases = report
+        .results
+        .iter()
+        .flat_map(|case| {
+            case.attempts.iter().map(move |attempt| HarnessEvaluationCase {
+                case_id: format!("{}:attempt:{}", case.case_name, attempt.attempt_index),
+                split: harness_case_split(case.case_name.as_str(), attempt.attempt_index),
+                case_name: case.case_name.clone(),
+                attempt_index: attempt.attempt_index,
+                passed: attempt.passed,
+                failure_category: attempt
+                    .failure_category
+                    .as_ref()
+                    .map(json_string_value),
+                wallclock_ms: attempt.observability.as_ref().map(|value| value.wallclock_ms),
+                executed_tool_calls: attempt.executed_tool_calls,
+                tool_names: attempt.tool_names.clone(),
+                refused_tool_calls: attempt.policy_counts.refused_tool_calls,
+                paused_tool_calls: attempt.policy_counts.paused_tool_calls,
+                backend_failure_family: attempt
+                    .backend_receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.failure_family.clone()),
+                backend_failure_reason: attempt
+                    .backend_receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.failure_reason.clone()),
+                transcript_path: attempt
+                    .transcript_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(HarnessCandidateEvaluationInput {
+        manifest,
+        report_ref: report_path.display().to_string(),
+        scorecard: optimization_scorecard_from_acceptance(report),
+        cases,
+    })
+}
+
+fn resolve_harness_candidate_manifest(
+    profile_name: &str,
+    profile_version: &str,
+) -> Result<HarnessCandidateManifest, String> {
+    builtin_harness_candidate_manifests()
+        .into_iter()
+        .find(|manifest| {
+            manifest.profile_name == profile_name && manifest.profile_version == profile_version
+        })
+        .ok_or_else(|| {
+            format!(
+                "no builtin harness candidate manifest matches {}@{}",
+                profile_name, profile_version
+            )
+        })
+}
+
+fn harness_case_split(case_name: &str, attempt_index: usize) -> probe_core::dataset_export::DecisionCaseSplit {
+    let checksum = case_name
+        .bytes()
+        .fold(attempt_index as u64, |accumulator, byte| accumulator + u64::from(byte));
+    if checksum % 5 == 0 {
+        probe_core::dataset_export::DecisionCaseSplit::Validation
+    } else {
+        probe_core::dataset_export::DecisionCaseSplit::Train
+    }
+}
+
+fn json_string_value<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| String::from("\"unknown\""))
+        .trim_matches('"')
+        .to_string()
 }
 
 fn optimization_scorecard_from_acceptance(
@@ -981,17 +1086,6 @@ fn optimization_scorecard_from_acceptance(
         median_wallclock_ms,
         operator_trust_penalty,
     }
-}
-
-fn write_optimizer_report(
-    path: &Path,
-    reports: &[CandidateComparisonReport],
-) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let body = serde_json::to_string_pretty(reports).map_err(|error| error.to_string())?;
-    std::fs::write(path, body).map_err(|error| error.to_string())
 }
 
 fn named_profile(name: &str) -> Result<probe_protocol::backend::BackendProfile, String> {

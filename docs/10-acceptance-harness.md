@@ -24,6 +24,13 @@ The current runner records retained coding-lane truth for six cases:
 Each case currently runs twice so the report includes a small repeat-run
 receipt instead of only a single pass/fail datapoint.
 
+The harness profiles themselves are now manifest-backed Probe artifacts rather
+than one hardcoded prompt string. The current built-ins are:
+
+- `coding_bootstrap_default@v1`
+- `coding_bootstrap_patch_guard@v1`
+- `coding_bootstrap_verify_first@v1`
+
 ## CLI Shape
 
 ```bash
@@ -51,6 +58,16 @@ Optional overrides:
 - `--probe-home <path>`
 - `--report-path <path>`
 
+Probe now also accepts offline harness optimization over retained acceptance
+reports:
+
+```bash
+cargo run -p probe-cli -- optimize-harness \
+  --baseline-report ~/.probe/reports/probe_acceptance_baseline.json \
+  --candidate-report ~/.probe/reports/probe_acceptance_verify_first.json \
+  --output ~/.probe/reports/probe_harness_optimization_bundle.json
+```
+
 ## Output
 
 The runner writes a JSON report that records:
@@ -72,6 +89,12 @@ The runner writes a JSON report that records:
 
 `probe accept-compare` writes one separate comparison artifact plus two
 backend-specific acceptance reports under the comparison run root.
+
+`probe optimize-harness` now turns those retained reports into:
+
+- manifest-backed harness candidates
+- per-attempt retained optimizer cases with failure categories and observability
+- a Psionic optimization bundle plus the final Probe promotion report
 
 When reading the report, the main things to watch are:
 

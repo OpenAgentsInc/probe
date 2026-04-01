@@ -28,7 +28,7 @@ Harness candidates over retained acceptance receipts:
 cargo run -p probe-cli -- optimize-harness \
   --baseline-report ~/.probe/reports/probe_acceptance_baseline.json \
   --candidate-report ~/.probe/reports/probe_acceptance_candidate.json \
-  --output ~/.probe/reports/probe_harness_optimization.json
+  --output ~/.probe/reports/probe_harness_optimization_bundle.json
 ```
 
 ## What The Optimizer Owns
@@ -44,7 +44,8 @@ The CLI currently uses that shared rule in two places:
 
 - decision-module candidates launched through the Psionic optimizer substrate
   from exported `decision-cases` bundles
-- harness candidates evaluated against retained acceptance reports
+- harness candidates launched through the same Psionic substrate from retained
+  acceptance reports adapted into per-attempt cases
 
 `optimize-modules` now writes one bundle that includes, per family:
 

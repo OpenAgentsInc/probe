@@ -1,11 +1,78 @@
 use std::path::Path;
 
 use probe_protocol::session::SessionHarnessProfile;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedHarnessProfile {
     pub profile: SessionHarnessProfile,
     pub system_prompt: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessCandidateManifest {
+    pub schema_version: u16,
+    pub candidate_id: String,
+    pub tool_set: String,
+    pub profile_name: String,
+    pub profile_version: String,
+    pub description: String,
+    pub system_prompt_template: String,
+    pub manifest_digest: String,
+}
+
+impl HarnessCandidateManifest {
+    #[must_use]
+    pub fn new(
+        candidate_id: impl Into<String>,
+        tool_set: impl Into<String>,
+        profile_name: impl Into<String>,
+        profile_version: impl Into<String>,
+        description: impl Into<String>,
+        system_prompt_template: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            candidate_id: candidate_id.into(),
+            tool_set: tool_set.into(),
+            profile_name: profile_name.into(),
+            profile_version: profile_version.into(),
+            description: description.into(),
+            system_prompt_template: system_prompt_template.into(),
+            manifest_digest: String::new(),
+        }
+        .with_stable_digest()
+    }
+
+    #[must_use]
+    pub fn stable_digest(&self) -> String {
+        let mut digestible = self.clone();
+        digestible.manifest_digest.clear();
+        let mut hasher = Sha256::new();
+        hasher.update(b"probe_harness_candidate_manifest|");
+        hasher.update(
+            serde_json::to_string(&digestible)
+                .expect("harness manifest should serialize")
+                .as_bytes(),
+        );
+        hex::encode(hasher.finalize())
+    }
+
+    #[must_use]
+    pub fn with_stable_digest(mut self) -> Self {
+        self.manifest_digest = self.stable_digest();
+        self
+    }
+}
+
+#[must_use]
+pub fn builtin_harness_candidate_manifests() -> Vec<HarnessCandidateManifest> {
+    vec![
+        coding_bootstrap_default_manifest(),
+        coding_bootstrap_patch_guard_manifest(),
+        coding_bootstrap_verify_first_manifest(),
+    ]
 }
 
 pub fn resolve_harness_profile(
@@ -15,13 +82,19 @@ pub fn resolve_harness_profile(
     operator_system: Option<&str>,
 ) -> Result<Option<ResolvedHarnessProfile>, String> {
     let base = match (tool_set, requested_profile) {
-        (Some("coding_bootstrap"), Some("coding_bootstrap_default"))
-        | (Some("coding_bootstrap"), None) => Some(coding_bootstrap_default(cwd)),
-        (Some("coding_bootstrap"), Some(profile)) => {
-            return Err(format!(
-                "unknown harness profile for coding_bootstrap: {profile}"
-            ));
-        }
+        (Some("coding_bootstrap"), Some(profile)) => Some(
+            builtin_harness_candidate_manifests()
+                .into_iter()
+                .find(|candidate| candidate.profile_name == profile)
+                .map(|candidate| resolve_manifest(candidate, cwd))
+                .ok_or_else(|| {
+                    format!("unknown harness profile for coding_bootstrap: {profile}")
+                })?,
+        ),
+        (Some("coding_bootstrap"), None) => Some(resolve_manifest(
+            coding_bootstrap_default_manifest(),
+            cwd,
+        )),
         (Some(other), Some(profile)) => {
             return Err(format!(
                 "harness profile `{profile}` is not available for tool set `{other}`"
@@ -51,19 +124,39 @@ pub fn render_harness_profile(profile: &SessionHarnessProfile) -> String {
     format!("{}@{}", profile.name, profile.version)
 }
 
-fn coding_bootstrap_default(cwd: &Path) -> ResolvedHarnessProfile {
+fn resolve_manifest(manifest: HarnessCandidateManifest, cwd: &Path) -> ResolvedHarnessProfile {
     let shell = if cfg!(target_family = "windows") {
         "cmd"
     } else {
         "sh"
     };
-    let prompt = format!(
+    let prompt = manifest
+        .system_prompt_template
+        .replace("{cwd}", &cwd.display().to_string())
+        .replace("{shell}", shell)
+        .replace("{operating_system}", std::env::consts::OS);
+    ResolvedHarnessProfile {
+        profile: SessionHarnessProfile {
+            name: manifest.profile_name,
+            version: manifest.profile_version,
+        },
+        system_prompt: prompt,
+    }
+}
+
+fn coding_bootstrap_default_manifest() -> HarnessCandidateManifest {
+    HarnessCandidateManifest::new(
+        "coding_bootstrap_default@v1",
+        "coding_bootstrap",
+        "coding_bootstrap_default",
+        "v1",
+        "Baseline Probe coding harness profile.",
         "You are operating inside Probe's coding_bootstrap harness profile v1.\n\
          \n\
          Environment:\n\
-         - cwd: {}\n\
-         - shell: {}\n\
-         - operating_system: {}\n\
+         - cwd: {cwd}\n\
+         - shell: {shell}\n\
+         - operating_system: {operating_system}\n\
          \n\
          Operating rules:\n\
          - Treat this session as one coding activity and stay focused on that activity.\n\
@@ -73,17 +166,57 @@ fn coding_bootstrap_default(cwd: &Path) -> ResolvedHarnessProfile {
          - Keep tool usage bounded and avoid repeating large reads when a narrower read or search would do.\n\
          - If a tool returns truncated output, narrow the next call instead of guessing.\n\
          - Ground final answers in observed tool output.",
-        cwd.display(),
-        shell,
-        std::env::consts::OS
-    );
-    ResolvedHarnessProfile {
-        profile: SessionHarnessProfile {
-            name: String::from("coding_bootstrap_default"),
-            version: String::from("v1"),
-        },
-        system_prompt: prompt,
-    }
+    )
+}
+
+fn coding_bootstrap_patch_guard_manifest() -> HarnessCandidateManifest {
+    HarnessCandidateManifest::new(
+        "coding_bootstrap_patch_guard@v1",
+        "coding_bootstrap",
+        "coding_bootstrap_patch_guard",
+        "v1",
+        "Variant that pushes harder on evidence gathering before edits.",
+        "You are operating inside Probe's coding_bootstrap patch-guard harness profile v1.\n\
+         \n\
+         Environment:\n\
+         - cwd: {cwd}\n\
+         - shell: {shell}\n\
+         - operating_system: {operating_system}\n\
+         \n\
+         Operating rules:\n\
+         - Treat this session as one coding activity and stay focused on that activity.\n\
+         - Prefer read_file, list_files, and code_search before using shell.\n\
+         - Do not use apply_patch until you have concrete file evidence and can name the edit target precisely.\n\
+         - Verify relevant files after editing before claiming success.\n\
+         - Keep tool usage bounded and avoid repeating large reads when a narrower read or search would do.\n\
+         - If a tool returns truncated output, narrow the next call instead of guessing.\n\
+         - Ground final answers in observed tool output.",
+    )
+}
+
+fn coding_bootstrap_verify_first_manifest() -> HarnessCandidateManifest {
+    HarnessCandidateManifest::new(
+        "coding_bootstrap_verify_first@v1",
+        "coding_bootstrap",
+        "coding_bootstrap_verify_first",
+        "v1",
+        "Variant that explicitly foregrounds post-edit verification and risk narration.",
+        "You are operating inside Probe's coding_bootstrap verify-first harness profile v1.\n\
+         \n\
+         Environment:\n\
+         - cwd: {cwd}\n\
+         - shell: {shell}\n\
+         - operating_system: {operating_system}\n\
+         \n\
+         Operating rules:\n\
+         - Treat this session as one coding activity and stay focused on that activity.\n\
+         - Prefer read_file, list_files, and code_search before using shell.\n\
+         - Use apply_patch for deterministic text changes instead of describing edits abstractly.\n\
+         - After every edit, schedule an explicit verification step before finalizing.\n\
+         - Keep tool usage bounded and avoid repeating large reads when a narrower read or search would do.\n\
+         - If a tool returns truncated output, narrow the next call instead of guessing.\n\
+         - Ground final answers in observed tool output and mention the verification step you ran.",
+    )
 }
 
 #[cfg(test)]
