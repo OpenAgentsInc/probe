@@ -176,26 +176,8 @@ Useful focused lanes:
 
 ## Docs
 
-Start with:
-
-- [docs/51-probe-optimizer-system.md](docs/51-probe-optimizer-system.md)
-- [docs/02-runtime-ownership-and-boundaries.md](docs/02-runtime-ownership-and-boundaries.md)
-- [docs/03-workspace-map.md](docs/03-workspace-map.md)
-- [docs/24-apple-fm-backend-lane.md](docs/24-apple-fm-backend-lane.md)
-- [docs/25-apple-fm-tool-lane.md](docs/25-apple-fm-tool-lane.md)
-- [docs/31-probe-tui-background-task-and-app-message-bridge.md](docs/31-probe-tui-background-task-and-app-message-bridge.md)
-- [docs/32-apple-fm-setup-screen.md](docs/32-apple-fm-setup-screen.md)
-- [docs/35-probe-tui-retained-transcript-model.md](docs/35-probe-tui-retained-transcript-model.md)
-- [docs/36-chat-screen-primary-shell-and-setup-secondary.md](docs/36-chat-screen-primary-shell-and-setup-secondary.md)
-- [docs/37-probe-tui-bottom-pane-and-minimal-composer.md](docs/37-probe-tui-bottom-pane-and-minimal-composer.md)
-- [docs/38-probe-tui-transcript-turn-rendering.md](docs/38-probe-tui-transcript-turn-rendering.md)
-- [docs/39-probe-tui-typed-overlay-stack-and-focus-routing.md](docs/39-probe-tui-typed-overlay-stack-and-focus-routing.md)
-- [docs/40-probe-tui-composer-history-commands-mentions-attachments-and-paste.md](docs/40-probe-tui-composer-history-commands-mentions-attachments-and-paste.md)
-- [docs/42-probe-tui-real-runtime-session-worker.md](docs/42-probe-tui-real-runtime-session-worker.md)
-- [docs/43-probe-runtime-event-stream-and-live-tui-lifecycle.md](docs/43-probe-runtime-event-stream-and-live-tui-lifecycle.md)
-- [docs/44-probe-tui-tool-call-and-tool-result-rows.md](docs/44-probe-tui-tool-call-and-tool-result-rows.md)
-- [docs/45-probe-tui-resumable-approval-broker.md](docs/45-probe-tui-resumable-approval-broker.md)
-- [docs/47-openai-streaming-runtime-delta-events.md](docs/47-openai-streaming-runtime-delta-events.md)
-- [docs/48-apple-fm-streaming-and-snapshot-events.md](docs/48-apple-fm-streaming-and-snapshot-events.md)
-- [docs/49-probe-tui-streamed-output-rendering.md](docs/49-probe-tui-streamed-output-rendering.md)
-- [docs/50-tailnet-qwen-operator-lane.md](docs/50-tailnet-qwen-operator-lane.md)
+Start with the optimizer-system doc, the runtime ownership doc, and the
+workspace map if you need to understand how Probe is split today and where the
+offline optimizer fits. For deeper TUI, backend, and streaming design history,
+use `docs/README.md`; the full contributor start-here list now lives in
+`AGENTS.md`.
