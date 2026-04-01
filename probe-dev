@@ -15,6 +15,7 @@ Commands:
   pr-fast                  Run the fast local merge-safe tier: fmt-check, check, and test.
   accept [args...]         Backward-compatible alias for accept-live.
   accept-live [args...]    Run the live acceptance harness against the configured backend.
+  self-test [args...]      Run the retained Probe self-test harness lane.
   accept-compare [args...] Run the admitted-Mac Apple FM vs Qwen comparison lane.
   decision-export [args...]  Run probe export with any extra CLI args.
   module-eval [args...]      Run probe module-eval with any extra CLI args.
@@ -69,6 +70,9 @@ case "$command_name" in
     ;;
   accept|accept-live)
     cargo run -p probe-cli -- accept "$@"
+    ;;
+  self-test)
+    cargo run -p probe-cli -- self-test "$@"
     ;;
   accept-compare)
     cargo run -p probe-cli -- accept-compare "$@"

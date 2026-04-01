@@ -5,12 +5,16 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use probe_core::harness::resolve_harness_profile;
-use probe_core::runtime::{PlainTextExecOutcome, PlainTextExecRequest, ProbeRuntime, RuntimeError};
+use probe_core::runtime::{
+    PlainTextExecOutcome, PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime,
+    ResolvePendingToolApprovalOutcome, ResolvePendingToolApprovalRequest, RuntimeError,
+};
 use probe_core::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig};
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_protocol::session::{
-    BackendTurnReceipt, CacheSignal, SessionMetadata, ToolPolicyDecision, TranscriptEvent,
-    TranscriptItemKind, TurnObservability, UsageMeasurement,
+    BackendTurnReceipt, CacheSignal, SessionMetadata, ToolApprovalResolution,
+    ToolPolicyDecision, TranscriptEvent, TranscriptItemKind, TurnObservability,
+    UsageMeasurement,
 };
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +31,18 @@ const ACCEPTANCE_CASE_NAMES: [&str; 6] = [
     "shell_then_summarize",
     "patch_then_verify",
     "approval_pause_or_refusal",
+];
+const SELF_TEST_CASE_NAMES: [&str; 10] = [
+    "read_file_answer",
+    "list_then_read",
+    "search_then_read",
+    "shell_then_summarize",
+    "patch_then_verify",
+    "approval_pause_or_refusal",
+    "shell_failure_then_summarize",
+    "multi_turn_session_resume",
+    "approval_pause_then_resume",
+    "backend_failure_is_honest",
 ];
 
 #[derive(Clone, Debug)]
@@ -309,6 +325,12 @@ pub fn run_acceptance_harness(
     run_acceptance_harness_for_case_names(config, retained_acceptance_case_names())
 }
 
+pub fn run_self_test_harness(
+    config: AcceptanceHarnessConfig,
+) -> Result<AcceptanceRunReport, String> {
+    run_acceptance_harness_for_case_names(config, retained_self_test_case_names())
+}
+
 pub fn run_acceptance_comparison(
     config: AcceptanceComparisonConfig,
 ) -> Result<AcceptanceComparisonReport, String> {
@@ -323,6 +345,10 @@ pub fn default_comparison_report_path(probe_home: &Path) -> PathBuf {
 
 fn retained_acceptance_case_names() -> &'static [&'static str] {
     &ACCEPTANCE_CASE_NAMES
+}
+
+fn retained_self_test_case_names() -> &'static [&'static str] {
+    &SELF_TEST_CASE_NAMES
 }
 
 fn run_acceptance_harness_for_case_names(
@@ -515,6 +541,12 @@ pub fn default_report_path(probe_home: &Path) -> PathBuf {
     probe_home
         .join("reports")
         .join(format!("probe_acceptance_{}.json", now_ms()))
+}
+
+pub fn default_self_test_report_path(probe_home: &Path) -> PathBuf {
+    probe_home
+        .join("reports")
+        .join(format!("probe_self_test_{}.json", now_ms()))
 }
 
 fn comparison_case_support(case_name: &str, backend_kind: BackendKind) -> AcceptanceCaseSupport {
@@ -713,6 +745,177 @@ fn run_case_approval_pause_or_refusal(
     )
 }
 
+fn run_case_shell_failure_then_summarize(
+    runtime: &ProbeRuntime,
+    base_profile: &BackendProfile,
+    probe_home: &Path,
+) -> AcceptanceCaseReport {
+    run_repeated_case(
+        runtime,
+        base_profile,
+        probe_home,
+        "shell_failure_then_summarize",
+        |runtime, profile, workspace, title| {
+            execute_coding_case(
+                runtime,
+                profile,
+                workspace,
+                title,
+                "Use shell to run `false`, observe the non-zero exit code, then answer with exactly SHELL_FAILURE_OK.",
+                coding_tool_loop(false, false, false, ToolDeniedAction::Refuse),
+            )
+        },
+        |attempt, _workspace| {
+            attempt.assistant_text.as_deref() == Some("SHELL_FAILURE_OK")
+                && attempt.tool_names.iter().any(|name| name == "shell")
+        },
+    )
+}
+
+fn run_case_multi_turn_session_resume(
+    runtime: &ProbeRuntime,
+    base_profile: &BackendProfile,
+    probe_home: &Path,
+) -> AcceptanceCaseReport {
+    run_repeated_case(
+        runtime,
+        base_profile,
+        probe_home,
+        "multi_turn_session_resume",
+        |runtime, profile, workspace, title| {
+            let first = execute_coding_case(
+                runtime,
+                profile,
+                workspace,
+                title,
+                "Reply with exactly SELF_TEST_TURN_ONE.",
+                coding_tool_loop(false, false, false, ToolDeniedAction::Refuse),
+            )?;
+            runtime
+                .continue_plain_text_session(PlainTextResumeRequest {
+                    session_id: first.session.id,
+                    profile: profile.clone(),
+                    prompt: String::from("Reply with exactly SELF_TEST_TURN_TWO."),
+                    tool_loop: None,
+                })
+                .map_err(AcceptanceExecutionError::Runtime)
+        },
+        |attempt, _workspace| {
+            let Some(transcript_path) = attempt.transcript_path.as_ref() else {
+                return false;
+            };
+            let events = load_transcript_events(transcript_path.as_path());
+            attempt.assistant_text.as_deref() == Some("SELF_TEST_TURN_TWO.")
+                && events.len() == 2
+                && events[0]
+                    .turn
+                    .items
+                    .iter()
+                    .any(|item| item.text == "SELF_TEST_TURN_ONE.")
+                && events[1]
+                    .turn
+                    .items
+                    .iter()
+                    .any(|item| item.text == "SELF_TEST_TURN_TWO.")
+        },
+    )
+}
+
+fn run_case_approval_pause_then_resume(
+    runtime: &ProbeRuntime,
+    base_profile: &BackendProfile,
+    probe_home: &Path,
+) -> AcceptanceCaseReport {
+    run_repeated_case(
+        runtime,
+        base_profile,
+        probe_home,
+        "approval_pause_then_resume",
+        |runtime, profile, workspace, title| {
+            let tool_loop = coding_tool_loop(false, false, false, ToolDeniedAction::Pause);
+            match execute_coding_case(
+                runtime,
+                profile,
+                workspace,
+                title,
+                "Use apply_patch to replace world with probe in hello.txt, then answer with exactly APPROVAL_RESUME_OK.",
+                tool_loop.clone(),
+            ) {
+                Err(AcceptanceExecutionError::Runtime(RuntimeError::ToolApprovalPending {
+                    session_id,
+                    call_id,
+                    ..
+                })) => match runtime
+                    .resolve_pending_tool_approval(ResolvePendingToolApprovalRequest {
+                        session_id,
+                        profile: profile.clone(),
+                        tool_loop,
+                        call_id,
+                        resolution: ToolApprovalResolution::Approved,
+                    })
+                    .map_err(AcceptanceExecutionError::Runtime)?
+                {
+                    ResolvePendingToolApprovalOutcome::Resumed { outcome } => Ok(outcome),
+                    ResolvePendingToolApprovalOutcome::StillPending { .. } => Err(
+                        AcceptanceExecutionError::Setup(String::from(
+                            "approval remained pending after approval resolution",
+                        )),
+                    ),
+                },
+                Err(other) => Err(other),
+                Ok(_) => Err(AcceptanceExecutionError::Setup(String::from(
+                    "expected approval pause before resume",
+                ))),
+            }
+        },
+        |attempt, workspace| {
+            attempt.assistant_text.as_deref() == Some("APPROVAL_RESUME_OK")
+                && attempt.policy_counts.paused_tool_calls >= 1
+                && attempt.policy_counts.approved_tool_calls >= 1
+                && fs::read_to_string(workspace.join("hello.txt"))
+                    .map(|content| content == "hello probe\n")
+                    .unwrap_or(false)
+        },
+    )
+}
+
+fn run_case_backend_failure_is_honest(
+    runtime: &ProbeRuntime,
+    base_profile: &BackendProfile,
+    probe_home: &Path,
+) -> AcceptanceCaseReport {
+    run_repeated_case(
+        runtime,
+        base_profile,
+        probe_home,
+        "backend_failure_is_honest",
+        |runtime, profile, workspace, title| {
+            let mut failing_profile = profile.clone();
+            failing_profile.base_url = format!("{}/missing", profile.base_url.trim_end_matches('/'));
+            runtime
+                .exec_plain_text(PlainTextExecRequest {
+                    profile: failing_profile,
+                    prompt: String::from("Reply with exactly BACKEND_FAILURE_SHOULD_NOT_SUCCEED."),
+                    title: Some(String::from(title)),
+                    cwd: workspace.to_path_buf(),
+                    system_prompt: None,
+                    harness_profile: None,
+                    tool_loop: None,
+                })
+                .map_err(AcceptanceExecutionError::Runtime)
+        },
+        |attempt, _workspace| {
+            attempt.assistant_text.is_none()
+                && matches!(
+                    attempt.failure_category,
+                    Some(AcceptanceFailureCategory::BackendFailure)
+                )
+                && attempt.error.is_some()
+                && attempt.session_id.is_some()
+        },
+    )
+}
+
 fn run_named_case(
     case_name: &str,
     runtime: &ProbeRuntime,
@@ -727,6 +930,18 @@ fn run_named_case(
         "patch_then_verify" => run_case_patch_then_verify(runtime, base_profile, probe_home),
         "approval_pause_or_refusal" => {
             run_case_approval_pause_or_refusal(runtime, base_profile, probe_home)
+        }
+        "shell_failure_then_summarize" => {
+            run_case_shell_failure_then_summarize(runtime, base_profile, probe_home)
+        }
+        "multi_turn_session_resume" => {
+            run_case_multi_turn_session_resume(runtime, base_profile, probe_home)
+        }
+        "approval_pause_then_resume" => {
+            run_case_approval_pause_then_resume(runtime, base_profile, probe_home)
+        }
+        "backend_failure_is_honest" => {
+            run_case_backend_failure_is_honest(runtime, base_profile, probe_home)
         }
         other => panic!("unknown acceptance case `{other}`"),
     }
@@ -1100,6 +1315,14 @@ fn find_session_by_title(runtime: &ProbeRuntime, title: &str) -> Option<SessionM
         .find(|metadata| metadata.title == title)
 }
 
+fn load_transcript_events(path: &Path) -> Vec<TranscriptEvent> {
+    fs::read_to_string(path)
+        .expect("read transcript")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("decode transcript event"))
+        .collect()
+}
+
 #[derive(Clone, Debug, Default)]
 struct TranscriptSummary {
     tool_names: Vec<String>,
@@ -1357,7 +1580,9 @@ mod tests {
     use super::{
         AcceptanceComparisonBackendCaseStatus, AcceptanceComparisonConfig,
         AcceptanceComparisonStatus, AcceptanceHarnessConfig, default_comparison_report_path,
-        default_report_path, run_acceptance_comparison_for_case_names, run_acceptance_harness,
+        default_report_path, default_self_test_report_path,
+        run_acceptance_comparison_for_case_names, run_acceptance_harness,
+        run_acceptance_harness_for_case_names,
     };
 
     #[derive(Default)]
@@ -1602,7 +1827,20 @@ mod tests {
         })
         .expect("acceptance harness should succeed");
 
-        assert!(report.overall_pass);
+        assert!(
+            report.overall_pass,
+            "failed self-test cases: {:?}",
+            report
+                .results
+                .iter()
+                .filter(|result| !result.passed)
+                .map(|result| (
+                    result.case_name.clone(),
+                    result.failure_category.clone(),
+                    result.error.clone(),
+                ))
+                .collect::<Vec<_>>()
+        );
         assert_eq!(report.results.len(), 6);
         assert_eq!(report.harness.repeat_runs_per_case, 2);
         assert_eq!(report.counts.total_cases, 6);
@@ -1623,6 +1861,162 @@ mod tests {
         assert!(report_path.exists());
 
         handle.join().expect("server thread should exit cleanly");
+    }
+
+    #[test]
+    fn self_test_extension_cases_write_report_against_mock_server() {
+        let responses = retained_self_test_extension_responses();
+        let server = FakeOpenAiServer::from_responses(responses);
+        let temp = tempfile::tempdir().expect("temp dir");
+        let probe_home = temp.path().join(".probe");
+        let report_path = default_self_test_report_path(probe_home.as_path());
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = server.base_url().to_string();
+
+        let report = run_acceptance_harness_for_case_names(
+            AcceptanceHarnessConfig {
+                probe_home,
+                report_path: report_path.clone(),
+                base_profile: profile,
+            },
+            &[
+                "shell_failure_then_summarize",
+                "multi_turn_session_resume",
+                "approval_pause_then_resume",
+                "backend_failure_is_honest",
+            ],
+        )
+        .expect("self-test extension cases should succeed");
+
+        assert!(
+            report.overall_pass,
+            "failed self-test cases: {:?}",
+            report
+                .results
+                .iter()
+                .filter(|result| !result.passed)
+                .map(|result| (
+                    result.case_name.clone(),
+                    result.failure_category.clone(),
+                    result.error.clone(),
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(report.results.len(), 4);
+        assert_eq!(report.counts.total_cases, 4);
+        assert_eq!(report.counts.passed_cases, 4);
+        assert_eq!(report.results[0].latest_tool_names, vec![String::from("shell")]);
+        assert_eq!(
+            report.results[1].latest_assistant_text.as_deref(),
+            Some("SELF_TEST_TURN_TWO.")
+        );
+        assert!(report.results[2].latest_policy_counts.paused_tool_calls >= 1);
+        assert!(report.results[2].latest_policy_counts.approved_tool_calls >= 1);
+        assert_eq!(report.results[3].latest_assistant_text, None);
+        assert!(
+            report.results[3]
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("missing route")
+        );
+        assert!(report_path.exists());
+    }
+
+    fn retained_self_test_extension_responses() -> Vec<FakeHttpResponse> {
+        let mut responses = Vec::new();
+
+        for attempt in 0..2 {
+            responses.push(FakeHttpResponse::json_ok(serde_json::json!({
+                "id": format!("shell_failure_tool_{}", attempt + 1),
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": format!("call_shell_failure_{}", attempt + 1),
+                            "type": "function",
+                            "function": {
+                                "name": "shell",
+                                "arguments": "{\"command\":\"false\",\"timeout_secs\":2}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            })));
+            responses.push(FakeHttpResponse::json_ok(serde_json::json!({
+                "id": format!("shell_failure_final_{}", attempt + 1),
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "SHELL_FAILURE_OK"},
+                    "finish_reason": "stop"
+                }]
+            })));
+        }
+
+        for attempt in 0..2 {
+            responses.push(FakeHttpResponse::json_ok(serde_json::json!({
+                "id": format!("multi_turn_first_{}", attempt + 1),
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "SELF_TEST_TURN_ONE."},
+                    "finish_reason": "stop"
+                }]
+            })));
+            responses.push(FakeHttpResponse::json_ok(serde_json::json!({
+                "id": format!("multi_turn_second_{}", attempt + 1),
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "SELF_TEST_TURN_TWO."},
+                    "finish_reason": "stop"
+                }]
+            })));
+        }
+
+        for attempt in 0..2 {
+            responses.push(FakeHttpResponse::json_ok(serde_json::json!({
+                "id": format!("approval_resume_pause_{}", attempt + 1),
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": format!("call_resume_patch_{}", attempt + 1),
+                            "type": "function",
+                            "function": {
+                                "name": "apply_patch",
+                                "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            })));
+            responses.push(FakeHttpResponse::json_ok(serde_json::json!({
+                "id": format!("approval_resume_final_{}", attempt + 1),
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "APPROVAL_RESUME_OK"},
+                    "finish_reason": "stop"
+                }]
+            })));
+        }
+
+        for _attempt in 0..2 {
+            responses.push(FakeHttpResponse::json_status(
+                404,
+                serde_json::json!({"error": "missing route"}),
+            ));
+        }
+
+        responses
     }
 
     #[test]

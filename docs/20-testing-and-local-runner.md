@@ -66,6 +66,7 @@ Primary commands:
 ./probe-dev check
 ./probe-dev test
 ./probe-dev accept-live
+./probe-dev self-test
 ./probe-dev accept-compare
 ```
 
@@ -84,6 +85,8 @@ The runner now also exposes explicit local tiers:
   - targeted binary-level Probe CLI regression and snapshot lane
 - `./probe-dev accept-live`
   - heavier live-backend acceptance lane
+- `./probe-dev self-test`
+  - heavier retained first-person Probe behavior lane
 - `./probe-dev accept-compare`
   - heavier admitted-Mac Apple FM versus Qwen comparison lane
 - `./probe-dev decision-export`, `./probe-dev module-eval`,

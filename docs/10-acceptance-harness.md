@@ -1,9 +1,13 @@
-# Acceptance Harness
+# Acceptance And Self-Test Harness
 
 ## Purpose
 
 `probe accept` is the retained local acceptance runner for the Probe coding
 controller lane.
+
+`probe self-test` is the adjacent retained first-person behavior lane built on
+the same runtime and report machinery, but with extra cases for failure,
+continuation, and approval recovery.
 
 It is a Probe-owned harness above the runtime, not a backend-side test.
 
@@ -35,6 +39,7 @@ than one hardcoded prompt string. The current built-ins are:
 
 ```bash
 cargo run -p probe-cli -- accept
+cargo run -p probe-cli -- self-test
 cargo run -p probe-cli -- accept --profile psionic-apple-fm-bridge
 cargo run -p probe-cli -- accept-compare
 ```
@@ -57,6 +62,29 @@ Optional overrides:
 - `--apple-model <model_id>`
 - `--probe-home <path>`
 - `--report-path <path>`
+
+`probe self-test` currently uses the same backend-selection arguments as
+`probe accept`, but writes a separate `probe_self_test_*.json` report by
+default so the behavior lane does not overwrite the baseline acceptance lane.
+
+## Self-Test Cases
+
+The retained self-test lane currently includes the original acceptance cases
+plus extra first-person behavior cases for:
+
+- shell failure handling
+- multi-turn session continuation and resume
+- approval pause followed by approval resume
+- backend failure surfaced honestly rather than swallowed
+
+That means the self-test lane now covers:
+
+- list, search, and read exploration
+- patch then verify
+- approval pause or refusal
+- shell success and shell failure
+- session continuation
+- backend failure honesty
 
 Probe now also accepts offline harness optimization over retained acceptance
 reports:
@@ -86,6 +114,10 @@ The runner writes a JSON report that records:
   observability summary
 - error text when a case emits an error path even if that path is the expected
   passing behavior for the case
+
+For `probe self-test`, that last point matters more than it does for plain
+acceptance: some self-test cases intentionally pass by proving that Probe
+preserved an honest failure instead of pretending the turn succeeded.
 
 `probe accept-compare` writes one separate comparison artifact plus two
 backend-specific acceptance reports under the comparison run root.

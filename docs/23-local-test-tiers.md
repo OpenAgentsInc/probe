@@ -58,11 +58,21 @@ Use:
 ```bash
 ./probe-dev accept-live --help
 ./probe-dev accept-live
+./probe-dev self-test --help
 ```
 
 This lane is intentionally separate from `pr-fast` because it depends on a
 reachable backend and produces heavier live receipts. It is the local coding
 acceptance lane, not the fast merge-safe lane.
+
+The retained self-test lane lives beside it:
+
+- `cargo run -p probe-cli -- self-test`
+- `./probe-dev self-test`
+
+That lane keeps the same runtime and tool loop, but adds first-person cases for
+shell failure, approval resume, multi-turn continuation, and backend-failure
+honesty.
 
 The Apple FM admitted-Mac paths live here too:
 

@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use acceptance::{
     AcceptanceComparisonConfig, AcceptanceHarnessConfig, default_comparison_report_path,
-    default_report_path, run_acceptance_comparison, run_acceptance_harness,
+    default_report_path, default_self_test_report_path, run_acceptance_comparison,
+    run_acceptance_harness, run_self_test_harness,
 };
 use clap::{Parser, Subcommand};
 use probe_core::backend_profiles::{
@@ -72,6 +73,7 @@ enum Commands {
     #[command(about = "Launch the current Probe terminal UI")]
     Tui(TuiArgs),
     Accept(AcceptArgs),
+    SelfTest(AcceptArgs),
     AcceptCompare(AcceptCompareArgs),
     Export(ExportArgs),
     ModuleEval(ModuleEvalArgs),
@@ -370,6 +372,7 @@ fn run() -> Result<(), String> {
         Commands::Codex(args) => run_codex(args),
         Commands::Tui(args) => run_tui(args),
         Commands::Accept(args) => run_accept(args),
+        Commands::SelfTest(args) => run_self_test(args),
         Commands::AcceptCompare(args) => run_accept_compare(args),
         Commands::Export(args) => run_export(args),
         Commands::ModuleEval(args) => run_module_eval(args),
@@ -872,6 +875,82 @@ fn run_accept(args: AcceptArgs) -> Result<(), String> {
     } else {
         Err(format!(
             "one or more acceptance cases failed; see {}",
+            report_path.display()
+        ))
+    }
+}
+
+fn run_self_test(args: AcceptArgs) -> Result<(), String> {
+    let probe_home = args
+        .probe_home
+        .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
+    let mut profile = named_profile(args.profile.as_str())?;
+    let server_guard = prepare_server(probe_home.as_path(), &args.server, profile.kind)?;
+    profile.base_url = server_guard.base_url();
+    if let Some(model_id) = server_guard.model_id() {
+        profile.model = model_id;
+    }
+    if let Some(base_url) = args.base_url {
+        profile.base_url = base_url;
+    }
+    if let Some(model) = args.model {
+        profile.model = model;
+    }
+    let report_path = args
+        .report_path
+        .unwrap_or_else(|| default_self_test_report_path(probe_home.as_path()));
+    let report = run_self_test_harness(AcceptanceHarnessConfig {
+        probe_home,
+        report_path: report_path.clone(),
+        base_profile: profile,
+    })?;
+
+    eprintln!(
+        "self_test run_id={} overall_pass={} report={} cases={}/{} git_sha={} git_dirty={}",
+        report.run.run_id,
+        report.overall_pass,
+        report_path.display(),
+        report.counts.passed_cases,
+        report.counts.total_cases,
+        report.run.git_commit_sha.as_deref().unwrap_or("-"),
+        report
+            .run
+            .git_dirty
+            .map(|value| if value { "true" } else { "false" })
+            .unwrap_or("unknown")
+    );
+    for result in &report.results {
+        eprintln!(
+            "case={} passed={} attempts={}/{} median_elapsed_ms={} failure_category={} tool_calls={} session={} transcript={} error={}",
+            result.case_name,
+            result.passed,
+            result.passed_attempts,
+            result.repeat_runs,
+            result
+                .median_elapsed_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| String::from("-")),
+            result
+                .failure_category
+                .as_ref()
+                .map(render_acceptance_failure_category)
+                .unwrap_or("-"),
+            result.latest_executed_tool_calls,
+            result.latest_session_id.as_deref().unwrap_or("-"),
+            result
+                .latest_transcript_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| String::from("-")),
+            result.error.as_deref().unwrap_or("-")
+        );
+    }
+
+    if report.overall_pass {
+        Ok(())
+    } else {
+        Err(format!(
+            "one or more self-test cases failed; see {}",
             report_path.display()
         ))
     }
