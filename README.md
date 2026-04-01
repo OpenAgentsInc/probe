@@ -72,16 +72,17 @@ cargo run -p probe-cli -- exec \
 `cargo probe` is the current top-level Probe UI entrypoint. The current shell
 uses a retained transcript widget with committed user, tool, and assistant
 turns plus one explicit active-turn cell. `Chat` is the home surface and the
-composer now submits through the real Probe runtime, using the backend resolved
-from `~/.probe/server/psionic-local.json` together with the
-`coding_bootstrap` harness and conservative tool approval policy. The first
-submit creates a persisted Probe session; later submits continue that same
-session. The active-turn cell is now driven by real runtime lifecycle events,
-so the TUI can show model requests, tool request/start/completion, refusal or
-pause, and the final assistant commit before the transcript delta is rendered.
-Persisted tool activity renders as first-class transcript rows such as
-`[tool call]`, `[tool result]`, and `[approval pending]` rather than generic
-notes.
+composer now submits through the real Probe runtime. `probe tui` now uses the
+same prepared backend contract as `probe chat`: it resolves the selected
+backend, runs server readiness or attach preparation first, and then carries
+the prepared host, port, model, backend kind, and attach mode into the UI.
+The first submit creates a persisted Probe session; later submits continue that
+same session. The active-turn cell is now driven by real runtime lifecycle
+events, so the TUI can show model requests, tool request/start/completion,
+refusal or pause, and the final assistant commit before the transcript delta
+is rendered. Persisted tool activity renders as first-class transcript rows
+such as `[tool call]`, `[tool result]`, and `[approval pending]` rather than
+generic notes.
 
 At the runtime layer, Probe now distinguishes backend streaming truth
 explicitly: OpenAI-compatible backends stream assistant deltas, while Apple FM
@@ -93,9 +94,17 @@ tool rows commit, and the bottom status bar carries a compact backend and
 stream summary.
 
 Setup, help, and approval flows live in a typed overlay stack above or in
-place of the composer. A background Apple FM availability/setup check still
-runs on launch, and the full setup detail can be opened on demand from the
-overlay.
+place of the composer. The old setup surface is now a backend overlay:
+Apple FM launches still foreground local Apple FM admission and setup truth,
+while Qwen launches show the prepared backend target and the remote operator
+contract instead of unrelated Apple FM chrome.
+
+The first supported remote-Qwen posture stays narrow and explicit:
+
+- local Probe owns sessions, transcripts, tools, approvals, and UI
+- remote Psionic serves inference only
+- `127.0.0.1` attach is treated as local or SSH-forwarded
+- `100.x.y.z` attach is treated as direct Tailnet attach
 
 Views:
 
@@ -109,8 +118,8 @@ Keys:
 - `Ctrl+J`: insert a newline
 - `Up`, `Down`: recall draft history
 - `Ctrl+O`: add an attachment placeholder to the draft
-- `Ctrl+R`: rerun setup
-- `Ctrl+S`: open setup overlay
+- `Ctrl+R`: rerun backend check when supported
+- `Ctrl+S`: open backend overlay
 - `Ctrl+A`: open approval overlay
 - `Ctrl+T`: toggle operator notes vs live detail
 - `F1`: help
@@ -124,6 +133,22 @@ history, and multiline paste state. When a tool pauses for approval, Probe now
 persists a real pending-approval record in `probe-core`, opens the approval
 overlay with the live tool details, and resumes the paused turn after approve
 or reject instead of leaving the operator in a dead-end pause state.
+
+Remote attach examples:
+
+```bash
+# direct Tailnet attach
+cargo run -p probe-cli -- tui \
+  --profile psionic-qwen35-2b-q8-registry \
+  --server-host 100.88.7.9 \
+  --server-port 8080
+
+# SSH-forwarded localhost attach
+cargo run -p probe-cli -- tui \
+  --profile psionic-qwen35-2b-q8-registry \
+  --server-host 127.0.0.1 \
+  --server-port 8080
+```
 
 ## Dev Helpers
 
@@ -166,3 +191,4 @@ Start with:
 - [docs/47-openai-streaming-runtime-delta-events.md](docs/47-openai-streaming-runtime-delta-events.md)
 - [docs/48-apple-fm-streaming-and-snapshot-events.md](docs/48-apple-fm-streaming-and-snapshot-events.md)
 - [docs/49-probe-tui-streamed-output-rendering.md](docs/49-probe-tui-streamed-output-rendering.md)
+- [docs/50-tailnet-qwen-operator-lane.md](docs/50-tailnet-qwen-operator-lane.md)

@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
+use probe_core::server_control::ServerOperatorSummary;
 use probe_protocol::session::{PendingToolApproval, ToolApprovalResolution};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Text};
@@ -33,7 +34,7 @@ impl ScreenId {
         match self {
             Self::Chat => "chat",
             Self::Help => "help modal",
-            Self::SetupOverlay => "setup overlay",
+            Self::SetupOverlay => "backend overlay",
             Self::ApprovalOverlay => "approval overlay",
         }
     }
@@ -306,6 +307,7 @@ pub struct ChatScreen {
     events_scroll: u16,
     runtime: ProbeRuntimeState,
     stream: Option<AssistantStreamState>,
+    operator_backend: Option<ServerOperatorSummary>,
     setup: AppleFmSetupState,
 }
 
@@ -321,10 +323,12 @@ impl Default for ChatScreen {
             events_scroll: 0,
             runtime: ProbeRuntimeState::default(),
             stream: None,
+            operator_backend: None,
             setup: AppleFmSetupState::default(),
         };
         screen.record_event("probe tui ready");
-        screen.record_event("press Ctrl+R to rerun Apple FM setup");
+        screen.record_event("press Ctrl+R to rerun backend check when supported");
+        screen.record_event("press Ctrl+S to inspect backend status");
         screen.record_event("press F1 for help");
         screen.record_event("press Tab or Shift+Tab to switch views");
         screen
@@ -370,6 +374,36 @@ impl ChatScreen {
 
     pub fn current_pending_tool_approval(&self) -> Option<&PendingToolApproval> {
         self.runtime.pending_approvals.first()
+    }
+
+    pub fn set_operator_backend(&mut self, summary: ServerOperatorSummary) {
+        self.runtime.backend_kind = Some(render_backend_kind(summary.backend_kind).to_string());
+        self.runtime.model_id = summary.model_id.clone();
+        self.operator_backend = Some(summary.clone());
+        self.record_event(format!(
+            "backend target: {} {} {} model={}",
+            render_backend_kind(summary.backend_kind),
+            summary.attach_mode_label(),
+            summary.endpoint_label(),
+            summary
+                .model_id
+                .as_deref()
+                .unwrap_or("unknown")
+        ));
+        self.record_event(format!(
+            "backend transport: {} ({})",
+            summary.target_kind_label(),
+            summary.base_url
+        ));
+        if summary.is_remote_target() {
+            self.record_event(
+                "remote inference only: tools, approvals, transcripts, and UI stay local",
+            );
+        } else if summary.target_kind_label() == "loopback_or_ssh_forward" {
+            self.record_event(
+                "loopback attach may be local or an SSH-forwarded remote Psionic target",
+            );
+        }
     }
 
     pub fn record_event(&mut self, message: impl Into<String>) {
@@ -450,14 +484,40 @@ impl ChatScreen {
         ));
     }
 
+    fn uses_apple_fm_backend(&self) -> bool {
+        self.operator_backend
+            .as_ref()
+            .is_some_and(|summary| summary.backend_kind == probe_protocol::backend::BackendKind::AppleFmBridge)
+    }
+
     pub fn compact_runtime_status(&self) -> String {
         let backend = self
             .runtime
-            .profile_name
+            .backend_kind
             .as_deref()
-            .or(self.runtime.backend_kind.as_deref())
+            .or_else(|| self.operator_backend.as_ref().map(|summary| render_backend_kind(summary.backend_kind)))
             .unwrap_or("pending");
         let phase = self.runtime.phase.as_deref().unwrap_or("idle");
+        let target = self
+            .operator_backend
+            .as_ref()
+            .map(ServerOperatorSummary::endpoint_label)
+            .unwrap_or_else(|| String::from("pending"));
+        let attach_mode = self
+            .operator_backend
+            .as_ref()
+            .map(ServerOperatorSummary::attach_mode_label)
+            .unwrap_or("unknown");
+        let model = self
+            .runtime
+            .model_id
+            .as_deref()
+            .or_else(|| {
+                self.operator_backend
+                    .as_ref()
+                    .and_then(|summary| summary.model_id.as_deref())
+            })
+            .unwrap_or("pending");
 
         if let Some(stream) = &self.stream {
             let mode = stream.mode.label();
@@ -465,6 +525,9 @@ impl ChatScreen {
             let tool_calls = stream.tool_calls.len();
             let mut parts = vec![
                 format!("backend: {backend}"),
+                format!("target: {target}"),
+                format!("attach: {attach_mode}"),
+                format!("model: {}", preview(model, 28)),
                 format!("phase: {phase}"),
                 format!("round: {}", stream.round_trip),
                 format!("stream: {mode}"),
@@ -485,7 +548,13 @@ impl ChatScreen {
             return parts.join(" | ");
         }
 
-        let mut parts = vec![format!("backend: {backend}"), format!("phase: {phase}")];
+        let mut parts = vec![
+            format!("backend: {backend}"),
+            format!("target: {target}"),
+            format!("attach: {attach_mode}"),
+            format!("model: {}", preview(model, 28)),
+            format!("phase: {phase}"),
+        ];
         if let Some(round_trip) = self.runtime.round_trip {
             parts.push(format!("round: {round_trip}"));
         }
@@ -1320,15 +1389,27 @@ impl ChatScreen {
                 ScreenOutcome::idle()
             }
             UiEvent::RunBackgroundTask => {
-                self.record_event(String::from("requested Apple FM setup rerun"));
-                ScreenOutcome::with_command(
-                    String::from("queued Apple FM setup rerun and opened setup overlay"),
-                    ScreenCommand::RunAppleFmSetup,
-                )
+                if self.uses_apple_fm_backend() {
+                    self.record_event(String::from("requested Apple FM backend check rerun"));
+                    ScreenOutcome::with_command(
+                        String::from("queued Apple FM backend check and opened backend overlay"),
+                        ScreenCommand::RunAppleFmSetup,
+                    )
+                } else {
+                    self.record_event(String::from(
+                        "current backend is prepared on launch; opened backend overlay",
+                    ));
+                    ScreenOutcome::with_status(
+                        ScreenAction::OpenSetupOverlay,
+                        String::from(
+                            "current backend is prepared on launch; opened backend overlay",
+                        ),
+                    )
+                }
             }
             UiEvent::OpenSetupOverlay => ScreenOutcome::with_status(
                 ScreenAction::OpenSetupOverlay,
-                String::from("opened setup overlay"),
+                String::from("opened backend overlay"),
             ),
             UiEvent::OpenApprovalOverlay => ScreenOutcome::with_status(
                 ScreenAction::OpenApprovalOverlay,
@@ -1378,6 +1459,9 @@ impl ChatScreen {
     }
 
     fn render_setup_overlay_text(&self, stack_depth: usize) -> Text<'static> {
+        if !self.uses_apple_fm_backend() {
+            return self.render_remote_backend_overlay_text(stack_depth);
+        }
         let mut lines = self
             .render_setup_body()
             .lines
@@ -1386,8 +1470,8 @@ impl ChatScreen {
             .map(Line::from)
             .collect::<Vec<_>>();
         lines.push(Line::from(""));
-        lines.push(Line::from("Setup Status"));
-        for line in self.render_status_lines("setup overlay", stack_depth) {
+        lines.push(Line::from("Backend Status"));
+        for line in self.render_status_lines("backend overlay", stack_depth) {
             lines.push(Line::from(format!("  {line}")));
         }
         lines.push(Line::from(""));
@@ -1399,6 +1483,50 @@ impl ChatScreen {
         lines.push(Line::from("Availability"));
         for line in self.render_availability_lines() {
             lines.push(Line::from(format!("  {line}")));
+        }
+        Text::from(lines)
+    }
+
+    fn render_remote_backend_overlay_text(&self, stack_depth: usize) -> Text<'static> {
+        let Some(summary) = self.operator_backend.as_ref() else {
+            return Text::from(vec![
+                Line::from("Probe does not have a prepared backend summary yet."),
+                Line::from(""),
+                Line::from("Restart the TUI from `probe tui` after selecting a backend target."),
+            ]);
+        };
+
+        let mut lines = vec![
+            Line::from("Probe is attached to an inference-only backend target."),
+            Line::from(""),
+            Line::from(format!(
+                "backend_kind: {}",
+                render_backend_kind(summary.backend_kind)
+            )),
+            Line::from(format!("target: {}", summary.endpoint_label())),
+            Line::from(format!("base_url: {}", summary.base_url)),
+            Line::from(format!("attach_mode: {}", summary.attach_mode_label())),
+            Line::from(format!("transport: {}", summary.target_kind_label())),
+            Line::from(format!(
+                "model: {}",
+                summary.model_id.as_deref().unwrap_or("unknown")
+            )),
+            Line::from(""),
+            Line::from("Contract"),
+            Line::from("  local Probe owns sessions, transcripts, tools, approvals, and UI"),
+            Line::from("  remote Psionic serves inference only"),
+            Line::from("  loopback attach may be a local server or an SSH-forwarded remote target"),
+            Line::from("  direct Tailnet attach is supported when intentionally configured"),
+            Line::from(""),
+            Line::from("State"),
+            Line::from(format!("  phase: {}", self.runtime.phase.as_deref().unwrap_or("idle"))),
+            Line::from(format!("  stack_depth: {stack_depth}")),
+        ];
+        if let Some(round_trip) = self.runtime.round_trip {
+            lines.push(Line::from(format!("  round_trip: {round_trip}")));
+        }
+        if let Some(tool) = self.runtime.active_tool.as_deref() {
+            lines.push(Line::from(format!("  active_tool: {tool}")));
         }
         Text::from(lines)
     }
@@ -1428,7 +1556,7 @@ impl ChatScreen {
         InfoPanel::new("UI Event Log", ui_body)
             .with_scroll(self.events_scroll)
             .render(frame, columns[0]);
-        InfoPanel::new("Apple FM Timeline", worker_body)
+        InfoPanel::new("Worker Timeline", worker_body)
             .with_scroll(self.events_scroll)
             .render(frame, columns[1]);
     }
@@ -1454,6 +1582,14 @@ impl ChatScreen {
     }
 
     fn render_setup_body(&self) -> Text<'static> {
+        if !self.uses_apple_fm_backend() {
+            return Text::from(vec![
+                Line::from("Probe is using a non-Apple-FM backend target."),
+                Line::from(""),
+                Line::from("The backend overlay shows the prepared attach target and operator contract."),
+                Line::from("Use Ctrl+S to inspect the target and Ctrl+R to reopen this overlay."),
+            ]);
+        }
         if self.emphasized_copy {
             return Text::from(vec![
                 Line::from("Apple FM setup is now a secondary Probe surface."),
@@ -1771,7 +1907,7 @@ impl HelpScreen {
             Line::from("Mouse wheel / PgUp  scroll active panel"),
             Line::from("PgDn                scroll back toward latest"),
             Line::from("Ctrl+O              add attachment placeholder"),
-            Line::from("Ctrl+R / Ctrl+S     rerun setup / open setup"),
+            Line::from("Ctrl+R / Ctrl+S     backend check / backend overlay"),
             Line::from("Ctrl+A              approval"),
             Line::from("Ctrl+T              toggle operator notes"),
             Line::from("F1 / Esc            toggle or dismiss help"),
@@ -1795,10 +1931,10 @@ impl SetupOverlay {
         match event {
             UiEvent::Dismiss | UiEvent::OpenSetupOverlay => ScreenOutcome::with_status(
                 ScreenAction::CloseModal,
-                String::from("dismissed setup overlay"),
+                String::from("dismissed backend overlay"),
             ),
             UiEvent::RunBackgroundTask => ScreenOutcome::with_command(
-                String::from("queued Apple FM setup rerun"),
+                String::from("requested backend check"),
                 ScreenCommand::RunAppleFmSetup,
             ),
             UiEvent::OpenHelp => ScreenOutcome::with_status(
@@ -1817,7 +1953,7 @@ impl SetupOverlay {
         base_screen: &ChatScreen,
     ) {
         let content = Paragraph::new(base_screen.render_setup_overlay_text(stack_depth));
-        ModalCard::new("Setup", content).render(frame, area);
+        ModalCard::new("Backend", content).render(frame, area);
     }
 }
 
@@ -2100,6 +2236,13 @@ fn numbered_event_log<'a>(items: impl Iterator<Item = &'a String>) -> Text<'stat
         ]);
     }
     Text::from(lines)
+}
+
+fn render_backend_kind(value: probe_protocol::backend::BackendKind) -> &'static str {
+    match value {
+        probe_protocol::backend::BackendKind::OpenAiChatCompletions => "openai_chat_completions",
+        probe_protocol::backend::BackendKind::AppleFmBridge => "apple_fm_bridge",
+    }
 }
 
 fn render_runtime_risk_class(value: probe_protocol::session::ToolRiskClass) -> &'static str {

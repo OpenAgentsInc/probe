@@ -7,7 +7,7 @@ mod transcript;
 mod widgets;
 mod worker;
 
-pub use app::{AppShell, run_probe_tui};
+pub use app::{AppShell, TuiLaunchConfig, run_probe_tui, run_probe_tui_with_config};
 pub use bottom_pane::BottomPane;
 pub use event::{UiEvent, event_from_key};
 pub use message::{

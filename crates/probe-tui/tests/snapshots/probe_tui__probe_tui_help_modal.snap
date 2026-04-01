@@ -20,7 +20,7 @@ expression: snapshot
 
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: opened help modal | backend: pending | phase: idle | Tab |           │
+│ status: opened help modal | backend: openai_chat_completions | target:       │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer (disabled) ────────────────────────────────────────────────────────┐

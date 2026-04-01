@@ -5,13 +5,13 @@ expression: snapshot
 
 
 
-           ┌─ Setup ────────────────────────────────────────────────┐
+           ┌─ Backend ──────────────────────────────────────────────┐
            │ Probe setup surface is ready.                          │
            │                                                        │
            │ Press Ctrl+R to start or rerun the Apple FM setup      │
            │ flow.                                                  │
            │                                                        │
-           │ Setup Status                                           │
+           │ Backend Status                                         │
            │   phase: idle                                          │
            │   calls_done: 0                                        │
            └────────────────────────────────────────────────────────┘
@@ -20,9 +20,9 @@ expression: snapshot
 
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: opened setup overlay | backend: pending | phase: idle | Tab |        │
+│ status: opened backend overlay | backend: apple_fm_bridge | target:          │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer (disabled) ────────────────────────────────────────────────────────┐
-│ Composer disabled while setup owns focus. Esc returns to chat.               │
+│ Composer disabled while backend overlay owns focus. Esc returns to chat.     │
 └──────────────────────────────────────────────────────────────────────────────┘

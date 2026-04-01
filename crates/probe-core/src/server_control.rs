@@ -1,5 +1,6 @@
 use std::fmt::{Display, Formatter};
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -37,6 +38,25 @@ pub struct PsionicServerConfig {
     pub model_path: Option<PathBuf>,
     pub model_id: Option<String>,
     pub reasoning_budget: Option<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServerTargetKind {
+    ManagedLaunch,
+    LoopbackAttach,
+    TailnetAttach,
+    RemoteAttach,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerOperatorSummary {
+    pub backend_kind: BackendKind,
+    pub mode: PsionicServerMode,
+    pub target_kind: ServerTargetKind,
+    pub host: String,
+    pub port: u16,
+    pub base_url: String,
+    pub model_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -199,6 +219,19 @@ impl PsionicServerConfig {
         }
     }
 
+    #[must_use]
+    pub fn operator_summary(&self) -> ServerOperatorSummary {
+        ServerOperatorSummary {
+            backend_kind: self.api_kind,
+            mode: self.mode.clone(),
+            target_kind: classify_target_kind(self.mode.clone(), self.host.as_str()),
+            host: self.host.clone(),
+            port: self.port,
+            base_url: self.base_url(),
+            model_id: self.resolved_model_id(),
+        }
+    }
+
     pub fn load_or_create(path: &Path) -> Result<Self, ServerControlError> {
         if path.exists() {
             let file = fs::File::open(path)?;
@@ -335,6 +368,70 @@ impl ServerProcessGuard {
     pub fn mode(&self) -> &PsionicServerMode {
         &self.config.mode
     }
+
+    #[must_use]
+    pub fn operator_summary(&self) -> ServerOperatorSummary {
+        self.config.operator_summary()
+    }
+}
+
+impl ServerOperatorSummary {
+    #[must_use]
+    pub const fn is_remote_target(&self) -> bool {
+        matches!(
+            self.target_kind,
+            ServerTargetKind::TailnetAttach | ServerTargetKind::RemoteAttach
+        )
+    }
+
+    #[must_use]
+    pub const fn attach_mode_label(&self) -> &'static str {
+        match self.mode {
+            PsionicServerMode::Attach => "attach",
+            PsionicServerMode::Launch => "launch",
+        }
+    }
+
+    #[must_use]
+    pub const fn target_kind_label(&self) -> &'static str {
+        match self.target_kind {
+            ServerTargetKind::ManagedLaunch => "managed_launch",
+            ServerTargetKind::LoopbackAttach => "loopback_or_ssh_forward",
+            ServerTargetKind::TailnetAttach => "tailnet_attach",
+            ServerTargetKind::RemoteAttach => "remote_attach",
+        }
+    }
+
+    #[must_use]
+    pub fn endpoint_label(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
+fn classify_target_kind(mode: PsionicServerMode, host: &str) -> ServerTargetKind {
+    match mode {
+        PsionicServerMode::Launch => ServerTargetKind::ManagedLaunch,
+        PsionicServerMode::Attach if is_loopback_host(host) => ServerTargetKind::LoopbackAttach,
+        PsionicServerMode::Attach if is_tailnet_host(host) => ServerTargetKind::TailnetAttach,
+        PsionicServerMode::Attach => ServerTargetKind::RemoteAttach,
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    if matches!(host, "localhost" | "ip6-localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>()
+        .map(|address| address.is_loopback())
+        .unwrap_or(false)
+}
+
+fn is_tailnet_host(host: &str) -> bool {
+    let Ok(IpAddr::V4(address)) = host.parse::<IpAddr>() else {
+        return false;
+    };
+    let octets = address.octets();
+    octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000
 }
 
 fn wait_for_ready(
@@ -447,6 +544,7 @@ mod tests {
 
     use super::{
         PsionicServerConfig, PsionicServerMode, ServerConfigOverrides, ServerProcessGuard,
+        ServerTargetKind,
     };
 
     #[test]
@@ -479,6 +577,29 @@ mod tests {
         assert_eq!(config.port, 9090);
         assert_eq!(config.backend, "cuda");
         assert_eq!(config.resolved_model_id().as_deref(), Some("custom.gguf"));
+    }
+
+    #[test]
+    fn operator_summary_classifies_loopback_tailnet_and_launch_targets() {
+        let loopback = PsionicServerConfig::default().operator_summary();
+        assert_eq!(loopback.target_kind, ServerTargetKind::LoopbackAttach);
+        assert_eq!(loopback.target_kind_label(), "loopback_or_ssh_forward");
+
+        let tailnet = PsionicServerConfig {
+            host: String::from("100.88.7.9"),
+            ..PsionicServerConfig::default()
+        }
+        .operator_summary();
+        assert_eq!(tailnet.target_kind, ServerTargetKind::TailnetAttach);
+        assert!(tailnet.is_remote_target());
+
+        let launched = PsionicServerConfig {
+            mode: PsionicServerMode::Launch,
+            ..PsionicServerConfig::default()
+        }
+        .operator_summary();
+        assert_eq!(launched.target_kind, ServerTargetKind::ManagedLaunch);
+        assert_eq!(launched.attach_mode_label(), "launch");
     }
 
     #[test]

@@ -151,3 +151,8 @@ This folder holds technical planning docs for the Probe runtime.
     snapshots, streamed tool-call assembly in the active cell, compact backend
     and stream state in the bottom status bar, and authoritative replacement by
     committed transcript rows
+- `50-tailnet-qwen-operator-lane.md`
+  - first-class remote-Qwen operator lane for `probe tui`, `probe chat`, and
+    `probe exec`, including prepared backend summaries, backend-aware TUI
+    startup, explicit Tailnet versus SSH-forwarded attach posture, and a
+    backend overlay instead of local-Apple-FM-only setup chrome

@@ -15,15 +15,15 @@ expression: snapshot
 │   response_id: chatcmpl_stream_delta_1                                                           │
 │   model: qwen3.5-2b-q8_0-registry.gguf                                                           │
 │   mode: delta                                                                                    │
+│   backend: openai_chat_completions                                                               │
 │   ttft_ms: 73                                                                                    │
 │   response                                                                                       │
 │   Probe owns the coding-agent runtime, including sessions, tools, approvals, and transcripts.    │
 │                                                                                                  │
-│                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ status: assistant delta appended for round 1 | backend: psionic-qwen35-2b-q8-registry | phase:   │
+│ status: assistant delta appended for round 1 | backend: openai_chat_completions | target:        │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer ───────────────────────────────────────────────────────────────────────────────────────┐

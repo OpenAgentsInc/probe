@@ -12,7 +12,9 @@ use probe_core::backend_profiles::{
 };
 use probe_core::harness::resolve_harness_profile;
 use probe_core::runtime::{current_working_dir, default_probe_home};
-use probe_core::server_control::PsionicServerConfig;
+use probe_core::server_control::{
+    PsionicServerConfig, PsionicServerMode, ServerOperatorSummary,
+};
 use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use ratatui::backend::CrosstermBackend;
@@ -41,9 +43,16 @@ pub struct AppShell {
     chat_runtime: ProbeRuntimeTurnConfig,
 }
 
+#[derive(Debug, Clone)]
+pub struct TuiLaunchConfig {
+    pub chat_runtime: ProbeRuntimeTurnConfig,
+    pub operator_backend: ServerOperatorSummary,
+    pub autostart_apple_fm_setup: bool,
+}
+
 impl Default for AppShell {
     fn default() -> Self {
-        Self::with_autostart(true, Self::default_chat_runtime_config())
+        Self::with_launch_config(Self::default_launch_config())
     }
 }
 
@@ -53,40 +62,83 @@ impl AppShell {
     }
 
     pub fn new_for_tests() -> Self {
-        Self::with_autostart(false, Self::test_chat_runtime_config())
+        Self::with_launch_config(Self::test_launch_config())
     }
 
     pub fn new_for_tests_with_chat_config(chat_runtime: ProbeRuntimeTurnConfig) -> Self {
-        Self::with_autostart(false, chat_runtime)
+        Self::with_launch_config(Self::launch_config_from_chat_runtime(chat_runtime, false))
     }
 
-    fn with_autostart(autostart_setup: bool, chat_runtime: ProbeRuntimeTurnConfig) -> Self {
+    pub fn new_with_launch_config(config: TuiLaunchConfig) -> Self {
+        Self::with_launch_config(config)
+    }
+
+    fn with_launch_config(config: TuiLaunchConfig) -> Self {
         let mut app = Self {
             screens: vec![ScreenState::Chat(ChatScreen::default())],
             last_status: String::from("probe tui launched"),
             should_quit: false,
             bottom_pane: BottomPane::new(),
             worker: BackgroundWorker::new(),
-            chat_runtime,
+            chat_runtime: config.chat_runtime,
         };
-        if autostart_setup {
-            let _ = app.submit_background_task(Self::default_setup_request());
+        app.base_screen_mut()
+            .set_operator_backend(config.operator_backend.clone());
+        if config.autostart_apple_fm_setup
+            && let Some(request) = app.default_setup_request()
+        {
+            let _ = app.submit_background_task(request);
         }
         app
     }
 
-    fn default_chat_runtime_config() -> ProbeRuntimeTurnConfig {
+    fn default_launch_config() -> TuiLaunchConfig {
         let probe_home = default_probe_home().ok();
-        Self::chat_runtime_config_from_probe_home(probe_home)
+        let (profile, summary) = Self::chat_profile_and_summary_from_probe_home(probe_home.as_deref());
+        let chat_runtime = Self::build_chat_runtime_config(probe_home, profile.clone());
+        Self::launch_config_from_parts(chat_runtime, summary, profile.kind == BackendKind::AppleFmBridge)
     }
 
-    fn test_chat_runtime_config() -> ProbeRuntimeTurnConfig {
-        Self::build_chat_runtime_config(None, psionic_qwen35_2b_q8_registry())
+    fn test_launch_config() -> TuiLaunchConfig {
+        let profile = psionic_qwen35_2b_q8_registry();
+        let chat_runtime = Self::build_chat_runtime_config(None, profile.clone());
+        Self::launch_config_from_parts(chat_runtime, operator_summary_from_profile(&profile), false)
     }
 
-    fn chat_runtime_config_from_probe_home(probe_home: Option<PathBuf>) -> ProbeRuntimeTurnConfig {
-        let profile = resolve_tui_chat_profile(probe_home.as_deref());
-        Self::build_chat_runtime_config(probe_home, profile)
+    fn launch_config_from_chat_runtime(
+        chat_runtime: ProbeRuntimeTurnConfig,
+        autostart_apple_fm_setup: bool,
+    ) -> TuiLaunchConfig {
+        let summary = operator_summary_from_profile(&chat_runtime.profile);
+        Self::launch_config_from_parts(chat_runtime, summary, autostart_apple_fm_setup)
+    }
+
+    fn launch_config_from_parts(
+        chat_runtime: ProbeRuntimeTurnConfig,
+        operator_backend: ServerOperatorSummary,
+        autostart_apple_fm_setup: bool,
+    ) -> TuiLaunchConfig {
+        TuiLaunchConfig {
+            chat_runtime,
+            operator_backend,
+            autostart_apple_fm_setup,
+        }
+    }
+
+    fn chat_profile_and_summary_from_probe_home(
+        probe_home: Option<&Path>,
+    ) -> (BackendProfile, ServerOperatorSummary) {
+        probe_home
+            .and_then(load_server_config)
+            .map(|config| {
+                let profile = profile_from_server_config(&config);
+                (profile, config.operator_summary())
+            })
+            .unwrap_or_else(|| {
+                let profile = psionic_qwen35_2b_q8_registry();
+                let summary = operator_summary_from_profile(&profile);
+                (profile, summary)
+            })
     }
 
     fn build_chat_runtime_config(
@@ -107,8 +159,10 @@ impl AppShell {
         }
     }
 
-    fn default_setup_request() -> BackgroundTaskRequest {
-        BackgroundTaskRequest::apple_fm_setup(psionic_apple_fm_bridge())
+    fn default_setup_request(&self) -> Option<BackgroundTaskRequest> {
+        (self.chat_runtime.profile.kind == BackendKind::AppleFmBridge).then(|| {
+            BackgroundTaskRequest::apple_fm_setup(self.chat_runtime.profile.clone())
+        })
     }
 
     pub fn should_quit(&self) -> bool {
@@ -225,7 +279,7 @@ impl AppShell {
                         }
                     }
                     ScreenAction::OpenSetupOverlay => {
-                        self.base_screen_mut().record_event("setup overlay took focus");
+                        self.base_screen_mut().record_event("backend overlay took focus");
                         if self.active_screen_id() != ScreenId::SetupOverlay {
                             self.screens.push(ScreenState::Setup(SetupOverlay::new()));
                         }
@@ -266,10 +320,13 @@ impl AppShell {
                             if self.active_screen_id() != ScreenId::SetupOverlay {
                                 self.screens.push(ScreenState::Setup(SetupOverlay::new()));
                             }
-                            if let Err(error) =
-                                self.submit_background_task(Self::default_setup_request())
-                            {
-                                self.last_status = error;
+                            if let Some(request) = self.default_setup_request() {
+                                if let Err(error) = self.submit_background_task(request) {
+                                    self.last_status = error;
+                                }
+                            } else {
+                                self.last_status =
+                                    String::from("current backend is prepared on launch");
                             }
                         }
                         ScreenCommand::ResolvePendingToolApproval {
@@ -416,7 +473,7 @@ impl AppShell {
             }
             ScreenId::SetupOverlay => {
                 return BottomPaneState::Disabled(String::from(
-                    "Composer disabled while setup owns focus. Esc returns to chat.",
+                    "Composer disabled while backend overlay owns focus. Esc returns to chat.",
                 ));
             }
             ScreenId::ApprovalOverlay => {
@@ -444,7 +501,7 @@ impl AppShell {
         match self.task_phase() {
             TaskPhase::Queued | TaskPhase::CheckingAvailability | TaskPhase::Running => {
                 BottomPaneState::Busy(String::from(
-                    "Apple FM setup is running in the background. Composer stays live.",
+                    "Backend check is running in the background. Composer stays live.",
                 ))
             }
             TaskPhase::Idle | TaskPhase::Unavailable | TaskPhase::Completed | TaskPhase::Failed => {
@@ -479,11 +536,9 @@ impl AppShell {
     }
 }
 
+#[cfg(test)]
 fn resolve_tui_chat_profile(probe_home: Option<&Path>) -> BackendProfile {
-    probe_home
-        .and_then(load_server_config)
-        .map(|config| profile_from_server_config(&config))
-        .unwrap_or_else(psionic_qwen35_2b_q8_registry)
+    AppShell::chat_profile_and_summary_from_probe_home(probe_home).0
 }
 
 fn load_server_config(probe_home: &Path) -> Option<PsionicServerConfig> {
@@ -501,6 +556,53 @@ fn profile_from_server_config(config: &PsionicServerConfig) -> BackendProfile {
         profile.model = model_id;
     }
     profile
+}
+
+fn operator_summary_from_profile(profile: &BackendProfile) -> ServerOperatorSummary {
+    let (host, port) = parse_profile_host_port(profile);
+    let mut config = PsionicServerConfig {
+        mode: PsionicServerMode::Attach,
+        api_kind: profile.kind,
+        host,
+        port,
+        backend: String::from("cpu"),
+        binary_path: None,
+        model_path: None,
+        model_id: Some(profile.model.clone()),
+        reasoning_budget: None,
+    };
+    config.set_api_kind(profile.kind);
+    config.model_id = Some(profile.model.clone());
+    config.operator_summary()
+}
+
+fn parse_profile_host_port(profile: &BackendProfile) -> (String, u16) {
+    let without_scheme = profile
+        .base_url
+        .strip_prefix("http://")
+        .or_else(|| profile.base_url.strip_prefix("https://"))
+        .unwrap_or(profile.base_url.as_str());
+    let authority = without_scheme
+        .split('/')
+        .next()
+        .unwrap_or(without_scheme);
+    let (host, port) = authority
+        .rsplit_once(':')
+        .map(|(host, port)| {
+            (
+                host.to_string(),
+                port.parse::<u16>().unwrap_or_else(|_| default_port_for_kind(profile.kind)),
+            )
+        })
+        .unwrap_or_else(|| (authority.to_string(), default_port_for_kind(profile.kind)));
+    (host, port)
+}
+
+fn default_port_for_kind(kind: BackendKind) -> u16 {
+    match kind {
+        BackendKind::OpenAiChatCompletions => 8080,
+        BackendKind::AppleFmBridge => 11435,
+    }
 }
 
 fn preview(value: &str, max_chars: usize) -> String {
@@ -527,6 +629,10 @@ fn submission_preview(
 }
 
 pub fn run_probe_tui() -> io::Result<()> {
+    run_probe_tui_with_config(AppShell::default_launch_config())
+}
+
+pub fn run_probe_tui_with_config(config: TuiLaunchConfig) -> io::Result<()> {
     let mut stdout = io::stdout();
     enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -535,14 +641,17 @@ pub fn run_probe_tui() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let result = run_loop(&mut terminal);
+    let result = run_loop(&mut terminal, config);
     let cleanup_result = restore_terminal(&mut terminal);
 
     result.and(cleanup_result)
 }
 
-fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
-    let mut app = AppShell::new();
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    config: TuiLaunchConfig,
+) -> io::Result<()> {
+    let mut app = AppShell::new_with_launch_config(config);
 
     while !app.should_quit() {
         app.poll_background_messages();
@@ -594,6 +703,7 @@ fn buffer_to_string(buffer: &Buffer) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -642,6 +752,19 @@ mod tests {
                 ProbeToolChoice::Auto,
                 false,
             )),
+        }
+    }
+
+    fn apple_fm_test_config(base_url: &str) -> ProbeRuntimeTurnConfig {
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = base_url.to_string();
+        ProbeRuntimeTurnConfig {
+            probe_home: None,
+            cwd: PathBuf::from("."),
+            profile,
+            system_prompt: None,
+            harness_profile: None,
+            tool_loop: None,
         }
     }
 
@@ -1122,10 +1245,10 @@ mod tests {
             }),
         )]);
 
+        let mut app =
+            AppShell::new_for_tests_with_chat_config(apple_fm_test_config(server.base_url()));
         let mut profile = psionic_apple_fm_bridge();
         profile.base_url = server.base_url().to_string();
-
-        let mut app = AppShell::new_for_tests();
         app.submit_background_task(BackgroundTaskRequest::apple_fm_setup(profile))
             .expect("setup task should queue");
 
@@ -1177,10 +1300,10 @@ mod tests {
             ),
         ]);
 
+        let mut app =
+            AppShell::new_for_tests_with_chat_config(apple_fm_test_config(server.base_url()));
         let mut profile = psionic_apple_fm_bridge();
         profile.base_url = server.base_url().to_string();
-
-        let mut app = AppShell::new_for_tests();
         app.submit_background_task(BackgroundTaskRequest::apple_fm_setup(profile))
             .expect("setup task should queue");
 
@@ -1283,10 +1406,10 @@ mod tests {
             ),
         ]);
 
+        let mut app =
+            AppShell::new_for_tests_with_chat_config(apple_fm_test_config(server.base_url()));
         let mut profile = psionic_apple_fm_bridge();
         profile.base_url = server.base_url().to_string();
-
-        let mut app = AppShell::new_for_tests();
         app.submit_background_task(BackgroundTaskRequest::apple_fm_setup(profile))
             .expect("setup task should queue");
         assert_eq!(app.task_phase(), TaskPhase::Queued);
@@ -1314,5 +1437,15 @@ mod tests {
         assert!(rendered.contains("resp-3"));
         let requests = server.finish();
         assert_eq!(requests.len(), 4);
+    }
+
+    #[test]
+    fn non_apple_fm_launch_does_not_autostart_local_setup() {
+        let app = AppShell::new_for_tests();
+        assert_eq!(app.task_phase(), TaskPhase::Idle);
+        assert!(app
+            .recent_events()
+            .iter()
+            .any(|entry| entry.contains("backend target: openai_chat_completions")));
     }
 }

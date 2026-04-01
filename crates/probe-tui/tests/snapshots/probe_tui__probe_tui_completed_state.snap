@@ -5,7 +5,7 @@ expression: snapshot
 
 
 
-           ┌─ Setup ────────────────────────────────────────────────┐
+           ┌─ Backend ──────────────────────────────────────────────┐
            │ Last completed call: Next Step                         │
            │                                                        │
            │ Response                                               │
@@ -20,9 +20,9 @@ expression: snapshot
 
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: opened setup overlay | backend: pending | phase: idle | Tab |        │
+│ status: opened backend overlay | backend: apple_fm_bridge | target:          │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer (disabled) ────────────────────────────────────────────────────────┐
-│ Composer disabled while setup owns focus. Esc returns to chat.               │
+│ Composer disabled while backend overlay owns focus. Esc returns to chat.     │
 └──────────────────────────────────────────────────────────────────────────────┘

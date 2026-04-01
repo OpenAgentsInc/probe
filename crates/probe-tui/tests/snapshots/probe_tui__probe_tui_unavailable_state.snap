@@ -5,7 +5,7 @@ expression: snapshot
 
 
 
-           ┌─ Setup ────────────────────────────────────────────────┐
+           ┌─ Backend ──────────────────────────────────────────────┐
            │ Apple FM is not ready on this machine right now.       │
            │                                                        │
            │ Foundation model is still preparing                    │
@@ -13,16 +13,16 @@ expression: snapshot
            │ Press Ctrl+R to rerun the setup check after the        │
            │ machine is admitted.                                   │
            │                                                        │
-           │ Setup Status                                           │
+           │ Backend Status                                         │
            └────────────────────────────────────────────────────────┘
 
 
 
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: opened setup overlay | backend: pending | phase: idle | Tab |        │
+│ status: opened backend overlay | backend: apple_fm_bridge | target:          │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer (disabled) ────────────────────────────────────────────────────────┐
-│ Composer disabled while setup owns focus. Esc returns to chat.               │
+│ Composer disabled while backend overlay owns focus. Esc returns to chat.     │
 └──────────────────────────────────────────────────────────────────────────────┘

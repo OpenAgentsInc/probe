@@ -12,6 +12,7 @@ use acceptance::{
 };
 use clap::{Parser, Subcommand};
 use probe_core::backend_profiles::{
+    psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
     PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE,
     PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
     named_backend_profile,
@@ -45,7 +46,7 @@ use probe_protocol::session::{
     BackendTurnReceipt, CacheSignal, SessionHarnessProfile, SessionId, SessionTurn,
     ToolPolicyDecision, ToolRiskClass, UsageMeasurement, UsageTruth,
 };
-use probe_tui::run_probe_tui;
+use probe_tui::{TuiLaunchConfig, run_probe_tui_with_config};
 
 #[derive(Parser, Debug)]
 #[command(name = "probe")]
@@ -71,7 +72,16 @@ enum Commands {
 }
 
 #[derive(clap::Args, Debug)]
-struct TuiArgs {}
+struct TuiArgs {
+    #[arg(long)]
+    profile: Option<String>,
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[command(flatten)]
+    server: ServerArgs,
+}
 
 #[derive(clap::Args, Debug)]
 struct ExecArgs {
@@ -286,8 +296,27 @@ fn run() -> Result<(), String> {
     }
 }
 
-fn run_tui(_args: TuiArgs) -> Result<(), String> {
-    run_probe_tui().map_err(|error| error.to_string())
+fn run_tui(args: TuiArgs) -> Result<(), String> {
+    let probe_home = args
+        .probe_home
+        .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
+    let mut profile = resolve_tui_profile(probe_home.as_path(), args.profile.as_deref(), &args.server)?;
+    let server_guard = prepare_server(probe_home.as_path(), &args.server, profile.kind)?;
+    profile.base_url = server_guard.base_url();
+    if let Some(model_id) = server_guard.model_id() {
+        profile.model = model_id;
+    }
+    print_backend_target_summary("tui", &server_guard);
+    let launch_config = TuiLaunchConfig {
+        chat_runtime: build_tui_runtime_config(
+            Some(probe_home),
+            args.cwd,
+            profile.clone(),
+        )?,
+        operator_backend: server_guard.operator_summary(),
+        autostart_apple_fm_setup: profile.kind == BackendKind::AppleFmBridge,
+    };
+    run_probe_tui_with_config(launch_config).map_err(|error| error.to_string())
 }
 
 fn run_exec(args: ExecArgs) -> Result<(), String> {
@@ -297,6 +326,7 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
     let runtime = resolve_runtime(Some(probe_home.clone()))?;
     let mut profile = named_profile(args.profile.as_str())?;
     let server_guard = prepare_server(probe_home.as_path(), &args.server, profile.kind)?;
+    print_backend_target_summary("exec", &server_guard);
     profile.base_url = server_guard.base_url();
     if let Some(model_id) = server_guard.model_id() {
         profile.model = model_id;
@@ -426,6 +456,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
     };
     let initial_profile = named_profile(initial_profile_name.as_str())?;
     let server_guard = prepare_server(probe_home.as_path(), &args.server, initial_profile.kind)?;
+    print_backend_target_summary("chat", &server_guard);
     let tool_loop = resolve_tool_loop(
         args.tool_set.as_deref(),
         args.tool_choice.as_str(),
@@ -948,6 +979,49 @@ fn named_profile(name: &str) -> Result<probe_protocol::backend::BackendProfile, 
     named_backend_profile(name).ok_or_else(|| format!("unknown backend profile: {name}"))
 }
 
+fn resolve_tui_profile(
+    probe_home: &Path,
+    profile_name: Option<&str>,
+    server_args: &ServerArgs,
+) -> Result<probe_protocol::backend::BackendProfile, String> {
+    if let Some(profile_name) = profile_name {
+        return named_profile(profile_name);
+    }
+
+    let config_path = server_args
+        .server_config
+        .clone()
+        .unwrap_or_else(|| PsionicServerConfig::config_path(probe_home));
+    let config = PsionicServerConfig::load_or_create(config_path.as_path())
+        .map_err(|error| error.to_string())?;
+    Ok(match config.api_kind {
+        BackendKind::OpenAiChatCompletions => psionic_qwen35_2b_q8_registry(),
+        BackendKind::AppleFmBridge => psionic_apple_fm_bridge(),
+    })
+}
+
+fn build_tui_runtime_config(
+    probe_home: Option<PathBuf>,
+    cwd: Option<PathBuf>,
+    profile: probe_protocol::backend::BackendProfile,
+) -> Result<probe_tui::ProbeRuntimeTurnConfig, String> {
+    let cwd = cwd.unwrap_or(current_working_dir().map_err(|error| error.to_string())?);
+    let harness = resolve_harness_profile(Some("coding_bootstrap"), None, cwd.as_path(), None)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| String::from("coding_bootstrap harness profile should exist"))?;
+    Ok(probe_tui::ProbeRuntimeTurnConfig {
+        probe_home,
+        cwd,
+        profile,
+        system_prompt: Some(harness.system_prompt),
+        harness_profile: Some(harness.profile),
+        tool_loop: Some(ToolLoopConfig::coding_bootstrap(
+            ProbeToolChoice::Auto,
+            false,
+        )),
+    })
+}
+
 fn resolve_runtime(probe_home: Option<PathBuf>) -> Result<ProbeRuntime, String> {
     Ok(ProbeRuntime::new(probe_home.unwrap_or(
         default_probe_home().map_err(|error| error.to_string())?,
@@ -984,6 +1058,25 @@ fn prepare_server(
     config
         .prepare(Duration::from_secs(15))
         .map_err(|error| error.to_string())
+}
+
+fn print_backend_target_summary(surface: &str, server_guard: &ServerProcessGuard) {
+    let summary = server_guard.operator_summary();
+    eprintln!(
+        "backend_target surface={} kind={} attach_mode={} transport={} target={} model={} base_url={}",
+        surface,
+        render_backend_kind(summary.backend_kind),
+        summary.attach_mode_label(),
+        summary.target_kind_label(),
+        summary.endpoint_label(),
+        summary.model_id.as_deref().unwrap_or("unknown"),
+        summary.base_url
+    );
+    if summary.is_remote_target() {
+        eprintln!(
+            "remote_contract inference_only=true local_probe_owns=sessions,transcripts,tools,approvals,ui"
+        );
+    }
 }
 
 fn resolve_tool_loop(
@@ -1180,6 +1273,13 @@ fn parse_server_mode(value: &str) -> Result<PsionicServerMode, String> {
         other => Err(format!(
             "invalid server mode `{other}`; expected `attach` or `launch`"
         )),
+    }
+}
+
+fn render_backend_kind(value: BackendKind) -> &'static str {
+    match value {
+        BackendKind::OpenAiChatCompletions => "openai_chat_completions",
+        BackendKind::AppleFmBridge => "apple_fm_bridge",
     }
 }
 
