@@ -56,6 +56,21 @@ Current header set:
 - `User-Agent: probe/<version> (<os>; <arch>)`
 - `session_id: <probe session id>` when the runtime has a session id
 
+Current hosted-body contract:
+
+- Probe sends the hosted request as a Responses-style payload, not a
+  chat-completions payload.
+- Probe lifts system prompt text into the top-level `instructions` field.
+- Probe serializes replayed user or assistant text into `input` items using
+  `input_text` and `output_text`.
+- Probe serializes tool replay as `function_call` and `function_call_output`
+  items so Probe-owned tool loops can resume cleanly.
+- The hosted ChatGPT Codex endpoint currently rejects `max_output_tokens`, so
+  Probe omits that field on the subscription lane even though it remains valid
+  for the public OpenAI Responses API.
+- The hosted streaming path can omit `Content-Type`, so Probe accepts
+  headerless SSE on this lane instead of hard-failing on the missing header.
+
 ## Model Gate
 
 Probe now rejects obviously unsupported subscription models before sending the
@@ -115,6 +130,7 @@ Expected behavior:
 - Probe uses `https://chatgpt.com/backend-api/codex/responses`.
 - Probe refreshes expired auth state before sending the request.
 - Probe includes the subscription headers listed above.
+- Probe sends `instructions` plus `input` instead of `messages`.
 - Probe refuses unsupported non-Codex models before the HTTP call is made.
 
 ## Tests

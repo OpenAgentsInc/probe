@@ -273,6 +273,282 @@ impl ChatCompletionRequest {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct CodexResponsesRequest {
+    pub model: String,
+    pub instructions: String,
+    pub input: Vec<CodexInputItem>,
+    pub stream: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<CodexToolDefinition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<CodexToolChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+    pub store: bool,
+}
+
+impl CodexResponsesRequest {
+    #[must_use]
+    fn from_chat_completion(request: &ChatCompletionRequest) -> Self {
+        let mut instructions = Vec::new();
+        let mut input = Vec::new();
+        for message in &request.messages {
+            match message.role.as_str() {
+                "system" => {
+                    if let Some(content) = message
+                        .content
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        instructions.push(content.to_string());
+                    }
+                }
+                "user" => {
+                    if let Some(content) = message.content.clone() {
+                        input.push(CodexInputItem::Message(CodexMessage {
+                            role: String::from("user"),
+                            content: vec![CodexMessageContent::InputText { text: content }],
+                        }));
+                    }
+                }
+                "assistant" => {
+                    if let Some(content) = message.content.clone() {
+                        input.push(CodexInputItem::Message(CodexMessage {
+                            role: String::from("assistant"),
+                            content: vec![CodexMessageContent::OutputText { text: content }],
+                        }));
+                    }
+                    if let Some(tool_calls) = &message.tool_calls {
+                        for tool_call in tool_calls {
+                            input.push(CodexInputItem::FunctionCall(CodexFunctionCall {
+                                kind: String::from("function_call"),
+                                call_id: tool_call.id.clone(),
+                                name: tool_call.function.name.clone(),
+                                arguments: tool_call.function.arguments.clone(),
+                            }));
+                        }
+                    }
+                }
+                "tool" => {
+                    if let Some(tool_call_id) = message.tool_call_id.clone() {
+                        input.push(CodexInputItem::FunctionCallOutput(
+                            CodexFunctionCallOutput {
+                                kind: String::from("function_call_output"),
+                                call_id: tool_call_id,
+                                output: message.content.clone().unwrap_or_default(),
+                            },
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Self {
+            model: request.model.clone(),
+            instructions: instructions.join("\n\n"),
+            input,
+            stream: request.stream,
+            max_output_tokens: None,
+            tools: request
+                .tools
+                .iter()
+                .map(CodexToolDefinition::from_chat_tool)
+                .collect(),
+            tool_choice: request.tool_choice.as_ref().map(CodexToolChoice::from_chat),
+            parallel_tool_calls: request.parallel_tool_calls,
+            store: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(untagged)]
+enum CodexInputItem {
+    Message(CodexMessage),
+    FunctionCall(CodexFunctionCall),
+    FunctionCallOutput(CodexFunctionCallOutput),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct CodexMessage {
+    pub role: String,
+    pub content: Vec<CodexMessageContent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "type")]
+enum CodexMessageContent {
+    #[serde(rename = "input_text")]
+    InputText { text: String },
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct CodexFunctionCall {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub call_id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct CodexFunctionCallOutput {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub call_id: String,
+    pub output: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct CodexToolDefinition {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Value>,
+}
+
+impl CodexToolDefinition {
+    #[must_use]
+    fn from_chat_tool(tool: &ChatToolDefinitionEnvelope) -> Self {
+        Self {
+            kind: String::from("function"),
+            name: tool.function.name.clone(),
+            description: tool.function.description.clone(),
+            parameters: tool.function.parameters.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+enum CodexToolChoice {
+    Mode(String),
+    Named(CodexNamedToolChoice),
+}
+
+impl CodexToolChoice {
+    #[must_use]
+    fn from_chat(choice: &ChatToolChoice) -> Self {
+        match choice {
+            ChatToolChoice::Mode(mode) => Self::Mode(mode.clone()),
+            ChatToolChoice::Named(named) => Self::Named(CodexNamedToolChoice {
+                kind: String::from("function"),
+                name: named.function.name.clone(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct CodexNamedToolChoice {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+struct CodexResponsesApiResponse {
+    pub id: String,
+    pub model: String,
+    #[serde(default)]
+    pub output: Vec<CodexResponseOutputItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<CodexResponsesUsage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type")]
+enum CodexResponseOutputItem {
+    #[serde(rename = "message")]
+    Message {
+        #[serde(default)]
+        content: Vec<CodexResponseMessageContent>,
+    },
+    #[serde(rename = "function_call")]
+    FunctionCall {
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type")]
+enum CodexResponseMessageContent {
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+struct CodexResponsesUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type")]
+enum CodexResponseEvent {
+    #[serde(rename = "response.created")]
+    ResponseCreated {
+        response: CodexStreamResponseCreated,
+    },
+    #[serde(rename = "response.output_item.added")]
+    OutputItemAdded { item: CodexStreamOutputItem },
+    #[serde(rename = "response.output_text.delta")]
+    OutputTextDelta { item_id: String, delta: String },
+    #[serde(rename = "response.function_call_arguments.delta")]
+    FunctionCallArgumentsDelta { item_id: String, delta: String },
+    #[serde(rename = "response.completed")]
+    ResponseCompleted {
+        response: CodexStreamResponseCompleted,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+struct CodexStreamResponseCreated {
+    pub id: String,
+    pub model: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+struct CodexStreamResponseCompleted {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<CodexResponsesUsage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type")]
+enum CodexStreamOutputItem {
+    #[serde(rename = "message")]
+    Message { id: String },
+    #[serde(rename = "function_call")]
+    FunctionCall {
+        id: String,
+        call_id: String,
+        name: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct ChatCompletionChoice {
     pub index: u32,
@@ -434,11 +710,20 @@ impl OpenAiProviderClient {
         request: &ChatCompletionRequest,
         on_chunk: impl FnMut(&ChatCompletionChunk),
     ) -> Result<ChatCompletionResponse, OpenAiProviderError> {
-        if request.stream {
-            return self.send_streaming_chat_completion(request, on_chunk);
+        match self.config.transport {
+            OpenAiTransport::ChatCompletions => {
+                if request.stream {
+                    return self.send_streaming_chat_completion(request, on_chunk);
+                }
+                self.send_non_streaming_chat_completion(request)
+            }
+            OpenAiTransport::CodexResponses => {
+                if request.stream {
+                    return self.send_streaming_codex_response(request, on_chunk);
+                }
+                self.send_non_streaming_codex_response(request)
+            }
         }
-
-        self.send_non_streaming_chat_completion(request)
     }
 
     fn send_non_streaming_chat_completion(
@@ -466,6 +751,35 @@ impl OpenAiProviderClient {
         response
             .json()
             .map_err(|error| OpenAiProviderError::Decode(error.to_string()))
+    }
+
+    fn send_non_streaming_codex_response(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, OpenAiProviderError> {
+        self.validate_request()?;
+        let request = CodexResponsesRequest::from_chat_completion(request);
+        let response = self
+            .request_builder(self.http.post(self.config.request_endpoint()))
+            .json(&request)
+            .send()
+            .map_err(|error| OpenAiProviderError::Transport(error.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .unwrap_or_else(|error| format!("failed to read error body: {error}"));
+            return Err(OpenAiProviderError::HttpStatus {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        let response: CodexResponsesApiResponse = response
+            .json()
+            .map_err(|error| OpenAiProviderError::Decode(error.to_string()))?;
+        Ok(chat_completion_from_codex_response(response))
     }
 
     fn send_streaming_chat_completion(
@@ -558,6 +872,99 @@ impl OpenAiProviderClient {
         accumulator.finalize()
     }
 
+    fn send_streaming_codex_response(
+        &self,
+        request: &ChatCompletionRequest,
+        mut on_chunk: impl FnMut(&ChatCompletionChunk),
+    ) -> Result<ChatCompletionResponse, OpenAiProviderError> {
+        self.validate_request()?;
+        let request = CodexResponsesRequest::from_chat_completion(request);
+        let response = self
+            .request_builder(
+                self.http
+                    .post(self.config.request_endpoint())
+                    .header("accept", "text/event-stream"),
+            )
+            .json(&request)
+            .send()
+            .map_err(|error| OpenAiProviderError::Transport(error.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .unwrap_or_else(|error| format!("failed to read error body: {error}"));
+            return Err(OpenAiProviderError::HttpStatus {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        if content_type.starts_with("application/json") {
+            let response: CodexResponsesApiResponse = response
+                .json()
+                .map_err(|error| OpenAiProviderError::Decode(error.to_string()))?;
+            return Ok(chat_completion_from_codex_response(response));
+        }
+
+        let mut accumulator = ChatCompletionStreamAccumulator::default();
+        let mut codex_state = CodexStreamState::default();
+        let mut reader = BufReader::new(response);
+        let mut line = String::new();
+        let mut event_data = Vec::new();
+        loop {
+            line.clear();
+            let bytes = reader
+                .read_line(&mut line)
+                .map_err(|error| OpenAiProviderError::Transport(error.to_string()))?;
+            if bytes == 0 {
+                break;
+            }
+
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                if !event_data.is_empty() {
+                    let payload = event_data.join("\n");
+                    if payload == "[DONE]" {
+                        break;
+                    }
+                    let event: CodexResponseEvent = serde_json::from_str(payload.as_str())
+                        .map_err(|error| OpenAiProviderError::Decode(error.to_string()))?;
+                    if let Some(chunk) = codex_state.chunk_from_event(event)? {
+                        on_chunk(&chunk);
+                        accumulator.ingest(chunk)?;
+                    }
+                    event_data.clear();
+                }
+                continue;
+            }
+
+            if let Some(data) = trimmed.strip_prefix("data:") {
+                event_data.push(data.trim_start().to_string());
+            }
+        }
+
+        if !event_data.is_empty() {
+            let payload = event_data.join("\n");
+            if payload != "[DONE]" {
+                let event: CodexResponseEvent = serde_json::from_str(payload.as_str())
+                    .map_err(|error| OpenAiProviderError::Decode(error.to_string()))?;
+                if let Some(chunk) = codex_state.chunk_from_event(event)? {
+                    on_chunk(&chunk);
+                    accumulator.ingest(chunk)?;
+                }
+            }
+        }
+
+        accumulator.finalize()
+    }
+
     fn validate_request(&self) -> Result<(), OpenAiProviderError> {
         if self.config.transport == OpenAiTransport::CodexResponses
             && !model_allowed_for_codex(self.config.model.as_str())
@@ -588,6 +995,218 @@ impl OpenAiProviderClient {
 
 fn model_allowed_for_codex(model: &str) -> bool {
     model.contains("codex") || CODEX_MODEL_ALLOWLIST.contains(&model)
+}
+
+fn chat_completion_from_codex_response(
+    response: CodexResponsesApiResponse,
+) -> ChatCompletionResponse {
+    let mut assistant_text = String::new();
+    let mut tool_calls = Vec::new();
+    for item in response.output {
+        match item {
+            CodexResponseOutputItem::Message { content } => {
+                for part in content {
+                    if let CodexResponseMessageContent::OutputText { text } = part {
+                        assistant_text.push_str(text.as_str());
+                    }
+                }
+            }
+            CodexResponseOutputItem::FunctionCall {
+                call_id,
+                name,
+                arguments,
+            } => {
+                tool_calls.push(ChatToolCall {
+                    id: call_id,
+                    kind: String::from("function"),
+                    function: ChatToolCallFunction { name, arguments },
+                });
+            }
+            CodexResponseOutputItem::Unknown => {}
+        }
+    }
+
+    ChatCompletionResponse {
+        id: response.id,
+        model: response.model,
+        choices: vec![ChatCompletionChoice {
+            index: 0,
+            message: ChatMessage {
+                role: String::from("assistant"),
+                content: (!assistant_text.is_empty()).then_some(assistant_text),
+                name: None,
+                tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
+                tool_call_id: None,
+            },
+            finish_reason: None,
+        }],
+        usage: response.usage.map(chat_completion_usage_from_codex),
+    }
+}
+
+fn chat_completion_usage_from_codex(usage: CodexResponsesUsage) -> ChatCompletionUsage {
+    ChatCompletionUsage {
+        prompt_tokens: usage.input_tokens,
+        completion_tokens: usage.output_tokens,
+        total_tokens: usage
+            .total_tokens
+            .unwrap_or(usage.input_tokens.saturating_add(usage.output_tokens)),
+    }
+}
+
+#[derive(Default)]
+struct CodexStreamState {
+    response_id: Option<String>,
+    response_model: Option<String>,
+    next_tool_index: usize,
+    tool_items: BTreeMap<String, CodexStreamToolRef>,
+}
+
+struct CodexStreamToolRef {
+    index: usize,
+}
+
+impl CodexStreamState {
+    fn chunk_from_event(
+        &mut self,
+        event: CodexResponseEvent,
+    ) -> Result<Option<ChatCompletionChunk>, OpenAiProviderError> {
+        match event {
+            CodexResponseEvent::ResponseCreated { response } => {
+                self.response_id = Some(response.id.clone());
+                self.response_model = Some(response.model.clone());
+                Ok(Some(ChatCompletionChunk {
+                    id: response.id,
+                    model: response.model,
+                    choices: Vec::new(),
+                    usage: None,
+                }))
+            }
+            CodexResponseEvent::OutputItemAdded { item } => match item {
+                CodexStreamOutputItem::Message { .. } => {
+                    let (id, model) = self.response_identity()?;
+                    Ok(Some(ChatCompletionChunk {
+                        id,
+                        model,
+                        choices: vec![ChatCompletionChunkChoice {
+                            index: 0,
+                            delta: ChatCompletionChunkDelta {
+                                role: Some(String::from("assistant")),
+                                content: None,
+                                tool_calls: None,
+                            },
+                            finish_reason: None,
+                        }],
+                        usage: None,
+                    }))
+                }
+                CodexStreamOutputItem::FunctionCall { id, call_id, name } => {
+                    let (response_id, response_model) = self.response_identity()?;
+                    let tool_index = self.next_tool_index;
+                    self.next_tool_index += 1;
+                    self.tool_items
+                        .insert(id, CodexStreamToolRef { index: tool_index });
+                    Ok(Some(ChatCompletionChunk {
+                        id: response_id,
+                        model: response_model,
+                        choices: vec![ChatCompletionChunkChoice {
+                            index: 0,
+                            delta: ChatCompletionChunkDelta {
+                                role: Some(String::from("assistant")),
+                                content: None,
+                                tool_calls: Some(vec![ChatCompletionChunkToolCall {
+                                    index: tool_index,
+                                    id: Some(call_id),
+                                    kind: Some(String::from("function")),
+                                    function: Some(ChatCompletionChunkToolCallFunctionDelta {
+                                        name: Some(name),
+                                        arguments: None,
+                                    }),
+                                }]),
+                            },
+                            finish_reason: None,
+                        }],
+                        usage: None,
+                    }))
+                }
+                CodexStreamOutputItem::Unknown => Ok(None),
+            },
+            CodexResponseEvent::OutputTextDelta { item_id: _, delta } => {
+                let (id, model) = self.response_identity()?;
+                Ok(Some(ChatCompletionChunk {
+                    id,
+                    model,
+                    choices: vec![ChatCompletionChunkChoice {
+                        index: 0,
+                        delta: ChatCompletionChunkDelta {
+                            role: None,
+                            content: Some(delta),
+                            tool_calls: None,
+                        },
+                        finish_reason: None,
+                    }],
+                    usage: None,
+                }))
+            }
+            CodexResponseEvent::FunctionCallArgumentsDelta { item_id, delta } => {
+                let Some(tool_ref) = self.tool_items.get(item_id.as_str()) else {
+                    return Ok(None);
+                };
+                let (id, model) = self.response_identity()?;
+                Ok(Some(ChatCompletionChunk {
+                    id,
+                    model,
+                    choices: vec![ChatCompletionChunkChoice {
+                        index: 0,
+                        delta: ChatCompletionChunkDelta {
+                            role: None,
+                            content: None,
+                            tool_calls: Some(vec![ChatCompletionChunkToolCall {
+                                index: tool_ref.index,
+                                id: None,
+                                kind: None,
+                                function: Some(ChatCompletionChunkToolCallFunctionDelta {
+                                    name: None,
+                                    arguments: Some(delta),
+                                }),
+                            }]),
+                        },
+                        finish_reason: None,
+                    }],
+                    usage: None,
+                }))
+            }
+            CodexResponseEvent::ResponseCompleted { response } => {
+                let (id, model) = self.response_identity()?;
+                Ok(Some(ChatCompletionChunk {
+                    id,
+                    model,
+                    choices: vec![ChatCompletionChunkChoice {
+                        index: 0,
+                        delta: ChatCompletionChunkDelta::default(),
+                        finish_reason: None,
+                    }],
+                    usage: response.usage.map(chat_completion_usage_from_codex),
+                }))
+            }
+            CodexResponseEvent::Unknown => Ok(None),
+        }
+    }
+
+    fn response_identity(&self) -> Result<(String, String), OpenAiProviderError> {
+        Ok((
+            self.response_id.clone().ok_or_else(|| {
+                OpenAiProviderError::Decode(String::from(
+                    "codex stream event arrived before response.created id",
+                ))
+            })?,
+            self.response_model.clone().ok_or_else(|| {
+                OpenAiProviderError::Decode(String::from(
+                    "codex stream event arrived before response.created model",
+                ))
+            })?,
+        ))
+    }
 }
 
 #[derive(Default)]
@@ -727,9 +1346,10 @@ mod tests {
     use probe_test_support::{FakeAppleFmServer, FakeHttpResponse, FakeOpenAiServer};
 
     use super::{
-        ChatCompletionChunk, ChatCompletionResponse, ChatMessage, ChatToolCall,
-        ChatToolCallFunction, OpenAiProviderClient, OpenAiProviderConfig, OpenAiProviderError,
-        OpenAiRequestAuth, OpenAiTransport,
+        ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatMessage,
+        ChatToolCall, ChatToolCallFunction, ChatToolChoice, ChatToolDefinition,
+        ChatToolDefinitionEnvelope, CodexResponsesRequest, OpenAiProviderClient,
+        OpenAiProviderConfig, OpenAiProviderError, OpenAiRequestAuth, OpenAiTransport,
     };
 
     #[test]
@@ -823,6 +1443,12 @@ mod tests {
         }
     }
 
+    fn codex_streaming_config(base_url: &str) -> OpenAiProviderConfig {
+        let mut config = codex_config(base_url);
+        config.stream = true;
+        config
+    }
+
     #[test]
     fn client_executes_plain_text_chat_completion_against_local_endpoint() {
         let server = FakeOpenAiServer::from_json_responses(vec![serde_json::json!({
@@ -914,15 +1540,139 @@ mod tests {
     }
 
     #[test]
+    fn codex_request_lifts_system_prompt_into_instructions() {
+        let request = ChatCompletionRequest::from_config(
+            &codex_config("https://chatgpt.com/backend-api/codex"),
+            vec![
+                ChatMessage::system("You are helpful"),
+                ChatMessage::user("hello from probe"),
+            ],
+        );
+
+        let encoded = serde_json::to_value(CodexResponsesRequest::from_chat_completion(&request))
+            .expect("serialize codex request");
+
+        assert_eq!(encoded["instructions"], "You are helpful");
+        assert_eq!(encoded["input"][0]["role"], "user");
+        assert_eq!(encoded["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(
+            encoded["input"][0]["content"][0]["text"],
+            "hello from probe"
+        );
+        assert!(encoded.get("messages").is_none());
+    }
+
+    #[test]
+    fn codex_request_translates_tool_replay_messages_to_responses_input() {
+        let request = ChatCompletionRequest::from_config(
+            &codex_config("https://chatgpt.com/backend-api/codex"),
+            vec![
+                ChatMessage::system("You are helpful"),
+                ChatMessage::assistant_tool_calls(vec![ChatToolCall {
+                    id: String::from("call_1"),
+                    kind: String::from("function"),
+                    function: ChatToolCallFunction {
+                        name: String::from("read_file"),
+                        arguments: String::from("{\"path\":\"README.md\"}"),
+                    },
+                }]),
+                ChatMessage::tool("read_file", "call_1", "{\"contents\":\"hi\"}"),
+            ],
+        )
+        .with_tools(
+            vec![ChatToolDefinitionEnvelope {
+                kind: String::from("function"),
+                function: ChatToolDefinition {
+                    name: String::from("read_file"),
+                    description: Some(String::from("Read a file")),
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"}
+                        },
+                        "required": ["path"]
+                    })),
+                },
+            }],
+            Some(ChatToolChoice::Mode(String::from("auto"))),
+            Some(false),
+        );
+
+        let encoded = serde_json::to_value(CodexResponsesRequest::from_chat_completion(&request))
+            .expect("serialize codex tool request");
+
+        assert_eq!(encoded["instructions"], "You are helpful");
+        assert_eq!(encoded["tools"][0]["type"], "function");
+        assert_eq!(encoded["tools"][0]["name"], "read_file");
+        assert_eq!(encoded["tool_choice"], "auto");
+        assert_eq!(encoded["parallel_tool_calls"], false);
+        assert_eq!(encoded["input"][0]["type"], "function_call");
+        assert_eq!(encoded["input"][0]["call_id"], "call_1");
+        assert_eq!(encoded["input"][0]["name"], "read_file");
+        assert_eq!(encoded["input"][1]["type"], "function_call_output");
+        assert_eq!(encoded["input"][1]["call_id"], "call_1");
+        assert_eq!(encoded["input"][1]["output"], "{\"contents\":\"hi\"}");
+    }
+
+    #[test]
     fn codex_transport_rewrites_to_subscription_endpoint_and_injects_headers() {
         let server = FakeAppleFmServer::from_json_responses(vec![serde_json::json!({
             "id": "codex_resp_1",
             "model": "gpt-5.3-codex",
-            "choices": [
+            "output": [
                 {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "hello from codex"},
-                    "finish_reason": "stop"
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hello from codex"}]
+                }
+            ],
+            "usage": {
+                "input_tokens": 3,
+                "output_tokens": 4
+            }
+        })]);
+        let client = OpenAiProviderClient::new(codex_config(
+            format!("{}/backend-api/codex", server.base_url()).as_str(),
+        ))
+        .expect("client");
+
+        let response = client
+            .chat_completion(vec![
+                ChatMessage::system("You are helpful"),
+                ChatMessage::user("hello from probe"),
+            ])
+            .expect("codex response");
+
+        assert_eq!(response.first_message_text(), Some("hello from codex"));
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        let request = requests[0].to_lowercase();
+        let raw_request = &requests[0];
+        assert!(request.contains("post /backend-api/codex/responses"));
+        assert!(request.contains("bearer access-token"));
+        assert!(request.contains("chatgpt-account-id: acct-123"));
+        assert!(request.contains("originator: probe"));
+        assert!(request.contains("user-agent: probe/test"));
+        assert!(request.contains("session_id: sess-codex-123"));
+        assert!(raw_request.contains("\"instructions\":\"You are helpful\""));
+        assert!(raw_request.contains("\"type\":\"input_text\""));
+        assert!(!raw_request.contains("\"messages\""));
+    }
+
+    #[test]
+    fn codex_transport_decodes_function_call_responses() {
+        let server = FakeAppleFmServer::from_json_responses(vec![serde_json::json!({
+            "id": "codex_tool_resp_1",
+            "model": "gpt-5.3-codex",
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"README.md\"}",
+                    "status": "completed"
                 }
             ]
         })]);
@@ -932,19 +1682,17 @@ mod tests {
         .expect("client");
 
         let response = client
-            .chat_completion(vec![ChatMessage::user("hello from probe")])
-            .expect("codex response");
+            .chat_completion(vec![
+                ChatMessage::system("You are helpful"),
+                ChatMessage::user("inspect README.md"),
+            ])
+            .expect("codex tool response");
 
-        assert_eq!(response.first_message_text(), Some("hello from codex"));
-        let requests = server.finish();
-        assert_eq!(requests.len(), 1);
-        let request = requests[0].to_lowercase();
-        assert!(request.contains("post /backend-api/codex/responses"));
-        assert!(request.contains("bearer access-token"));
-        assert!(request.contains("chatgpt-account-id: acct-123"));
-        assert!(request.contains("originator: probe"));
-        assert!(request.contains("user-agent: probe/test"));
-        assert!(request.contains("session_id: sess-codex-123"));
+        let tool_calls = response.first_tool_calls().expect("tool calls");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_1");
+        assert_eq!(tool_calls[0].function.name, "read_file");
+        assert_eq!(tool_calls[0].function.arguments, "{\"path\":\"README.md\"}");
     }
 
     #[test]
@@ -1097,6 +1845,82 @@ mod tests {
     }
 
     #[test]
+    fn codex_streaming_plain_text_requests_are_assembled_from_responses_events() {
+        let body = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_stream_text\",\"model\":\"gpt-5.3-codex\",\"created_at\":1}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_1\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"delta\":\"hello\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"delta\":\" world\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let server =
+            FakeOpenAiServer::from_responses(vec![FakeHttpResponse::text_event_stream(200, body)]);
+        let client = OpenAiProviderClient::new(codex_streaming_config(
+            format!("{}/backend-api/codex", server.base_url()).as_str(),
+        ))
+        .expect("client");
+        let mut seen_chunks = Vec::<ChatCompletionChunk>::new();
+
+        let response = client
+            .send_chat_completion_with_callback(
+                &ChatCompletionRequest::from_config(
+                    client.config(),
+                    vec![
+                        ChatMessage::system("You are helpful"),
+                        ChatMessage::user("hello"),
+                    ],
+                ),
+                |chunk| seen_chunks.push(chunk.clone()),
+            )
+            .expect("streaming codex completion");
+
+        assert_eq!(response.first_message_text(), Some("hello world"));
+        assert_eq!(seen_chunks.len(), 5);
+        assert_eq!(
+            response
+                .usage
+                .expect("usage should be preserved")
+                .total_tokens,
+            5
+        );
+    }
+
+    #[test]
+    fn codex_streaming_tool_call_requests_are_assembled_from_responses_events() {
+        let body = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_stream_tool\",\"model\":\"gpt-5.3-codex\",\"created_at\":1}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"read_file\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"path\\\":\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"\\\"README.md\\\"}\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let server =
+            FakeOpenAiServer::from_responses(vec![FakeHttpResponse::text_event_stream(200, body)]);
+        let client = OpenAiProviderClient::new(codex_streaming_config(
+            format!("{}/backend-api/codex", server.base_url()).as_str(),
+        ))
+        .expect("client");
+
+        let response = client
+            .send_chat_completion(&ChatCompletionRequest::from_config(
+                client.config(),
+                vec![
+                    ChatMessage::system("You are helpful"),
+                    ChatMessage::user("inspect README.md"),
+                ],
+            ))
+            .expect("streaming codex tool response");
+
+        let tool_calls = response.first_tool_calls().expect("tool calls");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_1");
+        assert_eq!(tool_calls[0].function.name, "read_file");
+        assert_eq!(tool_calls[0].function.arguments, "{\"path\":\"README.md\"}");
+    }
+
+    #[test]
     fn streaming_requests_fall_back_to_non_streaming_when_backend_returns_json() {
         let server =
             FakeOpenAiServer::from_responses(vec![FakeHttpResponse::json_ok(serde_json::json!({
@@ -1114,6 +1938,33 @@ mod tests {
         let response = client
             .chat_completion(vec![ChatMessage::assistant("hello")])
             .expect("streaming request should fall back to non-streaming");
+        assert_eq!(response.first_message_text(), Some("fallback response"));
+    }
+
+    #[test]
+    fn codex_streaming_requests_fall_back_to_non_streaming_when_backend_returns_json() {
+        let server =
+            FakeOpenAiServer::from_responses(vec![FakeHttpResponse::json_ok(serde_json::json!({
+                "id": "resp_fallback",
+                "model": "gpt-5.3-codex",
+                "output": [{
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "fallback response"}]
+                }]
+            }))]);
+        let client = OpenAiProviderClient::new(codex_streaming_config(
+            format!("{}/backend-api/codex", server.base_url()).as_str(),
+        ))
+        .expect("client");
+
+        let response = client
+            .chat_completion(vec![
+                ChatMessage::system("You are helpful"),
+                ChatMessage::assistant("hello"),
+            ])
+            .expect("codex streaming request should fall back to non-streaming");
         assert_eq!(response.first_message_text(), Some("fallback response"));
     }
 }
