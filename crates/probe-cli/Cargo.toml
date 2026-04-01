@@ -6,11 +6,13 @@ license.workspace = true
 
 [dependencies]
 clap.workspace = true
+probe-client.workspace = true
 probe-core.workspace = true
 probe-decisions.workspace = true
 probe-optimizer.workspace = true
 probe-openai-auth.workspace = true
 probe-protocol.workspace = true
+probe-server.workspace = true
 probe-tui.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -196,3 +196,7 @@ This folder holds technical planning docs for the Probe runtime.
   - the completed shared test-support boundary for fake backends, temp Probe
     homes and workspaces, CLI launch helpers, stable snapshot-root setup, and
     shared report or transcript normalization utilities
+- `60-probe-client-and-first-party-adoption.md`
+  - shared `probe-client` spawn and transport ownership, the hidden internal
+    server fallback for local development, and the first-party adoption path
+    for `probe exec`, `probe chat`, and the TUI worker

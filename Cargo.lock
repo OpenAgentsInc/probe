@@ -1511,16 +1511,29 @@ dependencies = [
  "clap",
  "insta",
  "predicates",
+ "probe-client",
  "probe-core",
  "probe-decisions",
  "probe-openai-auth",
  "probe-optimizer",
  "probe-protocol",
+ "probe-server",
  "probe-test-support",
  "probe-tui",
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "probe-client"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "probe-core",
+ "probe-protocol",
+ "probe-test-support",
+ "serde_json",
 ]
 
 [[package]]
@@ -1641,6 +1654,7 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "insta",
+ "probe-client",
  "probe-core",
  "probe-openai-auth",
  "probe-protocol",

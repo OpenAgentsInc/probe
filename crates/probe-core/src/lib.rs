@@ -22,6 +22,7 @@ pub fn runtime_bootstrap() -> RuntimeBootstrap {
         protocol: ProtocolDescriptor::current(),
         crate_boundaries: vec![
             "probe-protocol",
+            "probe-client",
             "probe-core",
             "probe-server",
             "probe-openai-auth",
@@ -42,8 +43,9 @@ mod tests {
     fn bootstrap_mentions_all_initial_crates() {
         let bootstrap = runtime_bootstrap();
         assert_eq!(bootstrap.protocol.version, 1);
-        assert_eq!(bootstrap.crate_boundaries.len(), 7);
+        assert_eq!(bootstrap.crate_boundaries.len(), 8);
         assert!(bootstrap.crate_boundaries.contains(&"probe-cli"));
+        assert!(bootstrap.crate_boundaries.contains(&"probe-client"));
         assert!(bootstrap.crate_boundaries.contains(&"probe-server"));
         assert!(bootstrap.crate_boundaries.contains(&"probe-openai-auth"));
         assert!(

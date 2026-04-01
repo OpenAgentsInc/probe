@@ -13,6 +13,7 @@ use acceptance::{
     run_acceptance_matrix, run_self_test_harness,
 };
 use clap::{Parser, Subcommand};
+use probe_client::{INTERNAL_SERVER_SUBCOMMAND, ProbeClient, ProbeClientConfig};
 use probe_core::backend_profiles::{
     PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE,
     PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
@@ -56,6 +57,7 @@ use probe_protocol::session::{
     BackendTurnReceipt, CacheSignal, SessionHarnessProfile, SessionId, SessionTurn,
     ToolPolicyDecision, ToolRiskClass, UsageMeasurement, UsageTruth,
 };
+use probe_server::server::run_stdio_server;
 use probe_tui::{AppShell, TuiLaunchConfig, UiEvent, run_probe_tui_with_config};
 use serde::Serialize;
 
@@ -75,6 +77,8 @@ enum Commands {
     Codex(CodexArgs),
     #[command(about = "Launch the current Probe terminal UI")]
     Tui(TuiArgs),
+    #[command(name = INTERNAL_SERVER_SUBCOMMAND, hide = true)]
+    InternalServer(InternalServerArgs),
     Accept(AcceptArgs),
     SelfTest(AcceptArgs),
     AcceptCompare(AcceptCompareArgs),
@@ -118,6 +122,12 @@ struct CodexStatusArgs {
 
 #[derive(clap::Args, Debug)]
 struct CodexLogoutArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct InternalServerArgs {
     #[arg(long)]
     probe_home: Option<PathBuf>,
 }
@@ -412,6 +422,7 @@ fn run() -> Result<(), String> {
         Commands::Chat(args) => run_chat(args),
         Commands::Codex(args) => run_codex(args),
         Commands::Tui(args) => run_tui(args),
+        Commands::InternalServer(args) => run_internal_server(args),
         Commands::Accept(args) => run_accept(args),
         Commands::SelfTest(args) => run_self_test(args),
         Commands::AcceptCompare(args) => run_accept_compare(args),
@@ -614,7 +625,7 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
     let probe_home = args
         .probe_home
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
-    let runtime = resolve_runtime(Some(probe_home.clone()))?;
+    let mut client = resolve_client(probe_home.clone(), "exec")?;
     let mut profile = named_profile(args.profile.as_str())?;
     let server_guard = prepare_server(probe_home.as_path(), &args.server, profile.kind)?;
     print_backend_target_summary("exec", &server_guard);
@@ -657,7 +668,7 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
         cwd.as_path(),
         profile.kind,
     )?;
-    let outcome = runtime
+    let outcome = client
         .exec_plain_text(PlainTextExecRequest {
             profile,
             prompt: args.prompt.join(" "),
@@ -734,11 +745,10 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
     let probe_home = args
         .probe_home
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
-    let runtime = resolve_runtime(Some(probe_home.clone()))?;
+    let mut client = resolve_client(probe_home.clone(), "chat")?;
     let initial_profile_name = match (&args.resume, args.profile.as_deref()) {
         (_, Some(profile)) => profile.to_string(),
-        (Some(session_id), None) => runtime
-            .session_store()
+        (Some(session_id), None) => client
             .read_metadata(&SessionId::new(session_id.clone()))
             .map_err(|error| error.to_string())?
             .backend
@@ -792,8 +802,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
     let mut profile_name = initial_profile_name;
 
     if let Some(active_session_id) = &session_id {
-        let metadata = runtime
-            .session_store()
+        let metadata = client
             .read_metadata(active_session_id)
             .map_err(|error| error.to_string())?;
         eprintln!(
@@ -865,7 +874,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
             profile.model = model_id;
         }
         let outcome = if let Some(active_session_id) = &session_id {
-            runtime
+            client
                 .continue_plain_text_session(PlainTextResumeRequest {
                     session_id: active_session_id.clone(),
                     profile,
@@ -874,7 +883,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
                 })
                 .map_err(|error| error.to_string())?
         } else {
-            runtime
+            client
                 .exec_plain_text(PlainTextExecRequest {
                     profile,
                     prompt: String::from(prompt),
@@ -1075,6 +1084,10 @@ fn run_self_test(args: AcceptArgs) -> Result<(), String> {
             report_path.display()
         ))
     }
+}
+
+fn run_internal_server(args: InternalServerArgs) -> Result<(), String> {
+    run_stdio_server(args.probe_home).map_err(|error| error.to_string())
 }
 
 fn run_matrix(args: MatrixArgs) -> Result<(), String> {
@@ -1683,6 +1696,12 @@ fn resolve_runtime(probe_home: Option<PathBuf>) -> Result<ProbeRuntime, String> 
     Ok(ProbeRuntime::new(probe_home.unwrap_or(
         default_probe_home().map_err(|error| error.to_string())?,
     )))
+}
+
+fn resolve_client(probe_home: PathBuf, surface: &str) -> Result<ProbeClient, String> {
+    let mut config = ProbeClientConfig::new(probe_home, format!("probe-cli-{surface}"));
+    config.client_version = Some(String::from(env!("CARGO_PKG_VERSION")));
+    ProbeClient::spawn(config).map_err(|error| error.to_string())
 }
 
 fn resolve_server_config(

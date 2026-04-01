@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/probe-client",
     "crates/probe-cli",
     "crates/probe-core",
     "crates/probe-server",
@@ -27,6 +28,7 @@ crossterm = "0.29"
 hex = "0.4"
 insta = { version = "1.43", features = ["json"] }
 predicates = "3.1"
+probe-client = { path = "crates/probe-client" }
 probe-core = { path = "crates/probe-core" }
 probe-decisions = { path = "crates/probe-decisions" }
 probe-optimizer = { path = "crates/probe-optimizer" }

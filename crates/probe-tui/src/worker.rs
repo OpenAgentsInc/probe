@@ -2,13 +2,14 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
+use probe_client::{ProbeClient, ProbeClientConfig, ProbeClientError};
 use probe_core::provider::{
     PlainTextMessage, PlainTextProviderResponse, ProviderError, ProviderUsageTruth,
     complete_plain_text, normalize_openai_assistant_text,
 };
 use probe_core::runtime::{
-    PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, ResolvePendingToolApprovalOutcome,
-    ResolvePendingToolApprovalRequest, RuntimeError, RuntimeEvent, RuntimeEventSink,
+    PlainTextExecRequest, PlainTextResumeRequest, ResolvePendingToolApprovalOutcome,
+    ResolvePendingToolApprovalRequest, RuntimeEvent, RuntimeEventSink,
 };
 use probe_protocol::session::{
     SessionId, SessionMetadata, ToolApprovalResolution, ToolPolicyDecision, TranscriptEvent,
@@ -150,21 +151,18 @@ fn run_probe_runtime_turn(
     message_tx: &Sender<AppMessage>,
     state: &mut WorkerState,
 ) {
-    let runtime = match config.probe_home.clone() {
-        Some(probe_home) => ProbeRuntime::new(probe_home),
-        None => match ProbeRuntime::detect() {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                    entry: TranscriptEntry::new(
-                        TranscriptRole::Status,
-                        "Runtime Error",
-                        vec![error.to_string()],
-                    ),
-                });
-                return;
-            }
-        },
+    let mut client = match resolve_probe_client(config.probe_home.clone()) {
+        Ok(client) => client,
+        Err(error) => {
+            let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
+                entry: TranscriptEntry::new(
+                    TranscriptRole::Status,
+                    "Runtime Error",
+                    vec![error.to_string()],
+                ),
+            });
+            return;
+        }
     };
 
     let previous_session = state.session_for_config(&config).cloned();
@@ -174,7 +172,7 @@ fn run_probe_runtime_turn(
         let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
             forward_runtime_event(&event_tx, event);
         });
-        runtime.continue_plain_text_session_with_events(
+        client.continue_plain_text_session_with_events(
             PlainTextResumeRequest {
                 session_id: session.session_id.clone(),
                 profile: config.profile.clone(),
@@ -188,7 +186,7 @@ fn run_probe_runtime_turn(
         let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
             forward_runtime_event(&event_tx, event);
         });
-        runtime.exec_plain_text_with_events(
+        client.exec_plain_text_with_events(
             PlainTextExecRequest {
                 profile: config.profile.clone(),
                 prompt,
@@ -212,28 +210,27 @@ fn run_probe_runtime_turn(
             }
             if emit_transcript_delta(
                 message_tx,
-                runtime.session_store().read_transcript(&outcome.session.id),
+                client.read_transcript(&outcome.session.id),
                 previous_turns,
             )
             .is_err()
             {
                 return;
             }
-            if emit_pending_tool_approvals(message_tx, &runtime, &outcome.session.id).is_err() {
+            if emit_pending_tool_approvals(message_tx, &mut client, &outcome.session.id).is_err() {
                 return;
             }
             state.upsert_runtime_session(ProbeRuntimeSessionState::from_metadata(
                 &outcome.session,
                 &config,
-                runtime
-                    .session_store()
+                client
                     .read_transcript(&outcome.session.id)
                     .map(|events| events.len())
                     .unwrap_or(previous_turns),
             ));
         }
         Err(error) => {
-            let Some(session_id) = runtime_error_session_id(&error).or_else(|| {
+            let Some(session_id) = client_error_session_id(&error).or_else(|| {
                 previous_session
                     .as_ref()
                     .map(|session| session.session_id.clone())
@@ -248,14 +245,14 @@ fn run_probe_runtime_turn(
                 return;
             };
 
-            let metadata = runtime.session_store().read_metadata(&session_id).ok();
+            let metadata = client.read_metadata(&session_id).ok();
             if let Some(metadata) = metadata.as_ref()
                 && emit_session_ready(message_tx, metadata, &config).is_err()
             {
                 return;
             }
             let previous_turns = state.rendered_turns_for_session(&session_id);
-            let transcript = runtime.session_store().read_transcript(&session_id);
+            let transcript = client.read_transcript(&session_id);
             let rendered_turns = transcript
                 .as_ref()
                 .map(|events| events.len())
@@ -267,7 +264,7 @@ fn run_probe_runtime_turn(
             if emit_transcript_delta(message_tx, transcript, previous_turns).is_err() {
                 return;
             }
-            if emit_pending_tool_approvals(message_tx, &runtime, &session_id).is_err() {
+            if emit_pending_tool_approvals(message_tx, &mut client, &session_id).is_err() {
                 return;
             }
             if let Some(metadata) = metadata {
@@ -298,25 +295,21 @@ fn run_pending_tool_approval_resolution(
     message_tx: &Sender<AppMessage>,
     state: &mut WorkerState,
 ) {
-    let runtime = match config.probe_home.clone() {
-        Some(probe_home) => ProbeRuntime::new(probe_home),
-        None => match ProbeRuntime::detect() {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                    entry: TranscriptEntry::new(
-                        TranscriptRole::Status,
-                        "Runtime Error",
-                        vec![error.to_string()],
-                    ),
-                });
-                return;
-            }
-        },
+    let mut client = match resolve_probe_client(config.probe_home.clone()) {
+        Ok(client) => client,
+        Err(error) => {
+            let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
+                entry: TranscriptEntry::new(
+                    TranscriptRole::Status,
+                    "Runtime Error",
+                    vec![error.to_string()],
+                ),
+            });
+            return;
+        }
     };
 
-    let Ok(session_id) = runtime
-        .session_store()
+    let Ok(session_id) = client
         .read_metadata(&SessionId::new(session_id.clone()))
         .map(|metadata| metadata.id)
     else {
@@ -351,7 +344,7 @@ fn run_pending_tool_approval_resolution(
     let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
         forward_runtime_event(&event_tx, event);
     });
-    let result = runtime.resolve_pending_tool_approval_with_events(
+    let result = client.resolve_pending_tool_approval_with_events(
         ResolvePendingToolApprovalRequest {
             session_id: session_id.clone(),
             profile: config.profile.clone(),
@@ -372,7 +365,7 @@ fn run_pending_tool_approval_resolution(
             }
             if emit_transcript_delta(
                 message_tx,
-                runtime.session_store().read_transcript(&session.id),
+                client.read_transcript(&session.id),
                 previous_turns,
             )
             .is_err()
@@ -391,8 +384,7 @@ fn run_pending_tool_approval_resolution(
             state.upsert_runtime_session(ProbeRuntimeSessionState::from_metadata(
                 &session,
                 &config,
-                runtime
-                    .session_store()
+                client
                     .read_transcript(&session.id)
                     .map(|events| events.len())
                     .unwrap_or(previous_turns),
@@ -404,28 +396,27 @@ fn run_pending_tool_approval_resolution(
             }
             if emit_transcript_delta(
                 message_tx,
-                runtime.session_store().read_transcript(&outcome.session.id),
+                client.read_transcript(&outcome.session.id),
                 previous_turns,
             )
             .is_err()
             {
                 return;
             }
-            if emit_pending_tool_approvals(message_tx, &runtime, &outcome.session.id).is_err() {
+            if emit_pending_tool_approvals(message_tx, &mut client, &outcome.session.id).is_err() {
                 return;
             }
             state.upsert_runtime_session(ProbeRuntimeSessionState::from_metadata(
                 &outcome.session,
                 &config,
-                runtime
-                    .session_store()
+                client
                     .read_transcript(&outcome.session.id)
                     .map(|events| events.len())
                     .unwrap_or(previous_turns),
             ));
         }
         Err(error) => {
-            let _ = emit_pending_tool_approvals(message_tx, &runtime, &session_id);
+            let _ = emit_pending_tool_approvals(message_tx, &mut client, &session_id);
             let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
                 entry: TranscriptEntry::new(
                     TranscriptRole::Status,
@@ -518,16 +509,29 @@ fn emit_session_ready(
 
 fn emit_pending_tool_approvals(
     message_tx: &Sender<AppMessage>,
-    runtime: &ProbeRuntime,
+    client: &mut ProbeClient,
     session_id: &SessionId,
 ) -> Result<(), ()> {
-    let approvals = runtime.pending_tool_approvals(session_id).map_err(|_| ())?;
+    let approvals = client.pending_tool_approvals(session_id).map_err(|_| ())?;
     message_tx
         .send(AppMessage::PendingToolApprovalsUpdated {
             session_id: session_id.as_str().to_string(),
             approvals,
         })
         .map_err(|_| ())
+}
+
+fn resolve_probe_client(
+    probe_home: Option<std::path::PathBuf>,
+) -> Result<ProbeClient, ProbeClientError> {
+    let probe_home = match probe_home {
+        Some(probe_home) => probe_home,
+        None => probe_core::runtime::default_probe_home()
+            .map_err(|error| ProbeClientError::UnexpectedServerMessage(error.to_string()))?,
+    };
+    let mut config = ProbeClientConfig::new(probe_home, "probe-tui");
+    config.client_version = Some(String::from(env!("CARGO_PKG_VERSION")));
+    ProbeClient::spawn(config)
 }
 
 fn forward_runtime_event(message_tx: &Sender<AppMessage>, event: RuntimeEvent) {
@@ -610,7 +614,7 @@ fn forward_runtime_event(message_tx: &Sender<AppMessage>, event: RuntimeEvent) {
 
 fn emit_transcript_delta(
     message_tx: &Sender<AppMessage>,
-    transcript: Result<Vec<TranscriptEvent>, probe_core::session_store::SessionStoreError>,
+    transcript: Result<Vec<TranscriptEvent>, ProbeClientError>,
     previous_turns: usize,
 ) -> Result<(), ()> {
     let transcript = transcript.map_err(|_| ())?;
@@ -1081,19 +1085,20 @@ mod tests {
     }
 }
 
-fn runtime_error_session_id(error: &RuntimeError) -> Option<SessionId> {
+fn client_error_session_id(error: &ProbeClientError) -> Option<SessionId> {
     match error {
-        RuntimeError::ProviderRequest { session_id, .. }
-        | RuntimeError::MissingAssistantMessage { session_id, .. }
-        | RuntimeError::UnsupportedBackendFeature { session_id, .. }
-        | RuntimeError::ToolApprovalPending { session_id, .. }
-        | RuntimeError::PendingToolApprovalNotFound { session_id, .. }
-        | RuntimeError::PendingToolApprovalAlreadyResolved { session_id, .. }
-        | RuntimeError::MaxToolRoundTrips { session_id, .. } => Some(session_id.clone()),
-        RuntimeError::ProbeHomeUnavailable
-        | RuntimeError::CurrentDir(_)
-        | RuntimeError::SessionStore(_)
-        | RuntimeError::MalformedTranscript(_) => None,
+        ProbeClientError::ToolApprovalPending { session_id, .. }
+        | ProbeClientError::SessionScopedProtocol { session_id, .. } => Some(session_id.clone()),
+        ProbeClientError::CurrentExecutable(_)
+        | ProbeClientError::Spawn(_)
+        | ProbeClientError::MissingChildStdin
+        | ProbeClientError::MissingChildStdout
+        | ProbeClientError::Io(_)
+        | ProbeClientError::Json(_)
+        | ProbeClientError::Protocol(_)
+        | ProbeClientError::UnexpectedServerMessage(_)
+        | ProbeClientError::UnsupportedToolSet(_)
+        | ProbeClientError::ShutdownRejected { .. } => None,
     }
 }
 

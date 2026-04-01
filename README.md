@@ -15,6 +15,8 @@ Current shipped surface:
 - `probe tui` / `cargo probe` for the local terminal UI
 - three inference lanes in the TUI: Qwen or Tailnet, Codex, and Apple FM
 - `probe-server` for the first typed local stdio supervision contract
+- a shared `probe-client` layer underneath `exec`, `chat`, and the TUI so
+  first-party surfaces now speak one server contract
 - `coding_bootstrap` tools, approvals, and harness profiles
 - append-only local transcripts under `PROBE_HOME` or `~/.probe`
 - bounded oracle and long-context escalation lanes

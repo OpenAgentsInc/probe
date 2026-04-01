@@ -708,6 +708,19 @@ Ship:
   metadata
 - pure workspace-lifecycle decision functions separated from provider effects
 
+Status:
+
+- landed now
+  - `probe-server`
+  - the shared `probe-client` crate
+  - typed session and turn APIs
+  - typed live event streaming
+  - attach, list, inspect, interrupt, and approval APIs
+  - pure workspace-lifecycle decision functions
+- still split out
+  - queued-turn contract and queue-position semantics
+  - Autopilot-side consumption in `openagents`
+
 Success condition:
 
 - CLI, TUI, and Autopilot can all talk to the same Probe runtime contract.
