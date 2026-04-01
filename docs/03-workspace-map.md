@@ -13,7 +13,8 @@
 - `probe-decisions`
   - offline-evaluable decision-module boundary above the runtime
 - `probe-optimizer`
-  - offline optimizer receipts and candidate comparison logic
+  - Psionic bridge artifacts, promotion ledgers, and bounded optimize-anything
+    families above the runtime
 - `probe-cli`
   - terminal entrypoint for Probe
 - `probe-tui`

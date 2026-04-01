@@ -1555,11 +1555,13 @@ dependencies = [
 name = "probe-optimizer"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "probe-core",
  "probe-decisions",
  "psionic-optimize",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

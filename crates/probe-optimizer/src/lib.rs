@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 const DECISION_MODULE_COMPONENT_ID: &str = "decision_module_manifest_json";
 const HARNESS_COMPONENT_ID: &str = "harness_candidate_manifest_json";
+const SKILL_PACK_COMPONENT_ID: &str = "skill_pack_manifest_json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -211,6 +212,66 @@ pub struct PromotionLedger {
     pub entries: Vec<PromotionLedgerEntry>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillPackManifest {
+    pub schema_version: u16,
+    pub candidate_id: String,
+    pub description: String,
+    pub tool_route_candidate_id: String,
+    pub patch_readiness_candidate_id: String,
+    pub long_context_candidate_id: String,
+    pub harness_candidate_id: String,
+    pub manifest_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillPackTask {
+    pub task_id: String,
+    pub split: DecisionCaseSplit,
+    pub source_kind: String,
+    pub source_ref: String,
+    pub case_family: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillPackTaskBundle {
+    pub schema_version: u16,
+    pub report_id: String,
+    pub tasks: Vec<SkillPackTask>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillPackPsionicArtifacts {
+    pub run_spec: OptimizationRunSpec,
+    pub run_receipt: OptimizationRunReceipt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontier_snapshot: Option<OptimizationFrontierSnapshot>,
+    pub candidate_manifests: Vec<PsionicCandidateManifest>,
+    pub train_cases: Vec<PsionicCaseManifest>,
+    pub validation_cases: Vec<PsionicCaseManifest>,
+    pub search_state_digest: String,
+    pub refs: PsionicArtifactRefs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillPackOptimizationBundle {
+    pub schema_version: u16,
+    pub report_id: String,
+    pub task_bundle: SkillPackTaskBundle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_ref: Option<String>,
+    pub baseline_candidate_id: String,
+    pub retained_candidate_id: String,
+    pub baseline_manifest_digest: String,
+    pub retained_manifest_digest: String,
+    pub baseline_scorecard: OptimizationScorecard,
+    pub retained_scorecard: OptimizationScorecard,
+    pub promotion_rule: PromotionRule,
+    pub promotion_report: CandidateComparisonReport,
+    pub probe_candidate_manifests: Vec<SkillPackManifest>,
+    pub psionic_artifacts: SkillPackPsionicArtifacts,
+}
+
 impl DecisionModuleOptimizationBundle {
     pub fn write_json(&self, path: impl AsRef<Path>) -> Result<(), String> {
         let path = path.as_ref();
@@ -228,6 +289,47 @@ impl DecisionModuleOptimizationBundle {
 }
 
 impl HarnessOptimizationBundle {
+    pub fn write_json(&self, path: impl AsRef<Path>) -> Result<(), String> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let body = serde_json::to_string_pretty(self).map_err(|error| error.to_string())?;
+        fs::write(path, format!("{body}\n")).map_err(|error| error.to_string())
+    }
+
+    pub fn read_json(path: impl AsRef<Path>) -> Result<Self, String> {
+        let body = fs::read_to_string(path.as_ref()).map_err(|error| error.to_string())?;
+        serde_json::from_str(&body).map_err(|error| error.to_string())
+    }
+}
+
+impl SkillPackManifest {
+    #[must_use]
+    pub fn new(
+        candidate_id: impl Into<String>,
+        description: impl Into<String>,
+        tool_route_candidate_id: impl Into<String>,
+        patch_readiness_candidate_id: impl Into<String>,
+        long_context_candidate_id: impl Into<String>,
+        harness_candidate_id: impl Into<String>,
+    ) -> Self {
+        let mut manifest = Self {
+            schema_version: 1,
+            candidate_id: candidate_id.into(),
+            description: description.into(),
+            tool_route_candidate_id: tool_route_candidate_id.into(),
+            patch_readiness_candidate_id: patch_readiness_candidate_id.into(),
+            long_context_candidate_id: long_context_candidate_id.into(),
+            harness_candidate_id: harness_candidate_id.into(),
+            manifest_digest: String::new(),
+        };
+        manifest.manifest_digest = skill_pack_manifest_digest(&manifest);
+        manifest
+    }
+}
+
+impl SkillPackOptimizationBundle {
     pub fn write_json(&self, path: impl AsRef<Path>) -> Result<(), String> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -388,6 +490,42 @@ pub fn harness_ledger_entries_from_bundle(
             .first()
             .map(|manifest| manifest.tool_set.clone())
             .unwrap_or_else(|| String::from("harness_profile")),
+        baseline_id: bundle.baseline_candidate_id.clone(),
+        candidate_id: bundle.retained_candidate_id.clone(),
+        baseline_ref: format!(
+            "{}:{}",
+            bundle.baseline_candidate_id, bundle.baseline_manifest_digest
+        ),
+        candidate_ref: format!(
+            "{}:{}",
+            bundle.retained_candidate_id, bundle.retained_manifest_digest
+        ),
+        psionic_run_id: bundle.psionic_artifacts.refs.run_id.clone(),
+        psionic_run_receipt_ref: bundle.psionic_artifacts.refs.run_receipt_digest.clone(),
+        artifact_bundle_ref,
+        search_winner: true,
+        promotion_disposition: if bundle.promotion_report.promoted {
+            PromotionDisposition::Admitted
+        } else {
+            PromotionDisposition::Rejected
+        },
+        adoption_state: AdoptionState::NotAdopted,
+        refusal_reason: if bundle.promotion_report.promoted {
+            None
+        } else {
+            Some(bundle.promotion_report.reason.clone())
+        },
+    }]
+}
+
+pub fn skill_pack_ledger_entries_from_bundle(
+    bundle: &SkillPackOptimizationBundle,
+    artifact_bundle_ref: impl Into<String>,
+) -> Vec<PromotionLedgerEntry> {
+    let artifact_bundle_ref = artifact_bundle_ref.into();
+    vec![PromotionLedgerEntry {
+        target_kind: OptimizationTargetKind::SkillPack,
+        family_key: String::from("retained_coding"),
         baseline_id: bundle.baseline_candidate_id.clone(),
         candidate_id: bundle.retained_candidate_id.clone(),
         baseline_ref: format!(
@@ -691,6 +829,182 @@ pub fn optimize_harness_profiles(
     })
 }
 
+pub fn optimize_skill_packs(
+    decision_cases: &[DecisionCaseRecord],
+    harness_inputs: &[HarnessCandidateEvaluationInput],
+    ledger: &PromotionLedger,
+    issue_ref: Option<&str>,
+    rule: PromotionRule,
+) -> Result<SkillPackOptimizationBundle, String> {
+    if decision_cases.is_empty() {
+        return Err(String::from(
+            "optimize-skill-packs requires retained decision cases",
+        ));
+    }
+    if harness_inputs.is_empty() {
+        return Err(String::from(
+            "optimize-skill-packs requires harness candidate evaluation inputs",
+        ));
+    }
+
+    let candidates = build_skill_pack_candidates_from_ledger(ledger, harness_inputs)?;
+    let baseline_manifest = candidates
+        .iter()
+        .find(|manifest| manifest.candidate_id == "probe_skill_pack_baseline_v1")
+        .cloned()
+        .ok_or_else(|| String::from("missing baseline skill pack manifest"))?;
+    let task_bundle = build_skill_pack_task_bundle(decision_cases, harness_inputs);
+    let run_id = format!("probe-optimize-skill-pack-{}", task_bundle.tasks.len());
+    let mut run_spec = OptimizationRunSpec::new(
+        run_id.clone(),
+        String::from("probe.skill_packs.retained_coding"),
+    )
+    .with_dataset_refs(vec![String::from("probe.skill_pack_tasks")])
+    .with_frontier_mode(OptimizationFrontierMode::Scalar)
+    .with_iteration_budget(candidates.len().saturating_sub(1) as u32)
+    .with_candidate_budget(candidates.len() as u32);
+    if let Some(issue_ref) = issue_ref {
+        run_spec = run_spec.with_issue_ref(issue_ref);
+    }
+
+    let mut psionic_candidates = candidates
+        .iter()
+        .map(|manifest| skill_pack_manifest_to_psionic(manifest, run_id.as_str()))
+        .collect::<Result<Vec<_>, _>>()?;
+    psionic_candidates.sort_by(|left, right| left.candidate_id.cmp(&right.candidate_id));
+    let seed_candidate = psionic_candidates
+        .iter()
+        .find(|candidate| candidate.candidate_id == baseline_manifest.candidate_id)
+        .cloned()
+        .ok_or_else(|| String::from("missing baseline skill pack candidate"))?;
+
+    let mut train_cases = task_bundle
+        .tasks
+        .iter()
+        .filter(|task| task.split == DecisionCaseSplit::Train)
+        .map(skill_pack_task_to_psionic_case)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut validation_cases = task_bundle
+        .tasks
+        .iter()
+        .filter(|task| task.split == DecisionCaseSplit::Validation)
+        .map(skill_pack_task_to_psionic_case)
+        .collect::<Result<Vec<_>, _>>()?;
+    normalize_case_splits(&mut train_cases, &mut validation_cases)?;
+
+    let mut evaluator = SkillPackPsionicEvaluator {
+        decision_cases: decision_cases
+            .iter()
+            .cloned()
+            .map(|case| (case.case_id.clone(), case))
+            .collect(),
+        decision_manifests: builtin_decision_module_manifests()
+            .into_iter()
+            .map(|manifest| (manifest.candidate_id.clone(), manifest))
+            .collect(),
+        harness_cases: harness_inputs
+            .iter()
+            .map(|input| {
+                (
+                    input.manifest.candidate_id.clone(),
+                    input.cases
+                        .iter()
+                        .cloned()
+                        .map(|case| (case.case_id.clone(), case))
+                        .collect::<BTreeMap<_, _>>(),
+                )
+            })
+            .collect(),
+    };
+    let state = OptimizationEngine::initialize(
+        run_spec.clone(),
+        seed_candidate.clone(),
+        train_cases.clone(),
+        validation_cases.clone(),
+        &mut evaluator,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut proposer = OrderedPsionicCandidateProposer::new(
+        SKILL_PACK_COMPONENT_ID,
+        psionic_candidates
+            .iter()
+            .filter(|candidate| candidate.candidate_id != seed_candidate.candidate_id)
+            .cloned()
+            .collect(),
+    );
+    let mut sampler = OptimizationSequentialMinibatchSampler::new(train_cases.len().min(8).max(1));
+    let outcome = OptimizationEngine::run(state, &mut evaluator, &mut proposer, &mut sampler, None)
+        .map_err(|error| error.to_string())?;
+
+    let retained_candidate_id = outcome.state.current_candidate_id.clone();
+    let retained_manifest = candidates
+        .iter()
+        .find(|manifest| manifest.candidate_id == retained_candidate_id)
+        .cloned()
+        .ok_or_else(|| format!("missing retained skill pack `{retained_candidate_id}`"))?;
+    let baseline_batch = outcome
+        .state
+        .accepted_validation_batches
+        .get(baseline_manifest.candidate_id.as_str())
+        .ok_or_else(|| String::from("missing baseline skill-pack validation batch"))?;
+    let retained_batch = outcome
+        .state
+        .accepted_validation_batches
+        .get(retained_candidate_id.as_str())
+        .ok_or_else(|| String::from("missing retained skill-pack validation batch"))?;
+    let baseline_scorecard = optimization_scorecard_from_psionic_batch(baseline_batch);
+    let retained_scorecard = optimization_scorecard_from_psionic_batch(retained_batch);
+    let promotion_report = compare_candidate(
+        OptimizationTargetKind::SkillPack,
+        baseline_manifest.candidate_id.clone(),
+        retained_manifest.candidate_id.clone(),
+        baseline_scorecard.clone(),
+        retained_scorecard.clone(),
+        rule.clone(),
+    );
+
+    Ok(SkillPackOptimizationBundle {
+        schema_version: 1,
+        report_id: String::from("probe.skill_pack_optimization_bundle.v1"),
+        task_bundle,
+        issue_ref: issue_ref.map(String::from),
+        baseline_candidate_id: baseline_manifest.candidate_id.clone(),
+        retained_candidate_id: retained_manifest.candidate_id.clone(),
+        baseline_manifest_digest: baseline_manifest.manifest_digest.clone(),
+        retained_manifest_digest: retained_manifest.manifest_digest.clone(),
+        baseline_scorecard,
+        retained_scorecard,
+        promotion_rule: rule,
+        promotion_report,
+        probe_candidate_manifests: candidates,
+        psionic_artifacts: SkillPackPsionicArtifacts {
+            run_spec: run_spec.clone(),
+            run_receipt: outcome.run_receipt.clone(),
+            frontier_snapshot: outcome.state.latest_frontier_snapshot.clone(),
+            candidate_manifests: psionic_candidates.clone(),
+            train_cases,
+            validation_cases,
+            search_state_digest: outcome.state.state_digest,
+            refs: PsionicArtifactRefs {
+                run_id,
+                run_spec_digest: run_spec.spec_digest,
+                run_receipt_digest: outcome.run_receipt.receipt_digest.clone(),
+                frontier_snapshot_digest: outcome
+                    .state
+                    .latest_frontier_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.snapshot_digest.clone()),
+                candidate_manifest_refs: psionic_candidates
+                    .iter()
+                    .map(|manifest| {
+                        format!("{}:{}", manifest.candidate_id, manifest.manifest_digest)
+                    })
+                    .collect(),
+            },
+        },
+    })
+}
+
 fn optimize_decision_module_family(
     family: DecisionModuleFamily,
     cases: &[DecisionCaseRecord],
@@ -944,6 +1258,174 @@ fn harness_case_to_psionic_case(case: &HarnessEvaluationCase) -> Result<PsionicC
         .with_label(if case.passed { "pass" } else { "fail" })
         .with_metadata(metadata)
         .with_evidence_refs(evidence_refs),
+    )
+}
+
+fn build_skill_pack_candidates_from_ledger(
+    ledger: &PromotionLedger,
+    harness_inputs: &[HarnessCandidateEvaluationInput],
+) -> Result<Vec<SkillPackManifest>, String> {
+    let available_harness_ids = harness_inputs
+        .iter()
+        .map(|input| input.manifest.candidate_id.clone())
+        .collect::<BTreeSet<_>>();
+    let baseline = SkillPackManifest::new(
+        "probe_skill_pack_baseline_v1",
+        "Baseline Probe coding skill pack composed from retained baseline module and harness artifacts.",
+        "heuristic_tool_route_v1",
+        "heuristic_patch_readiness_v1",
+        "heuristic_long_context_escalation_v1",
+        "coding_bootstrap_default@v1",
+    );
+    let admitted_harness_candidate_id = preferred_ledger_candidate_id(
+        ledger,
+        OptimizationTargetKind::HarnessProfile,
+        "coding_bootstrap",
+        "coding_bootstrap_default@v1",
+    );
+    let admitted_harness_candidate_id =
+        if available_harness_ids.contains(admitted_harness_candidate_id.as_str()) {
+            admitted_harness_candidate_id
+        } else {
+            String::from("coding_bootstrap_default@v1")
+        };
+    let admitted = SkillPackManifest::new(
+        "probe_skill_pack_admitted_v1",
+        "Skill pack assembled from the best available admitted module and harness artifacts in the Probe promotion ledger.",
+        preferred_ledger_candidate_id(
+            ledger,
+            OptimizationTargetKind::DecisionModule,
+            "tool_route",
+            "heuristic_tool_route_v1",
+        ),
+        preferred_ledger_candidate_id(
+            ledger,
+            OptimizationTargetKind::DecisionModule,
+            "patch_readiness",
+            "heuristic_patch_readiness_v1",
+        ),
+        preferred_ledger_candidate_id(
+            ledger,
+            OptimizationTargetKind::DecisionModule,
+            "long_context_escalation",
+            "heuristic_long_context_escalation_v1",
+        ),
+        admitted_harness_candidate_id,
+    );
+    if admitted.manifest_digest == baseline.manifest_digest {
+        Ok(vec![baseline])
+    } else {
+        Ok(vec![baseline, admitted])
+    }
+}
+
+fn preferred_ledger_candidate_id(
+    ledger: &PromotionLedger,
+    target_kind: OptimizationTargetKind,
+    family_key: &str,
+    fallback: &str,
+) -> String {
+    let mut admitted = ledger
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.target_kind == target_kind
+                && entry.family_key == family_key
+                && entry.promotion_disposition == PromotionDisposition::Admitted
+        })
+        .collect::<Vec<_>>();
+    admitted.sort_by_key(|entry| match entry.adoption_state {
+        AdoptionState::Promoted => 0_u8,
+        AdoptionState::Shadow => 1_u8,
+        AdoptionState::NotAdopted => 2_u8,
+    });
+    admitted
+        .first()
+        .map_or_else(|| fallback.to_string(), |entry| entry.candidate_id.clone())
+}
+
+fn build_skill_pack_task_bundle(
+    decision_cases: &[DecisionCaseRecord],
+    harness_inputs: &[HarnessCandidateEvaluationInput],
+) -> SkillPackTaskBundle {
+    let mut tasks = decision_cases
+        .iter()
+        .map(|case| SkillPackTask {
+            task_id: format!("skill_task:decision:{}", case.case_id),
+            split: case.split,
+            source_kind: String::from("decision_case"),
+            source_ref: case.case_id.clone(),
+            case_family: case.family.as_str().to_string(),
+        })
+        .collect::<Vec<_>>();
+    if let Some(harness_input) = harness_inputs.first() {
+        tasks.extend(harness_input.cases.iter().map(|case| SkillPackTask {
+            task_id: format!("skill_task:harness:{}", case.case_id),
+            split: case.split,
+            source_kind: String::from("harness_attempt"),
+            source_ref: case.case_id.clone(),
+            case_family: String::from("harness_profile"),
+        }));
+    }
+    SkillPackTaskBundle {
+        schema_version: 1,
+        report_id: String::from("probe.skill_pack_task_bundle.v1"),
+        tasks,
+    }
+}
+
+fn skill_pack_manifest_digest(manifest: &SkillPackManifest) -> String {
+    let mut digestible = manifest.clone();
+    digestible.manifest_digest.clear();
+    let body = serde_json::to_string(&digestible).expect("skill pack manifest should serialize");
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"probe_skill_pack_manifest|");
+    hasher.update(body.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn skill_pack_manifest_to_psionic(
+    manifest: &SkillPackManifest,
+    run_id: &str,
+) -> Result<PsionicCandidateManifest, String> {
+    let components = BTreeMap::from([(
+        String::from(SKILL_PACK_COMPONENT_ID),
+        serde_json::to_string(manifest).map_err(|error| error.to_string())?,
+    )]);
+    Ok(
+        PsionicCandidateManifest::new(
+            manifest.candidate_id.clone(),
+            String::from("probe.skill_packs.retained_coding"),
+            run_id.to_string(),
+            components,
+        )
+        .with_provenance_refs(vec![format!(
+            "probe_skill_pack_manifest_digest:{}",
+            manifest.manifest_digest
+        )]),
+    )
+}
+
+fn skill_pack_task_to_psionic_case(task: &SkillPackTask) -> Result<PsionicCaseManifest, String> {
+    Ok(
+        PsionicCaseManifest::new(
+            task.task_id.clone(),
+            match task.split {
+                DecisionCaseSplit::Train => PsionicCaseSplit::Train,
+                DecisionCaseSplit::Validation => PsionicCaseSplit::Validation,
+            },
+        )
+        .with_label(task.case_family.clone())
+        .with_metadata(BTreeMap::from([
+            (String::from("source_kind"), task.source_kind.clone()),
+            (String::from("source_ref"), task.source_ref.clone()),
+            (String::from("case_family"), task.case_family.clone()),
+        ]))
+        .with_evidence_refs(vec![format!(
+            "skill_pack_task:{}:{}",
+            task.source_kind, task.source_ref
+        )]),
     )
 }
 
@@ -1207,6 +1689,121 @@ impl OptimizationEvaluator for HarnessPsionicEvaluator {
     }
 }
 
+struct SkillPackPsionicEvaluator {
+    decision_cases: BTreeMap<String, DecisionCaseRecord>,
+    decision_manifests: BTreeMap<String, DecisionModuleCandidateManifest>,
+    harness_cases: BTreeMap<String, BTreeMap<String, HarnessEvaluationCase>>,
+}
+
+impl OptimizationEvaluator for SkillPackPsionicEvaluator {
+    fn evaluate_candidate(
+        &mut self,
+        run_id: &str,
+        candidate: &PsionicCandidateManifest,
+        cases: &[PsionicCaseManifest],
+        cache: &mut OptimizationEvaluationCache,
+    ) -> OptimizationBatchEvaluationReceipt {
+        let skill_pack_manifest = skill_pack_manifest_from_psionic(candidate)
+            .expect("skill pack manifest should deserialize from psionic candidate");
+        let mut case_receipts = Vec::new();
+        let mut cache_hit_count = 0_u32;
+        let mut cache_miss_count = 0_u32;
+
+        for case in cases {
+            if let Some(receipt) = cache.lookup(candidate, case).cloned() {
+                cache_hit_count += 1;
+                case_receipts.push(receipt);
+                continue;
+            }
+            cache_miss_count += 1;
+            let source_kind = case
+                .metadata
+                .get("source_kind")
+                .cloned()
+                .unwrap_or_else(|| String::from("decision_case"));
+            let source_ref = case
+                .metadata
+                .get("source_ref")
+                .cloned()
+                .unwrap_or_default();
+            let (scalar_score, details) = if source_kind == "decision_case" {
+                let decision_case = self
+                    .decision_cases
+                    .get(source_ref.as_str())
+                    .expect("decision case should exist for skill-pack task");
+                let selected_manifest_id = selected_decision_manifest_id(
+                    &skill_pack_manifest,
+                    decision_case.family.as_str(),
+                );
+                let selected_manifest = self
+                    .decision_manifests
+                    .get(selected_manifest_id.as_str())
+                    .expect("selected decision manifest should exist");
+                let eval_spec = DecisionModuleEvalSpec::all_splits(selected_manifest.family);
+                let evaluation = evaluate_candidate_manifest(
+                    std::slice::from_ref(decision_case),
+                    selected_manifest,
+                    &eval_spec,
+                )
+                .expect("skill-pack decision manifest should evaluate");
+                (
+                    if evaluation.matched_cases == 1 { 1 } else { 0 },
+                    vec![
+                        format!("decision_case={}", decision_case.case_id),
+                        format!("decision_manifest={selected_manifest_id}"),
+                    ],
+                )
+            } else {
+                let harness_case = self
+                    .harness_cases
+                    .get(skill_pack_manifest.harness_candidate_id.as_str())
+                    .and_then(|cases| cases.get(source_ref.as_str()))
+                    .expect("selected harness case should exist for skill-pack task");
+                (
+                    if harness_case.passed { 1 } else { 0 },
+                    vec![
+                        format!("harness_case={}", harness_case.case_id),
+                        format!(
+                            "harness_candidate={}",
+                            skill_pack_manifest.harness_candidate_id
+                        ),
+                    ],
+                )
+            };
+            let receipt = OptimizationCaseEvaluationReceipt::new(
+                candidate,
+                case,
+                scalar_score,
+                BTreeMap::from([(String::from("correctness"), scalar_score)]),
+                OptimizationSharedFeedback::new(if scalar_score == 1 {
+                    "skill pack matched this retained task"
+                } else {
+                    "skill pack missed this retained task"
+                })
+                .with_details(details),
+                BTreeMap::from([(
+                    String::from(SKILL_PACK_COMPONENT_ID),
+                    OptimizationComponentFeedback::new(if scalar_score == 1 {
+                        "serialized skill pack matched the retained task"
+                    } else {
+                        "serialized skill pack missed the retained task"
+                    }),
+                )]),
+            );
+            cache.insert(candidate, case, receipt.clone());
+            case_receipts.push(receipt);
+        }
+
+        OptimizationBatchEvaluationReceipt::new(
+            run_id.to_string(),
+            candidate,
+            case_receipts,
+            cache_hit_count,
+            cache_miss_count,
+        )
+    }
+}
+
 struct OrderedPsionicCandidateProposer {
     component_id: String,
     queued_candidates: Vec<PsionicCandidateManifest>,
@@ -1302,6 +1899,28 @@ fn harness_manifest_from_psionic(
     serde_json::from_str(body).map_err(|error| error.to_string())
 }
 
+fn skill_pack_manifest_from_psionic(
+    candidate: &PsionicCandidateManifest,
+) -> Result<SkillPackManifest, String> {
+    let body = candidate
+        .components
+        .get(SKILL_PACK_COMPONENT_ID)
+        .ok_or_else(|| String::from("missing serialized skill-pack manifest component"))?;
+    serde_json::from_str(body).map_err(|error| error.to_string())
+}
+
+fn selected_decision_manifest_id(
+    manifest: &SkillPackManifest,
+    family: &str,
+) -> String {
+    match family {
+        "tool_route" => manifest.tool_route_candidate_id.clone(),
+        "patch_readiness" => manifest.patch_readiness_candidate_id.clone(),
+        "long_context_escalation" => manifest.long_context_candidate_id.clone(),
+        _ => manifest.tool_route_candidate_id.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use probe_core::dataset_export::{
@@ -1316,7 +1935,8 @@ mod tests {
         AdoptionState, DecisionModuleOptimizationBundle, HarnessCandidateEvaluationInput,
         HarnessEvaluationCase, HarnessOptimizationBundle, OptimizationTargetKind,
         PromotionDisposition, PromotionLedger, PromotionLedgerEntry, PromotionRule,
-        compare_candidate, optimize_decision_modules, optimize_harness_profiles,
+        SkillPackOptimizationBundle, compare_candidate, optimize_decision_modules,
+        optimize_harness_profiles, optimize_skill_packs,
     };
 
     #[test]
@@ -1629,5 +2249,207 @@ mod tests {
             )
             .expect("promote shadowed candidate");
         assert_eq!(ledger.entries[0].adoption_state, AdoptionState::Promoted);
+    }
+
+    #[test]
+    fn optimize_skill_packs_runs_through_psionic_bridge() {
+        let manifests = builtin_harness_candidate_manifests();
+        let baseline_harness = manifests
+            .iter()
+            .find(|manifest| manifest.profile_name == "coding_bootstrap_default")
+            .cloned()
+            .expect("baseline harness manifest");
+        let candidate_harness = manifests
+            .iter()
+            .find(|manifest| manifest.profile_name == "coding_bootstrap_verify_first")
+            .cloned()
+            .expect("candidate harness manifest");
+        let decision_cases = vec![
+            DecisionCaseRecord {
+                case_id: String::from("tool_route:sess_1:0:call_1"),
+                stable_digest: String::from("digest-train"),
+                family: DecisionCaseFamily::ToolRoute,
+                split: DecisionCaseSplit::Train,
+                session_id: String::from("sess_1"),
+                title: String::from("sample"),
+                cwd: String::from("/tmp"),
+                backend_profile: Some(String::from("local")),
+                harness_profile: Some(String::from("coding_bootstrap_default@v1")),
+                source_transcript_path: String::from("/tmp/probe/transcript.jsonl"),
+                turn_index: 0,
+                context: DecisionCaseContext::ToolRoute(ToolRouteDecisionCaseContext {
+                    files_listed: 0,
+                    files_searched: 0,
+                    files_read: 0,
+                    patch_attempts: 0,
+                    verification_step_count: 0,
+                    refused_or_paused_tool_calls: 0,
+                }),
+                observed_label: DecisionCaseObservedLabel::ToolRoute(ToolRouteObservedLabel {
+                    selected_tool: String::from("code_search"),
+                }),
+                transcript_refs: Vec::new(),
+            },
+            DecisionCaseRecord {
+                case_id: String::from("tool_route:sess_1:1:call_2"),
+                stable_digest: String::from("digest-val"),
+                family: DecisionCaseFamily::ToolRoute,
+                split: DecisionCaseSplit::Validation,
+                session_id: String::from("sess_1"),
+                title: String::from("sample"),
+                cwd: String::from("/tmp"),
+                backend_profile: Some(String::from("local")),
+                harness_profile: Some(String::from("coding_bootstrap_default@v1")),
+                source_transcript_path: String::from("/tmp/probe/transcript.jsonl"),
+                turn_index: 1,
+                context: DecisionCaseContext::ToolRoute(ToolRouteDecisionCaseContext {
+                    files_listed: 0,
+                    files_searched: 0,
+                    files_read: 0,
+                    patch_attempts: 0,
+                    verification_step_count: 0,
+                    refused_or_paused_tool_calls: 0,
+                }),
+                observed_label: DecisionCaseObservedLabel::ToolRoute(ToolRouteObservedLabel {
+                    selected_tool: String::from("code_search"),
+                }),
+                transcript_refs: Vec::new(),
+            },
+        ];
+        let harness_inputs = vec![
+            HarnessCandidateEvaluationInput {
+                manifest: baseline_harness,
+                report_ref: String::from("/tmp/probe/baseline.json"),
+                scorecard: super::OptimizationScorecard {
+                    correctness_numerator: 1,
+                    correctness_denominator: 2,
+                    median_wallclock_ms: Some(120),
+                    operator_trust_penalty: 0,
+                },
+                cases: vec![
+                    HarnessEvaluationCase {
+                        case_id: String::from("read_file_answer:attempt:0"),
+                        split: DecisionCaseSplit::Train,
+                        case_name: String::from("read_file_answer"),
+                        attempt_index: 0,
+                        passed: false,
+                        failure_category: Some(String::from("verification_failure")),
+                        wallclock_ms: Some(130),
+                        executed_tool_calls: 2,
+                        tool_names: vec![String::from("read_file")],
+                        refused_tool_calls: 0,
+                        paused_tool_calls: 0,
+                        backend_failure_family: None,
+                        backend_failure_reason: None,
+                        transcript_path: Some(String::from("/tmp/probe/read_file_answer.jsonl")),
+                    },
+                    HarnessEvaluationCase {
+                        case_id: String::from("patch_then_verify:attempt:0"),
+                        split: DecisionCaseSplit::Validation,
+                        case_name: String::from("patch_then_verify"),
+                        attempt_index: 0,
+                        passed: true,
+                        failure_category: None,
+                        wallclock_ms: Some(110),
+                        executed_tool_calls: 3,
+                        tool_names: vec![String::from("apply_patch"), String::from("read_file")],
+                        refused_tool_calls: 0,
+                        paused_tool_calls: 0,
+                        backend_failure_family: None,
+                        backend_failure_reason: None,
+                        transcript_path: Some(String::from("/tmp/probe/patch_then_verify.jsonl")),
+                    },
+                ],
+            },
+            HarnessCandidateEvaluationInput {
+                manifest: candidate_harness,
+                report_ref: String::from("/tmp/probe/candidate.json"),
+                scorecard: super::OptimizationScorecard {
+                    correctness_numerator: 2,
+                    correctness_denominator: 2,
+                    median_wallclock_ms: Some(115),
+                    operator_trust_penalty: 0,
+                },
+                cases: vec![
+                    HarnessEvaluationCase {
+                        case_id: String::from("read_file_answer:attempt:0"),
+                        split: DecisionCaseSplit::Train,
+                        case_name: String::from("read_file_answer"),
+                        attempt_index: 0,
+                        passed: true,
+                        failure_category: None,
+                        wallclock_ms: Some(125),
+                        executed_tool_calls: 2,
+                        tool_names: vec![String::from("read_file")],
+                        refused_tool_calls: 0,
+                        paused_tool_calls: 0,
+                        backend_failure_family: None,
+                        backend_failure_reason: None,
+                        transcript_path: Some(String::from("/tmp/probe/read_file_answer.jsonl")),
+                    },
+                    HarnessEvaluationCase {
+                        case_id: String::from("patch_then_verify:attempt:0"),
+                        split: DecisionCaseSplit::Validation,
+                        case_name: String::from("patch_then_verify"),
+                        attempt_index: 0,
+                        passed: true,
+                        failure_category: None,
+                        wallclock_ms: Some(105),
+                        executed_tool_calls: 3,
+                        tool_names: vec![String::from("apply_patch"), String::from("read_file")],
+                        refused_tool_calls: 0,
+                        paused_tool_calls: 0,
+                        backend_failure_family: None,
+                        backend_failure_reason: None,
+                        transcript_path: Some(String::from("/tmp/probe/patch_then_verify.jsonl")),
+                    },
+                ],
+            },
+        ];
+        let mut ledger = PromotionLedger::default();
+        ledger.upsert(PromotionLedgerEntry {
+            target_kind: OptimizationTargetKind::DecisionModule,
+            family_key: String::from("tool_route"),
+            baseline_id: String::from("heuristic_tool_route_v1"),
+            candidate_id: String::from("aggressive_tool_route_v2"),
+            baseline_ref: String::from("heuristic_tool_route_v1:digest-a"),
+            candidate_ref: String::from("aggressive_tool_route_v2:digest-b"),
+            psionic_run_id: String::from("probe-optimize-tool_route"),
+            psionic_run_receipt_ref: String::from("receipt-a"),
+            artifact_bundle_ref: String::from("/tmp/probe/module_bundle.json"),
+            search_winner: true,
+            promotion_disposition: PromotionDisposition::Admitted,
+            adoption_state: AdoptionState::Shadow,
+            refusal_reason: None,
+        });
+        ledger.upsert(PromotionLedgerEntry {
+            target_kind: OptimizationTargetKind::HarnessProfile,
+            family_key: String::from("coding_bootstrap"),
+            baseline_id: String::from("coding_bootstrap_default@v1"),
+            candidate_id: String::from("coding_bootstrap_verify_first@v1"),
+            baseline_ref: String::from("coding_bootstrap_default@v1:digest-c"),
+            candidate_ref: String::from("coding_bootstrap_verify_first@v1:digest-d"),
+            psionic_run_id: String::from("probe-optimize-harness"),
+            psionic_run_receipt_ref: String::from("receipt-b"),
+            artifact_bundle_ref: String::from("/tmp/probe/harness_bundle.json"),
+            search_winner: true,
+            promotion_disposition: PromotionDisposition::Admitted,
+            adoption_state: AdoptionState::Shadow,
+            refusal_reason: None,
+        });
+
+        let bundle = optimize_skill_packs(
+            &decision_cases,
+            &harness_inputs,
+            &ledger,
+            Some("OpenAgentsInc/probe#57"),
+            PromotionRule::gepa_default(),
+        )
+        .expect("optimize skill packs");
+        assert_eq!(bundle.report_id, "probe.skill_pack_optimization_bundle.v1");
+        let serialized = serde_json::to_string(&bundle).expect("serialize skill-pack bundle");
+        let roundtrip: SkillPackOptimizationBundle =
+            serde_json::from_str(&serialized).expect("deserialize skill-pack bundle");
+        assert_eq!(roundtrip.retained_candidate_id, bundle.retained_candidate_id);
     }
 }

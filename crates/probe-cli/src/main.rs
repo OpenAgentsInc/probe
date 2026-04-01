@@ -45,7 +45,8 @@ use probe_optimizer::{
     HarnessEvaluationCase, HarnessOptimizationBundle, OptimizationScorecard,
     OptimizationTargetKind, PromotionLedger, PromotionRule,
     decision_module_ledger_entries_from_bundle, harness_ledger_entries_from_bundle,
-    optimize_decision_modules, optimize_harness_profiles,
+    optimize_decision_modules, optimize_harness_profiles, optimize_skill_packs,
+    skill_pack_ledger_entries_from_bundle, SkillPackOptimizationBundle,
 };
 use probe_protocol::backend::BackendKind;
 use probe_protocol::session::{
@@ -75,6 +76,7 @@ enum Commands {
     ModuleEval(ModuleEvalArgs),
     OptimizeModules(OptimizeModulesArgs),
     OptimizeHarness(OptimizeHarnessArgs),
+    OptimizeSkillPacks(OptimizeSkillPacksArgs),
     AdoptCandidate(AdoptCandidateArgs),
 }
 
@@ -265,6 +267,22 @@ struct OptimizeHarnessArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct OptimizeSkillPacksArgs {
+    #[arg(long)]
+    decision_dataset: Option<PathBuf>,
+    #[arg(long)]
+    baseline_report: Option<PathBuf>,
+    #[arg(long)]
+    candidate_report: Vec<PathBuf>,
+    #[arg(long)]
+    ledger: PathBuf,
+    #[arg(long)]
+    artifact_bundle: Option<PathBuf>,
+    #[arg(long)]
+    output: PathBuf,
+}
+
+#[derive(clap::Args, Debug)]
 struct AdoptCandidateArgs {
     #[arg(long)]
     ledger: PathBuf,
@@ -320,6 +338,7 @@ fn run() -> Result<(), String> {
         Commands::ModuleEval(args) => run_module_eval(args),
         Commands::OptimizeModules(args) => run_optimize_modules(args),
         Commands::OptimizeHarness(args) => run_optimize_harness(args),
+        Commands::OptimizeSkillPacks(args) => run_optimize_skill_packs(args),
         Commands::AdoptCandidate(args) => run_adopt_candidate(args),
     }
 }
@@ -984,6 +1003,58 @@ fn run_adopt_candidate(args: AdoptCandidateArgs) -> Result<(), String> {
         render_optimization_target(target),
         args.candidate,
         render_adoption_state(state)
+    );
+    Ok(())
+}
+
+fn run_optimize_skill_packs(args: OptimizeSkillPacksArgs) -> Result<(), String> {
+    let mut ledger = PromotionLedger::read_or_default(args.ledger.as_path())?;
+    let bundle = if let Some(artifact_bundle) = args.artifact_bundle.as_ref() {
+        SkillPackOptimizationBundle::read_json(artifact_bundle)?
+    } else {
+        let decision_dataset = args.decision_dataset.as_ref().ok_or_else(|| {
+            String::from(
+                "optimize-skill-packs requires either --artifact-bundle <bundle.json> or --decision-dataset plus --baseline-report",
+            )
+        })?;
+        let baseline_report_path = args.baseline_report.as_ref().ok_or_else(|| {
+            String::from(
+                "optimize-skill-packs requires --baseline-report when launching a new optimization run",
+            )
+        })?;
+        let decision_cases = read_decision_case_dataset(decision_dataset.as_path())?;
+        let baseline_report = read_acceptance_report(baseline_report_path.as_path())?;
+        let baseline_input =
+            harness_candidate_input_from_acceptance_report(baseline_report_path, &baseline_report)?;
+        let mut harness_inputs = vec![baseline_input];
+        for path in &args.candidate_report {
+            let report = read_acceptance_report(path.as_path())?;
+            harness_inputs.push(harness_candidate_input_from_acceptance_report(path, &report)?);
+        }
+        optimize_skill_packs(
+            &decision_cases,
+            &harness_inputs,
+            &ledger,
+            Some("OpenAgentsInc/probe#57"),
+            PromotionRule::gepa_default(),
+        )?
+    };
+
+    bundle.write_json(args.output.as_path())?;
+    for entry in skill_pack_ledger_entries_from_bundle(&bundle, args.output.display().to_string()) {
+        ledger.upsert(entry);
+    }
+    ledger.write_json(args.ledger.as_path())?;
+    let report = &bundle.promotion_report;
+    eprintln!(
+        "target={} baseline={} candidate={} promoted={} run={} ledger={} reason={}",
+        render_optimization_target(report.target_kind),
+        report.baseline_id,
+        report.candidate_id,
+        report.promoted,
+        bundle.psionic_artifacts.refs.run_id,
+        args.ledger.display(),
+        report.reason
     );
     Ok(())
 }

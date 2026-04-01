@@ -31,6 +31,17 @@ cargo run -p probe-cli -- optimize-harness \
   --output ~/.probe/reports/probe_harness_optimization_bundle.json
 ```
 
+Skill-pack candidates over retained coding tasks:
+
+```bash
+cargo run -p probe-cli -- optimize-skill-packs \
+  --decision-dataset ~/.probe/reports/probe_decision_cases \
+  --baseline-report ~/.probe/reports/probe_acceptance_baseline.json \
+  --candidate-report ~/.probe/reports/probe_acceptance_verify_first.json \
+  --ledger ~/.probe/reports/probe_promotion_ledger.json \
+  --output ~/.probe/reports/probe_skill_pack_optimization_bundle.json
+```
+
 ## What The Optimizer Owns
 
 The optimizer crate currently owns:
@@ -38,6 +49,8 @@ The optimizer crate currently owns:
 - generic scorecard types
 - a shared promotion rule
 - Psionic artifact bundles for offline module jobs
+- retained coding skill-pack manifests and task bundles
+- promotion ledgers and adoption state transitions
 - baseline-versus-candidate comparison receipts above those Psionic runs
 
 The CLI currently uses that shared rule in two places:
@@ -46,6 +59,8 @@ The CLI currently uses that shared rule in two places:
   from exported `decision-cases` bundles
 - harness candidates launched through the same Psionic substrate from retained
   acceptance reports adapted into per-attempt cases
+- skill-pack candidates composed from retained module plus harness artifacts and
+  evaluated against mixed retained coding tasks
 
 `optimize-modules` now writes one bundle that includes, per family:
 
