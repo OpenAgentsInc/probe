@@ -12,10 +12,9 @@ use acceptance::{
 };
 use clap::{Parser, Subcommand};
 use probe_core::backend_profiles::{
-    psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
     PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE,
     PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
-    named_backend_profile,
+    named_backend_profile, psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
 };
 use probe_core::dataset_export::{
     DatasetExportConfig, DatasetKind, DecisionCaseRecord, DecisionSessionSummary, export_dataset,
@@ -37,16 +36,16 @@ use probe_core::tools::{
 };
 use probe_decisions::{
     HeuristicLongContextEscalationModule, HeuristicPatchReadinessModule, HeuristicToolRouteModule,
-    builtin_decision_module_manifests, evaluate_candidate_manifest,
-    evaluate_long_context_module, evaluate_patch_readiness_module, evaluate_tool_route_module,
+    builtin_decision_module_manifests, evaluate_candidate_manifest, evaluate_long_context_module,
+    evaluate_patch_readiness_module, evaluate_tool_route_module,
 };
 use probe_optimizer::{
     AdoptionState, DecisionModuleOptimizationBundle, HarnessCandidateEvaluationInput,
     HarnessEvaluationCase, HarnessOptimizationBundle, OptimizationScorecard,
-    OptimizationTargetKind, PromotionLedger, PromotionRule,
+    OptimizationTargetKind, PromotionLedger, PromotionRule, SkillPackOptimizationBundle,
     decision_module_ledger_entries_from_bundle, harness_ledger_entries_from_bundle,
     optimize_decision_modules, optimize_harness_profiles, optimize_skill_packs,
-    skill_pack_ledger_entries_from_bundle, SkillPackOptimizationBundle,
+    skill_pack_ledger_entries_from_bundle,
 };
 use probe_protocol::backend::BackendKind;
 use probe_protocol::session::{
@@ -347,20 +346,33 @@ fn run_tui(args: TuiArgs) -> Result<(), String> {
     let probe_home = args
         .probe_home
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
-    let mut profile = resolve_tui_profile(probe_home.as_path(), args.profile.as_deref(), &args.server)?;
-    let server_guard = prepare_server(probe_home.as_path(), &args.server, profile.kind)?;
-    profile.base_url = server_guard.base_url();
-    if let Some(model_id) = server_guard.model_id() {
-        profile.model = model_id;
-    }
-    print_backend_target_summary("tui", &server_guard);
+    let desired_profile =
+        resolve_tui_profile(probe_home.as_path(), args.profile.as_deref(), &args.server)?;
+    let config = resolve_server_config(probe_home.as_path(), &args.server, desired_profile.kind)?;
+    let (profile, operator_backend, _server_guard) = match config.mode {
+        PsionicServerMode::Attach => {
+            let profile = profile_from_server_config(&config);
+            let summary = config.operator_summary();
+            print_backend_target_summary_from_summary("tui", &summary);
+            (profile, summary, None)
+        }
+        PsionicServerMode::Launch => {
+            let server_guard = config
+                .prepare(Duration::from_secs(15))
+                .map_err(|error| error.to_string())?;
+            let mut profile = profile_from_server_config(&config);
+            profile.base_url = server_guard.base_url();
+            if let Some(model_id) = server_guard.model_id() {
+                profile.model = model_id;
+            }
+            let summary = server_guard.operator_summary();
+            print_backend_target_summary_from_summary("tui", &summary);
+            (profile, summary, Some(server_guard))
+        }
+    };
     let launch_config = TuiLaunchConfig {
-        chat_runtime: build_tui_runtime_config(
-            Some(probe_home),
-            args.cwd,
-            profile.clone(),
-        )?,
-        operator_backend: server_guard.operator_summary(),
+        chat_runtime: build_tui_runtime_config(Some(probe_home), args.cwd, profile.clone())?,
+        operator_backend,
         autostart_apple_fm_setup: profile.kind == BackendKind::AppleFmBridge,
     };
     run_probe_tui_with_config(launch_config).map_err(|error| error.to_string())
@@ -911,7 +923,8 @@ fn run_optimize_modules(args: OptimizeModulesArgs) -> Result<(), String> {
         .clone()
         .unwrap_or_else(|| default_promotion_ledger_path(args.output.as_path()));
     let mut ledger = PromotionLedger::read_or_default(ledger_path.as_path())?;
-    for entry in decision_module_ledger_entries_from_bundle(&bundle, args.output.display().to_string())
+    for entry in
+        decision_module_ledger_entries_from_bundle(&bundle, args.output.display().to_string())
     {
         ledger.upsert(entry);
     }
@@ -1029,7 +1042,9 @@ fn run_optimize_skill_packs(args: OptimizeSkillPacksArgs) -> Result<(), String> 
         let mut harness_inputs = vec![baseline_input];
         for path in &args.candidate_report {
             let report = read_acceptance_report(path.as_path())?;
-            harness_inputs.push(harness_candidate_input_from_acceptance_report(path, &report)?);
+            harness_inputs.push(harness_candidate_input_from_acceptance_report(
+                path, &report,
+            )?);
         }
         optimize_skill_packs(
             &decision_cases,
@@ -1101,34 +1116,36 @@ fn harness_candidate_input_from_acceptance_report(
         .results
         .iter()
         .flat_map(|case| {
-            case.attempts.iter().map(move |attempt| HarnessEvaluationCase {
-                case_id: format!("{}:attempt:{}", case.case_name, attempt.attempt_index),
-                split: harness_case_split(case.case_name.as_str(), attempt.attempt_index),
-                case_name: case.case_name.clone(),
-                attempt_index: attempt.attempt_index,
-                passed: attempt.passed,
-                failure_category: attempt
-                    .failure_category
-                    .as_ref()
-                    .map(json_string_value),
-                wallclock_ms: attempt.observability.as_ref().map(|value| value.wallclock_ms),
-                executed_tool_calls: attempt.executed_tool_calls,
-                tool_names: attempt.tool_names.clone(),
-                refused_tool_calls: attempt.policy_counts.refused_tool_calls,
-                paused_tool_calls: attempt.policy_counts.paused_tool_calls,
-                backend_failure_family: attempt
-                    .backend_receipt
-                    .as_ref()
-                    .and_then(|receipt| receipt.failure_family.clone()),
-                backend_failure_reason: attempt
-                    .backend_receipt
-                    .as_ref()
-                    .and_then(|receipt| receipt.failure_reason.clone()),
-                transcript_path: attempt
-                    .transcript_path
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
-            })
+            case.attempts
+                .iter()
+                .map(move |attempt| HarnessEvaluationCase {
+                    case_id: format!("{}:attempt:{}", case.case_name, attempt.attempt_index),
+                    split: harness_case_split(case.case_name.as_str(), attempt.attempt_index),
+                    case_name: case.case_name.clone(),
+                    attempt_index: attempt.attempt_index,
+                    passed: attempt.passed,
+                    failure_category: attempt.failure_category.as_ref().map(json_string_value),
+                    wallclock_ms: attempt
+                        .observability
+                        .as_ref()
+                        .map(|value| value.wallclock_ms),
+                    executed_tool_calls: attempt.executed_tool_calls,
+                    tool_names: attempt.tool_names.clone(),
+                    refused_tool_calls: attempt.policy_counts.refused_tool_calls,
+                    paused_tool_calls: attempt.policy_counts.paused_tool_calls,
+                    backend_failure_family: attempt
+                        .backend_receipt
+                        .as_ref()
+                        .and_then(|receipt| receipt.failure_family.clone()),
+                    backend_failure_reason: attempt
+                        .backend_receipt
+                        .as_ref()
+                        .and_then(|receipt| receipt.failure_reason.clone()),
+                    transcript_path: attempt
+                        .transcript_path
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
+                })
         })
         .collect::<Vec<_>>();
 
@@ -1157,10 +1174,15 @@ fn resolve_harness_candidate_manifest(
         })
 }
 
-fn harness_case_split(case_name: &str, attempt_index: usize) -> probe_core::dataset_export::DecisionCaseSplit {
+fn harness_case_split(
+    case_name: &str,
+    attempt_index: usize,
+) -> probe_core::dataset_export::DecisionCaseSplit {
     let checksum = case_name
         .bytes()
-        .fold(attempt_index as u64, |accumulator, byte| accumulator + u64::from(byte));
+        .fold(attempt_index as u64, |accumulator, byte| {
+            accumulator + u64::from(byte)
+        });
     if checksum % 5 == 0 {
         probe_core::dataset_export::DecisionCaseSplit::Validation
     } else {
@@ -1241,6 +1263,20 @@ fn resolve_tui_profile(
     })
 }
 
+fn profile_from_server_config(
+    config: &PsionicServerConfig,
+) -> probe_protocol::backend::BackendProfile {
+    let mut profile = match config.api_kind {
+        BackendKind::OpenAiChatCompletions => psionic_qwen35_2b_q8_registry(),
+        BackendKind::AppleFmBridge => psionic_apple_fm_bridge(),
+    };
+    profile.base_url = config.base_url();
+    if let Some(model_id) = config.resolved_model_id() {
+        profile.model = model_id;
+    }
+    profile
+}
+
 fn build_tui_runtime_config(
     probe_home: Option<PathBuf>,
     cwd: Option<PathBuf>,
@@ -1269,11 +1305,11 @@ fn resolve_runtime(probe_home: Option<PathBuf>) -> Result<ProbeRuntime, String> 
     )))
 }
 
-fn prepare_server(
+fn resolve_server_config(
     probe_home: &Path,
     server_args: &ServerArgs,
     desired_backend_kind: BackendKind,
-) -> Result<ServerProcessGuard, String> {
+) -> Result<PsionicServerConfig, String> {
     let config_path = server_args
         .server_config
         .clone()
@@ -1299,13 +1335,28 @@ fn prepare_server(
     config
         .save(PsionicServerConfig::backend_config_path(probe_home, desired_backend_kind).as_path())
         .map_err(|error| error.to_string())?;
+    Ok(config)
+}
+
+fn prepare_server(
+    probe_home: &Path,
+    server_args: &ServerArgs,
+    desired_backend_kind: BackendKind,
+) -> Result<ServerProcessGuard, String> {
+    let config = resolve_server_config(probe_home, server_args, desired_backend_kind)?;
     config
         .prepare(Duration::from_secs(15))
         .map_err(|error| error.to_string())
 }
 
 fn print_backend_target_summary(surface: &str, server_guard: &ServerProcessGuard) {
-    let summary = server_guard.operator_summary();
+    print_backend_target_summary_from_summary(surface, &server_guard.operator_summary());
+}
+
+fn print_backend_target_summary_from_summary(
+    surface: &str,
+    summary: &probe_core::server_control::ServerOperatorSummary,
+) {
     eprintln!(
         "backend_target surface={} kind={} attach_mode={} transport={} target={} model={} base_url={}",
         surface,
@@ -1777,12 +1828,19 @@ fn render_usage_value(value: Option<u64>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
+    use tempfile::tempdir;
+
     use probe_protocol::session::{
         BackendTurnReceipt, CacheSignal, SessionTurn, TranscriptItem, TurnId, TurnObservability,
         UsageMeasurement, UsageTruth,
     };
 
-    use super::{render_turn_backend_receipt, render_turn_observability};
+    use super::{
+        BackendKind, PsionicServerConfig, ServerArgs, render_turn_backend_receipt,
+        render_turn_observability, resolve_server_config,
+    };
 
     #[test]
     fn render_turn_observability_includes_metrics_and_cache_signal() {
@@ -1863,5 +1921,48 @@ mod tests {
         let rendered = render_turn_backend_receipt(&turn).expect("line should exist");
         assert!(rendered.contains("transcript_format=foundation_models.transcript.v1"));
         assert!(rendered.contains("transcript_payload_bytes=13"));
+    }
+
+    #[test]
+    fn resolve_server_config_does_not_wait_for_attach_mode_tui_startup() {
+        let probe_home = tempdir().expect("temp probe home");
+        let start = Instant::now();
+
+        let config = resolve_server_config(
+            probe_home.path(),
+            &ServerArgs {
+                server_mode: String::from("attach"),
+                server_config: None,
+                server_binary: None,
+                server_model_path: None,
+                server_model_id: None,
+                server_host: Some(String::from("203.0.113.10")),
+                server_port: Some(11435),
+                server_backend: None,
+                server_reasoning_budget: None,
+            },
+            BackendKind::AppleFmBridge,
+        )
+        .expect("attach-mode tui config should resolve without readiness check");
+
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert_eq!(config.api_kind, BackendKind::AppleFmBridge);
+        assert_eq!(config.host, "203.0.113.10");
+        assert_eq!(config.port, 11435);
+
+        let saved_default = PsionicServerConfig::load_or_create(
+            PsionicServerConfig::config_path(probe_home.path()).as_path(),
+        )
+        .expect("load saved default config");
+        assert_eq!(saved_default.api_kind, BackendKind::AppleFmBridge);
+        assert_eq!(saved_default.host, "203.0.113.10");
+
+        let saved_backend = PsionicServerConfig::load_or_create(
+            PsionicServerConfig::backend_config_path(probe_home.path(), BackendKind::AppleFmBridge)
+                .as_path(),
+        )
+        .expect("load saved backend snapshot");
+        assert_eq!(saved_backend.api_kind, BackendKind::AppleFmBridge);
+        assert_eq!(saved_backend.host, "203.0.113.10");
     }
 }
