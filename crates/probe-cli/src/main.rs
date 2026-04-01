@@ -1286,16 +1286,15 @@ fn build_tui_runtime_config(
     let harness = resolve_harness_profile(Some("coding_bootstrap"), None, cwd.as_path(), None)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| String::from("coding_bootstrap harness profile should exist"))?;
+    let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Auto, false);
+    tool_loop.approval = ToolApprovalConfig::allow_all();
     Ok(probe_tui::ProbeRuntimeTurnConfig {
         probe_home,
         cwd,
         profile,
         system_prompt: Some(harness.system_prompt),
         harness_profile: Some(harness.profile),
-        tool_loop: Some(ToolLoopConfig::coding_bootstrap(
-            ProbeToolChoice::Auto,
-            false,
-        )),
+        tool_loop: Some(tool_loop),
     })
 }
 
@@ -1828,18 +1827,21 @@ fn render_usage_value(value: Option<u64>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     use tempfile::tempdir;
 
+    use probe_core::backend_profiles::psionic_apple_fm_bridge;
     use probe_protocol::session::{
         BackendTurnReceipt, CacheSignal, SessionTurn, TranscriptItem, TurnId, TurnObservability,
         UsageMeasurement, UsageTruth,
     };
 
     use super::{
-        BackendKind, PsionicServerConfig, ServerArgs, render_turn_backend_receipt,
-        render_turn_observability, resolve_server_config,
+        BackendKind, PsionicServerConfig, ServerArgs, ToolApprovalConfig,
+        build_tui_runtime_config, render_turn_backend_receipt, render_turn_observability,
+        resolve_server_config,
     };
 
     #[test]
@@ -1964,5 +1966,18 @@ mod tests {
         .expect("load saved backend snapshot");
         assert_eq!(saved_backend.api_kind, BackendKind::AppleFmBridge);
         assert_eq!(saved_backend.host, "203.0.113.10");
+    }
+
+    #[test]
+    fn build_tui_runtime_config_allows_tools_by_default() {
+        let config = build_tui_runtime_config(
+            None,
+            Some(PathBuf::from("/tmp")),
+            psionic_apple_fm_bridge(),
+        )
+        .expect("build tui runtime config");
+
+        let tool_loop = config.tool_loop.expect("tui config should include tool loop");
+        assert_eq!(tool_loop.approval, ToolApprovalConfig::allow_all());
     }
 }
