@@ -5,6 +5,7 @@ use probe_protocol::backend::BackendKind;
 use probe_protocol::session::{
     PendingToolApproval, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
 };
+use probe_test_support::configure_snapshot_root;
 use probe_tui::{
     AppMessage, AppShell, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
     AppleFmUsageSummary, ProbeRuntimeTurnConfig, TranscriptEntry, TranscriptRole, UiEvent,
@@ -33,6 +34,7 @@ fn apple_fm_chat_config(base_url: &str) -> ProbeRuntimeTurnConfig {
 
 #[test]
 fn initial_frame_snapshot_is_stable() {
+    configure_snapshot_root();
     let app = AppShell::new_for_tests();
     let snapshot = app.render_to_string(80, 24);
     assert_snapshot!("probe_tui_initial", snapshot);
@@ -40,6 +42,7 @@ fn initial_frame_snapshot_is_stable() {
 
 #[test]
 fn help_modal_snapshot_is_stable() {
+    configure_snapshot_root();
     let mut app = AppShell::new_for_tests();
     app.dispatch(UiEvent::OpenHelp);
     let snapshot = app.render_to_string(80, 24);
@@ -48,6 +51,7 @@ fn help_modal_snapshot_is_stable() {
 
 #[test]
 fn setup_overlay_snapshot_is_stable() {
+    configure_snapshot_root();
     let mut app =
         AppShell::new_for_tests_with_chat_config(apple_fm_chat_config("http://127.0.0.1:11435"));
     app.dispatch(UiEvent::OpenSetupOverlay);
@@ -57,6 +61,7 @@ fn setup_overlay_snapshot_is_stable() {
 
 #[test]
 fn approval_overlay_snapshot_is_stable() {
+    configure_snapshot_root();
     let mut app = AppShell::new_for_tests();
     app.apply_message(AppMessage::ProbeRuntimeSessionReady {
         session_id: String::from("sess_tui_pending"),
@@ -90,6 +95,7 @@ fn approval_overlay_snapshot_is_stable() {
 
 #[test]
 fn transcript_running_turn_snapshot_is_stable() {
+    configure_snapshot_root();
     let mut app = AppShell::new_for_tests();
     app.apply_message(AppMessage::ProbeRuntimeSessionReady {
         session_id: String::from("sess_tui_running"),
@@ -168,6 +174,7 @@ fn completed_tool_turn_renders_compact_output_text() {
 
 #[test]
 fn transcript_streaming_delta_turn_snapshot_is_stable() {
+    configure_snapshot_root();
     let mut app = AppShell::new_for_tests();
     app.apply_message(AppMessage::ProbeRuntimeSessionReady {
         session_id: String::from("sess_tui_stream_delta"),

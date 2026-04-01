@@ -2,12 +2,15 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use assert_cmd::cargo::CommandCargoExt;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -323,6 +326,157 @@ impl ProbeTestEnvironment {
     }
 }
 
+static SNAPSHOT_ROOT_ONCE: Once = Once::new();
+
+pub fn configure_snapshot_root() {
+    SNAPSHOT_ROOT_ONCE.call_once(|| {
+        let root = workspace_root();
+        // SAFETY: tests call this once before snapshot assertions and do not
+        // mutate the variable concurrently afterward.
+        unsafe {
+            std::env::set_var("INSTA_WORKSPACE_ROOT", root.as_os_str());
+        }
+    });
+}
+
+pub fn probe_cli_command() -> Command {
+    configure_snapshot_root();
+    Command::cargo_bin("probe-cli").expect("probe-cli binary should build for tests")
+}
+
+pub fn write_openai_attach_server_config(
+    environment: &ProbeTestEnvironment,
+    server: &FakeOpenAiServer,
+    model_id: &str,
+) -> PathBuf {
+    let address = server
+        .base_url()
+        .strip_prefix("http://")
+        .expect("base url should start with http://")
+        .strip_suffix("/v1")
+        .expect("base url should end with /v1");
+    let (host, port) = address.rsplit_once(':').expect("host:port pair");
+    let port = port.parse::<u16>().expect("port should parse");
+    write_attach_server_config(
+        environment.probe_home(),
+        "psionic-local.json",
+        serde_json::json!({
+            "mode": "attach",
+            "host": host,
+            "port": port,
+            "backend": "cpu",
+            "binary_path": null,
+            "model_path": null,
+            "model_id": model_id,
+            "reasoning_budget": null
+        }),
+    )
+}
+
+pub fn write_apple_fm_attach_server_config(
+    environment: &ProbeTestEnvironment,
+    server: &FakeAppleFmServer,
+    model_id: &str,
+) -> PathBuf {
+    let address = server
+        .base_url()
+        .strip_prefix("http://")
+        .expect("base url should start with http://");
+    let (host, port) = address.rsplit_once(':').expect("host:port pair");
+    let port = port.parse::<u16>().expect("port should parse");
+    write_attach_server_config(
+        environment.probe_home(),
+        "psionic-apple-fm.json",
+        serde_json::json!({
+            "mode": "attach",
+            "api_kind": "apple_foundation_models",
+            "host": host,
+            "port": port,
+            "backend": "cpu",
+            "binary_path": null,
+            "model_path": null,
+            "model_id": model_id,
+            "reasoning_budget": null
+        }),
+    )
+}
+
+pub fn normalize_test_paths(value: &str, environment: &ProbeTestEnvironment) -> String {
+    let temp_root = environment.temp_root().display().to_string();
+    let replaced = normalize_workspace_path(value.replace(temp_root.as_str(), "$TEST_ROOT"));
+    normalize_session_path_segments(replaced.as_str())
+}
+
+pub fn normalize_exec_stderr_for_snapshot(raw: &str, environment: &ProbeTestEnvironment) -> String {
+    raw.lines()
+        .map(|line| {
+            if line.starts_with("backend_target ") {
+                normalize_backend_target_line(line)
+            } else if line.starts_with("session=") {
+                normalize_session_line(line, environment)
+            } else if line.starts_with("observability ") {
+                normalize_observability_line(line)
+            } else {
+                normalize_test_paths(line, environment)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn selected_transcript_event_snapshot(probe_home: &Path) -> Value {
+    let sessions_dir = probe_home.join("sessions");
+    let session_dir = fs::read_dir(&sessions_dir)
+        .expect("read sessions directory")
+        .map(|entry| entry.expect("session entry").path())
+        .next()
+        .expect("session should exist");
+    let transcript_path = session_dir.join("transcript.jsonl");
+    let first_line = fs::read_to_string(transcript_path)
+        .expect("read transcript")
+        .lines()
+        .next()
+        .expect("first transcript line")
+        .to_string();
+    let event: Value = serde_json::from_str(&first_line).expect("decode transcript event");
+    serde_json::json!({
+        "turn_index": event["turn"]["index"],
+        "observability": {
+            "cache_signal": event["turn"]["observability"]["cache_signal"],
+            "prompt_tokens": event["turn"]["observability"]["prompt_tokens"],
+            "prompt_tokens_detail": event["turn"]["observability"]["prompt_tokens_detail"],
+            "completion_tokens": event["turn"]["observability"]["completion_tokens"],
+            "completion_tokens_detail": event["turn"]["observability"]["completion_tokens_detail"],
+            "total_tokens": event["turn"]["observability"]["total_tokens"],
+            "total_tokens_detail": event["turn"]["observability"]["total_tokens_detail"]
+        },
+        "items": event["turn"]["items"]
+            .as_array()
+            .expect("items array")
+            .iter()
+            .map(|item| {
+                serde_json::json!({
+                    "kind": item["kind"],
+                    "name": item["name"],
+                    "text": item["text"],
+                    "tool_execution": item["tool_execution"]
+                })
+            })
+            .collect::<Vec<_>>()
+    })
+}
+
+pub fn normalized_acceptance_report_snapshot(
+    report_path: &Path,
+    environment: &ProbeTestEnvironment,
+) -> Value {
+    let mut value: Value =
+        serde_json::from_str(&fs::read_to_string(report_path).expect("read acceptance report"))
+            .expect("decode acceptance report");
+    normalize_acceptance_value(&mut value, environment);
+    value
+}
+
 pub fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -399,11 +553,160 @@ fn status_text(status_code: u16) -> &'static str {
     }
 }
 
+fn write_attach_server_config(probe_home: &Path, file_name: &str, value: Value) -> PathBuf {
+    let config_path = probe_home.join("server").join(file_name);
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).expect("create server config directory");
+    }
+    fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&value).expect("encode server config"),
+    )
+    .expect("write server config");
+    config_path
+}
+
+fn normalize_backend_target_line(line: &str) -> String {
+    line.split_whitespace()
+        .map(|field| {
+            if field.starts_with("target=") {
+                String::from("target=<target>")
+            } else if field.starts_with("base_url=") {
+                String::from("base_url=<base-url>")
+            } else {
+                field.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_session_line(line: &str, environment: &ProbeTestEnvironment) -> String {
+    line.split_whitespace()
+        .map(|field| {
+            if field.starts_with("session=") {
+                String::from("session=<session-id>")
+            } else if let Some(value) = field.strip_prefix("transcript=") {
+                format!("transcript={}", normalize_test_paths(value, environment))
+            } else {
+                field.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_observability_line(line: &str) -> String {
+    let mut normalized = vec![String::from("observability")];
+    for field in line.trim_start_matches("observability ").split_whitespace() {
+        if field.starts_with("wallclock_ms=") {
+            normalized.push(String::from("wallclock_ms=<dynamic>"));
+        } else if field.starts_with("model_output_ms=") {
+            normalized.push(String::from("model_output_ms=<dynamic>"));
+        } else if field.starts_with("completion_tps=") {
+            normalized.push(String::from("completion_tps=<dynamic>"));
+        } else {
+            normalized.push(field.to_string());
+        }
+    }
+    normalized.join(" ")
+}
+
+fn normalize_acceptance_value(value: &mut Value, environment: &ProbeTestEnvironment) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                match key.as_str() {
+                    "run_id" => *child = serde_json::json!("<run-id>"),
+                    "git_commit_sha" => {
+                        if child.is_string() {
+                            *child = serde_json::json!("<git-sha>");
+                        }
+                    }
+                    "git_dirty" => {
+                        if child.is_boolean() {
+                            *child = serde_json::json!("<git-dirty>");
+                        }
+                    }
+                    "base_url" => *child = serde_json::json!("<base-url>"),
+                    "session_id" | "latest_session_id" => {
+                        if child.is_string() {
+                            *child = serde_json::json!("<session-id>");
+                        }
+                    }
+                    "transcript_path" | "latest_transcript_path" => {
+                        if let Some(path) = child.as_str() {
+                            *child = serde_json::json!(normalize_test_paths(path, environment));
+                        }
+                    }
+                    "error" => {
+                        if let Some(error) = child.as_str() {
+                            let normalized = normalize_session_words(
+                                normalize_test_paths(error, environment).as_str(),
+                            );
+                            *child = serde_json::json!(normalized);
+                        }
+                    }
+                    "started_at_ms" | "finished_at_ms" | "duration_ms" | "median_elapsed_ms"
+                    | "wallclock_ms" | "model_output_ms" => {
+                        if child.is_number() {
+                            *child = serde_json::json!("<ms>");
+                        }
+                    }
+                    "completion_tokens_per_second_x1000" => {
+                        if child.is_number() {
+                            *child = serde_json::json!("<tps>");
+                        }
+                    }
+                    _ => normalize_acceptance_value(child, environment),
+                }
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                normalize_acceptance_value(child, environment);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_session_path_segments(value: &str) -> String {
+    value
+        .split('/')
+        .map(|segment| {
+            if segment.starts_with("sess_") {
+                String::from("<session-id>")
+            } else {
+                segment.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn normalize_session_words(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|word| {
+            if word.starts_with("sess_") {
+                String::from("<session-id>")
+            } else {
+                word.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::{
         FakeAppleFmServer, FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment,
-        normalize_workspace_path,
+        configure_snapshot_root, normalize_exec_stderr_for_snapshot, normalize_workspace_path,
+        probe_cli_command, write_apple_fm_attach_server_config, write_openai_attach_server_config,
     };
 
     #[test]
@@ -445,5 +748,61 @@ mod tests {
             super::workspace_root().display()
         ));
         assert!(normalized.starts_with("$PROBE_WORKSPACE_ROOT"));
+    }
+
+    #[test]
+    fn snapshot_root_configuration_sets_insta_workspace_root() {
+        configure_snapshot_root();
+        assert_eq!(
+            std::env::var("INSTA_WORKSPACE_ROOT").ok(),
+            Some(super::workspace_root().display().to_string())
+        );
+    }
+
+    #[test]
+    fn probe_cli_command_uses_current_binary_name() {
+        let command = probe_cli_command();
+        let program = command.get_program().to_string_lossy();
+        assert!(program.contains("probe-cli"));
+    }
+
+    #[test]
+    fn attach_config_helpers_write_expected_files() {
+        let environment = ProbeTestEnvironment::new();
+        let openai_server =
+            FakeOpenAiServer::from_responses(vec![FakeHttpResponse::text_status(200, "ok")]);
+        let apple_server =
+            FakeAppleFmServer::from_responses(vec![FakeHttpResponse::text_status(200, "ok")]);
+
+        let openai_path = write_openai_attach_server_config(&environment, &openai_server, "tiny");
+        let apple_path =
+            write_apple_fm_attach_server_config(&environment, &apple_server, "apple-model");
+
+        assert!(openai_path.ends_with("psionic-local.json"));
+        assert!(apple_path.ends_with("psionic-apple-fm.json"));
+        assert!(
+            fs::read_to_string(openai_path)
+                .expect("read openai config")
+                .contains("tiny")
+        );
+        assert!(
+            fs::read_to_string(apple_path)
+                .expect("read apple fm config")
+                .contains("apple_foundation_models")
+        );
+    }
+
+    #[test]
+    fn stderr_normalization_stabilizes_dynamic_fields() {
+        let environment = ProbeTestEnvironment::new();
+        let raw = format!(
+            "backend_target profile=tailnet target=100.0.0.1:8080 base_url=http://100.0.0.1:8080/v1\nsession=sess_123 transcript={}/sessions/sess_123/transcript.jsonl\nobservability wallclock_ms=12 model_output_ms=34 completion_tps=56",
+            environment.temp_root().display()
+        );
+        let normalized = normalize_exec_stderr_for_snapshot(raw.as_str(), &environment);
+        assert!(normalized.contains("target=<target>"));
+        assert!(normalized.contains("base_url=<base-url>"));
+        assert!(normalized.contains("session=<session-id>"));
+        assert!(normalized.contains("wallclock_ms=<dynamic>"));
     }
 }

@@ -169,3 +169,7 @@ This folder holds technical planning docs for the Probe runtime.
   - Probe-specific plan for becoming a real background coding agent with a
     server-first runtime, detached session workers, prepared workspaces, and
     CLI/TUI plus Autopilot as the first client set
+- `59-shared-test-support-and-stable-snapshot-root.md`
+  - the completed shared test-support boundary for fake backends, temp Probe
+    homes and workspaces, CLI launch helpers, stable snapshot-root setup, and
+    shared report or transcript normalization utilities

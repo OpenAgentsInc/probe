@@ -10,22 +10,32 @@ The workspace now includes `crates/probe-test-support`.
 That crate owns reusable helpers for:
 
 - fake OpenAI-compatible backend servers
+- fake Apple FM bridge responders
 - temp Probe home and workspace setup
 - seeded coding-workspace fixtures
-- workspace-root path normalization for later snapshot tests
+- CLI binary launch helpers
+- shared fake attach-config writers
+- stderr, transcript, and acceptance-report normalization for snapshots
+- explicit `INSTA_WORKSPACE_ROOT` setup for stable snapshots
 
 The immediate goal is not to centralize every test helper in one patch. The
 goal is to stop re-implementing the same fake-backend and temp-workspace logic
 inside unrelated crate test modules.
 
-The first adoption points are:
+The first adoption points now are:
 
 - `probe-provider-openai` tests
 - `probe-core` runtime tests
+- `probe-cli` regression tests
+- `probe-tui` snapshot tests
 
-Those are the two highest-value places because they drive most of the local
-backend and session-loop behavior that later CLI and acceptance tests depend
-on.
+Those are the highest-value places because they drive most of the backend,
+session-loop, binary, and UI behavior that later acceptance, self-test, and
+matrix suites depend on.
+
+Probe does not have a real MCP boundary yet, so the shared support crate stops
+at the repo's actual current seams instead of inventing fake MCP fixtures
+prematurely.
 
 ## Local Runner Contract
 

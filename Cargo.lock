@@ -1601,6 +1601,7 @@ dependencies = [
 name = "probe-test-support"
 version = "0.1.0"
 dependencies = [
+ "assert_cmd",
  "reqwest",
  "serde_json",
  "tempfile",
