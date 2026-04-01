@@ -33,14 +33,13 @@ use probe_core::tools::{
     ToolLoopConfig, ToolOracleConfig,
 };
 use probe_decisions::{
-    AggressiveToolRouteModule, HeuristicLongContextEscalationModule, HeuristicPatchReadinessModule,
-    HeuristicToolRouteModule, StrictPatchReadinessModule, builtin_decision_module_manifests,
-    evaluate_candidate_manifest, evaluate_long_context_module, evaluate_patch_readiness_module,
-    evaluate_tool_route_module,
+    HeuristicLongContextEscalationModule, HeuristicPatchReadinessModule, HeuristicToolRouteModule,
+    builtin_decision_module_manifests, evaluate_candidate_manifest,
+    evaluate_long_context_module, evaluate_patch_readiness_module, evaluate_tool_route_module,
 };
 use probe_optimizer::{
-    CandidateComparisonReport, OptimizationScorecard, OptimizationTargetKind, PromotionRule,
-    compare_candidate,
+    CandidateComparisonReport, DecisionModuleOptimizationBundle, OptimizationScorecard,
+    OptimizationTargetKind, PromotionRule, compare_candidate, optimize_decision_modules,
 };
 use probe_protocol::backend::BackendKind;
 use probe_protocol::session::{
@@ -235,7 +234,9 @@ struct ModuleEvalArgs {
 #[derive(clap::Args, Debug)]
 struct OptimizeModulesArgs {
     #[arg(long)]
-    dataset: PathBuf,
+    dataset: Option<PathBuf>,
+    #[arg(long)]
+    artifact_bundle: Option<PathBuf>,
     #[arg(long)]
     output: PathBuf,
 }
@@ -839,40 +840,37 @@ fn run_module_eval(args: ModuleEvalArgs) -> Result<(), String> {
 }
 
 fn run_optimize_modules(args: OptimizeModulesArgs) -> Result<(), String> {
-    let summaries = read_decision_dataset(args.dataset.as_path())?;
-    let rule = PromotionRule::gepa_default();
-    let tool_route_baseline = evaluate_tool_route_module(&summaries, &HeuristicToolRouteModule);
-    let tool_route_candidate = evaluate_tool_route_module(&summaries, &AggressiveToolRouteModule);
-    let patch_baseline =
-        evaluate_patch_readiness_module(&summaries, &HeuristicPatchReadinessModule);
-    let patch_candidate = evaluate_patch_readiness_module(&summaries, &StrictPatchReadinessModule);
+    let bundle = if let Some(artifact_bundle) = args.artifact_bundle.as_ref() {
+        DecisionModuleOptimizationBundle::read_json(artifact_bundle)?
+    } else {
+        let dataset = args.dataset.as_ref().ok_or_else(|| {
+            String::from("optimize-modules requires either --dataset <decision-case-bundle> or --artifact-bundle <bundle.json>")
+        })?;
+        let cases = read_decision_case_dataset(dataset.as_path()).map_err(|error| {
+            format!(
+                "failed to read decision-case dataset from {}: {error}",
+                dataset.display()
+            )
+        })?;
+        optimize_decision_modules(
+            dataset.display().to_string(),
+            &cases,
+            Some("OpenAgentsInc/probe#54"),
+            PromotionRule::gepa_default(),
+        )?
+    };
 
-    let reports = vec![
-        compare_candidate(
-            OptimizationTargetKind::DecisionModule,
-            tool_route_baseline.module_id.clone(),
-            tool_route_candidate.module_id.clone(),
-            optimization_scorecard_from_module(&tool_route_baseline),
-            optimization_scorecard_from_module(&tool_route_candidate),
-            rule.clone(),
-        ),
-        compare_candidate(
-            OptimizationTargetKind::DecisionModule,
-            patch_baseline.module_id.clone(),
-            patch_candidate.module_id.clone(),
-            optimization_scorecard_from_module(&patch_baseline),
-            optimization_scorecard_from_module(&patch_candidate),
-            rule,
-        ),
-    ];
-    write_optimizer_report(args.output.as_path(), &reports)?;
-    for report in &reports {
+    bundle.write_json(args.output.as_path())?;
+    for family in &bundle.families {
+        let report = &family.promotion_report;
         eprintln!(
-            "target={} baseline={} candidate={} promoted={} reason={}",
+            "target={} family={} baseline={} candidate={} promoted={} run={} reason={}",
             render_optimization_target(report.target_kind),
+            family.family.as_str(),
             report.baseline_id,
             report.candidate_id,
             report.promoted,
+            family.psionic_artifacts.refs.run_id,
             report.reason
         );
     }
@@ -942,17 +940,6 @@ fn read_decision_case_dataset(path: &Path) -> Result<Vec<DecisionCaseRecord>, St
 fn read_acceptance_report(path: &Path) -> Result<acceptance::AcceptanceRunReport, String> {
     let body = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     serde_json::from_str(&body).map_err(|error| error.to_string())
-}
-
-fn optimization_scorecard_from_module(
-    scorecard: &probe_decisions::ModuleScorecard,
-) -> OptimizationScorecard {
-    OptimizationScorecard {
-        correctness_numerator: scorecard.matched_cases,
-        correctness_denominator: scorecard.total_cases,
-        median_wallclock_ms: None,
-        operator_trust_penalty: 0,
-    }
 }
 
 fn optimization_scorecard_from_acceptance(
@@ -1515,6 +1502,7 @@ fn render_optimization_target(kind: OptimizationTargetKind) -> &'static str {
     match kind {
         OptimizationTargetKind::HarnessProfile => "harness_profile",
         OptimizationTargetKind::DecisionModule => "decision_module",
+        OptimizationTargetKind::SkillPack => "skill_pack",
     }
 }
 

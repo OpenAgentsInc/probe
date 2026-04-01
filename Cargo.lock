@@ -1555,6 +1555,9 @@ dependencies = [
 name = "probe-optimizer"
 version = "0.1.0"
 dependencies = [
+ "probe-core",
+ "probe-decisions",
+ "psionic-optimize",
  "serde",
  "serde_json",
 ]
@@ -1666,6 +1669,18 @@ dependencies = [
  "thiserror",
  "wasm-encoder 0.244.0",
  "wasmparser 0.244.0",
+]
+
+[[package]]
+name = "psionic-optimize"
+version = "0.1.1"
+source = "git+https://github.com/OpenAgentsInc/psionic.git?rev=6f245fb64844d12bf4e277440e1d3cd2053d2e30#6f245fb64844d12bf4e277440e1d3cd2053d2e30"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]

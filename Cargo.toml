@@ -33,6 +33,7 @@ probe-provider-openai = { path = "crates/probe-provider-openai" }
 probe-test-support = { path = "crates/probe-test-support" }
 probe-tui = { path = "crates/probe-tui" }
 psionic-apple-fm = { git = "https://github.com/OpenAgentsInc/psionic.git", rev = "73e5025a3da04673331141ed33fda91a69cfbc0a", package = "psionic-apple-fm" }
+psionic-optimize = { git = "https://github.com/OpenAgentsInc/psionic.git", rev = "6f245fb64844d12bf4e277440e1d3cd2053d2e30", package = "psionic-optimize" }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }

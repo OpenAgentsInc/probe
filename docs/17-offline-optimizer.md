@@ -18,8 +18,8 @@ Module candidates over decision datasets:
 
 ```bash
 cargo run -p probe-cli -- optimize-modules \
-  --dataset ~/.probe/reports/probe_decision.jsonl \
-  --output ~/.probe/reports/probe_module_optimization.json
+  --dataset ~/.probe/reports/probe_decision_cases \
+  --output ~/.probe/reports/probe_module_optimization_bundle.json
 ```
 
 Harness candidates over retained acceptance receipts:
@@ -37,12 +37,30 @@ The optimizer crate currently owns:
 
 - generic scorecard types
 - a shared promotion rule
-- baseline-versus-candidate comparison receipts
+- Psionic artifact bundles for offline module jobs
+- baseline-versus-candidate comparison receipts above those Psionic runs
 
 The CLI currently uses that shared rule in two places:
 
-- decision-module candidates evaluated against exported decision datasets
+- decision-module candidates launched through the Psionic optimizer substrate
+  from exported `decision-cases` bundles
 - harness candidates evaluated against retained acceptance reports
+
+`optimize-modules` now writes one bundle that includes, per family:
+
+- the Probe-side candidate manifests
+- the Psionic run spec and run receipt
+- the retained frontier snapshot when one exists
+- train and validation case manifests handed to Psionic
+- the retained winner plus the final Probe promotion report
+
+The same command can also ingest an existing bundle with:
+
+```bash
+cargo run -p probe-cli -- optimize-modules \
+  --artifact-bundle ~/.probe/reports/probe_module_optimization_bundle.json \
+  --output ~/.probe/reports/probe_module_optimization_bundle.json
+```
 
 ## Promotion Rule
 
@@ -80,8 +98,8 @@ This gives Probe the minimal honest stack for later GEPA work:
 
 - retained acceptance set
 - replay and decision exports
-- explicit decision modules
-- candidate-versus-baseline scorecards
+- explicit manifest-backed decision modules
+- Psionic search receipts plus Probe promotion reports
 - enforced promotion rules
 
 That is enough to start bounded offline optimization without pretending the

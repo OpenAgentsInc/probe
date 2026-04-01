@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+probe-core.workspace = true
+probe-decisions.workspace = true
+psionic-optimize.workspace = true
 serde.workspace = true
 serde_json.workspace = true
