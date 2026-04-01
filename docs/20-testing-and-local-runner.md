@@ -68,6 +68,7 @@ Primary commands:
 ./probe-dev accept-live
 ./probe-dev self-test
 ./probe-dev accept-compare
+./probe-dev matrix
 ```
 
 `./probe-dev test` is `nextest`-first. If `cargo nextest` is installed, Probe uses
@@ -89,6 +90,8 @@ The runner now also exposes explicit local tiers:
   - heavier retained first-person Probe behavior lane
 - `./probe-dev accept-compare`
   - heavier admitted-Mac Apple FM versus Qwen comparison lane
+- `./probe-dev matrix`
+  - heavier scenario-matrix lane with worst-of-N retention per cell
 - `./probe-dev decision-export`, `./probe-dev module-eval`,
   `./probe-dev optimize-modules`, and `./probe-dev optimize-harness`
   - explicit local eval and optimization lanes that stay out of the fast path

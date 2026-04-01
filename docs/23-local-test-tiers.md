@@ -74,6 +74,14 @@ That lane keeps the same runtime and tool loop, but adds first-person cases for
 shell failure, approval resume, multi-turn continuation, and backend-failure
 honesty.
 
+The heavier matrix lane lives above both:
+
+- `cargo run -p probe-cli -- matrix --profile psionic-qwen35-2b-q8-registry`
+- `./probe-dev matrix --profile psionic-qwen35-2b-q8-registry`
+
+That lane is for backend/model/harness/scenario combinations with repeated
+runs and worst-of-N retention, not for the default retained coding receipt.
+
 The Apple FM admitted-Mac paths live here too:
 
 - `cargo run -p probe-cli -- accept --profile psionic-apple-fm-bridge`

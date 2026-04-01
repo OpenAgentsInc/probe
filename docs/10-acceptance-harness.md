@@ -42,6 +42,7 @@ cargo run -p probe-cli -- accept
 cargo run -p probe-cli -- self-test
 cargo run -p probe-cli -- accept --profile psionic-apple-fm-bridge
 cargo run -p probe-cli -- accept-compare
+cargo run -p probe-cli -- matrix --profile psionic-qwen35-2b-q8-registry
 ```
 
 Optional overrides:
@@ -67,6 +68,11 @@ Optional overrides:
 `probe accept`, but writes a separate `probe_self_test_*.json` report by
 default so the behavior lane does not overwrite the baseline acceptance lane.
 
+`probe matrix` is the heavier scenario-matrix lane. It accepts repeatable
+`--profile`, optional repeatable `--model`, optional repeatable
+`--harness-profile`, optional repeatable `--scenario`, and a `--repetitions`
+count. It writes a separate `probe_matrix_*.json` artifact by default.
+
 ## Self-Test Cases
 
 The retained self-test lane currently includes the original acceptance cases
@@ -85,6 +91,27 @@ That means the self-test lane now covers:
 - shell success and shell failure
 - session continuation
 - backend failure honesty
+
+## Matrix Lane
+
+The matrix lane is intentionally separate from both `accept` and `self-test`.
+
+Its job is not to give one retained pass/fail receipt for the default coding
+lane. Its job is to answer a different question:
+
+- which profile/model/harness/scenario cell is only passing on lucky repeats
+
+The initial retained matrix scenarios are:
+
+- `read_file_answer`
+- `search_then_read`
+- `patch_then_verify`
+- `approval_pause_or_refusal`
+- `streaming_reply_stability`
+- `multi_turn_session_resume`
+
+For each matrix cell, Probe now retains every repetition and reports the worst
+outcome. One failed repetition is enough to keep the cell red.
 
 Probe now also accepts offline harness optimization over retained acceptance
 reports:

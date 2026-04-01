@@ -17,6 +17,7 @@ Commands:
   accept-live [args...]    Run the live acceptance harness against the configured backend.
   self-test [args...]      Run the retained Probe self-test harness lane.
   accept-compare [args...] Run the admitted-Mac Apple FM vs Qwen comparison lane.
+  matrix [args...]         Run the heavier scenario-matrix lane with worst-of-N retention.
   decision-export [args...]  Run probe export with any extra CLI args.
   module-eval [args...]      Run probe module-eval with any extra CLI args.
   optimize-modules [args...] Run probe optimize-modules with any extra CLI args.
@@ -76,6 +77,9 @@ case "$command_name" in
     ;;
   accept-compare)
     cargo run -p probe-cli -- accept-compare "$@"
+    ;;
+  matrix)
+    cargo run -p probe-cli -- matrix "$@"
     ;;
   decision-export)
     cargo run -p probe-cli -- export "$@"

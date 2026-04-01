@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use probe_core::harness::resolve_harness_profile;
@@ -21,6 +22,7 @@ use serde::{Deserialize, Serialize};
 const ACCEPTANCE_REPEAT_RUNS: usize = 2;
 const ACCEPTANCE_REPORT_SCHEMA_VERSION: &str = "v3";
 const ACCEPTANCE_COMPARISON_REPORT_SCHEMA_VERSION: &str = "v1";
+const ACCEPTANCE_MATRIX_REPORT_SCHEMA_VERSION: &str = "v1";
 const ACCEPTANCE_TOOL_SET: &str = "coding_bootstrap";
 const ACCEPTANCE_HARNESS_PROFILE_NAME: &str = "coding_bootstrap_default";
 const ACCEPTANCE_HARNESS_PROFILE_VERSION: &str = "v1";
@@ -44,6 +46,14 @@ const SELF_TEST_CASE_NAMES: [&str; 10] = [
     "approval_pause_then_resume",
     "backend_failure_is_honest",
 ];
+const MATRIX_SCENARIO_NAMES: [&str; 6] = [
+    "read_file_answer",
+    "search_then_read",
+    "patch_then_verify",
+    "approval_pause_or_refusal",
+    "streaming_reply_stability",
+    "multi_turn_session_resume",
+];
 
 #[derive(Clone, Debug)]
 pub struct AcceptanceHarnessConfig {
@@ -58,6 +68,17 @@ pub struct AcceptanceComparisonConfig {
     pub report_path: PathBuf,
     pub qwen_profile: BackendProfile,
     pub apple_fm_profile: BackendProfile,
+}
+
+#[derive(Clone, Debug)]
+pub struct AcceptanceMatrixConfig {
+    pub probe_home: PathBuf,
+    pub report_path: PathBuf,
+    pub profiles: Vec<BackendProfile>,
+    pub models: Vec<String>,
+    pub harness_profiles: Vec<String>,
+    pub scenarios: Vec<String>,
+    pub repetitions: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,6 +107,17 @@ pub struct AcceptanceComparisonReport {
     pub qwen_report_path: PathBuf,
     pub apple_fm_report_path: PathBuf,
     pub cases: Vec<AcceptanceComparisonCaseReport>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcceptanceMatrixReport {
+    pub run: AcceptanceRunIdentity,
+    pub started_at_ms: u64,
+    pub finished_at_ms: u64,
+    pub duration_ms: u64,
+    pub repetitions_per_cell: usize,
+    pub counts: AcceptanceMatrixCounts,
+    pub cells: Vec<AcceptanceMatrixCellReport>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -129,6 +161,15 @@ pub struct AcceptanceComparisonCounts {
     pub comparable_passed_cases: usize,
     pub comparable_failed_cases: usize,
     pub unsupported_backend_results: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcceptanceMatrixCounts {
+    pub total_cells: usize,
+    pub passed_cells: usize,
+    pub failed_cells: usize,
+    pub total_repetitions: usize,
+    pub failed_repetitions: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -179,6 +220,22 @@ pub struct AcceptanceComparisonCaseReport {
     pub status: AcceptanceComparisonStatus,
     pub qwen: AcceptanceComparisonBackendCaseReport,
     pub apple_fm: AcceptanceComparisonBackendCaseReport,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcceptanceMatrixCellReport {
+    pub profile_name: String,
+    pub model: String,
+    pub harness_profile: String,
+    pub scenario: String,
+    pub passed: bool,
+    pub worst_repetition_index: usize,
+    pub worst_failure_category: Option<AcceptanceFailureCategory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worst_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worst_transcript_path: Option<PathBuf>,
+    pub repetitions: Vec<AcceptanceAttemptReport>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -337,10 +394,123 @@ pub fn run_acceptance_comparison(
     run_acceptance_comparison_for_case_names(config, retained_acceptance_case_names())
 }
 
+pub fn run_acceptance_matrix(
+    config: AcceptanceMatrixConfig,
+) -> Result<AcceptanceMatrixReport, String> {
+    let started_at_ms = now_ms();
+    fs::create_dir_all(config.probe_home.as_path()).map_err(|error| error.to_string())?;
+    if let Some(parent) = config.report_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    if config.repetitions == 0 {
+        return Err(String::from("matrix repetitions must be at least 1"));
+    }
+    if config.profiles.is_empty() {
+        return Err(String::from("matrix requires at least one profile"));
+    }
+
+    let scenarios = if config.scenarios.is_empty() {
+        retained_matrix_scenario_names()
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect::<Vec<_>>()
+    } else {
+        config.scenarios.clone()
+    };
+    let harness_profiles = if config.harness_profiles.is_empty() {
+        vec![String::from(ACCEPTANCE_HARNESS_PROFILE_NAME)]
+    } else {
+        config.harness_profiles.clone()
+    };
+
+    let run_id = format!("acceptance_matrix_{}_{}", started_at_ms, std::process::id());
+    let matrix_root = config.probe_home.join("matrix_runs").join(run_id.as_str());
+    let mut cells = Vec::new();
+    let mut cell_index = 0_usize;
+
+    for profile in &config.profiles {
+        let models = if config.models.is_empty() {
+            vec![profile.model.clone()]
+        } else {
+            config.models.clone()
+        };
+        for model in models {
+            for harness_profile in &harness_profiles {
+                for scenario in &scenarios {
+                    let cell_probe_home = matrix_root.join(format!("cell_{cell_index}"));
+                    let runtime = ProbeRuntime::new(cell_probe_home.clone());
+                    let mut cell_profile = profile.clone();
+                    cell_profile.model = model.clone();
+                    let repetitions = (0..config.repetitions)
+                        .map(|attempt_index| {
+                            run_matrix_scenario_attempt(
+                                &runtime,
+                                &cell_profile,
+                                cell_probe_home.as_path(),
+                                scenario.as_str(),
+                                harness_profile.as_str(),
+                                attempt_index,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    cells.push(build_matrix_cell_report(
+                        profile.name.as_str(),
+                        model.as_str(),
+                        harness_profile.as_str(),
+                        scenario.as_str(),
+                        repetitions,
+                    ));
+                    cell_index += 1;
+                }
+            }
+        }
+    }
+
+    let finished_at_ms = now_ms();
+    let failed_cells = cells.iter().filter(|cell| !cell.passed).count();
+    let failed_repetitions = cells
+        .iter()
+        .flat_map(|cell| cell.repetitions.iter())
+        .filter(|attempt| !attempt.passed)
+        .count();
+    let git_state = current_probe_git_state();
+    let report = AcceptanceMatrixReport {
+        run: AcceptanceRunIdentity {
+            run_id,
+            schema_version: String::from(ACCEPTANCE_MATRIX_REPORT_SCHEMA_VERSION),
+            probe_version: String::from(env!("CARGO_PKG_VERSION")),
+            git_commit_sha: git_state.git_commit_sha,
+            git_dirty: git_state.git_dirty,
+        },
+        started_at_ms,
+        finished_at_ms,
+        duration_ms: finished_at_ms.saturating_sub(started_at_ms),
+        repetitions_per_cell: config.repetitions,
+        counts: AcceptanceMatrixCounts {
+            total_cells: cells.len(),
+            passed_cells: cells.len().saturating_sub(failed_cells),
+            failed_cells,
+            total_repetitions: cells.iter().map(|cell| cell.repetitions.len()).sum(),
+            failed_repetitions,
+        },
+        cells,
+    };
+    let report_json =
+        serde_json::to_string_pretty(&report).map_err(|error| format!("json error: {error}"))?;
+    fs::write(config.report_path, report_json).map_err(|error| error.to_string())?;
+    Ok(report)
+}
+
 pub fn default_comparison_report_path(probe_home: &Path) -> PathBuf {
     probe_home
         .join("reports")
         .join(format!("probe_acceptance_compare_{}.json", now_ms()))
+}
+
+pub fn default_matrix_report_path(probe_home: &Path) -> PathBuf {
+    probe_home
+        .join("reports")
+        .join(format!("probe_matrix_{}.json", now_ms()))
 }
 
 fn retained_acceptance_case_names() -> &'static [&'static str] {
@@ -349,6 +519,10 @@ fn retained_acceptance_case_names() -> &'static [&'static str] {
 
 fn retained_self_test_case_names() -> &'static [&'static str] {
     &SELF_TEST_CASE_NAMES
+}
+
+fn retained_matrix_scenario_names() -> &'static [&'static str] {
+    &MATRIX_SCENARIO_NAMES
 }
 
 fn run_acceptance_harness_for_case_names(
@@ -985,6 +1159,148 @@ where
     build_case_report(case_name, attempts)
 }
 
+fn run_matrix_scenario_attempt(
+    runtime: &ProbeRuntime,
+    base_profile: &BackendProfile,
+    probe_home: &Path,
+    scenario: &str,
+    harness_profile_name: &str,
+    attempt_index: usize,
+) -> AcceptanceAttemptReport {
+    let title = format!("matrix-{scenario}-{}", attempt_index + 1);
+    let workspace = prepare_acceptance_workspace(probe_home, scenario, attempt_index)
+        .unwrap_or_else(|error| panic!("failed to prepare matrix workspace for {scenario}: {error}"));
+    let outcome = match scenario {
+        "read_file_answer" => execute_coding_case_with_harness(
+            runtime,
+            base_profile,
+            workspace.as_path(),
+            title.as_str(),
+            "Use read_file on README.md and answer with exactly READ_FILE_OK once you confirm the first line says Probe acceptance fixture.",
+            harness_profile_name,
+            coding_tool_loop(false, false, false, ToolDeniedAction::Refuse),
+        ),
+        "search_then_read" => execute_coding_case_with_harness(
+            runtime,
+            base_profile,
+            workspace.as_path(),
+            title.as_str(),
+            "Use code_search for beta_function, then read the matching file, then answer with exactly SEARCH_READ_OK if beta_function exists.",
+            harness_profile_name,
+            coding_tool_loop(false, false, false, ToolDeniedAction::Refuse),
+        ),
+        "patch_then_verify" => execute_coding_case_with_harness(
+            runtime,
+            base_profile,
+            workspace.as_path(),
+            title.as_str(),
+            "Use apply_patch to replace world with probe in hello.txt, then read hello.txt, then answer with exactly PATCH_OK.",
+            harness_profile_name,
+            coding_tool_loop(true, false, false, ToolDeniedAction::Refuse),
+        ),
+        "approval_pause_or_refusal" => execute_coding_case_with_harness(
+            runtime,
+            base_profile,
+            workspace.as_path(),
+            title.as_str(),
+            "Use apply_patch to replace world with blocked in hello.txt.",
+            harness_profile_name,
+            coding_tool_loop(false, false, false, ToolDeniedAction::Pause),
+        ),
+        "streaming_reply_stability" => execute_eventful_case_with_harness(
+            runtime,
+            base_profile,
+            workspace.as_path(),
+            title.as_str(),
+            "Reply with exactly STREAMING_OK.",
+            harness_profile_name,
+        ),
+        "multi_turn_session_resume" => execute_multi_turn_case_with_harness(
+            runtime,
+            base_profile,
+            workspace.as_path(),
+            title.as_str(),
+            harness_profile_name,
+        ),
+        other => Err(AcceptanceExecutionError::Setup(format!(
+            "unknown matrix scenario `{other}`"
+        ))),
+    };
+    let mut attempt = capture_attempt_report(runtime, title.as_str(), attempt_index, outcome);
+    attempt.passed = validate_matrix_scenario(scenario, &attempt, workspace.as_path());
+    if attempt.passed {
+        attempt.failure_category = None;
+    } else if attempt.failure_category.is_none() {
+        attempt.failure_category = Some(AcceptanceFailureCategory::VerificationFailure);
+    }
+    attempt
+}
+
+fn validate_matrix_scenario(
+    scenario: &str,
+    attempt: &AcceptanceAttemptReport,
+    workspace: &Path,
+) -> bool {
+    match scenario {
+        "read_file_answer" => {
+            attempt.assistant_text.as_deref() == Some("READ_FILE_OK")
+                && attempt.tool_names.iter().any(|name| name == "read_file")
+        }
+        "search_then_read" => {
+            attempt.assistant_text.as_deref() == Some("SEARCH_READ_OK")
+                && attempt.tool_names.iter().any(|name| name == "code_search")
+                && attempt.tool_names.iter().any(|name| name == "read_file")
+        }
+        "patch_then_verify" => {
+            attempt.assistant_text.as_deref() == Some("PATCH_OK")
+                && attempt.tool_names.iter().any(|name| name == "apply_patch")
+                && fs::read_to_string(workspace.join("hello.txt"))
+                    .map(|content| content == "hello probe\n")
+                    .unwrap_or(false)
+        }
+        "approval_pause_or_refusal" => {
+            attempt.policy_counts.paused_tool_calls >= 1
+                && attempt.tool_names.iter().any(|name| name == "apply_patch")
+        }
+        "streaming_reply_stability" => attempt.assistant_text.as_deref() == Some("STREAMING_OK."),
+        "multi_turn_session_resume" => {
+            let Some(transcript_path) = attempt.transcript_path.as_ref() else {
+                return false;
+            };
+            let events = load_transcript_events(transcript_path.as_path());
+            attempt.assistant_text.as_deref() == Some("SELF_TEST_TURN_TWO.")
+                && events.len() == 2
+        }
+        _ => false,
+    }
+}
+
+fn build_matrix_cell_report(
+    profile_name: &str,
+    model: &str,
+    harness_profile: &str,
+    scenario: &str,
+    repetitions: Vec<AcceptanceAttemptReport>,
+) -> AcceptanceMatrixCellReport {
+    let worst_repetition_index = repetitions.iter().position(|attempt| !attempt.passed).unwrap_or(0);
+    let worst = repetitions
+        .get(worst_repetition_index)
+        .cloned()
+        .expect("matrix cell should have at least one repetition");
+    AcceptanceMatrixCellReport {
+        profile_name: String::from(profile_name),
+        model: String::from(model),
+        harness_profile: String::from(harness_profile),
+        scenario: String::from(scenario),
+        passed: repetitions.iter().all(|attempt| attempt.passed),
+        worst_repetition_index,
+        worst_failure_category: worst.failure_category.clone(),
+        worst_session_id: worst.session_id.clone(),
+        worst_transcript_path: worst.transcript_path.clone(),
+        repetitions,
+    }
+}
+
 fn execute_coding_case(
     runtime: &ProbeRuntime,
     base_profile: &BackendProfile,
@@ -993,9 +1309,29 @@ fn execute_coding_case(
     prompt: &str,
     tool_loop: ToolLoopConfig,
 ) -> Result<PlainTextExecOutcome, AcceptanceExecutionError> {
+    execute_coding_case_with_harness(
+        runtime,
+        base_profile,
+        workspace,
+        title,
+        prompt,
+        ACCEPTANCE_HARNESS_PROFILE_NAME,
+        tool_loop,
+    )
+}
+
+fn execute_coding_case_with_harness(
+    runtime: &ProbeRuntime,
+    base_profile: &BackendProfile,
+    workspace: &Path,
+    title: &str,
+    prompt: &str,
+    harness_profile_name: &str,
+    tool_loop: ToolLoopConfig,
+) -> Result<PlainTextExecOutcome, AcceptanceExecutionError> {
     let resolved = resolve_harness_profile(
         Some("coding_bootstrap"),
-        Some("coding_bootstrap_default"),
+        Some(harness_profile_name),
         workspace,
         None,
     )
@@ -1013,6 +1349,86 @@ fn execute_coding_case(
             system_prompt: Some(resolved.system_prompt),
             harness_profile: Some(resolved.profile),
             tool_loop: Some(tool_loop),
+        })
+        .map_err(AcceptanceExecutionError::Runtime)
+}
+
+fn execute_eventful_case_with_harness(
+    runtime: &ProbeRuntime,
+    base_profile: &BackendProfile,
+    workspace: &Path,
+    title: &str,
+    prompt: &str,
+    harness_profile_name: &str,
+) -> Result<PlainTextExecOutcome, AcceptanceExecutionError> {
+    let resolved = resolve_harness_profile(
+        Some("coding_bootstrap"),
+        Some(harness_profile_name),
+        workspace,
+        None,
+    )
+    .map_err(AcceptanceExecutionError::Setup)?
+    .ok_or_else(|| {
+        AcceptanceExecutionError::Setup(String::from("missing coding bootstrap harness profile"))
+    })?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink_events = Arc::clone(&events);
+    let outcome = runtime
+        .exec_plain_text_with_events(
+            PlainTextExecRequest {
+                profile: base_profile.clone(),
+                prompt: String::from(prompt),
+                title: Some(String::from(title)),
+                cwd: workspace.to_path_buf(),
+                system_prompt: Some(resolved.system_prompt),
+                harness_profile: Some(resolved.profile),
+                tool_loop: None,
+            },
+            Arc::new(move |event| {
+                sink_events
+                    .lock()
+                    .expect("matrix event collection lock")
+                    .push(event);
+            }),
+        )
+        .map_err(AcceptanceExecutionError::Runtime)?;
+    let captured = events.lock().expect("matrix event collection lock");
+    if !captured
+        .iter()
+        .any(|event| matches!(event, probe_core::runtime::RuntimeEvent::ModelRequestStarted { .. }))
+        || !captured.iter().any(
+            |event| matches!(event, probe_core::runtime::RuntimeEvent::AssistantTurnCommitted { .. }),
+        )
+    {
+        return Err(AcceptanceExecutionError::Setup(String::from(
+            "streaming stability scenario did not emit the required runtime lifecycle events",
+        )));
+    }
+    Ok(outcome)
+}
+
+fn execute_multi_turn_case_with_harness(
+    runtime: &ProbeRuntime,
+    base_profile: &BackendProfile,
+    workspace: &Path,
+    title: &str,
+    harness_profile_name: &str,
+) -> Result<PlainTextExecOutcome, AcceptanceExecutionError> {
+    let first = execute_coding_case_with_harness(
+        runtime,
+        base_profile,
+        workspace,
+        title,
+        "Reply with exactly SELF_TEST_TURN_ONE.",
+        harness_profile_name,
+        coding_tool_loop(false, false, false, ToolDeniedAction::Refuse),
+    )?;
+    runtime
+        .continue_plain_text_session(PlainTextResumeRequest {
+            session_id: first.session.id,
+            profile: base_profile.clone(),
+            prompt: String::from("Reply with exactly SELF_TEST_TURN_TWO."),
+            tool_loop: None,
         })
         .map_err(AcceptanceExecutionError::Runtime)
 }
@@ -1579,9 +1995,11 @@ mod tests {
 
     use super::{
         AcceptanceComparisonBackendCaseStatus, AcceptanceComparisonConfig,
+        AcceptanceMatrixConfig,
         AcceptanceComparisonStatus, AcceptanceHarnessConfig, default_comparison_report_path,
-        default_report_path, default_self_test_report_path,
+        default_matrix_report_path, default_report_path, default_self_test_report_path,
         run_acceptance_comparison_for_case_names, run_acceptance_harness,
+        run_acceptance_matrix,
         run_acceptance_harness_for_case_names,
     };
 
@@ -2017,6 +2435,58 @@ mod tests {
         }
 
         responses
+    }
+
+    #[test]
+    fn matrix_runner_keeps_the_worst_repetition_for_each_cell() {
+        let server = FakeOpenAiServer::from_responses(vec![
+            FakeHttpResponse::json_ok(serde_json::json!({
+                "id": "matrix_stream_ok_1",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "STREAMING_OK."},
+                    "finish_reason": "stop"
+                }]
+            })),
+            FakeHttpResponse::json_status(404, serde_json::json!({"error": "missing route"})),
+            FakeHttpResponse::json_ok(serde_json::json!({
+                "id": "matrix_stream_ok_3",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "STREAMING_OK."},
+                    "finish_reason": "stop"
+                }]
+            })),
+        ]);
+        let temp = tempfile::tempdir().expect("temp dir");
+        let probe_home = temp.path().join(".probe");
+        let report_path = default_matrix_report_path(probe_home.as_path());
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = server.base_url().to_string();
+
+        let report = run_acceptance_matrix(AcceptanceMatrixConfig {
+            probe_home,
+            report_path: report_path.clone(),
+            profiles: vec![profile],
+            models: Vec::new(),
+            harness_profiles: vec![String::from("coding_bootstrap_default")],
+            scenarios: vec![String::from("streaming_reply_stability")],
+            repetitions: 3,
+        })
+        .expect("matrix runner should succeed");
+
+        assert_eq!(report.counts.total_cells, 1);
+        assert_eq!(report.counts.failed_cells, 1);
+        assert_eq!(report.counts.failed_repetitions, 1);
+        assert!(!report.cells[0].passed);
+        assert_eq!(report.cells[0].worst_repetition_index, 1);
+        assert_eq!(
+            report.cells[0].worst_failure_category,
+            Some(super::AcceptanceFailureCategory::BackendFailure)
+        );
+        assert!(report_path.exists());
     }
 
     #[test]

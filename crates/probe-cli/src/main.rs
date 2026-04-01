@@ -7,9 +7,10 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use acceptance::{
-    AcceptanceComparisonConfig, AcceptanceHarnessConfig, default_comparison_report_path,
-    default_report_path, default_self_test_report_path, run_acceptance_comparison,
-    run_acceptance_harness, run_self_test_harness,
+    AcceptanceComparisonConfig, AcceptanceHarnessConfig, AcceptanceMatrixConfig,
+    default_comparison_report_path, default_matrix_report_path, default_report_path,
+    default_self_test_report_path, run_acceptance_comparison, run_acceptance_harness,
+    run_acceptance_matrix, run_self_test_harness,
 };
 use clap::{Parser, Subcommand};
 use probe_core::backend_profiles::{
@@ -75,6 +76,7 @@ enum Commands {
     Accept(AcceptArgs),
     SelfTest(AcceptArgs),
     AcceptCompare(AcceptCompareArgs),
+    Matrix(MatrixArgs),
     Export(ExportArgs),
     ModuleEval(ModuleEvalArgs),
     OptimizeModules(OptimizeModulesArgs),
@@ -259,6 +261,24 @@ struct AcceptCompareArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct MatrixArgs {
+    #[arg(long = "profile", required = true)]
+    profiles: Vec<String>,
+    #[arg(long = "model")]
+    models: Vec<String>,
+    #[arg(long = "harness-profile")]
+    harness_profiles: Vec<String>,
+    #[arg(long = "scenario")]
+    scenarios: Vec<String>,
+    #[arg(long, default_value_t = 3)]
+    repetitions: usize,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[arg(long)]
+    report_path: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
 struct ExportArgs {
     #[arg(long, default_value = "decision")]
     dataset: String,
@@ -374,6 +394,7 @@ fn run() -> Result<(), String> {
         Commands::Accept(args) => run_accept(args),
         Commands::SelfTest(args) => run_self_test(args),
         Commands::AcceptCompare(args) => run_accept_compare(args),
+        Commands::Matrix(args) => run_matrix(args),
         Commands::Export(args) => run_export(args),
         Commands::ModuleEval(args) => run_module_eval(args),
         Commands::OptimizeModules(args) => run_optimize_modules(args),
@@ -951,6 +972,67 @@ fn run_self_test(args: AcceptArgs) -> Result<(), String> {
     } else {
         Err(format!(
             "one or more self-test cases failed; see {}",
+            report_path.display()
+        ))
+    }
+}
+
+fn run_matrix(args: MatrixArgs) -> Result<(), String> {
+    let probe_home = args
+        .probe_home
+        .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
+    let profiles = args
+        .profiles
+        .iter()
+        .map(|profile_name| named_profile(profile_name.as_str()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let report_path = args
+        .report_path
+        .unwrap_or_else(|| default_matrix_report_path(probe_home.as_path()));
+    let report = run_acceptance_matrix(AcceptanceMatrixConfig {
+        probe_home,
+        report_path: report_path.clone(),
+        profiles,
+        models: args.models,
+        harness_profiles: args.harness_profiles,
+        scenarios: args.scenarios,
+        repetitions: args.repetitions,
+    })?;
+
+    eprintln!(
+        "matrix run_id={} report={} cells={}/{} repetitions_per_cell={} failed_repetitions={}",
+        report.run.run_id,
+        report_path.display(),
+        report.counts.passed_cells,
+        report.counts.total_cells,
+        report.repetitions_per_cell,
+        report.counts.failed_repetitions,
+    );
+    for cell in &report.cells {
+        eprintln!(
+            "cell profile={} model={} harness={} scenario={} passed={} worst_repetition={} worst_failure={} transcript={}",
+            cell.profile_name,
+            cell.model,
+            cell.harness_profile,
+            cell.scenario,
+            cell.passed,
+            cell.worst_repetition_index,
+            cell.worst_failure_category
+                .as_ref()
+                .map(render_acceptance_failure_category)
+                .unwrap_or("-"),
+            cell.worst_transcript_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| String::from("-"))
+        );
+    }
+
+    if report.counts.failed_cells == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "one or more matrix cells retained a failing repetition; see {}",
             report_path.display()
         ))
     }
