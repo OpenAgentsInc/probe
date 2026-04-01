@@ -409,30 +409,6 @@ impl ChatScreen {
         }
     }
 
-    pub fn switch_backend(
-        &mut self,
-        labels: [String; 2],
-        active_tab: ActiveTab,
-        lane_label: &str,
-        summary: ServerOperatorSummary,
-    ) {
-        self.active_tab = active_tab;
-        self.tab_labels = labels;
-        self.emphasized_copy = false;
-        self.transcript = RetainedTranscript::new();
-        self.transcript.push_entry(TranscriptEntry::new(
-            TranscriptRole::Status,
-            "Backend Switched",
-            vec![format!("active_backend: {lane_label}")],
-        ));
-        self.transcript_scroll_from_bottom = 0;
-        self.runtime = ProbeRuntimeState::default();
-        self.stream = None;
-        self.setup = AppleFmSetupState::default();
-        self.set_operator_backend(summary);
-        self.record_event(format!("switched active backend to {lane_label}"));
-    }
-
     pub fn record_event(&mut self, message: impl Into<String>) {
         self.recent_events.push_front(message.into());
         while self.recent_events.len() > MAX_EVENT_LOG {

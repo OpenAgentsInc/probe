@@ -44,6 +44,7 @@ pub struct AppShell {
     bottom_pane: BottomPane,
     worker: BackgroundWorker,
     backend_lanes: [BackendLaneConfig; 2],
+    chat_lanes: [ChatScreen; 2],
     active_backend_index: usize,
 }
 
@@ -79,18 +80,18 @@ impl AppShell {
 
     fn with_launch_config(config: TuiLaunchConfig) -> Self {
         let backend_lanes = build_backend_lanes(&config);
+        let chat_lanes = build_chat_lanes(&backend_lanes);
         let mut app = Self {
-            screens: vec![ScreenState::Chat(ChatScreen::default())],
+            screens: vec![ScreenState::Chat(chat_lanes[0].clone())],
             last_status: String::from("probe tui launched"),
             should_quit: false,
             bottom_pane: BottomPane::new(),
             worker: BackgroundWorker::new(),
             backend_lanes,
+            chat_lanes,
             active_backend_index: 0,
         };
         app.sync_backend_selector();
-        let summary = app.active_operator_backend().clone();
-        app.base_screen_mut().set_operator_backend(summary);
         if config.autostart_apple_fm_setup
             && let Some(request) = app.default_setup_request()
         {
@@ -568,10 +569,6 @@ impl AppShell {
         &self.backend_lanes[self.active_backend_index].chat_runtime
     }
 
-    fn active_operator_backend(&self) -> &ServerOperatorSummary {
-        &self.backend_lanes[self.active_backend_index].operator_backend
-    }
-
     fn backend_selector_labels(&self) -> [String; 2] {
         [
             self.backend_lanes[0].label.clone(),
@@ -586,8 +583,22 @@ impl AppShell {
             ActiveTab::Secondary
         };
         let labels = self.backend_selector_labels();
+        self.chat_lanes[self.active_backend_index].set_backend_selector(labels.clone(), active_tab);
         self.base_screen_mut()
             .set_backend_selector(labels, active_tab);
+    }
+
+    fn persist_active_chat_lane(&mut self) {
+        let screen = self.base_screen().clone();
+        self.chat_lanes[self.active_backend_index] = screen;
+    }
+
+    fn restore_chat_lane(&mut self, lane_index: usize, active_tab: ActiveTab) {
+        let labels = self.backend_selector_labels();
+        let mut screen = self.chat_lanes[lane_index].clone();
+        screen.set_backend_selector(labels, active_tab);
+        self.chat_lanes[lane_index] = screen.clone();
+        self.screens[0] = ScreenState::Chat(screen);
     }
 
     fn switch_backend(&mut self, active_tab: ActiveTab) {
@@ -598,15 +609,10 @@ impl AppShell {
             return;
         }
 
+        self.persist_active_chat_lane();
         self.active_backend_index = active_tab.index();
-        let labels = self.backend_selector_labels();
         let lane = self.backend_lanes[self.active_backend_index].clone();
-        self.base_screen_mut().switch_backend(
-            labels,
-            active_tab,
-            lane.label.as_str(),
-            lane.operator_backend,
-        );
+        self.restore_chat_lane(self.active_backend_index, active_tab);
         self.last_status = format!("active backend: {}", lane.label);
     }
 }
@@ -727,6 +733,30 @@ fn build_backend_lanes(config: &TuiLaunchConfig) -> [BackendLaneConfig; 2] {
         },
     );
     [primary, alternate]
+}
+
+fn build_chat_lane(
+    backend_lanes: &[BackendLaneConfig; 2],
+    lane_index: usize,
+    active_tab: ActiveTab,
+) -> ChatScreen {
+    let mut screen = ChatScreen::default();
+    screen.set_backend_selector(
+        [
+            backend_lanes[0].label.clone(),
+            backend_lanes[1].label.clone(),
+        ],
+        active_tab,
+    );
+    screen.set_operator_backend(backend_lanes[lane_index].operator_backend.clone());
+    screen
+}
+
+fn build_chat_lanes(backend_lanes: &[BackendLaneConfig; 2]) -> [ChatScreen; 2] {
+    [
+        build_chat_lane(backend_lanes, 0, ActiveTab::Primary),
+        build_chat_lane(backend_lanes, 1, ActiveTab::Primary),
+    ]
 }
 
 fn parse_profile_host_port(profile: &BackendProfile) -> (String, u16) {
@@ -880,6 +910,7 @@ mod tests {
         AppleFmUsageSummary, BackgroundTaskRequest, ProbeRuntimeTurnConfig,
     };
     use crate::screens::{ActiveTab, ScreenId, TaskPhase};
+    use crate::transcript::{TranscriptEntry, TranscriptRole};
 
     fn runtime_test_config(
         environment: &ProbeTestEnvironment,
@@ -995,18 +1026,49 @@ mod tests {
         let mut app = AppShell::new_for_tests();
         assert_eq!(app.active_tab(), ActiveTab::Primary);
         assert!(!app.emphasized_copy());
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_primary"),
+            profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+            model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+            cwd: String::from("/tmp/probe-workspace"),
+        });
+        app.apply_message(AppMessage::TranscriptEntryCommitted {
+            entry: TranscriptEntry::new(
+                TranscriptRole::User,
+                "You",
+                vec![String::from("primary lane message")],
+            ),
+        });
 
         app.dispatch(UiEvent::NextView);
         assert_eq!(app.active_tab(), ActiveTab::Secondary);
-        let rendered = app.render_to_string(120, 32);
-        assert!(rendered.contains("Backend Switched"));
-        assert!(rendered.contains("active_backend: Apple FM"));
+        assert_eq!(app.runtime_session_id(), None);
+        let rendered_secondary = app.render_to_string(120, 32);
+        assert!(rendered_secondary.contains("Transcript is empty."));
+        assert!(!rendered_secondary.contains("primary lane message"));
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_secondary"),
+            profile_name: String::from("psionic-apple-fm-bridge"),
+            model_id: String::from("apple-foundation-model"),
+            cwd: String::from("/tmp/probe-workspace"),
+        });
+        app.apply_message(AppMessage::TranscriptEntryCommitted {
+            entry: TranscriptEntry::new(
+                TranscriptRole::User,
+                "You",
+                vec![String::from("secondary lane message")],
+            ),
+        });
 
         app.dispatch(UiEvent::ToggleBody);
         assert!(app.emphasized_copy());
 
         app.dispatch(UiEvent::PreviousView);
         assert_eq!(app.active_tab(), ActiveTab::Primary);
+        assert_eq!(app.runtime_session_id(), Some("sess_primary"));
+        let rendered_primary = app.render_to_string(120, 32);
+        assert!(rendered_primary.contains("primary lane message"));
+        assert!(!rendered_primary.contains("secondary lane message"));
     }
 
     #[test]
@@ -1048,7 +1110,7 @@ mod tests {
         app.dispatch(UiEvent::NextView);
 
         let rendered = app.render_to_string(120, 32);
-        assert!(rendered.contains("active_backend: Tailnet"));
+        assert!(rendered.contains("100.108.56.85:8080"));
         assert_eq!(app.backend_lanes[1].label, "Tailnet");
         assert_eq!(app.backend_lanes[1].operator_backend.host, "100.108.56.85");
         assert_eq!(app.backend_lanes[1].operator_backend.port, 8080);

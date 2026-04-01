@@ -44,7 +44,7 @@ enum WorkerCommand {
 
 #[derive(Debug, Default)]
 struct WorkerState {
-    runtime_session: Option<ProbeRuntimeSessionState>,
+    runtime_sessions: Vec<ProbeRuntimeSessionState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +54,8 @@ struct ProbeRuntimeSessionState {
     probe_home: Option<std::path::PathBuf>,
     cwd: std::path::PathBuf,
     profile_name: String,
+    profile_base_url: String,
+    profile_model: String,
 }
 
 #[derive(Debug)]
@@ -148,14 +150,6 @@ fn run_probe_runtime_turn(
     message_tx: &Sender<AppMessage>,
     state: &mut WorkerState,
 ) {
-    if state
-        .runtime_session
-        .as_ref()
-        .is_some_and(|session| !session.matches_config(&config))
-    {
-        state.runtime_session = None;
-    }
-
     let runtime = match config.probe_home.clone() {
         Some(probe_home) => ProbeRuntime::new(probe_home),
         None => match ProbeRuntime::detect() {
@@ -173,7 +167,9 @@ fn run_probe_runtime_turn(
         },
     };
 
-    let result = if let Some(session) = state.runtime_session.as_ref() {
+    let previous_session = state.session_for_config(&config).cloned();
+
+    let result = if let Some(session) = previous_session.as_ref() {
         let event_tx = message_tx.clone();
         let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
             forward_runtime_event(&event_tx, event);
@@ -208,8 +204,7 @@ fn run_probe_runtime_turn(
 
     match result {
         Ok(outcome) => {
-            let previous_turns = state
-                .runtime_session
+            let previous_turns = previous_session
                 .as_ref()
                 .map_or(0, |session| session.rendered_turns);
             if emit_session_ready(message_tx, &outcome.session, &config).is_err() {
@@ -227,7 +222,7 @@ fn run_probe_runtime_turn(
             if emit_pending_tool_approvals(message_tx, &runtime, &outcome.session.id).is_err() {
                 return;
             }
-            state.runtime_session = Some(ProbeRuntimeSessionState::from_metadata(
+            state.upsert_runtime_session(ProbeRuntimeSessionState::from_metadata(
                 &outcome.session,
                 &config,
                 runtime
@@ -239,8 +234,7 @@ fn run_probe_runtime_turn(
         }
         Err(error) => {
             let Some(session_id) = runtime_error_session_id(&error).or_else(|| {
-                state
-                    .runtime_session
+                previous_session
                     .as_ref()
                     .map(|session| session.session_id.clone())
             }) else {
@@ -260,11 +254,7 @@ fn run_probe_runtime_turn(
             {
                 return;
             }
-            let previous_turns = state
-                .runtime_session
-                .as_ref()
-                .filter(|session| session.session_id == session_id)
-                .map_or(0, |session| session.rendered_turns);
+            let previous_turns = state.rendered_turns_for_session(&session_id);
             let transcript = runtime.session_store().read_transcript(&session_id);
             let rendered_turns = transcript
                 .as_ref()
@@ -281,7 +271,7 @@ fn run_probe_runtime_turn(
                 return;
             }
             if let Some(metadata) = metadata {
-                state.runtime_session = Some(ProbeRuntimeSessionState::from_metadata(
+                state.upsert_runtime_session(ProbeRuntimeSessionState::from_metadata(
                     &metadata,
                     &config,
                     rendered_turns,
@@ -356,11 +346,7 @@ fn run_pending_tool_approval_resolution(
         }
     };
 
-    let previous_turns = state
-        .runtime_session
-        .as_ref()
-        .filter(|session| session.session_id == session_id)
-        .map_or(0, |session| session.rendered_turns);
+    let previous_turns = state.rendered_turns_for_session(&session_id);
     let event_tx = message_tx.clone();
     let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
         forward_runtime_event(&event_tx, event);
@@ -402,7 +388,7 @@ fn run_pending_tool_approval_resolution(
             {
                 return;
             }
-            state.runtime_session = Some(ProbeRuntimeSessionState::from_metadata(
+            state.upsert_runtime_session(ProbeRuntimeSessionState::from_metadata(
                 &session,
                 &config,
                 runtime
@@ -428,7 +414,7 @@ fn run_pending_tool_approval_resolution(
             if emit_pending_tool_approvals(message_tx, &runtime, &outcome.session.id).is_err() {
                 return;
             }
-            state.runtime_session = Some(ProbeRuntimeSessionState::from_metadata(
+            state.upsert_runtime_session(ProbeRuntimeSessionState::from_metadata(
                 &outcome.session,
                 &config,
                 runtime
@@ -451,11 +437,51 @@ fn run_pending_tool_approval_resolution(
     }
 }
 
+impl WorkerState {
+    fn session_for_config(
+        &self,
+        config: &ProbeRuntimeTurnConfig,
+    ) -> Option<&ProbeRuntimeSessionState> {
+        self.runtime_sessions
+            .iter()
+            .find(|session| session.matches_config(config))
+    }
+
+    fn rendered_turns_for_session(&self, session_id: &SessionId) -> usize {
+        self.runtime_sessions
+            .iter()
+            .find(|session| &session.session_id == session_id)
+            .map_or(0, |session| session.rendered_turns)
+    }
+
+    fn upsert_runtime_session(&mut self, new_session: ProbeRuntimeSessionState) {
+        if let Some(existing) = self
+            .runtime_sessions
+            .iter_mut()
+            .find(|session| session.same_runtime_config(&new_session))
+        {
+            *existing = new_session;
+            return;
+        }
+        self.runtime_sessions.push(new_session);
+    }
+}
+
 impl ProbeRuntimeSessionState {
     fn matches_config(&self, config: &ProbeRuntimeTurnConfig) -> bool {
         self.probe_home == config.probe_home
             && self.cwd == config.cwd
             && self.profile_name == config.profile.name
+            && self.profile_base_url == config.profile.base_url
+            && self.profile_model == config.profile.model
+    }
+
+    fn same_runtime_config(&self, other: &Self) -> bool {
+        self.probe_home == other.probe_home
+            && self.cwd == other.cwd
+            && self.profile_name == other.profile_name
+            && self.profile_base_url == other.profile_base_url
+            && self.profile_model == other.profile_model
     }
 
     fn from_metadata(
@@ -469,6 +495,8 @@ impl ProbeRuntimeSessionState {
             probe_home: config.probe_home.clone(),
             cwd: config.cwd.clone(),
             profile_name: config.profile.name.clone(),
+            profile_base_url: config.profile.base_url.clone(),
+            profile_model: config.profile.model.clone(),
         }
     }
 }
@@ -897,12 +925,16 @@ fn split_body_lines(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{tool_call_lines, tool_result_lines};
+    use super::{ProbeRuntimeSessionState, WorkerState, tool_call_lines, tool_result_lines};
+    use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
     use probe_protocol::session::{
         ItemId, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
         TranscriptItem, TranscriptItemKind, TurnId,
     };
     use serde_json::{Value, json};
+    use std::path::PathBuf;
+
+    use crate::message::ProbeRuntimeTurnConfig;
 
     fn transcript_item(
         kind: TranscriptItemKind,
@@ -964,6 +996,87 @@ mod tests {
                 String::from("whoami"),
                 String::from("blocked: write approval")
             ]
+        );
+    }
+
+    fn turn_config(profile_name: &str, base_url: &str, model: &str) -> ProbeRuntimeTurnConfig {
+        ProbeRuntimeTurnConfig {
+            probe_home: None,
+            cwd: PathBuf::from("."),
+            profile: BackendProfile {
+                name: profile_name.to_string(),
+                kind: BackendKind::OpenAiChatCompletions,
+                base_url: base_url.to_string(),
+                model: model.to_string(),
+                api_key_env: String::from("OPENAI_API_KEY"),
+                timeout_secs: 120,
+                attach_mode: ServerAttachMode::AttachToExisting,
+                prefix_cache_mode: PrefixCacheMode::BackendDefault,
+            },
+            system_prompt: None,
+            harness_profile: None,
+            tool_loop: None,
+        }
+    }
+
+    #[test]
+    fn worker_state_keeps_runtime_sessions_per_config() {
+        let qwen = turn_config(
+            "psionic-qwen35-2b-q8-registry",
+            "http://100.108.56.85:8080/v1",
+            "qwen3.5-2b-q8_0-registry.gguf",
+        );
+        let apple = ProbeRuntimeTurnConfig {
+            profile: BackendProfile {
+                name: String::from("psionic-apple-fm-bridge"),
+                kind: BackendKind::AppleFmBridge,
+                base_url: String::from("http://127.0.0.1:11435"),
+                model: String::from("apple-foundation-model"),
+                api_key_env: String::from("OPENAI_API_KEY"),
+                timeout_secs: 120,
+                attach_mode: ServerAttachMode::AttachToExisting,
+                prefix_cache_mode: PrefixCacheMode::BackendDefault,
+            },
+            ..turn_config(
+                "psionic-qwen35-2b-q8-registry",
+                "http://100.108.56.85:8080/v1",
+                "qwen3.5-2b-q8_0-registry.gguf",
+            )
+        };
+
+        let mut state = WorkerState::default();
+        state.upsert_runtime_session(ProbeRuntimeSessionState {
+            session_id: probe_protocol::session::SessionId::new("sess_qwen"),
+            rendered_turns: 3,
+            probe_home: None,
+            cwd: PathBuf::from("."),
+            profile_name: qwen.profile.name.clone(),
+            profile_base_url: qwen.profile.base_url.clone(),
+            profile_model: qwen.profile.model.clone(),
+        });
+        state.upsert_runtime_session(ProbeRuntimeSessionState {
+            session_id: probe_protocol::session::SessionId::new("sess_apple"),
+            rendered_turns: 2,
+            probe_home: None,
+            cwd: PathBuf::from("."),
+            profile_name: apple.profile.name.clone(),
+            profile_base_url: apple.profile.base_url.clone(),
+            profile_model: apple.profile.model.clone(),
+        });
+
+        assert_eq!(
+            state
+                .session_for_config(&qwen)
+                .expect("qwen session should be retained")
+                .rendered_turns,
+            3
+        );
+        assert_eq!(
+            state
+                .session_for_config(&apple)
+                .expect("apple session should be retained")
+                .rendered_turns,
+            2
         );
     }
 }
