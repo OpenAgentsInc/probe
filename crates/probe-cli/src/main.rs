@@ -41,8 +41,10 @@ use probe_decisions::{
     evaluate_long_context_module, evaluate_patch_readiness_module, evaluate_tool_route_module,
 };
 use probe_optimizer::{
-    DecisionModuleOptimizationBundle, HarnessCandidateEvaluationInput, HarnessEvaluationCase,
-    HarnessOptimizationBundle, OptimizationScorecard, OptimizationTargetKind, PromotionRule,
+    AdoptionState, DecisionModuleOptimizationBundle, HarnessCandidateEvaluationInput,
+    HarnessEvaluationCase, HarnessOptimizationBundle, OptimizationScorecard,
+    OptimizationTargetKind, PromotionLedger, PromotionRule,
+    decision_module_ledger_entries_from_bundle, harness_ledger_entries_from_bundle,
     optimize_decision_modules, optimize_harness_profiles,
 };
 use probe_protocol::backend::BackendKind;
@@ -73,6 +75,7 @@ enum Commands {
     ModuleEval(ModuleEvalArgs),
     OptimizeModules(OptimizeModulesArgs),
     OptimizeHarness(OptimizeHarnessArgs),
+    AdoptCandidate(AdoptCandidateArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -242,6 +245,8 @@ struct OptimizeModulesArgs {
     #[arg(long)]
     artifact_bundle: Option<PathBuf>,
     #[arg(long)]
+    ledger: Option<PathBuf>,
+    #[arg(long)]
     output: PathBuf,
 }
 
@@ -254,7 +259,21 @@ struct OptimizeHarnessArgs {
     #[arg(long)]
     artifact_bundle: Option<PathBuf>,
     #[arg(long)]
+    ledger: Option<PathBuf>,
+    #[arg(long)]
     output: PathBuf,
+}
+
+#[derive(clap::Args, Debug)]
+struct AdoptCandidateArgs {
+    #[arg(long)]
+    ledger: PathBuf,
+    #[arg(long)]
+    target: String,
+    #[arg(long)]
+    candidate: String,
+    #[arg(long)]
+    state: String,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -301,6 +320,7 @@ fn run() -> Result<(), String> {
         Commands::ModuleEval(args) => run_module_eval(args),
         Commands::OptimizeModules(args) => run_optimize_modules(args),
         Commands::OptimizeHarness(args) => run_optimize_harness(args),
+        Commands::AdoptCandidate(args) => run_adopt_candidate(args),
     }
 }
 
@@ -867,16 +887,27 @@ fn run_optimize_modules(args: OptimizeModulesArgs) -> Result<(), String> {
     };
 
     bundle.write_json(args.output.as_path())?;
+    let ledger_path = args
+        .ledger
+        .clone()
+        .unwrap_or_else(|| default_promotion_ledger_path(args.output.as_path()));
+    let mut ledger = PromotionLedger::read_or_default(ledger_path.as_path())?;
+    for entry in decision_module_ledger_entries_from_bundle(&bundle, args.output.display().to_string())
+    {
+        ledger.upsert(entry);
+    }
+    ledger.write_json(ledger_path.as_path())?;
     for family in &bundle.families {
         let report = &family.promotion_report;
         eprintln!(
-            "target={} family={} baseline={} candidate={} promoted={} run={} reason={}",
+            "target={} family={} baseline={} candidate={} promoted={} run={} ledger={} reason={}",
             render_optimization_target(report.target_kind),
             family.family.as_str(),
             report.baseline_id,
             report.candidate_id,
             report.promoted,
             family.psionic_artifacts.refs.run_id,
+            ledger_path.display(),
             report.reason
         );
     }
@@ -918,15 +949,41 @@ fn run_optimize_harness(args: OptimizeHarnessArgs) -> Result<(), String> {
     };
 
     bundle.write_json(args.output.as_path())?;
+    let ledger_path = args
+        .ledger
+        .clone()
+        .unwrap_or_else(|| default_promotion_ledger_path(args.output.as_path()));
+    let mut ledger = PromotionLedger::read_or_default(ledger_path.as_path())?;
+    for entry in harness_ledger_entries_from_bundle(&bundle, args.output.display().to_string()) {
+        ledger.upsert(entry);
+    }
+    ledger.write_json(ledger_path.as_path())?;
     let report = &bundle.promotion_report;
     eprintln!(
-        "target={} baseline={} candidate={} promoted={} run={} reason={}",
+        "target={} baseline={} candidate={} promoted={} run={} ledger={} reason={}",
         render_optimization_target(report.target_kind),
         report.baseline_id,
         report.candidate_id,
         report.promoted,
         bundle.psionic_artifacts.refs.run_id,
+        ledger_path.display(),
         report.reason
+    );
+    Ok(())
+}
+
+fn run_adopt_candidate(args: AdoptCandidateArgs) -> Result<(), String> {
+    let target = parse_optimization_target(args.target.as_str())?;
+    let state = parse_adoption_state(args.state.as_str())?;
+    let mut ledger = PromotionLedger::read_or_default(args.ledger.as_path())?;
+    ledger.set_adoption_state(target, args.candidate.as_str(), state)?;
+    ledger.write_json(args.ledger.as_path())?;
+    eprintln!(
+        "ledger={} target={} candidate={} state={}",
+        args.ledger.display(),
+        render_optimization_target(target),
+        args.candidate,
+        render_adoption_state(state)
     );
     Ok(())
 }
@@ -1598,6 +1655,43 @@ fn render_optimization_target(kind: OptimizationTargetKind) -> &'static str {
         OptimizationTargetKind::DecisionModule => "decision_module",
         OptimizationTargetKind::SkillPack => "skill_pack",
     }
+}
+
+fn parse_optimization_target(value: &str) -> Result<OptimizationTargetKind, String> {
+    match value {
+        "harness_profile" => Ok(OptimizationTargetKind::HarnessProfile),
+        "decision_module" => Ok(OptimizationTargetKind::DecisionModule),
+        "skill_pack" => Ok(OptimizationTargetKind::SkillPack),
+        other => Err(format!(
+            "unknown optimization target `{other}`; expected `harness_profile`, `decision_module`, or `skill_pack`"
+        )),
+    }
+}
+
+fn parse_adoption_state(value: &str) -> Result<AdoptionState, String> {
+    match value {
+        "not_adopted" => Ok(AdoptionState::NotAdopted),
+        "shadow" => Ok(AdoptionState::Shadow),
+        "promoted" => Ok(AdoptionState::Promoted),
+        other => Err(format!(
+            "unknown adoption state `{other}`; expected `not_adopted`, `shadow`, or `promoted`"
+        )),
+    }
+}
+
+fn render_adoption_state(state: AdoptionState) -> &'static str {
+    match state {
+        AdoptionState::NotAdopted => "not_adopted",
+        AdoptionState::Shadow => "shadow",
+        AdoptionState::Promoted => "promoted",
+    }
+}
+
+fn default_promotion_ledger_path(output_path: &Path) -> PathBuf {
+    output_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("probe_promotion_ledger.json")
 }
 
 fn format_rate_x1000(value: u64) -> String {

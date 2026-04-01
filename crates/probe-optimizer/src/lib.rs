@@ -171,6 +171,46 @@ pub struct HarnessOptimizationBundle {
     pub psionic_artifacts: HarnessPsionicArtifacts,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromotionDisposition {
+    Admitted,
+    Rejected,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdoptionState {
+    NotAdopted,
+    Shadow,
+    Promoted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromotionLedgerEntry {
+    pub target_kind: OptimizationTargetKind,
+    pub family_key: String,
+    pub baseline_id: String,
+    pub candidate_id: String,
+    pub baseline_ref: String,
+    pub candidate_ref: String,
+    pub psionic_run_id: String,
+    pub psionic_run_receipt_ref: String,
+    pub artifact_bundle_ref: String,
+    pub search_winner: bool,
+    pub promotion_disposition: PromotionDisposition,
+    pub adoption_state: AdoptionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromotionLedger {
+    pub schema_version: u16,
+    pub report_id: String,
+    pub entries: Vec<PromotionLedgerEntry>,
+}
+
 impl DecisionModuleOptimizationBundle {
     pub fn write_json(&self, path: impl AsRef<Path>) -> Result<(), String> {
         let path = path.as_ref();
@@ -201,6 +241,179 @@ impl HarnessOptimizationBundle {
         let body = fs::read_to_string(path.as_ref()).map_err(|error| error.to_string())?;
         serde_json::from_str(&body).map_err(|error| error.to_string())
     }
+}
+
+impl Default for PromotionLedger {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            report_id: String::from("probe.promotion_ledger.v1"),
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl PromotionLedger {
+    pub fn write_json(&self, path: impl AsRef<Path>) -> Result<(), String> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let body = serde_json::to_string_pretty(self).map_err(|error| error.to_string())?;
+        fs::write(path, format!("{body}\n")).map_err(|error| error.to_string())
+    }
+
+    pub fn read_json(path: impl AsRef<Path>) -> Result<Self, String> {
+        let body = fs::read_to_string(path.as_ref()).map_err(|error| error.to_string())?;
+        serde_json::from_str(&body).map_err(|error| error.to_string())
+    }
+
+    pub fn read_or_default(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        if path.exists() {
+            Self::read_json(path)
+        } else {
+            Ok(Self::default())
+        }
+    }
+
+    pub fn upsert(&mut self, entry: PromotionLedgerEntry) {
+        if let Some(existing) = self.entries.iter_mut().find(|existing| {
+            existing.target_kind == entry.target_kind
+                && existing.family_key == entry.family_key
+                && existing.candidate_id == entry.candidate_id
+        }) {
+            *existing = entry;
+        } else {
+            self.entries.push(entry);
+        }
+    }
+
+    pub fn set_adoption_state(
+        &mut self,
+        target_kind: OptimizationTargetKind,
+        candidate_id: &str,
+        adoption_state: AdoptionState,
+    ) -> Result<(), String> {
+        let entry = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.target_kind == target_kind && entry.candidate_id == candidate_id)
+            .ok_or_else(|| {
+                format!(
+                    "no ledger entry found for target `{}` candidate `{candidate_id}`",
+                    match target_kind {
+                        OptimizationTargetKind::HarnessProfile => "harness_profile",
+                        OptimizationTargetKind::DecisionModule => "decision_module",
+                        OptimizationTargetKind::SkillPack => "skill_pack",
+                    }
+                )
+            })?;
+        if entry.promotion_disposition != PromotionDisposition::Admitted {
+            return Err(format!(
+                "candidate `{candidate_id}` was not promotion-admitted and cannot change adoption state"
+            ));
+        }
+        match adoption_state {
+            AdoptionState::NotAdopted => {
+                entry.adoption_state = AdoptionState::NotAdopted;
+                Ok(())
+            }
+            AdoptionState::Shadow => {
+                entry.adoption_state = AdoptionState::Shadow;
+                Ok(())
+            }
+            AdoptionState::Promoted => {
+                if entry.adoption_state != AdoptionState::Shadow {
+                    return Err(format!(
+                        "candidate `{candidate_id}` must enter shadow state before promotion"
+                    ));
+                }
+                entry.adoption_state = AdoptionState::Promoted;
+                Ok(())
+            }
+        }
+    }
+}
+
+pub fn decision_module_ledger_entries_from_bundle(
+    bundle: &DecisionModuleOptimizationBundle,
+    artifact_bundle_ref: impl Into<String>,
+) -> Vec<PromotionLedgerEntry> {
+    let artifact_bundle_ref = artifact_bundle_ref.into();
+    bundle
+        .families
+        .iter()
+        .map(|family| PromotionLedgerEntry {
+            target_kind: OptimizationTargetKind::DecisionModule,
+            family_key: family.family.as_str().to_string(),
+            baseline_id: family.baseline_candidate_id.clone(),
+            candidate_id: family.retained_candidate_id.clone(),
+            baseline_ref: format!(
+                "{}:{}",
+                family.baseline_candidate_id, family.baseline_probe_manifest_digest
+            ),
+            candidate_ref: format!(
+                "{}:{}",
+                family.retained_candidate_id, family.retained_probe_manifest_digest
+            ),
+            psionic_run_id: family.psionic_artifacts.refs.run_id.clone(),
+            psionic_run_receipt_ref: family.psionic_artifacts.refs.run_receipt_digest.clone(),
+            artifact_bundle_ref: artifact_bundle_ref.clone(),
+            search_winner: true,
+            promotion_disposition: if family.promotion_report.promoted {
+                PromotionDisposition::Admitted
+            } else {
+                PromotionDisposition::Rejected
+            },
+            adoption_state: AdoptionState::NotAdopted,
+            refusal_reason: if family.promotion_report.promoted {
+                None
+            } else {
+                Some(family.promotion_report.reason.clone())
+            },
+        })
+        .collect()
+}
+
+pub fn harness_ledger_entries_from_bundle(
+    bundle: &HarnessOptimizationBundle,
+    artifact_bundle_ref: impl Into<String>,
+) -> Vec<PromotionLedgerEntry> {
+    let artifact_bundle_ref = artifact_bundle_ref.into();
+    vec![PromotionLedgerEntry {
+        target_kind: OptimizationTargetKind::HarnessProfile,
+        family_key: bundle
+            .probe_candidate_manifests
+            .first()
+            .map(|manifest| manifest.tool_set.clone())
+            .unwrap_or_else(|| String::from("harness_profile")),
+        baseline_id: bundle.baseline_candidate_id.clone(),
+        candidate_id: bundle.retained_candidate_id.clone(),
+        baseline_ref: format!(
+            "{}:{}",
+            bundle.baseline_candidate_id, bundle.baseline_manifest_digest
+        ),
+        candidate_ref: format!(
+            "{}:{}",
+            bundle.retained_candidate_id, bundle.retained_manifest_digest
+        ),
+        psionic_run_id: bundle.psionic_artifacts.refs.run_id.clone(),
+        psionic_run_receipt_ref: bundle.psionic_artifacts.refs.run_receipt_digest.clone(),
+        artifact_bundle_ref,
+        search_winner: true,
+        promotion_disposition: if bundle.promotion_report.promoted {
+            PromotionDisposition::Admitted
+        } else {
+            PromotionDisposition::Rejected
+        },
+        adoption_state: AdoptionState::NotAdopted,
+        refusal_reason: if bundle.promotion_report.promoted {
+            None
+        } else {
+            Some(bundle.promotion_report.reason.clone())
+        },
+    }]
 }
 
 impl PromotionRule {
@@ -1100,9 +1313,10 @@ mod tests {
     use probe_decisions::DecisionModuleFamily;
 
     use super::{
-        DecisionModuleOptimizationBundle, HarnessCandidateEvaluationInput, HarnessEvaluationCase,
-        HarnessOptimizationBundle, OptimizationTargetKind, PromotionRule, compare_candidate,
-        optimize_decision_modules, optimize_harness_profiles,
+        AdoptionState, DecisionModuleOptimizationBundle, HarnessCandidateEvaluationInput,
+        HarnessEvaluationCase, HarnessOptimizationBundle, OptimizationTargetKind,
+        PromotionDisposition, PromotionLedger, PromotionLedgerEntry, PromotionRule,
+        compare_candidate, optimize_decision_modules, optimize_harness_profiles,
     };
 
     #[test]
@@ -1380,5 +1594,40 @@ mod tests {
         let roundtrip: HarnessOptimizationBundle =
             serde_json::from_str(&serialized).expect("deserialize harness bundle");
         assert_eq!(roundtrip.retained_candidate_id, bundle.retained_candidate_id);
+    }
+
+    #[test]
+    fn promotion_ledger_tracks_shadow_then_promoted_state() {
+        let mut ledger = PromotionLedger::default();
+        ledger.upsert(PromotionLedgerEntry {
+            target_kind: OptimizationTargetKind::DecisionModule,
+            family_key: String::from("tool_route"),
+            baseline_id: String::from("heuristic_tool_route_v1"),
+            candidate_id: String::from("aggressive_tool_route_v2"),
+            baseline_ref: String::from("heuristic_tool_route_v1:digest-a"),
+            candidate_ref: String::from("aggressive_tool_route_v2:digest-b"),
+            psionic_run_id: String::from("probe-optimize-tool_route"),
+            psionic_run_receipt_ref: String::from("receipt-digest"),
+            artifact_bundle_ref: String::from("/tmp/probe/module_bundle.json"),
+            search_winner: true,
+            promotion_disposition: PromotionDisposition::Admitted,
+            adoption_state: AdoptionState::NotAdopted,
+            refusal_reason: None,
+        });
+        ledger
+            .set_adoption_state(
+                OptimizationTargetKind::DecisionModule,
+                "aggressive_tool_route_v2",
+                AdoptionState::Shadow,
+            )
+            .expect("move candidate to shadow");
+        ledger
+            .set_adoption_state(
+                OptimizationTargetKind::DecisionModule,
+                "aggressive_tool_route_v2",
+                AdoptionState::Promoted,
+            )
+            .expect("promote shadowed candidate");
+        assert_eq!(ledger.entries[0].adoption_state, AdoptionState::Promoted);
     }
 }

@@ -63,6 +63,33 @@ cargo run -p probe-cli -- optimize-modules \
   --output ~/.probe/reports/probe_module_optimization_bundle.json
 ```
 
+Both `optimize-modules` and `optimize-harness` now also write a durable Probe
+promotion ledger next to the bundle by default:
+
+- `probe_promotion_ledger.json`
+
+Each entry stores:
+
+- baseline ref and candidate ref
+- Psionic run id and run-receipt ref
+- whether the candidate was the retained search winner
+- whether Probe promotion admitted or rejected it
+- the runtime adoption state: `not_adopted`, `shadow`, or `promoted`
+- refusal reason when promotion rejected the candidate
+
+Probe now keeps search, promotion, and runtime adoption separate. A search
+winner is not implicitly live runtime truth.
+
+To move an admitted candidate into shadow or promoted state:
+
+```bash
+cargo run -p probe-cli -- adopt-candidate \
+  --ledger ~/.probe/reports/probe_promotion_ledger.json \
+  --target decision_module \
+  --candidate aggressive_tool_route_v2 \
+  --state shadow
+```
+
 ## Promotion Rule
 
 The current default rule is intentionally strict:
