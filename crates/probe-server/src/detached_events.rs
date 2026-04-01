@@ -42,6 +42,7 @@ impl From<serde_json::Error> for DetachedEventError {
 #[derive(Clone)]
 pub(crate) struct DetachedSessionEventHub {
     events_root: PathBuf,
+    append_lock: Arc<Mutex<()>>,
     next_cursor: Arc<Mutex<HashMap<String, u64>>>,
     subscribers: Arc<Mutex<HashMap<String, Vec<Sender<DetachedSessionEventRecord>>>>>,
 }
@@ -50,6 +51,7 @@ impl DetachedSessionEventHub {
     pub(crate) fn new(probe_home: &Path) -> Self {
         Self {
             events_root: probe_home.join("daemon").join("events"),
+            append_lock: Arc::new(Mutex::new(())),
             next_cursor: Arc::new(Mutex::new(HashMap::new())),
             subscribers: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -62,6 +64,10 @@ impl DetachedSessionEventHub {
         payload: DetachedSessionEventPayload,
         timestamp_ms: TimestampMs,
     ) -> Result<DetachedSessionEventRecord, DetachedEventError> {
+        let _append_lock = self
+            .append_lock
+            .lock()
+            .expect("detached session append mutex should not be poisoned");
         let cursor = self.next_cursor_for(session_id)?;
         let record = DetachedSessionEventRecord {
             cursor,

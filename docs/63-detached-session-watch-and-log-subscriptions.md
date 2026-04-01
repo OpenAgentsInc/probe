@@ -72,8 +72,9 @@ plain replay read and the live subscription attach.
 - `read_detached_session_log`
 - `watch_detached_session`
 
-That keeps `probe logs`, later TUI watch panes, and downstream Autopilot attach
-work on the same shared client seam rather than growing a second control path.
+That keeps shipped `probe logs`, later TUI watch panes, and downstream
+Autopilot attach work on the same shared client seam rather than growing a
+second control path.
 
 ## Current Limits
 
@@ -84,10 +85,10 @@ It gives Probe:
 - bounded replay for recent detached session history
 - push-style local watch streams without polling `inspect_session_turns`
 - visible approval-paused lifecycle and runtime progress in detached logs
+- operator CLI commands above this surface
 
 It does not yet give Probe:
 
-- operator CLI commands above this surface
 - watchdog or timeout actions
 - remote or multi-tenant subscriptions
 - a browser-facing transport

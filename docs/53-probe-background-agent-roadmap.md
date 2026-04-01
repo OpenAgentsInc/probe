@@ -421,9 +421,9 @@ Probe now ships a canonical local `probe-server` path for:
 The remaining gap is no longer "add a daemon transport," "add a detached
 registry," or "add detached watch." It is:
 
-- operator CLI surfaces above the daemon
 - watchdog and timeout policy
 - first-party chat and TUI adoption of daemon attach flows
+- richer remote execution and workspace ownership beyond the local daemon
 
 ## 2. Remote inference is not remote execution
 
@@ -475,12 +475,12 @@ Detached supervision is now partly real:
 - bounded detached log replay
 - push-style detached session watch
 - approval-paused and runtime-progress visibility in daemon event logs
+- operator `probe daemon run|stop` and `probe ps|attach|logs|stop` commands
 
 The remaining gap is around operating that supervision safely:
 
 - timeout and watchdog enforcement for stuck detached turns
 - recurring-run discipline once automation exists
-- operator CLI surfaces above the daemon-owned watch and control seam
 
 ## 5. No branch or PR closure lane yet
 
@@ -762,17 +762,25 @@ Success condition:
 
 ## Phase 2: Detached local daemon mode
 
-Ship:
+Phase 2 is now mostly shipped locally.
+
+Shipped:
 
 - a long-lived local Probe daemon
 - detached session execution away from the foreground terminal
 - a local socket or equivalent daemon transport on top of the shipped stdio
   contract
+- `probe daemon run|stop`
 - `probe ps`, `probe attach`, `probe logs`, `probe stop`
 - detached queued follow-up prompts away from the foreground client process
 - push-style session status updates for detached work instead of poll-only
   queue inspection
-- stop and timeout watchdog behavior for stuck turns
+- stop behavior for approval-paused or queued work
+
+Still open in Phase 2:
+
+- timeout and watchdog behavior for stuck turns
+- first-party daemon attach adoption in `probe chat` and the TUI
 - first consumer adoption from Autopilot sidecar launch in `openagents`
 
 Success condition:
@@ -781,6 +789,8 @@ Success condition:
   losing runtime state
 - a second first-party client can reattach to the same daemon-owned session
   without fabricating a second runtime
+- the remaining local gap is no longer operator control, but watchdogs and
+  default client adoption
 
 ## Phase 3: Remote worker mode
 

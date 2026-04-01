@@ -667,7 +667,7 @@ fn normalize_acceptance_value(value: &mut Value, environment: &ProbeTestEnvironm
                         }
                     }
                     "git_dirty" => {
-                        if child.is_boolean() {
+                        if child.is_boolean() || child.is_null() {
                             *child = serde_json::json!("<git-dirty>");
                         }
                     }

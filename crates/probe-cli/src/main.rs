@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use acceptance::{
@@ -13,7 +14,10 @@ use acceptance::{
     run_acceptance_matrix, run_self_test_harness,
 };
 use clap::{Parser, Subcommand};
-use probe_client::{INTERNAL_SERVER_SUBCOMMAND, ProbeClient, ProbeClientConfig};
+use probe_client::{
+    INTERNAL_SERVER_SUBCOMMAND, ProbeClient, ProbeClientConfig, ProbeClientError,
+    ProbeClientTransportConfig,
+};
 use probe_core::backend_profiles::{
     PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE,
     PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
@@ -53,13 +57,21 @@ use probe_optimizer::{
     skill_pack_ledger_entries_from_bundle,
 };
 use probe_protocol::backend::BackendKind;
+use probe_protocol::runtime::{
+    DetachedSessionEventPayload, DetachedSessionEventRecord, DetachedSessionEventTruth,
+    DetachedSessionRecoveryState, DetachedSessionStatus, RuntimeProgressEvent,
+    SessionTurnControlRecord, WatchDetachedSessionRequest,
+};
 use probe_protocol::session::{
     BackendTurnReceipt, CacheSignal, SessionHarnessProfile, SessionId, SessionTurn,
-    ToolPolicyDecision, ToolRiskClass, UsageMeasurement, UsageTruth,
+    ToolPolicyDecision, ToolRiskClass, TranscriptEvent, TranscriptItemKind, UsageMeasurement,
+    UsageTruth,
 };
-use probe_server::server::run_stdio_server;
+use probe_server::server::{run_local_daemon, run_stdio_server};
 use probe_tui::{AppShell, TuiLaunchConfig, UiEvent, run_probe_tui_with_config};
 use serde::Serialize;
+
+const INTERNAL_DAEMON_SUBCOMMAND: &str = "__internal-probe-daemon";
 
 #[derive(Parser, Debug)]
 #[command(name = "probe")]
@@ -74,11 +86,23 @@ struct Cli {
 enum Commands {
     Exec(ExecArgs),
     Chat(ChatArgs),
+    #[command(about = "Manage the local detached Probe daemon")]
+    Daemon(DaemonArgs),
+    #[command(about = "List daemon-owned detached sessions")]
+    Ps(PsArgs),
+    #[command(about = "Inspect an existing daemon-owned detached session")]
+    Attach(AttachArgs),
+    #[command(about = "Read detached daemon session logs")]
+    Logs(LogsArgs),
+    #[command(about = "Stop active or queued work for a detached daemon session")]
+    Stop(StopArgs),
     Codex(CodexArgs),
     #[command(about = "Launch the current Probe terminal UI")]
     Tui(TuiArgs),
     #[command(name = INTERNAL_SERVER_SUBCOMMAND, hide = true)]
     InternalServer(InternalServerArgs),
+    #[command(name = INTERNAL_DAEMON_SUBCOMMAND, hide = true)]
+    InternalDaemon(InternalDaemonArgs),
     Accept(AcceptArgs),
     SelfTest(AcceptArgs),
     AcceptCompare(AcceptCompareArgs),
@@ -95,6 +119,59 @@ enum Commands {
 struct CodexArgs {
     #[command(subcommand)]
     command: CodexCommands,
+}
+
+#[derive(clap::Args, Debug)]
+struct DaemonArgs {
+    #[command(subcommand)]
+    command: DaemonCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum DaemonCommands {
+    Run(DaemonControlArgs),
+    Stop(DaemonControlArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct DaemonControlArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct PsArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct AttachArgs {
+    session_id: String,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[arg(long, default_value_t = 12)]
+    transcript_limit: usize,
+    #[arg(long, default_value_t = 8)]
+    recent_turn_limit: usize,
+}
+
+#[derive(clap::Args, Debug)]
+struct LogsArgs {
+    session_id: String,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    #[arg(long, default_value_t = false)]
+    follow: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct StopArgs {
+    session_id: String,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -128,6 +205,12 @@ struct CodexLogoutArgs {
 
 #[derive(clap::Args, Debug)]
 struct InternalServerArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct InternalDaemonArgs {
     #[arg(long)]
     probe_home: Option<PathBuf>,
 }
@@ -420,9 +503,15 @@ fn run() -> Result<(), String> {
     match cli.command {
         Commands::Exec(args) => run_exec(args),
         Commands::Chat(args) => run_chat(args),
+        Commands::Daemon(args) => run_daemon(args),
+        Commands::Ps(args) => run_ps(args),
+        Commands::Attach(args) => run_attach(args),
+        Commands::Logs(args) => run_logs(args),
+        Commands::Stop(args) => run_stop(args),
         Commands::Codex(args) => run_codex(args),
         Commands::Tui(args) => run_tui(args),
         Commands::InternalServer(args) => run_internal_server(args),
+        Commands::InternalDaemon(args) => run_internal_daemon(args),
         Commands::Accept(args) => run_accept(args),
         Commands::SelfTest(args) => run_self_test(args),
         Commands::AcceptCompare(args) => run_accept_compare(args),
@@ -918,6 +1007,293 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn run_daemon(args: DaemonArgs) -> Result<(), String> {
+    match args.command {
+        DaemonCommands::Run(args) => {
+            let probe_home = resolve_probe_home_path(args.probe_home)?;
+            run_local_daemon(Some(probe_home), None).map_err(|error| error.to_string())
+        }
+        DaemonCommands::Stop(args) => {
+            let probe_home = resolve_probe_home_path(args.probe_home)?;
+            match try_daemon_client(probe_home, "daemon-stop") {
+                Ok(mut client) => match client.shutdown() {
+                    Ok(()) => {
+                        println!("running=true stopped=true active_turns=0");
+                        Ok(())
+                    }
+                    Err(ProbeClientError::ShutdownRejected { active_turns }) => {
+                        println!("running=true stopped=false active_turns={active_turns}");
+                        Ok(())
+                    }
+                    Err(error) => Err(error.to_string()),
+                },
+                Err(error) if missing_local_daemon(&error) => {
+                    println!("running=false stopped=false active_turns=0");
+                    Ok(())
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        }
+    }
+}
+
+fn run_ps(args: PsArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let mut client = resolve_daemon_client(probe_home, "ps", true)?;
+    let mut sessions = client
+        .list_detached_sessions()
+        .map_err(|error| error.to_string())?;
+    sessions.sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
+    println!("sessions={}", sessions.len());
+    for summary in &sessions {
+        println!("{}", render_detached_summary_line(summary));
+    }
+    Ok(())
+}
+
+fn run_attach(args: AttachArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let mut client = resolve_daemon_client(probe_home, "attach", true)?;
+    let response = client
+        .inspect_detached_session(&SessionId::new(args.session_id))
+        .map_err(|error| error.to_string())?;
+
+    println!("{}", render_detached_summary_line(&response.summary));
+    println!(
+        "backend_profile={} next_turn_index={} transcript_events={} pending_approvals={}",
+        response
+            .session
+            .session
+            .backend
+            .as_ref()
+            .map(|backend| backend.profile_name.as_str())
+            .unwrap_or("none"),
+        response.session.session.next_turn_index,
+        response.session.transcript.len(),
+        response.session.pending_approvals.len(),
+    );
+    if let Some(active_turn) = response.turn_control.active_turn.as_ref() {
+        println!("active_turn {}", render_turn_control_kv(active_turn));
+    }
+    for turn in response
+        .turn_control
+        .queued_turns
+        .iter()
+        .take(args.recent_turn_limit)
+    {
+        println!("queued_turn {}", render_turn_control_kv(turn));
+    }
+    for turn in response
+        .turn_control
+        .recent_turns
+        .iter()
+        .take(args.recent_turn_limit)
+    {
+        println!("recent_turn {}", render_turn_control_kv(turn));
+    }
+    for approval in &response.session.pending_approvals {
+        println!(
+            "pending_approval tool_call_id={} tool={} risk={} requested_at_ms={} reason={:?}",
+            approval.tool_call_id,
+            approval.tool_name,
+            render_tool_risk_class(approval.risk_class),
+            approval.requested_at_ms,
+            approval.reason,
+        );
+    }
+    let transcript_start = response
+        .session
+        .transcript
+        .len()
+        .saturating_sub(args.transcript_limit);
+    for event in response.session.transcript.iter().skip(transcript_start) {
+        println!("{}", render_transcript_event_line(event));
+    }
+    Ok(())
+}
+
+fn run_logs(args: LogsArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let session_id = SessionId::new(args.session_id);
+    let mut client = resolve_daemon_client(probe_home, "logs", true)?;
+    let replay = client
+        .read_detached_session_log(&session_id, None, args.limit)
+        .map_err(|error| error.to_string())?;
+    for record in &replay.events {
+        println!("{}", render_detached_event_line(record));
+    }
+    if args.follow {
+        let after_cursor = replay.newest_cursor;
+        let outcome = client
+            .watch_detached_session(
+                WatchDetachedSessionRequest {
+                    session_id,
+                    after_cursor,
+                    replay_limit: 0,
+                },
+                |record| {
+                    println!("{}", render_detached_event_line(&record));
+                    true
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        if let Some(response) = outcome {
+            println!(
+                "watch_complete session={} replayed_events={} last_cursor={}",
+                response.session_id.as_str(),
+                response.replayed_events,
+                response
+                    .last_cursor
+                    .map(|cursor| cursor.to_string())
+                    .unwrap_or_else(|| String::from("none"))
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_stop(args: StopArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let session_id = SessionId::new(args.session_id);
+    let mut client = resolve_daemon_client(probe_home, "stop-session", true)?;
+    let inspected = client
+        .inspect_detached_session(&session_id)
+        .map_err(|error| error.to_string())?;
+    let mut interrupted = false;
+    let mut interrupt_reason = None;
+    if inspected.turn_control.active_turn.is_some() {
+        let response = client
+            .interrupt_turn(&session_id)
+            .map_err(|error| error.to_string())?;
+        interrupted = response.interrupted;
+        interrupt_reason = Some(response.message);
+    }
+    let mut queued_cancelled = 0usize;
+    for turn in &inspected.turn_control.queued_turns {
+        let response = client
+            .cancel_queued_turn(&session_id, turn.turn_id.as_str())
+            .map_err(|error| error.to_string())?;
+        if response.cancelled {
+            queued_cancelled += 1;
+        }
+    }
+    let refreshed = client
+        .inspect_detached_session(&session_id)
+        .map_err(|error| error.to_string())?;
+    println!(
+        "session={} active_interrupted={} queued_cancelled={} status={} queued_remaining={} pending_approvals={} reason={:?}",
+        refreshed.summary.session_id.as_str(),
+        interrupted,
+        queued_cancelled,
+        render_detached_status(refreshed.summary.status),
+        refreshed.summary.queued_turn_count,
+        refreshed.summary.pending_approval_count,
+        interrupt_reason,
+    );
+    Ok(())
+}
+
+fn run_internal_daemon(args: InternalDaemonArgs) -> Result<(), String> {
+    run_local_daemon(args.probe_home, None).map_err(|error| error.to_string())
+}
+
+fn resolve_probe_home_path(probe_home: Option<PathBuf>) -> Result<PathBuf, String> {
+    probe_home
+        .map(Ok)
+        .unwrap_or_else(|| default_probe_home().map_err(|error| error.to_string()))
+}
+
+fn daemon_client_config(probe_home: PathBuf, surface: &str) -> ProbeClientConfig {
+    let mut config = ProbeClientConfig::new(probe_home, format!("probe-cli-{surface}"));
+    config.client_version = Some(String::from(env!("CARGO_PKG_VERSION")));
+    config.transport = ProbeClientTransportConfig::LocalDaemon { socket_path: None };
+    config
+}
+
+fn try_daemon_client(probe_home: PathBuf, surface: &str) -> Result<ProbeClient, ProbeClientError> {
+    ProbeClient::connect(daemon_client_config(probe_home, surface))
+}
+
+fn resolve_daemon_client(
+    probe_home: PathBuf,
+    surface: &str,
+    autostart: bool,
+) -> Result<ProbeClient, String> {
+    match try_daemon_client(probe_home.clone(), surface) {
+        Ok(client) => Ok(client),
+        Err(error) if autostart && missing_local_daemon(&error) => {
+            spawn_background_daemon(probe_home.as_path())?;
+            wait_for_daemon_client(probe_home.clone(), surface, Duration::from_secs(3))?;
+            try_daemon_client(probe_home, surface).map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn missing_local_daemon(error: &ProbeClientError) -> bool {
+    matches!(
+        error,
+        ProbeClientError::ConnectDaemon(io_error)
+            if matches!(
+                io_error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            )
+    )
+}
+
+fn spawn_background_daemon(probe_home: &Path) -> Result<(), String> {
+    let mut command = build_daemon_command()?;
+    command
+        .arg("--probe-home")
+        .arg(probe_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("failed to spawn probe-daemon: {error}"))
+}
+
+fn build_daemon_command() -> Result<Command, String> {
+    let current_exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let sibling_daemon = sibling_named_binary_path(current_exe.as_path(), "probe-daemon");
+    if sibling_daemon.exists() {
+        let mut command = Command::new(sibling_daemon);
+        command.arg("run");
+        return Ok(command);
+    }
+    let mut command = Command::new(current_exe);
+    command.arg(INTERNAL_DAEMON_SUBCOMMAND);
+    Ok(command)
+}
+
+fn sibling_named_binary_path(current_exe: &Path, name: &str) -> PathBuf {
+    let mut path = current_exe.to_path_buf();
+    path.set_file_name(name);
+    path
+}
+
+fn wait_for_daemon_client(
+    probe_home: PathBuf,
+    surface: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match try_daemon_client(probe_home.clone(), surface) {
+            Ok(client) => {
+                drop(client);
+                return Ok(());
+            }
+            Err(error) if missing_local_daemon(&error) && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
 }
 
 fn resolve_prompt_config(
@@ -2055,6 +2431,174 @@ fn render_backend_kind(value: BackendKind) -> &'static str {
         BackendKind::OpenAiChatCompletions => "openai_chat_completions",
         BackendKind::OpenAiCodexSubscription => "openai_codex_subscription",
         BackendKind::AppleFmBridge => "apple_fm_bridge",
+    }
+}
+
+fn render_detached_summary_line(
+    summary: &probe_protocol::runtime::DetachedSessionSummary,
+) -> String {
+    format!(
+        "session={} status={} recovery={} queued={} approvals={} active_turn={} title={:?} cwd={:?}",
+        summary.session_id.as_str(),
+        render_detached_status(summary.status),
+        render_detached_recovery_state(summary.recovery_state),
+        summary.queued_turn_count,
+        summary.pending_approval_count,
+        summary.active_turn_id.as_deref().unwrap_or("none"),
+        summary.title,
+        summary.cwd,
+    )
+}
+
+fn render_detached_status(status: DetachedSessionStatus) -> &'static str {
+    match status {
+        DetachedSessionStatus::Idle => "idle",
+        DetachedSessionStatus::Running => "running",
+        DetachedSessionStatus::Queued => "queued",
+        DetachedSessionStatus::ApprovalPaused => "approval_paused",
+        DetachedSessionStatus::Completed => "completed",
+        DetachedSessionStatus::Failed => "failed",
+        DetachedSessionStatus::Cancelled => "cancelled",
+    }
+}
+
+fn render_detached_recovery_state(state: DetachedSessionRecoveryState) -> &'static str {
+    match state {
+        DetachedSessionRecoveryState::Clean => "clean",
+        DetachedSessionRecoveryState::ApprovalPausedResumable => "approval_paused_resumable",
+        DetachedSessionRecoveryState::RunningTurnFailedOnRestart => {
+            "running_turn_failed_on_restart"
+        }
+    }
+}
+
+fn render_turn_control_kv(turn: &SessionTurnControlRecord) -> String {
+    format!(
+        "turn_id={} submission={} status={} awaiting_approval={} queue_position={} requested_at_ms={} started_at_ms={} finished_at_ms={} author={:?} prompt={:?}",
+        turn.turn_id,
+        render_turn_submission_kind(turn.submission_kind),
+        render_queued_turn_status(turn.status),
+        turn.awaiting_approval,
+        turn.queue_position
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| String::from("none")),
+        turn.requested_at_ms,
+        turn.started_at_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| String::from("none")),
+        turn.finished_at_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| String::from("none")),
+        turn.author
+            .display_name
+            .as_deref()
+            .unwrap_or(&turn.author.client_name),
+        turn.prompt,
+    )
+}
+
+fn render_turn_submission_kind(value: probe_protocol::runtime::TurnSubmissionKind) -> &'static str {
+    match value {
+        probe_protocol::runtime::TurnSubmissionKind::Start => "start",
+        probe_protocol::runtime::TurnSubmissionKind::Continue => "continue",
+    }
+}
+
+fn render_queued_turn_status(value: probe_protocol::runtime::QueuedTurnStatus) -> &'static str {
+    match value {
+        probe_protocol::runtime::QueuedTurnStatus::Queued => "queued",
+        probe_protocol::runtime::QueuedTurnStatus::Running => "running",
+        probe_protocol::runtime::QueuedTurnStatus::Completed => "completed",
+        probe_protocol::runtime::QueuedTurnStatus::Failed => "failed",
+        probe_protocol::runtime::QueuedTurnStatus::Cancelled => "cancelled",
+    }
+}
+
+fn render_transcript_event_line(event: &TranscriptEvent) -> String {
+    let mut parts = Vec::new();
+    for item in &event.turn.items {
+        parts.push(format!(
+            "{}:{:?}",
+            render_transcript_item_kind(item.kind),
+            item.text
+        ));
+    }
+    format!(
+        "transcript turn_index={} turn_id={:?} items={}",
+        event.turn.index,
+        event.turn.id,
+        parts.join(" | ")
+    )
+}
+
+fn render_transcript_item_kind(kind: TranscriptItemKind) -> &'static str {
+    match kind {
+        TranscriptItemKind::UserMessage => "user_message",
+        TranscriptItemKind::AssistantMessage => "assistant_message",
+        TranscriptItemKind::ToolCall => "tool_call",
+        TranscriptItemKind::ToolResult => "tool_result",
+        TranscriptItemKind::Note => "note",
+    }
+}
+
+fn render_detached_event_line(record: &DetachedSessionEventRecord) -> String {
+    match &record.payload {
+        DetachedSessionEventPayload::SummaryUpdated { summary, .. } => format!(
+            "cursor={} truth={} kind=summary_updated status={} recovery={} queued={} approvals={} active_turn={}",
+            record.cursor,
+            render_detached_truth(record.truth),
+            render_detached_status(summary.status),
+            render_detached_recovery_state(summary.recovery_state),
+            summary.queued_turn_count,
+            summary.pending_approval_count,
+            summary.active_turn_id.as_deref().unwrap_or("none"),
+        ),
+        DetachedSessionEventPayload::RuntimeProgress { delivery: _, event } => format!(
+            "cursor={} truth={} kind=runtime_progress event={}",
+            record.cursor,
+            render_detached_truth(record.truth),
+            render_runtime_progress_kind(event),
+        ),
+        DetachedSessionEventPayload::PendingApprovalsUpdated { approvals } => format!(
+            "cursor={} truth={} kind=pending_approvals_updated approvals={}",
+            record.cursor,
+            render_detached_truth(record.truth),
+            approvals.len(),
+        ),
+        DetachedSessionEventPayload::Note { code, message } => format!(
+            "cursor={} truth={} kind=note code={} message={:?}",
+            record.cursor,
+            render_detached_truth(record.truth),
+            code,
+            message,
+        ),
+    }
+}
+
+fn render_detached_truth(truth: DetachedSessionEventTruth) -> &'static str {
+    match truth {
+        DetachedSessionEventTruth::Authoritative => "authoritative",
+        DetachedSessionEventTruth::BestEffort => "best_effort",
+    }
+}
+
+fn render_runtime_progress_kind(event: &RuntimeProgressEvent) -> &'static str {
+    match event {
+        RuntimeProgressEvent::TurnStarted { .. } => "turn_started",
+        RuntimeProgressEvent::ModelRequestStarted { .. } => "model_request_started",
+        RuntimeProgressEvent::AssistantStreamStarted { .. } => "assistant_stream_started",
+        RuntimeProgressEvent::TimeToFirstTokenObserved { .. } => "time_to_first_token_observed",
+        RuntimeProgressEvent::AssistantDelta { .. } => "assistant_delta",
+        RuntimeProgressEvent::AssistantSnapshot { .. } => "assistant_snapshot",
+        RuntimeProgressEvent::ToolCallDelta { .. } => "tool_call_delta",
+        RuntimeProgressEvent::ToolCallRequested { .. } => "tool_call_requested",
+        RuntimeProgressEvent::ToolExecutionStarted { .. } => "tool_execution_started",
+        RuntimeProgressEvent::ToolExecutionCompleted { .. } => "tool_execution_completed",
+        RuntimeProgressEvent::ToolRefused { .. } => "tool_refused",
+        RuntimeProgressEvent::ToolPaused { .. } => "tool_paused",
+        RuntimeProgressEvent::AssistantStreamFinished { .. } => "assistant_stream_finished",
+        RuntimeProgressEvent::ModelRequestFailed { .. } => "model_request_failed",
+        RuntimeProgressEvent::AssistantTurnCommitted { .. } => "assistant_turn_committed",
     }
 }
 

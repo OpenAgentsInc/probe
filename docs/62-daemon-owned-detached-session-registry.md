@@ -87,7 +87,6 @@ Detached watch and log subscriptions now exist above it in
 
 The remaining gap is now above the registry and watch substrate:
 
-- operator `probe ps|attach|logs|stop` commands
 - timeout or watchdog policy
 - first-party chat or TUI default attach flows
 

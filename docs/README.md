@@ -217,3 +217,7 @@ This folder holds technical planning docs for the Probe runtime.
     daemon event logs, cursor-based replay, authoritative versus best-effort
     truth labels, daemon watch subscriptions, and the shared `probe-client`
     helpers above that event stream
+- `64-daemon-operator-cli.md`
+  - the first human-facing daemon operator surface for Phase 2, including
+    `probe daemon run|stop`, `probe ps|attach|logs|stop`, daemon autostart,
+    and the bounded binary-regression coverage for those commands

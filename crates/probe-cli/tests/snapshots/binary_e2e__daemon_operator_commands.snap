@@ -1,0 +1,25 @@
+---
+source: crates/probe-cli/tests/binary_e2e.rs
+assertion_line: 319
+expression: "normalize_daemon_cli_snapshot(&combined, &environment, session_id.as_str())"
+---
+PS
+sessions=1
+session=<SESSION_ID> status=approval_paused recovery=approval_paused_resumable queued=0 approvals=1 active_turn=turn-0 title="daemon cli approval pause" cwd="<WORKSPACE>"
+
+ATTACH
+session=<SESSION_ID> status=approval_paused recovery=approval_paused_resumable queued=0 approvals=1 active_turn=turn-0 title="daemon cli approval pause" cwd="<WORKSPACE>"
+backend_profile=daemon-cli-test next_turn_index=2 transcript_events=2 pending_approvals=1
+active_turn turn_id=turn-0 submission=continue status=running awaiting_approval=true queue_position=0 requested_at_ms=<TS> started_at_ms=<TS> finished_at_ms=none author="probe-cli-test" prompt="pause for daemon cli"
+pending_approval tool_call_id=call_patch_1 tool=apply_patch risk=write requested_at_ms=<TS> reason=Some("tool `apply_patch` requires write approval")
+transcript turn_index=0 turn_id=TurnId(0) items=user_message:"pause for daemon cli" | tool_call:"{\"new_text\":\"probe\",\"old_text\":\"world\",\"path\":\"hello.txt\"}"
+transcript turn_index=1 turn_id=TurnId(1) items=tool_result:"{\"approval_required\":true,\"error\":\"tool execution blocked by local approval policy\",\"reason\":\"tool `apply_patch` requires write approval\",\"risk_class\":\"write\",\"tool\":\"apply_patch\"}"
+
+LOGS
+cursor=<CURSOR> truth=authoritative kind=pending_approvals_updated approvals=1
+cursor=<CURSOR> truth=authoritative kind=summary_updated status=approval_paused recovery=approval_paused_resumable queued=0 approvals=1 active_turn=turn-0
+STOP
+session=<SESSION_ID> active_interrupted=true queued_cancelled=0 status=cancelled queued_remaining=0 pending_approvals=0 reason=Some("cancelled the approval-paused turn, rejected its pending approvals, and preserved the interruption in the transcript")
+
+DAEMON_STOP
+running=true stopped=true active_turns=0

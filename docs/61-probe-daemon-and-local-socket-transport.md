@@ -83,10 +83,10 @@ It gives Probe:
   `62-daemon-owned-detached-session-registry.md`
 - the detached watch or log lane documented in
   `63-detached-session-watch-and-log-subscriptions.md`
+- the operator CLI documented in `64-daemon-operator-cli.md`
 
 It does not yet give Probe:
 
-- operator `probe ps|attach|logs|stop` commands
 - timeout and watchdog policy
 - first-party chat or TUI defaulting to daemon attach
 

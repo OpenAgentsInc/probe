@@ -1,6 +1,6 @@
 ---
 source: crates/probe-cli/tests/binary_e2e.rs
-assertion_line: 181
+assertion_line: 191
 expression: report
 ---
 {
@@ -12,7 +12,8 @@ expression: report
     "loopback attach may be local or an SSH-forwarded remote Psionic target",
     "backend transport: loopback_or_ssh_forward (http://127.0.0.1:<port>/v1)",
     "backend target: openai_chat_completions attach 127.0.0.1:<port> model=tiny-qwen35",
-    "press Tab or Shift+Tab to switch backends",
+    "press Shift+Tab for Codex reasoning or previous backend",
+    "press Tab to switch backends",
     "press F1 for help",
     "press Ctrl+S to inspect backend status",
     "press Ctrl+R to rerun backend check when supported",

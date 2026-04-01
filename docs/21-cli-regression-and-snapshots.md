@@ -19,6 +19,8 @@ Current coverage includes:
 - resume-override rejection paths for `probe chat`
 - successful `probe accept` runs with a stable normalized JSON snapshot of the
   emitted report
+- real daemon-backed operator flows for `probe ps`, `probe attach`,
+  `probe logs`, `probe stop`, and `probe daemon stop`
 
 ## Snapshot Boundary
 
@@ -29,6 +31,8 @@ What is snapshot-tested:
 - normalized `probe exec` stderr summaries
 - one selected persisted transcript event from a real CLI session
 - a normalized acceptance report JSON shape
+- one normalized detached operator-control transcript covering `ps`, `attach`,
+  `logs`, `stop`, and daemon shutdown
 
 What is not snapshot-tested:
 

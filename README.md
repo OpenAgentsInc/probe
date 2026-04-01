@@ -16,6 +16,8 @@ Current shipped surface:
 - three inference lanes in the TUI: Codex, Qwen or Tailnet, and Apple FM
 - `probe-server` for the first typed local stdio supervision contract
 - `probe-daemon` for the first long-lived local Unix-socket supervision path
+- `probe daemon run|stop` plus `probe ps|attach|logs|stop` for local detached
+  session supervision
 - a shared `probe-client` layer underneath `exec`, `chat`, and the TUI so
   first-party surfaces now speak one server contract
 - `coding_bootstrap` tools, approvals, and harness profiles
@@ -85,6 +87,36 @@ Run the long-lived local daemon:
 
 ```bash
 cargo run -p probe-daemon -- run --probe-home ~/.probe
+```
+
+Inspect detached sessions:
+
+```bash
+cargo run -p probe-cli -- ps --probe-home ~/.probe
+```
+
+Inspect one detached session:
+
+```bash
+cargo run -p probe-cli -- attach <session-id> --probe-home ~/.probe
+```
+
+Tail detached session logs:
+
+```bash
+cargo run -p probe-cli -- logs <session-id> --probe-home ~/.probe --follow
+```
+
+Stop detached work for one session:
+
+```bash
+cargo run -p probe-cli -- stop <session-id> --probe-home ~/.probe
+```
+
+Stop the daemon after detached work is drained:
+
+```bash
+cargo run -p probe-cli -- daemon stop --probe-home ~/.probe
 ```
 
 Resume a session:

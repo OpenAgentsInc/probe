@@ -127,7 +127,8 @@ The shared client also now exposes the first daemon-owned session helpers:
 - `watch_detached_session`
 
 That keeps later `probe ps` and attach work on the same shared client seam
-instead of growing a second daemon-only control client.
+instead of growing a second daemon-only control client. The shipped operator
+CLI in `64-daemon-operator-cli.md` now sits on that same shared seam.
 
 ## New Shared Control Calls
 

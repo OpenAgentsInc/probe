@@ -1099,6 +1099,7 @@ fn client_error_session_id(error: &ProbeClientError) -> Option<SessionId> {
         | ProbeClientError::SessionScopedProtocol { session_id, .. } => Some(session_id.clone()),
         ProbeClientError::CurrentExecutable(_)
         | ProbeClientError::Spawn(_)
+        | ProbeClientError::ConnectDaemon(_)
         | ProbeClientError::MissingChildStdin
         | ProbeClientError::MissingChildStdout
         | ProbeClientError::Io(_)
