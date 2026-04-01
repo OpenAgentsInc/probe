@@ -21,11 +21,12 @@ use serde_json::Value;
 
 use crate::dataset_export::build_decision_summary;
 use crate::provider::{
-    PlainTextMessage, ProviderError, ProviderUsage, apple_fm_tool_loop_response,
-    apple_fm_tool_loop_response_with_callback, complete_apple_fm_plain_text_with_callback,
-    complete_openai_plain_text_with_callback, complete_plain_text,
-    normalize_openai_stream_display_text, observability_usage_measurement, openai_tool_loop_response,
-    openai_tool_loop_response_with_callback,
+    OpenAiRequestContext, PlainTextMessage, ProviderError, ProviderUsage,
+    apple_fm_tool_loop_response, apple_fm_tool_loop_response_with_callback,
+    complete_apple_fm_plain_text_with_callback,
+    complete_openai_plain_text_with_context_and_callback, complete_plain_text_with_context,
+    normalize_openai_stream_display_text, observability_usage_measurement,
+    openai_tool_loop_response_with_callback, openai_tool_loop_response_with_context,
 };
 use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionStoreError};
 use crate::tools::{
@@ -640,7 +641,8 @@ fn emit_openai_stream_events(
             && !content.is_empty()
         {
             state.raw_assistant_text.push_str(content);
-            let normalized = normalize_openai_stream_display_text(state.raw_assistant_text.as_str());
+            let normalized =
+                normalize_openai_stream_display_text(state.raw_assistant_text.as_str());
             let delta = normalized
                 .strip_prefix(state.rendered_assistant_text.as_str())
                 .map(ToOwned::to_owned)
@@ -866,13 +868,14 @@ impl ProbeRuntime {
             return self.run_plain_completion_turn(session, profile, prompt, event_sink);
         }
         match profile.kind {
-            BackendKind::OpenAiChatCompletions => self.run_openai_tool_loop_turn(
-                session,
-                profile,
-                Some(prompt),
-                tool_loop.expect("filtered"),
-                event_sink,
-            ),
+            BackendKind::OpenAiChatCompletions | BackendKind::OpenAiCodexSubscription => self
+                .run_openai_tool_loop_turn(
+                    session,
+                    profile,
+                    Some(prompt),
+                    tool_loop.expect("filtered"),
+                    event_sink,
+                ),
             BackendKind::AppleFmBridge => self.run_apple_fm_tool_loop_turn(
                 session,
                 profile,
@@ -931,15 +934,23 @@ impl ProbeRuntime {
                         tool_loop.registry.declared_tools(),
                         tool_loop.tool_choice.to_provider_choice(),
                         Some(tool_loop.parallel_tool_calls),
+                        OpenAiRequestContext {
+                            probe_home: Some(self.session_store.root()),
+                            session_id: Some(session.id.as_str()),
+                        },
                         Some(&mut callback),
                     )
                 } else {
-                    openai_tool_loop_response(
+                    openai_tool_loop_response_with_context(
                         &profile,
                         messages.clone(),
                         tool_loop.registry.declared_tools(),
                         tool_loop.tool_choice.to_provider_choice(),
                         Some(tool_loop.parallel_tool_calls),
+                        OpenAiRequestContext {
+                            probe_home: Some(self.session_store.root()),
+                            session_id: Some(session.id.as_str()),
+                        },
                     )
                 }
             }
@@ -1404,7 +1415,9 @@ impl ProbeRuntime {
         );
         let request_started = Instant::now();
         let response = match profile.kind {
-            BackendKind::OpenAiChatCompletions if event_sink.is_some() => {
+            BackendKind::OpenAiChatCompletions | BackendKind::OpenAiCodexSubscription
+                if event_sink.is_some() =>
+            {
                 let mut stream_state = OpenAiStreamRuntimeState::default();
                 let mut callback = |chunk: &ChatCompletionChunk| {
                     emit_openai_stream_events(
@@ -1416,7 +1429,15 @@ impl ProbeRuntime {
                         chunk,
                     );
                 };
-                complete_openai_plain_text_with_callback(&profile, messages, Some(&mut callback))
+                complete_openai_plain_text_with_context_and_callback(
+                    &profile,
+                    messages,
+                    OpenAiRequestContext {
+                        probe_home: Some(self.session_store.root()),
+                        session_id: Some(session.id.as_str()),
+                    },
+                    Some(&mut callback),
+                )
             }
             BackendKind::AppleFmBridge if event_sink.is_some() => {
                 let mut stream_state = AppleFmStreamRuntimeState::default();
@@ -1433,7 +1454,14 @@ impl ProbeRuntime {
                 };
                 complete_apple_fm_plain_text_with_callback(&profile, messages, Some(&mut callback))
             }
-            _ => complete_plain_text(&profile, messages),
+            _ => complete_plain_text_with_context(
+                &profile,
+                messages,
+                OpenAiRequestContext {
+                    probe_home: Some(self.session_store.root()),
+                    session_id: Some(session.id.as_str()),
+                },
+            ),
         }
         .map_err(|source| RuntimeError::ProviderRequest {
             session_id: session.id.clone(),
@@ -1595,7 +1623,7 @@ impl ProbeRuntime {
             },
         );
         match profile.kind {
-            BackendKind::OpenAiChatCompletions => {
+            BackendKind::OpenAiChatCompletions | BackendKind::OpenAiCodexSubscription => {
                 self.run_openai_tool_loop_turn(session, profile, None, tool_loop, event_sink)
             }
             BackendKind::AppleFmBridge => {

@@ -7,14 +7,39 @@ use probe_protocol::backend::BackendProfile;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
+const CODEX_MODEL_ALLOWLIST: &[&str] = &[
+    "gpt-5.1-codex",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex-mini",
+    "gpt-5.2",
+    "gpt-5.2-codex",
+    "gpt-5.3-codex",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpenAiRequestAuth {
+    None,
+    BearerToken(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenAiTransport {
+    ChatCompletions,
+    CodexResponses,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenAiProviderConfig {
     pub base_url: String,
     pub model: String,
-    pub api_key: String,
+    pub auth: OpenAiRequestAuth,
     pub timeout: Duration,
     pub stream: bool,
     pub max_tokens: Option<u32>,
+    pub transport: OpenAiTransport,
+    pub extra_headers: BTreeMap<String, String>,
 }
 
 impl OpenAiProviderConfig {
@@ -25,16 +50,30 @@ impl OpenAiProviderConfig {
         Self {
             base_url: String::from("http://127.0.0.1:8080/v1"),
             model: model.into(),
-            api_key: String::from("dummy"),
+            auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: Duration::from_secs(30),
             stream: false,
             max_tokens: Some(Self::DEFAULT_MAX_TOKENS),
+            transport: OpenAiTransport::ChatCompletions,
+            extra_headers: BTreeMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn request_endpoint(&self) -> String {
+        match self.transport {
+            OpenAiTransport::ChatCompletions => {
+                format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+            }
+            OpenAiTransport::CodexResponses => {
+                format!("{}/responses", self.base_url.trim_end_matches('/'))
+            }
         }
     }
 
     #[must_use]
     pub fn chat_completions_endpoint(&self) -> String {
-        format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+        self.request_endpoint()
     }
 
     #[must_use]
@@ -42,10 +81,28 @@ impl OpenAiProviderConfig {
         Self {
             base_url: profile.base_url.clone(),
             model: profile.model.clone(),
-            api_key: String::from("dummy"),
+            auth: match profile.kind {
+                probe_protocol::backend::BackendKind::OpenAiCodexSubscription => {
+                    OpenAiRequestAuth::None
+                }
+                probe_protocol::backend::BackendKind::OpenAiChatCompletions
+                | probe_protocol::backend::BackendKind::AppleFmBridge => {
+                    OpenAiRequestAuth::BearerToken(String::from("dummy"))
+                }
+            },
             timeout: Duration::from_secs(profile.timeout_secs),
             stream: false,
             max_tokens: Some(Self::DEFAULT_MAX_TOKENS),
+            transport: match profile.kind {
+                probe_protocol::backend::BackendKind::OpenAiCodexSubscription => {
+                    OpenAiTransport::CodexResponses
+                }
+                probe_protocol::backend::BackendKind::OpenAiChatCompletions
+                | probe_protocol::backend::BackendKind::AppleFmBridge => {
+                    OpenAiTransport::ChatCompletions
+                }
+            },
+            extra_headers: BTreeMap::new(),
         }
     }
 }
@@ -308,6 +365,7 @@ pub enum OpenAiProviderError {
     HttpStatus { status: u16, body: String },
     InvalidStreamContentType { content_type: String },
     Decode(String),
+    UnsupportedCodexModel { model: String },
 }
 
 impl Display for OpenAiProviderError {
@@ -325,6 +383,12 @@ impl Display for OpenAiProviderError {
                 )
             }
             Self::Decode(message) => write!(f, "failed to decode backend response: {message}"),
+            Self::UnsupportedCodexModel { model } => {
+                write!(
+                    f,
+                    "model `{model}` is not allowed for Codex subscription transport"
+                )
+            }
         }
     }
 }
@@ -381,10 +445,9 @@ impl OpenAiProviderClient {
         &self,
         request: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, OpenAiProviderError> {
+        self.validate_request()?;
         let response = self
-            .http
-            .post(self.config.chat_completions_endpoint())
-            .bearer_auth(self.config.api_key.as_str())
+            .request_builder(self.http.post(self.config.request_endpoint()))
             .json(request)
             .send()
             .map_err(|error| OpenAiProviderError::Transport(error.to_string()))?;
@@ -410,11 +473,13 @@ impl OpenAiProviderClient {
         request: &ChatCompletionRequest,
         mut on_chunk: impl FnMut(&ChatCompletionChunk),
     ) -> Result<ChatCompletionResponse, OpenAiProviderError> {
+        self.validate_request()?;
         let response = self
-            .http
-            .post(self.config.chat_completions_endpoint())
-            .bearer_auth(self.config.api_key.as_str())
-            .header("accept", "text/event-stream")
+            .request_builder(
+                self.http
+                    .post(self.config.request_endpoint())
+                    .header("accept", "text/event-stream"),
+            )
             .json(request)
             .send()
             .map_err(|error| OpenAiProviderError::Transport(error.to_string()))?;
@@ -492,6 +557,37 @@ impl OpenAiProviderClient {
 
         accumulator.finalize()
     }
+
+    fn validate_request(&self) -> Result<(), OpenAiProviderError> {
+        if self.config.transport == OpenAiTransport::CodexResponses
+            && !model_allowed_for_codex(self.config.model.as_str())
+        {
+            return Err(OpenAiProviderError::UnsupportedCodexModel {
+                model: self.config.model.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn request_builder(
+        &self,
+        builder: reqwest::blocking::RequestBuilder,
+    ) -> reqwest::blocking::RequestBuilder {
+        let builder = match &self.config.auth {
+            OpenAiRequestAuth::None => builder,
+            OpenAiRequestAuth::BearerToken(token) => builder.bearer_auth(token),
+        };
+        self.config
+            .extra_headers
+            .iter()
+            .fold(builder, |builder, (name, value)| {
+                builder.header(name, value)
+            })
+    }
+}
+
+fn model_allowed_for_codex(model: &str) -> bool {
+    model.contains("codex") || CODEX_MODEL_ALLOWLIST.contains(&model)
 }
 
 #[derive(Default)]
@@ -566,12 +662,14 @@ impl ChatCompletionStreamAccumulator {
     }
 
     fn finalize(self) -> Result<ChatCompletionResponse, OpenAiProviderError> {
-        let id = self
-            .response_id
-            .ok_or_else(|| OpenAiProviderError::Decode(String::from("stream ended before emitting a response id")))?;
-        let model = self
-            .response_model
-            .ok_or_else(|| OpenAiProviderError::Decode(String::from("stream ended before emitting a response model")))?;
+        let id = self.response_id.ok_or_else(|| {
+            OpenAiProviderError::Decode(String::from("stream ended before emitting a response id"))
+        })?;
+        let model = self.response_model.ok_or_else(|| {
+            OpenAiProviderError::Decode(String::from(
+                "stream ended before emitting a response model",
+            ))
+        })?;
         let mut choices = Vec::new();
         for (index, builder) in self.choices {
             let mut tool_calls = Vec::new();
@@ -622,26 +720,31 @@ impl ChatCompletionStreamAccumulator {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::time::Duration;
 
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
-    use probe_test_support::{FakeHttpResponse, FakeOpenAiServer};
+    use probe_test_support::{FakeAppleFmServer, FakeHttpResponse, FakeOpenAiServer};
 
     use super::{
         ChatCompletionChunk, ChatCompletionResponse, ChatMessage, ChatToolCall,
-        ChatToolCallFunction, OpenAiProviderClient, OpenAiProviderConfig,
-        OpenAiProviderError,
+        ChatToolCallFunction, OpenAiProviderClient, OpenAiProviderConfig, OpenAiProviderError,
+        OpenAiRequestAuth, OpenAiTransport,
     };
 
     #[test]
     fn localhost_helper_uses_local_default() {
         let config = OpenAiProviderConfig::localhost("example.gguf");
         assert_eq!(config.base_url, "http://127.0.0.1:8080/v1");
-        assert_eq!(config.api_key, "dummy");
+        assert_eq!(
+            config.auth,
+            OpenAiRequestAuth::BearerToken(String::from("dummy"))
+        );
         assert_eq!(
             config.chat_completions_endpoint(),
             "http://127.0.0.1:8080/v1/chat/completions"
         );
+        assert_eq!(config.transport, OpenAiTransport::ChatCompletions);
     }
 
     #[test]
@@ -665,16 +768,58 @@ mod tests {
             config.max_tokens,
             Some(OpenAiProviderConfig::DEFAULT_MAX_TOKENS)
         );
+        assert_eq!(config.transport, OpenAiTransport::ChatCompletions);
+    }
+
+    #[test]
+    fn codex_config_can_be_built_from_backend_profile() {
+        let profile = BackendProfile {
+            name: String::from("openai-codex-subscription"),
+            kind: BackendKind::OpenAiCodexSubscription,
+            base_url: String::from("https://chatgpt.com/backend-api/codex"),
+            model: String::from("gpt-5.3-codex"),
+            api_key_env: String::new(),
+            timeout_secs: 60,
+            attach_mode: ServerAttachMode::AttachToExisting,
+            prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        };
+        let config = OpenAiProviderConfig::from_backend_profile(&profile);
+        assert_eq!(
+            config.request_endpoint(),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(config.transport, OpenAiTransport::CodexResponses);
+        assert_eq!(config.auth, OpenAiRequestAuth::None);
     }
 
     fn streaming_config(base_url: &str) -> OpenAiProviderConfig {
         OpenAiProviderConfig {
             base_url: base_url.to_string(),
             model: String::from("tiny-qwen35"),
-            api_key: String::from("dummy"),
+            auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: Duration::from_secs(5),
             stream: true,
             max_tokens: Some(OpenAiProviderConfig::DEFAULT_MAX_TOKENS),
+            transport: OpenAiTransport::ChatCompletions,
+            extra_headers: BTreeMap::new(),
+        }
+    }
+
+    fn codex_config(base_url: &str) -> OpenAiProviderConfig {
+        let mut extra_headers = BTreeMap::new();
+        extra_headers.insert(String::from("ChatGPT-Account-Id"), String::from("acct-123"));
+        extra_headers.insert(String::from("originator"), String::from("probe"));
+        extra_headers.insert(String::from("session_id"), String::from("sess-codex-123"));
+        extra_headers.insert(String::from("User-Agent"), String::from("probe/test"));
+        OpenAiProviderConfig {
+            base_url: base_url.to_string(),
+            model: String::from("gpt-5.3-codex"),
+            auth: OpenAiRequestAuth::BearerToken(String::from("access-token")),
+            timeout: Duration::from_secs(5),
+            stream: false,
+            max_tokens: Some(OpenAiProviderConfig::DEFAULT_MAX_TOKENS),
+            transport: OpenAiTransport::CodexResponses,
+            extra_headers,
         }
     }
 
@@ -700,10 +845,12 @@ mod tests {
         let config = OpenAiProviderConfig {
             base_url: String::from(server.base_url()),
             model: String::from("tiny-qwen35"),
-            api_key: String::from("dummy"),
+            auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: std::time::Duration::from_secs(5),
             stream: false,
             max_tokens: Some(OpenAiProviderConfig::DEFAULT_MAX_TOKENS),
+            transport: OpenAiTransport::ChatCompletions,
+            extra_headers: BTreeMap::new(),
         };
         let client = OpenAiProviderClient::new(config).expect("client");
         let response: ChatCompletionResponse = client
@@ -745,10 +892,12 @@ mod tests {
         let config = OpenAiProviderConfig {
             base_url: String::from(server.base_url()),
             model: String::from("tiny-qwen35"),
-            api_key: String::from("dummy"),
+            auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: Duration::from_secs(5),
             stream: false,
             max_tokens: Some(OpenAiProviderConfig::DEFAULT_MAX_TOKENS),
+            transport: OpenAiTransport::ChatCompletions,
+            extra_headers: BTreeMap::new(),
         };
         let client = OpenAiProviderClient::new(config).expect("client");
         let response = client
@@ -762,6 +911,63 @@ mod tests {
         let requests = server.finish();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].contains("inspect README.md"));
+    }
+
+    #[test]
+    fn codex_transport_rewrites_to_subscription_endpoint_and_injects_headers() {
+        let server = FakeAppleFmServer::from_json_responses(vec![serde_json::json!({
+            "id": "codex_resp_1",
+            "model": "gpt-5.3-codex",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello from codex"},
+                    "finish_reason": "stop"
+                }
+            ]
+        })]);
+        let client = OpenAiProviderClient::new(codex_config(
+            format!("{}/backend-api/codex", server.base_url()).as_str(),
+        ))
+        .expect("client");
+
+        let response = client
+            .chat_completion(vec![ChatMessage::user("hello from probe")])
+            .expect("codex response");
+
+        assert_eq!(response.first_message_text(), Some("hello from codex"));
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        let request = requests[0].to_lowercase();
+        assert!(request.contains("post /backend-api/codex/responses"));
+        assert!(request.contains("bearer access-token"));
+        assert!(request.contains("chatgpt-account-id: acct-123"));
+        assert!(request.contains("originator: probe"));
+        assert!(request.contains("user-agent: probe/test"));
+        assert!(request.contains("session_id: sess-codex-123"));
+    }
+
+    #[test]
+    fn codex_transport_rejects_models_outside_the_allowlist() {
+        let server = FakeAppleFmServer::from_json_responses(vec![serde_json::json!({
+            "id": "unused",
+            "model": "gpt-4.1",
+            "choices": []
+        })]);
+        let mut config = codex_config(format!("{}/backend-api/codex", server.base_url()).as_str());
+        config.model = String::from("gpt-4.1");
+        let client = OpenAiProviderClient::new(config).expect("client");
+
+        let error = client
+            .chat_completion(vec![ChatMessage::user("hello")])
+            .expect_err("non-codex model should be rejected");
+
+        match error {
+            OpenAiProviderError::UnsupportedCodexModel { model } => {
+                assert_eq!(model, "gpt-4.1");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]
@@ -795,10 +1001,12 @@ mod tests {
         let config = OpenAiProviderConfig {
             base_url: String::from(server.base_url()),
             model: String::from("tiny-qwen35"),
-            api_key: String::from("dummy"),
+            auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: std::time::Duration::from_secs(5),
             stream: false,
             max_tokens: Some(OpenAiProviderConfig::DEFAULT_MAX_TOKENS),
+            transport: OpenAiTransport::ChatCompletions,
+            extra_headers: BTreeMap::new(),
         };
         let client = OpenAiProviderClient::new(config).expect("client");
         let error = client
@@ -825,9 +1033,8 @@ mod tests {
             "data: {\"id\":\"chatcmpl_stream_text\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n",
             "data: [DONE]\n\n"
         );
-        let server = FakeOpenAiServer::from_responses(vec![FakeHttpResponse::text_event_stream(
-            200, body,
-        )]);
+        let server =
+            FakeOpenAiServer::from_responses(vec![FakeHttpResponse::text_event_stream(200, body)]);
         let client =
             OpenAiProviderClient::new(streaming_config(server.base_url())).expect("client");
         let mut seen_chunks = Vec::<ChatCompletionChunk>::new();
@@ -845,7 +1052,10 @@ mod tests {
         assert_eq!(seen_chunks.len(), 3);
         assert_eq!(response.first_message_text(), Some("hello world"));
         assert_eq!(
-            response.usage.expect("usage should be preserved").total_tokens,
+            response
+                .usage
+                .expect("usage should be preserved")
+                .total_tokens,
             5
         );
     }
@@ -870,9 +1080,8 @@ mod tests {
             "data: {\"id\":\"chatcmpl_stream_tool\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: [DONE]\n\n"
         );
-        let server = FakeOpenAiServer::from_responses(vec![FakeHttpResponse::text_event_stream(
-            200, body,
-        )]);
+        let server =
+            FakeOpenAiServer::from_responses(vec![FakeHttpResponse::text_event_stream(200, body)]);
         let client =
             OpenAiProviderClient::new(streaming_config(server.base_url())).expect("client");
 
@@ -889,8 +1098,8 @@ mod tests {
 
     #[test]
     fn streaming_requests_fall_back_to_non_streaming_when_backend_returns_json() {
-        let server = FakeOpenAiServer::from_responses(vec![FakeHttpResponse::json_ok(
-            serde_json::json!({
+        let server =
+            FakeOpenAiServer::from_responses(vec![FakeHttpResponse::json_ok(serde_json::json!({
                 "id": "chatcmpl_fallback",
                 "model": "tiny-qwen35",
                 "choices": [{
@@ -898,8 +1107,7 @@ mod tests {
                     "message": {"role": "assistant", "content": "fallback response"},
                     "finish_reason": "stop"
                 }]
-            }),
-        )]);
+            }))]);
         let client =
             OpenAiProviderClient::new(streaming_config(server.base_url())).expect("client");
 

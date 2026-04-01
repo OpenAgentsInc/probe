@@ -2324,6 +2324,9 @@ fn compact_runtime_policy_reason(reason: Option<&str>, tool_name: &str) -> Strin
 fn render_backend_kind(value: probe_protocol::backend::BackendKind) -> &'static str {
     match value {
         probe_protocol::backend::BackendKind::OpenAiChatCompletions => "openai_chat_completions",
+        probe_protocol::backend::BackendKind::OpenAiCodexSubscription => {
+            "openai_codex_subscription"
+        }
         probe_protocol::backend::BackendKind::AppleFmBridge => "apple_fm_bridge",
     }
 }

@@ -1,6 +1,8 @@
 use std::fmt::{Display, Formatter};
+use std::path::Path;
 use std::sync::Arc;
 
+use probe_openai_auth::{OpenAiAuthError, OpenAiCodexAuthController};
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_protocol::session::{
     BackendAvailabilityReceipt, BackendFailureReceipt, BackendTranscriptReceipt,
@@ -12,7 +14,7 @@ use probe_provider_apple_fm::{
 };
 use probe_provider_openai::{
     ChatCompletionChunk, ChatMessage, ChatToolCall, ChatToolDefinitionEnvelope,
-    OpenAiProviderClient, OpenAiProviderConfig, OpenAiProviderError,
+    OpenAiProviderClient, OpenAiProviderConfig, OpenAiProviderError, OpenAiRequestAuth,
 };
 use psionic_apple_fm::{
     AppleFmChatUsage, AppleFmErrorCode, AppleFmTextStreamEvent, AppleFmToolCallError,
@@ -122,10 +124,20 @@ pub struct ToolLoopProviderResponse {
 pub type OpenAiStreamChunkCallback<'a> = dyn FnMut(&ChatCompletionChunk) + 'a;
 pub type AppleFmStreamEventCallback<'a> = dyn FnMut(&AppleFmTextStreamEvent) + 'a;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OpenAiRequestContext<'a> {
+    pub probe_home: Option<&'a Path>,
+    pub session_id: Option<&'a str>,
+}
+
 #[derive(Debug)]
 pub enum ProviderError {
     OpenAi(OpenAiProviderError),
     AppleFm(AppleFmProviderError),
+    Auth(OpenAiAuthError),
+    MissingCodexSubscriptionAuth {
+        path: String,
+    },
     UnsupportedFeature {
         backend: BackendKind,
         feature: &'static str,
@@ -137,6 +149,11 @@ impl Display for ProviderError {
         match self {
             Self::OpenAi(error) => write!(f, "{error}"),
             Self::AppleFm(error) => write!(f, "{error}"),
+            Self::Auth(error) => write!(f, "{error}"),
+            Self::MissingCodexSubscriptionAuth { path } => write!(
+                f,
+                "codex subscription auth is missing at {path}; run `probe codex login --method browser`"
+            ),
             Self::UnsupportedFeature { backend, feature } => {
                 write!(f, "backend {:?} does not support {feature}", backend)
             }
@@ -177,7 +194,10 @@ impl ProviderError {
                         transcript: None,
                     })
             }
-            Self::OpenAi(_) | Self::UnsupportedFeature { .. } => None,
+            Self::OpenAi(_)
+            | Self::Auth(_)
+            | Self::MissingCodexSubscriptionAuth { .. }
+            | Self::UnsupportedFeature { .. } => None,
         }
     }
 }
@@ -186,8 +206,18 @@ pub fn complete_plain_text(
     profile: &BackendProfile,
     messages: Vec<PlainTextMessage>,
 ) -> Result<PlainTextProviderResponse, ProviderError> {
+    complete_plain_text_with_context(profile, messages, OpenAiRequestContext::default())
+}
+
+pub fn complete_plain_text_with_context(
+    profile: &BackendProfile,
+    messages: Vec<PlainTextMessage>,
+    context: OpenAiRequestContext<'_>,
+) -> Result<PlainTextProviderResponse, ProviderError> {
     match profile.kind {
-        BackendKind::OpenAiChatCompletions => complete_openai_plain_text(profile, messages),
+        BackendKind::OpenAiChatCompletions | BackendKind::OpenAiCodexSubscription => {
+            complete_openai_plain_text(profile, messages, context)
+        }
         BackendKind::AppleFmBridge => complete_apple_fm_plain_text(profile, messages),
     }
 }
@@ -195,8 +225,9 @@ pub fn complete_plain_text(
 fn complete_openai_plain_text(
     profile: &BackendProfile,
     messages: Vec<PlainTextMessage>,
+    context: OpenAiRequestContext<'_>,
 ) -> Result<PlainTextProviderResponse, ProviderError> {
-    complete_openai_plain_text_with_callback(profile, messages, None)
+    complete_openai_plain_text_with_context_and_callback(profile, messages, context, None)
 }
 
 pub fn complete_openai_plain_text_with_callback(
@@ -204,7 +235,21 @@ pub fn complete_openai_plain_text_with_callback(
     messages: Vec<PlainTextMessage>,
     callback: Option<&mut OpenAiStreamChunkCallback<'_>>,
 ) -> Result<PlainTextProviderResponse, ProviderError> {
-    let provider_config = OpenAiProviderConfig::from_backend_profile(profile);
+    complete_openai_plain_text_with_context_and_callback(
+        profile,
+        messages,
+        OpenAiRequestContext::default(),
+        callback,
+    )
+}
+
+pub fn complete_openai_plain_text_with_context_and_callback(
+    profile: &BackendProfile,
+    messages: Vec<PlainTextMessage>,
+    context: OpenAiRequestContext<'_>,
+    callback: Option<&mut OpenAiStreamChunkCallback<'_>>,
+) -> Result<PlainTextProviderResponse, ProviderError> {
+    let provider_config = openai_provider_config_from_profile(profile, context)?;
     let provider = OpenAiProviderClient::new(provider_config).map_err(ProviderError::OpenAi)?;
     let request_messages = messages
         .iter()
@@ -214,8 +259,10 @@ pub fn complete_openai_plain_text_with_callback(
         Some(callback) => {
             let mut streaming_config = provider.config().clone();
             streaming_config.stream = true;
-            let request =
-                probe_provider_openai::ChatCompletionRequest::from_config(&streaming_config, request_messages);
+            let request = probe_provider_openai::ChatCompletionRequest::from_config(
+                &streaming_config,
+                request_messages,
+            );
             provider
                 .send_chat_completion_with_callback(&request, callback)
                 .map_err(ProviderError::OpenAi)?
@@ -334,12 +381,31 @@ pub fn openai_tool_loop_response(
     tool_choice: Option<probe_provider_openai::ChatToolChoice>,
     parallel_tool_calls: Option<bool>,
 ) -> Result<ToolLoopProviderResponse, ProviderError> {
+    openai_tool_loop_response_with_context(
+        profile,
+        messages,
+        tools,
+        tool_choice,
+        parallel_tool_calls,
+        OpenAiRequestContext::default(),
+    )
+}
+
+pub fn openai_tool_loop_response_with_context(
+    profile: &BackendProfile,
+    messages: Vec<ChatMessage>,
+    tools: Vec<ChatToolDefinitionEnvelope>,
+    tool_choice: Option<probe_provider_openai::ChatToolChoice>,
+    parallel_tool_calls: Option<bool>,
+    context: OpenAiRequestContext<'_>,
+) -> Result<ToolLoopProviderResponse, ProviderError> {
     openai_tool_loop_response_with_callback(
         profile,
         messages,
         tools,
         tool_choice,
         parallel_tool_calls,
+        context,
         None,
     )
 }
@@ -350,16 +416,20 @@ pub fn openai_tool_loop_response_with_callback(
     tools: Vec<ChatToolDefinitionEnvelope>,
     tool_choice: Option<probe_provider_openai::ChatToolChoice>,
     parallel_tool_calls: Option<bool>,
+    context: OpenAiRequestContext<'_>,
     callback: Option<&mut OpenAiStreamChunkCallback<'_>>,
 ) -> Result<ToolLoopProviderResponse, ProviderError> {
-    if profile.kind != BackendKind::OpenAiChatCompletions {
+    if !matches!(
+        profile.kind,
+        BackendKind::OpenAiChatCompletions | BackendKind::OpenAiCodexSubscription
+    ) {
         return Err(ProviderError::UnsupportedFeature {
             backend: profile.kind,
             feature: "openai-style tool calls",
         });
     }
 
-    let provider_config = OpenAiProviderConfig::from_backend_profile(profile);
+    let provider_config = openai_provider_config_from_profile(profile, context)?;
     let provider =
         OpenAiProviderClient::new(provider_config.clone()).map_err(ProviderError::OpenAi)?;
     let mut request =
@@ -468,6 +538,56 @@ fn plain_text_provider_response_from_apple_session(
     }
 }
 
+fn openai_provider_config_from_profile(
+    profile: &BackendProfile,
+    context: OpenAiRequestContext<'_>,
+) -> Result<OpenAiProviderConfig, ProviderError> {
+    let mut config = OpenAiProviderConfig::from_backend_profile(profile);
+    if profile.kind != BackendKind::OpenAiCodexSubscription {
+        return Ok(config);
+    }
+
+    let probe_home =
+        context
+            .probe_home
+            .ok_or_else(|| ProviderError::MissingCodexSubscriptionAuth {
+                path: String::from("PROBE_HOME/auth/openai-codex.json"),
+            })?;
+    let controller = OpenAiCodexAuthController::new(probe_home).map_err(ProviderError::Auth)?;
+    let auth_path = controller.store().path().display().to_string();
+    let record = controller
+        .refresh_if_needed()
+        .map_err(ProviderError::Auth)?
+        .ok_or(ProviderError::MissingCodexSubscriptionAuth { path: auth_path })?;
+    config.auth = OpenAiRequestAuth::BearerToken(record.access);
+    config
+        .extra_headers
+        .insert(String::from("originator"), String::from("probe"));
+    config
+        .extra_headers
+        .insert(String::from("User-Agent"), codex_user_agent());
+    if let Some(account_id) = record.account_id {
+        config
+            .extra_headers
+            .insert(String::from("ChatGPT-Account-Id"), account_id);
+    }
+    if let Some(session_id) = context.session_id {
+        config
+            .extra_headers
+            .insert(String::from("session_id"), String::from(session_id));
+    }
+    Ok(config)
+}
+
+fn codex_user_agent() -> String {
+    format!(
+        "probe/{} ({}; {})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
 #[must_use]
 pub fn normalize_openai_assistant_text(raw: &str) -> String {
     normalize_openai_stream_display_text(raw)
@@ -561,9 +681,7 @@ fn decode_partial_json_string(raw: &str) -> String {
     decoded
 }
 
-fn provider_usage_from_openai(
-    usage: probe_provider_openai::ChatCompletionUsage,
-) -> ProviderUsage {
+fn provider_usage_from_openai(usage: probe_provider_openai::ChatCompletionUsage) -> ProviderUsage {
     ProviderUsage {
         prompt_tokens: Some(u64::from(usage.prompt_tokens)),
         completion_tokens: Some(u64::from(usage.completion_tokens)),
@@ -585,7 +703,10 @@ fn provider_usage_from_openai(
 
 #[cfg(test)]
 mod tests {
+    use crate::backend_profiles::openai_codex_subscription;
+
     use super::{
+        OpenAiRequestContext, PlainTextMessage, ProviderError, complete_plain_text_with_context,
         normalize_openai_assistant_text, normalize_openai_stream_display_text,
     };
 
@@ -608,9 +729,7 @@ mod tests {
             ""
         );
         assert_eq!(
-            normalize_openai_stream_display_text(
-                r#"{"kind":"message","content":"hello\nwor"#
-            ),
+            normalize_openai_stream_display_text(r#"{"kind":"message","content":"hello\nwor"#),
             "hello\nwor"
         );
     }
@@ -621,5 +740,20 @@ mod tests {
             normalize_openai_assistant_text("plain assistant text"),
             "plain assistant text"
         );
+    }
+
+    #[test]
+    fn codex_backend_requires_subscription_auth_state() {
+        let error = complete_plain_text_with_context(
+            &openai_codex_subscription(),
+            vec![PlainTextMessage::user("hello")],
+            OpenAiRequestContext::default(),
+        )
+        .expect_err("codex request without auth should fail");
+
+        assert!(matches!(
+            error,
+            ProviderError::MissingCodexSubscriptionAuth { .. }
+        ));
     }
 }

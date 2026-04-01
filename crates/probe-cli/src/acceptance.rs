@@ -732,7 +732,9 @@ fn comparison_case_support(case_name: &str, backend_kind: BackendKind) -> Accept
             | "shell_then_summarize"
             | "patch_then_verify"
             | "approval_pause_or_refusal",
-            BackendKind::OpenAiChatCompletions | BackendKind::AppleFmBridge,
+            BackendKind::OpenAiChatCompletions
+            | BackendKind::OpenAiCodexSubscription
+            | BackendKind::AppleFmBridge,
         ) => AcceptanceCaseSupport::supported(),
         (unknown_case, _) => AcceptanceCaseSupport::unsupported(format!(
             "case `{unknown_case}` is not part of the retained comparison set"
@@ -1820,14 +1822,12 @@ fn classify_attempt(
                 }) => Some(AcceptanceFailureCategory::BackendFailure),
                 AcceptanceExecutionError::Runtime(RuntimeError::MaxToolRoundTrips { .. })
                 | AcceptanceExecutionError::Runtime(RuntimeError::MalformedTranscript(_))
-                | AcceptanceExecutionError::Runtime(
-                    RuntimeError::PendingToolApprovalNotFound { .. },
-                )
+                | AcceptanceExecutionError::Runtime(RuntimeError::PendingToolApprovalNotFound {
+                    ..
+                })
                 | AcceptanceExecutionError::Runtime(
                     RuntimeError::PendingToolApprovalAlreadyResolved { .. },
-                ) => {
-                    Some(AcceptanceFailureCategory::ToolExecutionFailure)
-                }
+                ) => Some(AcceptanceFailureCategory::ToolExecutionFailure),
                 AcceptanceExecutionError::Runtime(RuntimeError::ProbeHomeUnavailable)
                 | AcceptanceExecutionError::Runtime(RuntimeError::CurrentDir(_))
                 | AcceptanceExecutionError::Runtime(RuntimeError::SessionStore(_)) => {

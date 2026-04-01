@@ -46,10 +46,12 @@ mod tests {
     #[test]
     fn backend_types_are_constructible() {
         let kind = BackendKind::OpenAiChatCompletions;
+        let codex_kind = BackendKind::OpenAiCodexSubscription;
         let apple_kind = BackendKind::AppleFmBridge;
         let attach_mode = ServerAttachMode::AttachToExisting;
         let cache_mode = PrefixCacheMode::BackendDefault;
         assert!(matches!(kind, BackendKind::OpenAiChatCompletions));
+        assert!(matches!(codex_kind, BackendKind::OpenAiCodexSubscription));
         assert!(matches!(apple_kind, BackendKind::AppleFmBridge));
         assert!(matches!(attach_mode, ServerAttachMode::AttachToExisting));
         assert!(matches!(cache_mode, PrefixCacheMode::BackendDefault));

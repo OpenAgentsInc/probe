@@ -1,7 +1,10 @@
 use std::time::Duration;
 
+use std::collections::BTreeMap;
+
 use probe_provider_openai::{
     ChatMessage, OpenAiProviderClient, OpenAiProviderConfig, OpenAiProviderError,
+    OpenAiRequestAuth, OpenAiTransport,
 };
 use probe_test_support::{FakeHttpResponse, FakeOpenAiServer};
 use serde_json::json;
@@ -27,10 +30,12 @@ fn provider_suite_executes_plain_text_chat_completion() {
     let client = OpenAiProviderClient::new(OpenAiProviderConfig {
         base_url: server.base_url().to_string(),
         model: String::from("tiny-qwen35"),
-        api_key: String::from("dummy"),
+        auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
         timeout: Duration::from_secs(5),
         stream: false,
         max_tokens: Some(OpenAiProviderConfig::DEFAULT_MAX_TOKENS),
+        transport: OpenAiTransport::ChatCompletions,
+        extra_headers: BTreeMap::new(),
     })
     .expect("client");
 
@@ -56,10 +61,12 @@ fn provider_suite_surfaces_http_status_errors_with_body_context() {
     let client = OpenAiProviderClient::new(OpenAiProviderConfig {
         base_url: server.base_url().to_string(),
         model: String::from("tiny-qwen35"),
-        api_key: String::from("dummy"),
+        auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
         timeout: Duration::from_secs(5),
         stream: false,
         max_tokens: Some(OpenAiProviderConfig::DEFAULT_MAX_TOKENS),
+        transport: OpenAiTransport::ChatCompletions,
+        extra_headers: BTreeMap::new(),
     })
     .expect("client");
 

@@ -11,13 +11,18 @@ use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig};
 use psionic_apple_fm::AppleFmSystemLanguageModelAvailability;
 use serde::{Deserialize, Serialize};
 
-use crate::backend_profiles::{PSIONIC_APPLE_FM_MODEL, PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL};
+use crate::backend_profiles::{
+    OPENAI_CODEX_SUBSCRIPTION_MODEL, PSIONIC_APPLE_FM_MODEL, PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL,
+};
 
 const DEFAULT_SERVER_CONFIG_PATH: &str = "server/psionic-local.json";
 const DEFAULT_OPENAI_SERVER_CONFIG_PATH: &str = "server/psionic-openai-chat-completions.json";
+const DEFAULT_CODEX_SERVER_CONFIG_PATH: &str = "server/openai-codex-subscription.json";
 const DEFAULT_APPLE_FM_SERVER_CONFIG_PATH: &str = "server/psionic-apple-fm.json";
 const DEFAULT_SERVER_HOST: &str = "127.0.0.1";
+const DEFAULT_CODEX_SERVER_HOST: &str = "chatgpt.com";
 const DEFAULT_OPENAI_SERVER_PORT: u16 = 8080;
+const DEFAULT_CODEX_SERVER_PORT: u16 = 443;
 const DEFAULT_APPLE_FM_SERVER_PORT: u16 = 11435;
 const DEFAULT_SERVER_BACKEND: &str = "cpu";
 
@@ -180,6 +185,7 @@ impl PsionicServerConfig {
     pub fn backend_config_path(probe_home: &Path, api_kind: BackendKind) -> PathBuf {
         probe_home.join(match api_kind {
             BackendKind::OpenAiChatCompletions => DEFAULT_OPENAI_SERVER_CONFIG_PATH,
+            BackendKind::OpenAiCodexSubscription => DEFAULT_CODEX_SERVER_CONFIG_PATH,
             BackendKind::AppleFmBridge => DEFAULT_APPLE_FM_SERVER_CONFIG_PATH,
         })
     }
@@ -188,6 +194,13 @@ impl PsionicServerConfig {
     pub fn base_url(&self) -> String {
         match self.api_kind {
             BackendKind::OpenAiChatCompletions => format!("http://{}:{}/v1", self.host, self.port),
+            BackendKind::OpenAiCodexSubscription => {
+                if self.port == DEFAULT_CODEX_SERVER_PORT {
+                    format!("https://{}/backend-api/codex", self.host)
+                } else {
+                    format!("https://{}:{}/backend-api/codex", self.host, self.port)
+                }
+            }
             BackendKind::AppleFmBridge => format!("http://{}:{}", self.host, self.port),
         }
     }
@@ -212,7 +225,11 @@ impl PsionicServerConfig {
         }
 
         let previous_default_port = default_port_for(self.api_kind);
+        let previous_default_host = default_host_for(self.api_kind);
         let previous_default_model = default_model_id_for(self.api_kind);
+        if self.host == previous_default_host {
+            self.host = String::from(default_host_for(api_kind));
+        }
         if self.port == previous_default_port {
             self.port = default_port_for(api_kind);
         }
@@ -472,6 +489,7 @@ fn wait_for_ready(
         BackendKind::OpenAiChatCompletions => {
             format!("{}/models", config.base_url().trim_end_matches('/'))
         }
+        BackendKind::OpenAiCodexSubscription => return Ok(()),
         BackendKind::AppleFmBridge => format!("{}/health", config.base_url().trim_end_matches('/')),
     };
 
@@ -489,6 +507,9 @@ fn wait_for_ready(
                     });
                 }
             },
+            BackendKind::OpenAiCodexSubscription => {
+                unreachable!("codex readiness returns early before entering the retry loop")
+            }
             BackendKind::AppleFmBridge => {
                 let apple_client = AppleFmProviderClient::new(AppleFmProviderConfig {
                     base_url: config.base_url(),
@@ -525,9 +546,17 @@ const fn default_server_api_kind() -> BackendKind {
     BackendKind::OpenAiChatCompletions
 }
 
+const fn default_host_for(api_kind: BackendKind) -> &'static str {
+    match api_kind {
+        BackendKind::OpenAiChatCompletions | BackendKind::AppleFmBridge => DEFAULT_SERVER_HOST,
+        BackendKind::OpenAiCodexSubscription => DEFAULT_CODEX_SERVER_HOST,
+    }
+}
+
 const fn default_port_for(api_kind: BackendKind) -> u16 {
     match api_kind {
         BackendKind::OpenAiChatCompletions => DEFAULT_OPENAI_SERVER_PORT,
+        BackendKind::OpenAiCodexSubscription => DEFAULT_CODEX_SERVER_PORT,
         BackendKind::AppleFmBridge => DEFAULT_APPLE_FM_SERVER_PORT,
     }
 }
@@ -537,6 +566,7 @@ fn default_model_id_for(api_kind: BackendKind) -> Option<String> {
         BackendKind::OpenAiChatCompletions => {
             Some(String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL))
         }
+        BackendKind::OpenAiCodexSubscription => Some(String::from(OPENAI_CODEX_SUBSCRIPTION_MODEL)),
         BackendKind::AppleFmBridge => Some(String::from(PSIONIC_APPLE_FM_MODEL)),
     }
 }
@@ -568,8 +598,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        DEFAULT_APPLE_FM_SERVER_PORT, PSIONIC_APPLE_FM_MODEL, PsionicServerConfig,
-        PsionicServerMode, ServerConfigOverrides, ServerProcessGuard, ServerTargetKind,
+        DEFAULT_APPLE_FM_SERVER_PORT, DEFAULT_CODEX_SERVER_PORT, PSIONIC_APPLE_FM_MODEL,
+        PsionicServerConfig, PsionicServerMode, ServerConfigOverrides, ServerProcessGuard,
+        ServerTargetKind,
     };
 
     #[test]
@@ -635,7 +666,8 @@ mod tests {
                 temp.path(),
                 BackendKind::OpenAiChatCompletions
             ),
-            temp.path().join("server/psionic-openai-chat-completions.json")
+            temp.path()
+                .join("server/psionic-openai-chat-completions.json")
         );
         assert_eq!(
             PsionicServerConfig::backend_config_path(temp.path(), BackendKind::AppleFmBridge),
@@ -650,15 +682,14 @@ mod tests {
         qwen.host = String::from("100.108.56.85");
         qwen.port = 8080;
         qwen.model_id = Some(String::from("remote-qwen.gguf"));
-        qwen
-            .save(
-                PsionicServerConfig::backend_config_path(
-                    temp.path(),
-                    BackendKind::OpenAiChatCompletions,
-                )
-                .as_path(),
+        qwen.save(
+            PsionicServerConfig::backend_config_path(
+                temp.path(),
+                BackendKind::OpenAiChatCompletions,
             )
-            .expect("save qwen snapshot");
+            .as_path(),
+        )
+        .expect("save qwen snapshot");
 
         let loaded = PsionicServerConfig::load_or_default_for_backend(
             temp.path(),
@@ -667,7 +698,10 @@ mod tests {
         .expect("load saved qwen snapshot");
         assert_eq!(loaded.host, "100.108.56.85");
         assert_eq!(loaded.port, 8080);
-        assert_eq!(loaded.resolved_model_id().as_deref(), Some("remote-qwen.gguf"));
+        assert_eq!(
+            loaded.resolved_model_id().as_deref(),
+            Some("remote-qwen.gguf")
+        );
 
         let apple = PsionicServerConfig::load_or_default_for_backend(
             temp.path(),
@@ -679,6 +713,25 @@ mod tests {
         assert_eq!(
             apple.resolved_model_id().as_deref(),
             Some(PSIONIC_APPLE_FM_MODEL)
+        );
+    }
+
+    #[test]
+    fn codex_backend_defaults_to_chatgpt_remote_attach_target() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let codex = PsionicServerConfig::load_or_default_for_backend(
+            temp.path(),
+            BackendKind::OpenAiCodexSubscription,
+        )
+        .expect("default codex snapshot");
+        assert_eq!(codex.api_kind, BackendKind::OpenAiCodexSubscription);
+        assert_eq!(codex.host, "chatgpt.com");
+        assert_eq!(codex.port, DEFAULT_CODEX_SERVER_PORT);
+        assert_eq!(codex.base_url(), "https://chatgpt.com/backend-api/codex");
+        assert_eq!(codex.resolved_model_id().as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(
+            codex.operator_summary().target_kind,
+            ServerTargetKind::RemoteAttach
         );
     }
 

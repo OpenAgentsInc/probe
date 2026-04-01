@@ -1528,6 +1528,7 @@ name = "probe-core"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "probe-openai-auth",
  "probe-protocol",
  "probe-provider-apple-fm",
  "probe-provider-openai",

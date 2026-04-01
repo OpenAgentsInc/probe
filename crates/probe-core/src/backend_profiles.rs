@@ -6,6 +6,9 @@ pub const PSIONIC_APPLE_FM_BRIDGE_PROFILE: &str = "psionic-apple-fm-bridge";
 pub const PSIONIC_APPLE_FM_ORACLE_PROFILE: &str = "psionic-apple-fm-oracle";
 pub const PSIONIC_APPLE_FM_MODEL: &str = "apple-foundation-model";
 pub const DEFAULT_APPLE_FM_BRIDGE_BASE_URL: &str = "http://127.0.0.1:11435";
+pub const OPENAI_CODEX_SUBSCRIPTION_PROFILE: &str = "openai-codex-subscription";
+pub const OPENAI_CODEX_SUBSCRIPTION_MODEL: &str = "gpt-5.3-codex";
+pub const DEFAULT_OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub const PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE: &str = "psionic-qwen35-2b-q8-registry";
 pub const PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE: &str = "psionic-qwen35-2b-q8-oracle";
 pub const PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE: &str = "psionic-qwen35-2b-q8-long-context";
@@ -17,12 +20,27 @@ const APPLE_FM_BASE_URL_ENV_KEYS: [&str; 2] =
 #[must_use]
 pub fn named_backend_profile(name: &str) -> Option<BackendProfile> {
     match name {
+        OPENAI_CODEX_SUBSCRIPTION_PROFILE => Some(openai_codex_subscription()),
         PSIONIC_APPLE_FM_BRIDGE_PROFILE => Some(psionic_apple_fm_bridge()),
         PSIONIC_APPLE_FM_ORACLE_PROFILE => Some(psionic_apple_fm_oracle()),
         PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE => Some(psionic_qwen35_2b_q8_registry()),
         PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE => Some(psionic_qwen35_2b_q8_oracle()),
         PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE => Some(psionic_qwen35_2b_q8_long_context()),
         _ => None,
+    }
+}
+
+#[must_use]
+pub fn openai_codex_subscription() -> BackendProfile {
+    BackendProfile {
+        name: String::from(OPENAI_CODEX_SUBSCRIPTION_PROFILE),
+        kind: BackendKind::OpenAiCodexSubscription,
+        base_url: String::from(DEFAULT_OPENAI_CODEX_BASE_URL),
+        model: String::from(OPENAI_CODEX_SUBSCRIPTION_MODEL),
+        api_key_env: String::new(),
+        timeout_secs: 60,
+        attach_mode: ServerAttachMode::AttachToExisting,
+        prefix_cache_mode: PrefixCacheMode::BackendDefault,
     }
 }
 
@@ -123,14 +141,37 @@ mod tests {
     use probe_protocol::backend::{PrefixCacheMode, ServerAttachMode};
 
     use super::{
-        DEFAULT_APPLE_FM_BRIDGE_BASE_URL, PSIONIC_APPLE_FM_BRIDGE_PROFILE,
-        PSIONIC_APPLE_FM_MODEL, PSIONIC_APPLE_FM_ORACLE_PROFILE,
+        DEFAULT_APPLE_FM_BRIDGE_BASE_URL, DEFAULT_OPENAI_CODEX_BASE_URL,
+        OPENAI_CODEX_SUBSCRIPTION_MODEL, OPENAI_CODEX_SUBSCRIPTION_PROFILE,
+        PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_APPLE_FM_MODEL, PSIONIC_APPLE_FM_ORACLE_PROFILE,
         PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE, PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE,
         PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
-        named_backend_profile, psionic_apple_fm_bridge, psionic_apple_fm_oracle,
-        psionic_qwen35_2b_q8_long_context, psionic_qwen35_2b_q8_oracle,
+        named_backend_profile, openai_codex_subscription, psionic_apple_fm_bridge,
+        psionic_apple_fm_oracle, psionic_qwen35_2b_q8_long_context, psionic_qwen35_2b_q8_oracle,
         psionic_qwen35_2b_q8_registry, resolve_apple_fm_bridge_base_url_with,
     };
+
+    #[test]
+    fn canonical_codex_subscription_profile_is_stable() {
+        let profile = openai_codex_subscription();
+        assert_eq!(profile.name, OPENAI_CODEX_SUBSCRIPTION_PROFILE);
+        assert_eq!(
+            profile.kind,
+            probe_protocol::backend::BackendKind::OpenAiCodexSubscription
+        );
+        assert_eq!(profile.base_url, DEFAULT_OPENAI_CODEX_BASE_URL);
+        assert_eq!(profile.model, OPENAI_CODEX_SUBSCRIPTION_MODEL);
+        assert_eq!(profile.api_key_env, "");
+        assert_eq!(profile.timeout_secs, 60);
+    }
+
+    #[test]
+    fn codex_subscription_profile_is_available_by_name() {
+        let profile = named_backend_profile(OPENAI_CODEX_SUBSCRIPTION_PROFILE)
+            .expect("codex subscription profile");
+        assert_eq!(profile.base_url, DEFAULT_OPENAI_CODEX_BASE_URL);
+        assert_eq!(profile.model, OPENAI_CODEX_SUBSCRIPTION_MODEL);
+    }
 
     #[test]
     fn canonical_psionic_profile_is_stable() {

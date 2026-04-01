@@ -137,6 +137,30 @@ fn codex_logout_removes_persisted_auth_state() {
 }
 
 #[test]
+fn exec_codex_profile_requires_login_before_request_execution() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+
+    probe_cli_command()
+        .arg("exec")
+        .arg("--profile")
+        .arg("openai-codex-subscription")
+        .arg("--probe-home")
+        .arg(environment.probe_home())
+        .arg("--cwd")
+        .arg(environment.workspace())
+        .arg("Reply with exactly CODEx_AUTH_REQUIRED.")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "codex subscription auth is missing",
+        ))
+        .stderr(predicate::str::contains(
+            "probe codex login --method browser",
+        ));
+}
+
+#[test]
 fn accept_process_emits_stable_report_shape() {
     configure_snapshot_root();
     let environment = ProbeTestEnvironment::new();

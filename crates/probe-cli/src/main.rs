@@ -16,7 +16,8 @@ use clap::{Parser, Subcommand};
 use probe_core::backend_profiles::{
     PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE,
     PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
-    named_backend_profile, psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
+    named_backend_profile, openai_codex_subscription, psionic_apple_fm_bridge,
+    psionic_qwen35_2b_q8_registry,
 };
 use probe_core::dataset_export::{
     DatasetExportConfig, DatasetKind, DecisionCaseRecord, DecisionSessionSummary, export_dataset,
@@ -1627,6 +1628,7 @@ fn resolve_tui_profile(
         .map_err(|error| error.to_string())?;
     Ok(match config.api_kind {
         BackendKind::OpenAiChatCompletions => psionic_qwen35_2b_q8_registry(),
+        BackendKind::OpenAiCodexSubscription => openai_codex_subscription(),
         BackendKind::AppleFmBridge => psionic_apple_fm_bridge(),
     })
 }
@@ -1636,6 +1638,7 @@ fn profile_from_server_config(
 ) -> probe_protocol::backend::BackendProfile {
     let mut profile = match config.api_kind {
         BackendKind::OpenAiChatCompletions => psionic_qwen35_2b_q8_registry(),
+        BackendKind::OpenAiCodexSubscription => openai_codex_subscription(),
         BackendKind::AppleFmBridge => psionic_apple_fm_bridge(),
     };
     profile.base_url = config.base_url();
@@ -1990,6 +1993,7 @@ fn parse_server_mode(value: &str) -> Result<PsionicServerMode, String> {
 fn render_backend_kind(value: BackendKind) -> &'static str {
     match value {
         BackendKind::OpenAiChatCompletions => "openai_chat_completions",
+        BackendKind::OpenAiCodexSubscription => "openai_codex_subscription",
         BackendKind::AppleFmBridge => "apple_fm_bridge",
     }
 }

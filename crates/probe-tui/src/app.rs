@@ -7,7 +7,9 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use probe_core::backend_profiles::{psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry};
+use probe_core::backend_profiles::{
+    openai_codex_subscription, psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
+};
 use probe_core::harness::resolve_harness_profile;
 use probe_core::runtime::{current_working_dir, default_probe_home};
 use probe_core::server_control::{PsionicServerConfig, PsionicServerMode, ServerOperatorSummary};
@@ -634,6 +636,7 @@ fn load_saved_backend_config(probe_home: &Path, kind: BackendKind) -> Option<Psi
 fn profile_from_server_config(config: &PsionicServerConfig) -> BackendProfile {
     let mut profile = match config.api_kind {
         BackendKind::OpenAiChatCompletions => psionic_qwen35_2b_q8_registry(),
+        BackendKind::OpenAiCodexSubscription => openai_codex_subscription(),
         BackendKind::AppleFmBridge => psionic_apple_fm_bridge(),
     };
     profile.base_url = config.base_url();
@@ -678,6 +681,7 @@ fn clone_runtime_with_profile(
 fn default_profile_for_backend_kind(kind: BackendKind) -> BackendProfile {
     match kind {
         BackendKind::OpenAiChatCompletions => psionic_qwen35_2b_q8_registry(),
+        BackendKind::OpenAiCodexSubscription => openai_codex_subscription(),
         BackendKind::AppleFmBridge => psionic_apple_fm_bridge(),
     }
 }
@@ -685,6 +689,7 @@ fn default_profile_for_backend_kind(kind: BackendKind) -> BackendProfile {
 fn backend_selector_label(summary: &ServerOperatorSummary) -> String {
     match summary.backend_kind {
         BackendKind::AppleFmBridge => String::from("Apple FM"),
+        BackendKind::OpenAiCodexSubscription => String::from("Codex"),
         BackendKind::OpenAiChatCompletions if summary.is_remote_target() => String::from("Tailnet"),
         BackendKind::OpenAiChatCompletions => String::from("Qwen"),
     }
@@ -730,6 +735,7 @@ fn build_backend_lanes(config: &TuiLaunchConfig) -> [BackendLaneConfig; 2] {
         match config.operator_backend.backend_kind {
             BackendKind::AppleFmBridge => BackendKind::OpenAiChatCompletions,
             BackendKind::OpenAiChatCompletions => BackendKind::AppleFmBridge,
+            BackendKind::OpenAiCodexSubscription => BackendKind::AppleFmBridge,
         },
     );
     [primary, alternate]
@@ -783,6 +789,7 @@ fn parse_profile_host_port(profile: &BackendProfile) -> (String, u16) {
 fn default_port_for_kind(kind: BackendKind) -> u16 {
     match kind {
         BackendKind::OpenAiChatCompletions => 8080,
+        BackendKind::OpenAiCodexSubscription => 443,
         BackendKind::AppleFmBridge => 11435,
     }
 }

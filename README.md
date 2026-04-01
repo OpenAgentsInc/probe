@@ -20,11 +20,16 @@ Current shipped surface:
 
 ## Backends
 
-Probe currently ships two backend families:
+Probe currently ships three backend families:
 
 - `psionic-qwen35-2b-q8-registry`
   - base URL: `http://127.0.0.1:8080/v1`
   - model: `qwen3.5-2b-q8_0-registry.gguf`
+- `openai-codex-subscription`
+  - base URL: `https://chatgpt.com/backend-api/codex`
+  - request endpoint: `https://chatgpt.com/backend-api/codex/responses`
+  - model: `gpt-5.3-codex`
+  - auth source: `PROBE_HOME/auth/openai-codex.json`
 - `psionic-apple-fm-bridge`
   - default base URL: `http://127.0.0.1:11435`
   - model: `apple-foundation-model`
@@ -32,6 +37,8 @@ Probe currently ships two backend families:
 
 Apple FM is attach-only. Probe checks `GET /health` before use and stays honest
 about unavailable or non-admitted machines.
+Codex is also attach-only, but its attach target is the hosted ChatGPT Codex
+endpoint rather than a local Psionic server.
 
 ## Quick Start
 
@@ -51,6 +58,12 @@ Start an interactive session:
 
 ```bash
 cargo run -p probe-cli -- chat
+```
+
+Start an interactive Codex-backed session:
+
+```bash
+cargo run -p probe-cli -- chat --profile openai-codex-subscription
 ```
 
 Resume a session:
@@ -86,6 +99,10 @@ cargo run -p probe-cli -- codex logout
 Probe persists this state at `PROBE_HOME/auth/openai-codex.json` with private
 file permissions. The current TUI backend overlay also shows whether that auth
 state exists and whether it is expired.
+
+After login, the canonical Codex backend profile sends requests to
+`https://chatgpt.com/backend-api/codex/responses` with subscription bearer auth
+instead of using `PROBE_OPENAI_API_KEY`.
 
 ## TUI
 

@@ -9,6 +9,7 @@ hex.workspace = true
 probe-protocol.workspace = true
 probe-provider-apple-fm.workspace = true
 probe-provider-openai.workspace = true
+probe-openai-auth.workspace = true
 psionic-apple-fm.workspace = true
 reqwest.workspace = true
 serde.workspace = true
