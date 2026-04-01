@@ -165,3 +165,7 @@ This folder holds technical planning docs for the Probe runtime.
     including optimize-campaign runtime objects, long-horizon study lanes,
     richer export shapes, isolated candidate worktrees, stronger evals, and
     promotion-safe adoption stages
+- `53-probe-background-agent-roadmap.md`
+  - Probe-specific plan for becoming a real background coding agent with a
+    server-first runtime, detached session workers, prepared workspaces, and
+    CLI/TUI plus Autopilot as the first client set
