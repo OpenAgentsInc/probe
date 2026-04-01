@@ -1,0 +1,35 @@
+---
+source: crates/probe-cli/tests/binary_e2e.rs
+expression: report
+---
+{
+  "final_render": "┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ Qwen │ Apple FM │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ ┌─ Transcript ─────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ [user] You │ │ hello │ │ │ │ [tool call] read_file │ │ README.md │ │ │ │ [tool result] read_file │ │ README.md:1-1 │ │ # Probe acceptance fixture │ │ │ │ [assistant] Probe │ │ Probe inspected README.md through the real runtime. │ │ │ │ │ │ │ │ │ │ │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ status: pending approvals cleared | backend: OpenAiChatCompletions | target: 127.0.0.1:<port> | model: tiny-qwen35 | │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ ┌─ Composer ───────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ cmd: plain | hist: 1 │ │ Type a Probe message. Enter submits. Ctrl+J inserts a newline. │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
+  "last_status": "pending approvals cleared",
+  "recent_events": [
+    "queued Probe runtime turn: hello",
+    "submitted chat turn (5 chars)",
+    "loopback attach may be local or an SSH-forwarded remote Psionic target",
+    "backend transport: loopback_or_ssh_forward (http://127.0.0.1:<port>/v1)",
+    "backend target: openai_chat_completions attach 127.0.0.1:<port> model=tiny-qwen35",
+    "press Tab or Shift+Tab to switch backends",
+    "press F1 for help",
+    "press Ctrl+S to inspect backend status",
+    "press Ctrl+R to rerun backend check when supported",
+    "probe tui ready"
+  ],
+  "runtime_session_id": "<session-id>",
+  "worker_events": [
+    "pending approvals cleared",
+    "committed assistant row: Probe",
+    "committed tool result row: read_file",
+    "committed tool call row: read_file",
+    "runtime session ready: <session-id> via psionic-qwen35-2b-q8-registry",
+    "assistant turn committed",
+    "model request started: round 2",
+    "tool execution completed: read_file",
+    "tool execution started: read_file",
+    "tool call requested: read_file",
+    "model request started: round 1",
+    "runtime turn started"
+  ]
+}

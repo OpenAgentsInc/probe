@@ -32,6 +32,13 @@ CLI. It is useful when iterating on command output, transcript receipts,
 acceptance report shape, or other operator-visible behavior without rerunning
 everything else.
 
+That binary lane now includes:
+
+- `probe exec`
+- subprocess `probe chat` create and resume flows
+- subprocess `probe tui` smoke coverage through the hidden headless driver used
+  by tests
+
 The adjacent crate-level integration suites now cover:
 
 - runtime and session-loop behavior

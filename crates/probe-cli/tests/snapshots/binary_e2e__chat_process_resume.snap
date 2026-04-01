@@ -1,0 +1,15 @@
+---
+source: crates/probe-cli/tests/binary_e2e.rs
+expression: stderr
+---
+backend_target surface=chat kind=openai_chat_completions attach_mode=attach transport=loopback_or_ssh_forward target=<target> model=tiny-qwen35 base_url=<base-url>
+starting new session on profile=psionic-qwen35-2b-q8-registry
+session=<session-id> turn=0
+observability wallclock_ms=<dynamic> cache_signal=cold_start model_output_ms=<dynamic> prompt_tokens=5(exact) completion_tokens=3(exact) total_tokens=8(exact) completion_tps=<dynamic>
+chat ended
+---
+backend_target surface=chat kind=openai_chat_completions attach_mode=attach transport=loopback_or_ssh_forward target=<target> model=tiny-qwen35 base_url=<base-url>
+resumed session=<session-id> title=hello turns=1
+session=<session-id> turn=1
+observability wallclock_ms=<dynamic> cache_signal=no_clear_signal model_output_ms=<dynamic> prompt_tokens=6(exact) completion_tokens=3(exact) total_tokens=9(exact) completion_tps=<dynamic>
+chat ended

@@ -90,6 +90,15 @@ The runner now also exposes explicit local tiers:
   `./probe-dev optimize-modules`, and `./probe-dev optimize-harness`
   - explicit local eval and optimization lanes that stay out of the fast path
 
+The binary lane now covers more than `probe exec`.
+
+It includes:
+
+- real subprocess `probe chat` session creation and resume coverage
+- a hidden headless `probe tui` smoke path used only by tests so the binary can
+  submit a real background turn, wait for the reply, and retain a structured
+  report artifact without requiring PTY orchestration in the test harness
+
 ## Why This Matters
 
 This patch is the testing substrate for the next steps:

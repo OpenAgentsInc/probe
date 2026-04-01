@@ -404,7 +404,7 @@ pub fn write_apple_fm_attach_server_config(
 pub fn normalize_test_paths(value: &str, environment: &ProbeTestEnvironment) -> String {
     let temp_root = environment.temp_root().display().to_string();
     let replaced = normalize_workspace_path(value.replace(temp_root.as_str(), "$TEST_ROOT"));
-    normalize_session_path_segments(replaced.as_str())
+    normalize_loopback_ports(normalize_session_path_segments(replaced.as_str()).as_str())
 }
 
 pub fn normalize_exec_stderr_for_snapshot(raw: &str, environment: &ProbeTestEnvironment) -> String {
@@ -418,6 +418,25 @@ pub fn normalize_exec_stderr_for_snapshot(raw: &str, environment: &ProbeTestEnvi
                 normalize_observability_line(line)
             } else {
                 normalize_test_paths(line, environment)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn normalize_chat_stderr_for_snapshot(raw: &str, environment: &ProbeTestEnvironment) -> String {
+    raw.lines()
+        .map(|line| {
+            if line.starts_with("backend_target ") {
+                normalize_backend_target_line(line)
+            } else if line.starts_with("session=") {
+                normalize_session_line(line, environment)
+            } else if line.starts_with("resumed session=") {
+                normalize_session_words(normalize_test_paths(line, environment).as_str())
+            } else if line.starts_with("observability ") {
+                normalize_observability_line(line)
+            } else {
+                normalize_session_words(normalize_test_paths(line, environment).as_str())
             }
         })
         .collect::<Vec<_>>()
@@ -474,6 +493,17 @@ pub fn normalized_acceptance_report_snapshot(
         serde_json::from_str(&fs::read_to_string(report_path).expect("read acceptance report"))
             .expect("decode acceptance report");
     normalize_acceptance_value(&mut value, environment);
+    value
+}
+
+pub fn normalized_tui_smoke_report_snapshot(
+    report_path: &Path,
+    environment: &ProbeTestEnvironment,
+) -> Value {
+    let mut value: Value =
+        serde_json::from_str(&fs::read_to_string(report_path).expect("read tui smoke report"))
+            .expect("decode tui smoke report");
+    normalize_tui_smoke_value(&mut value, environment);
     value
 }
 
@@ -671,6 +701,39 @@ fn normalize_acceptance_value(value: &mut Value, environment: &ProbeTestEnvironm
     }
 }
 
+fn normalize_tui_smoke_value(value: &mut Value, environment: &ProbeTestEnvironment) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                match key.as_str() {
+                    "runtime_session_id" => {
+                        if child.is_string() {
+                            *child = serde_json::json!("<session-id>");
+                        }
+                    }
+                    "final_render" | "last_status" => {
+                        if let Some(text) = child.as_str() {
+                            *child = serde_json::json!(normalize_session_words(
+                                normalize_test_paths(text, environment).as_str(),
+                            ));
+                        }
+                    }
+                    _ => normalize_tui_smoke_value(child, environment),
+                }
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                normalize_tui_smoke_value(child, environment);
+            }
+        }
+        Value::String(text) => {
+            *text = normalize_session_words(normalize_test_paths(text, environment).as_str());
+        }
+        _ => {}
+    }
+}
+
 fn normalize_session_path_segments(value: &str) -> String {
     value
         .split('/')
@@ -689,7 +752,11 @@ fn normalize_session_words(value: &str) -> String {
     value
         .split_whitespace()
         .map(|word| {
-            if word.starts_with("sess_") {
+            if let Some((prefix, suffix)) = word.split_once('=')
+                && suffix.starts_with("sess_")
+            {
+                format!("{prefix}=<session-id>")
+            } else if word.starts_with("sess_") {
                 String::from("<session-id>")
             } else {
                 word.to_string()
@@ -697,6 +764,23 @@ fn normalize_session_words(value: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn normalize_loopback_ports(value: &str) -> String {
+    let mut normalized = String::new();
+    let mut remaining = value;
+    while let Some(index) = remaining.find("127.0.0.1:") {
+        normalized.push_str(&remaining[..index]);
+        normalized.push_str("127.0.0.1:<port>");
+        let digits = &remaining[index + "127.0.0.1:".len()..];
+        let consumed = digits
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .count();
+        remaining = &digits[consumed..];
+    }
+    normalized.push_str(remaining);
+    normalized
 }
 
 #[cfg(test)]
