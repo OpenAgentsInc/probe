@@ -21,7 +21,7 @@ The daemon socket defaults to:
 
 - `PROBE_HOME/daemon/probe-daemon.sock`
 
-The current protocol version is now `2` so transport-capability changes fail
+The current protocol version is now `3` so transport-capability changes fail
 honestly during initialize instead of silently drifting.
 
 ## Startup And Shutdown Semantics
@@ -79,10 +79,11 @@ It gives Probe:
 - multiple sequential client attaches
 - the same typed initialize or request or event or response contract over the
   daemon socket
+- the daemon-owned detached-session registry documented in
+  `62-daemon-owned-detached-session-registry.md`
 
 It does not yet give Probe:
 
-- daemon-owned detached session registry
 - push watch or logs subscriptions
 - operator `probe ps|attach|logs|stop` commands
 - timeout and watchdog policy

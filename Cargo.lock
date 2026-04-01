@@ -1564,6 +1564,7 @@ dependencies = [
  "probe-protocol",
  "probe-server",
  "probe-test-support",
+ "serde_json",
 ]
 
 [[package]]

@@ -207,3 +207,8 @@ This folder holds technical planning docs for the Probe runtime.
     long-lived `probe-daemon`, Unix-socket JSONL reuse of the shipped runtime
     protocol, stale-socket cleanup, explicit run or stop entrypoints, and the
     shared client split between spawned stdio children and daemon attaches
+- `62-daemon-owned-detached-session-registry.md`
+  - daemon-owned detached-session summaries and restart reconciliation, with
+    typed `list_detached_sessions` or `inspect_detached_session` protocol
+    calls, persisted session-control summaries, and explicit resumable versus
+    terminal restart outcomes

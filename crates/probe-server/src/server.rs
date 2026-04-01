@@ -18,20 +18,25 @@ use probe_core::tools::{
 };
 use probe_protocol::default_local_daemon_socket_path;
 use probe_protocol::runtime::{
-    CancelQueuedTurnRequest, CancelQueuedTurnResponse, ClientMessage, EventDeliveryGuarantee,
-    EventEnvelope, InitializeResponse, InspectSessionTurnsResponse, InterruptTurnResponse,
-    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListSessionsResponse,
-    QueueTurnResponse, QueuedTurnStatus, RequestEnvelope, ResolvePendingApprovalResponse,
-    ResponseBody, ResponseEnvelope, RuntimeCapabilities, RuntimeProgressEvent,
-    RuntimeProtocolError, RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage,
-    ServerEvent, ServerMessage, SessionLookupRequest, SessionSnapshot, ShutdownResponse,
-    StartSessionRequest, ToolApprovalRecipe, ToolCallResult, ToolChoice, ToolDeniedAction,
-    ToolLongContextRecipe, ToolLoopRecipe, ToolOracleRecipe, ToolSetKind, TransportKind,
-    TurnCompleted, TurnPaused, TurnRequest, TurnResponse, TurnSubmissionKind,
+    CancelQueuedTurnRequest, CancelQueuedTurnResponse, ClientMessage, DetachedSessionRecoveryState,
+    DetachedSessionStatus, DetachedSessionSummary, EventDeliveryGuarantee, EventEnvelope,
+    InitializeResponse, InspectDetachedSessionResponse, InspectSessionTurnsResponse,
+    InterruptTurnResponse, ListDetachedSessionsResponse, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, ListSessionsResponse, QueueTurnResponse, QueuedTurnStatus,
+    RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope,
+    RuntimeCapabilities, RuntimeProgressEvent, RuntimeProtocolError, RuntimeRequest,
+    RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage, ServerEvent, ServerMessage,
+    SessionLookupRequest, SessionSnapshot, ShutdownResponse, StartSessionRequest,
+    ToolApprovalRecipe, ToolCallResult, ToolChoice, ToolDeniedAction, ToolLongContextRecipe,
+    ToolLoopRecipe, ToolOracleRecipe, ToolSetKind, TransportKind, TurnCompleted, TurnPaused,
+    TurnRequest, TurnResponse, TurnSubmissionKind,
 };
-use probe_protocol::session::{SessionBackendTarget, SessionId, UsageMeasurement, UsageTruth};
+use probe_protocol::session::{
+    SessionBackendTarget, SessionId, SessionMetadata, UsageMeasurement, UsageTruth,
+};
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
 
+use crate::detached_registry::{DetachedRegistryError, DetachedSessionRegistry};
 use crate::turn_control::{SessionTurnControlState, StoredTurnControlRecord, now_ms};
 
 #[cfg(unix)]
@@ -147,7 +152,9 @@ pub fn run_local_daemon(
     prepare_daemon_socket(socket_path.as_path())?;
     let _cleanup_guard = SocketCleanupGuard::new(socket_path.clone());
     let listener = UnixListener::bind(&socket_path)?;
-    let core = ProbeServerCore::new(ProbeRuntime::new(home));
+    let core = ProbeServerCore::daemon(ProbeRuntime::new(home));
+    core.reconcile_detached_sessions()
+        .map_err(runtime_protocol_error_to_io)?;
 
     loop {
         let (stream, _) = listener.accept()?;
@@ -247,6 +254,7 @@ impl Drop for SocketCleanupGuard {
 pub struct ProbeServerCore {
     runtime: ProbeRuntime,
     turn_control: Arc<TurnControlPlane>,
+    detached_registry: Option<Arc<DetachedSessionRegistry>>,
 }
 
 struct ProbeServerConnection {
@@ -269,6 +277,7 @@ enum RequestHandlingOutcome {
 struct TurnControlPlane {
     runtime: ProbeRuntime,
     coordination: Arc<Mutex<HashSet<String>>>,
+    detached_registry: Option<Arc<DetachedSessionRegistry>>,
 }
 
 struct QueuedTurnReservation {
@@ -290,19 +299,233 @@ struct InterruptOutcome {
 
 impl ProbeServerCore {
     pub fn new(runtime: ProbeRuntime) -> Self {
+        Self::with_mode(runtime, ServerOwnershipMode::ForegroundStdio)
+    }
+
+    fn daemon(runtime: ProbeRuntime) -> Self {
+        Self::with_mode(runtime, ServerOwnershipMode::DetachedDaemon)
+    }
+
+    fn with_mode(runtime: ProbeRuntime, mode: ServerOwnershipMode) -> Self {
+        let detached_registry = mode
+            .is_daemon()
+            .then(|| Arc::new(DetachedSessionRegistry::new(runtime.session_store().root())));
         Self {
-            turn_control: Arc::new(TurnControlPlane::new(runtime.clone())),
+            turn_control: Arc::new(TurnControlPlane::new(
+                runtime.clone(),
+                detached_registry.clone(),
+            )),
             runtime,
+            detached_registry,
         }
+    }
+
+    fn reconcile_detached_sessions(&self) -> Result<(), RuntimeProtocolError> {
+        let Some(registry) = self.detached_registry.as_ref() else {
+            return Ok(());
+        };
+        for session_id in registry
+            .tracked_session_ids()
+            .map_err(detached_registry_error_to_protocol)?
+        {
+            if self
+                .runtime
+                .session_store()
+                .read_metadata(&session_id)
+                .is_err()
+            {
+                registry
+                    .remove(&session_id)
+                    .map_err(detached_registry_error_to_protocol)?;
+                continue;
+            }
+            self.sync_detached_session_if_tracked(&session_id)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_detached_session_registered(
+        &self,
+        metadata: &SessionMetadata,
+    ) -> Result<(), RuntimeProtocolError> {
+        let Some(registry) = self.detached_registry.as_ref() else {
+            return Ok(());
+        };
+        registry
+            .register_session(metadata, now_ms())
+            .map_err(detached_registry_error_to_protocol)?;
+        self.turn_control
+            .sync_detached_session_if_tracked(&metadata.id)
+    }
+
+    fn ensure_detached_session_registered_by_id(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeProtocolError> {
+        if self.detached_registry.is_none() {
+            return Ok(());
+        }
+        let metadata = self
+            .runtime
+            .session_store()
+            .read_metadata(session_id)
+            .map_err(session_store_error_to_protocol)?;
+        self.ensure_detached_session_registered(&metadata)
+    }
+
+    fn sync_detached_session_if_tracked(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeProtocolError> {
+        self.turn_control
+            .sync_detached_session_if_tracked(session_id)
+    }
+
+    fn list_detached_sessions(&self) -> Result<ListDetachedSessionsResponse, RuntimeProtocolError> {
+        let Some(registry) = self.detached_registry.as_ref() else {
+            return Err(protocol_error(
+                "unsupported_transport",
+                "detached session registry is only available through the daemon transport",
+            ));
+        };
+        for session_id in registry
+            .tracked_session_ids()
+            .map_err(detached_registry_error_to_protocol)?
+        {
+            self.sync_detached_session_if_tracked(&session_id)?;
+        }
+        let sessions = registry
+            .list()
+            .map_err(detached_registry_error_to_protocol)?;
+        Ok(ListDetachedSessionsResponse { sessions })
+    }
+
+    fn inspect_detached_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<InspectDetachedSessionResponse, RuntimeProtocolError> {
+        let Some(registry) = self.detached_registry.as_ref() else {
+            return Err(protocol_error(
+                "unsupported_transport",
+                "detached session registry is only available through the daemon transport",
+            ));
+        };
+        let metadata = self
+            .runtime
+            .session_store()
+            .read_metadata(session_id)
+            .map_err(session_store_error_to_protocol)?;
+        registry
+            .register_session(&metadata, now_ms())
+            .map_err(detached_registry_error_to_protocol)?;
+        self.sync_detached_session_if_tracked(session_id)?;
+        let summary = registry
+            .read(session_id)
+            .map_err(detached_registry_error_to_protocol)?
+            .ok_or_else(|| {
+                protocol_error(
+                    "session_not_found",
+                    format!(
+                        "daemon registry has no detached session for {}",
+                        session_id.as_str()
+                    ),
+                )
+            })?;
+        let turn_control = self.turn_control.inspect_session_turns(session_id)?;
+        let session = session_snapshot_from_runtime(&self.runtime, session_id)?;
+        Ok(InspectDetachedSessionResponse {
+            summary,
+            session,
+            turn_control,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ServerOwnershipMode {
+    ForegroundStdio,
+    DetachedDaemon,
+}
+
+impl ServerOwnershipMode {
+    fn is_daemon(self) -> bool {
+        matches!(self, Self::DetachedDaemon)
     }
 }
 
 impl TurnControlPlane {
-    fn new(runtime: ProbeRuntime) -> Self {
+    fn new(runtime: ProbeRuntime, detached_registry: Option<Arc<DetachedSessionRegistry>>) -> Self {
         Self {
             runtime,
             coordination: Arc::new(Mutex::new(HashSet::new())),
+            detached_registry,
         }
+    }
+
+    fn save_state_and_sync(
+        &self,
+        session_id: &SessionId,
+        state: &SessionTurnControlState,
+    ) -> Result<(), RuntimeProtocolError> {
+        state
+            .save(&self.runtime, session_id)
+            .map_err(session_store_error_to_protocol)?;
+        self.sync_detached_session_summary(session_id, state)
+    }
+
+    fn sync_detached_session_summary(
+        &self,
+        session_id: &SessionId,
+        state: &SessionTurnControlState,
+    ) -> Result<(), RuntimeProtocolError> {
+        let Some(registry) = self.detached_registry.as_ref() else {
+            return Ok(());
+        };
+        let metadata = self
+            .runtime
+            .session_store()
+            .read_metadata(session_id)
+            .map_err(session_store_error_to_protocol)?;
+        let pending_approval_count = self
+            .runtime
+            .pending_tool_approvals(session_id)
+            .map_err(runtime_error_to_protocol)?
+            .len();
+        let previous = registry
+            .read(session_id)
+            .map_err(detached_registry_error_to_protocol)?;
+        let summary = detached_session_summary_from_state(
+            &metadata,
+            state,
+            pending_approval_count,
+            previous.as_ref(),
+            now_ms(),
+        );
+        registry
+            .upsert(summary)
+            .map_err(detached_registry_error_to_protocol)
+    }
+
+    fn sync_detached_session_if_tracked(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeProtocolError> {
+        let Some(registry) = self.detached_registry.as_ref() else {
+            return Ok(());
+        };
+        if registry
+            .read(session_id)
+            .map_err(detached_registry_error_to_protocol)?
+            .is_none()
+        {
+            return Ok(());
+        }
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let state = self.load_state_locked(session_id.as_str(), &mut coordination)?;
+        self.sync_detached_session_summary(session_id, &state)
     }
 
     fn reserve_direct_turn(
@@ -335,9 +558,7 @@ impl TurnControlPlane {
                 Some(requested_at_ms),
             )
             .turn_id;
-        state
-            .save(&self.runtime, &request.session_id)
-            .map_err(session_store_error_to_protocol)?;
+        self.save_state_and_sync(&request.session_id, &state)?;
         coordination.insert(String::from(request.session_id.as_str()));
         Ok(turn_id)
     }
@@ -374,9 +595,7 @@ impl TurnControlPlane {
                 .view_for(turn_id.as_str())
                 .expect("queued turn should be visible after insert"),
         };
-        state
-            .save(&self.runtime, &request.session_id)
-            .map_err(session_store_error_to_protocol)?;
+        self.save_state_and_sync(&request.session_id, &state)?;
         if should_start {
             coordination.insert(String::from(request.session_id.as_str()));
         }
@@ -416,9 +635,7 @@ impl TurnControlPlane {
         }
         active_turn.record.awaiting_approval = false;
         let turn_id = active_turn.record.turn_id.clone();
-        state
-            .save(&self.runtime, &request.session_id)
-            .map_err(session_store_error_to_protocol)?;
+        self.save_state_and_sync(&request.session_id, &state)?;
         coordination.insert(String::from(request.session_id.as_str()));
         Ok(turn_id)
     }
@@ -477,9 +694,7 @@ impl TurnControlPlane {
                 )],
             )
             .map_err(session_store_error_to_protocol)?;
-        state
-            .save(&self.runtime, &request.session_id)
-            .map_err(session_store_error_to_protocol)?;
+        self.save_state_and_sync(&request.session_id, &state)?;
         Ok(CancelQueuedTurnResponse {
             session_id: request.session_id,
             turn_id,
@@ -586,9 +801,7 @@ impl TurnControlPlane {
         active_turn.record.cancellation_reason =
             Some(String::from("interrupted while waiting for tool approval"));
         let should_start_next = state.queued_turn_count() > 0;
-        state
-            .save(&self.runtime, &session_id)
-            .map_err(session_store_error_to_protocol)?;
+        self.save_state_and_sync(&session_id, &state)?;
         Ok(InterruptOutcome {
             response: InterruptTurnResponse {
                 session_id,
@@ -622,9 +835,7 @@ impl TurnControlPlane {
         }
         coordination.remove(session_id.as_str());
         let should_start_next = state.queued_turn_count() > 0;
-        state
-            .save(&self.runtime, session_id)
-            .map_err(session_store_error_to_protocol)?;
+        self.save_state_and_sync(session_id, &state)?;
         Ok(should_start_next)
     }
 
@@ -644,9 +855,7 @@ impl TurnControlPlane {
             turn.record.finished_at_ms = None;
         }
         coordination.remove(session_id.as_str());
-        state
-            .save(&self.runtime, session_id)
-            .map_err(session_store_error_to_protocol)
+        self.save_state_and_sync(session_id, &state)
     }
 
     fn restore_paused_turn(
@@ -664,9 +873,7 @@ impl TurnControlPlane {
             turn.record.awaiting_approval = true;
         }
         coordination.remove(session_id.as_str());
-        state
-            .save(&self.runtime, session_id)
-            .map_err(session_store_error_to_protocol)
+        self.save_state_and_sync(session_id, &state)
     }
 
     fn mark_turn_failed(
@@ -689,9 +896,7 @@ impl TurnControlPlane {
         }
         coordination.remove(session_id.as_str());
         let should_start_next = state.queued_turn_count() > 0;
-        state
-            .save(&self.runtime, session_id)
-            .map_err(session_store_error_to_protocol)?;
+        self.save_state_and_sync(session_id, &state)?;
         Ok(should_start_next)
     }
 
@@ -718,9 +923,7 @@ impl TurnControlPlane {
             turn.record.failure_message = None;
             turn.record.cancellation_reason = None;
         }
-        state
-            .save(&self.runtime, session_id)
-            .map_err(session_store_error_to_protocol)?;
+        self.save_state_and_sync(session_id, &state)?;
         coordination.insert(String::from(session_id.as_str()));
         Ok(Some(BackgroundTurnWorkItem {
             turn_id,
@@ -763,9 +966,7 @@ impl TurnControlPlane {
         if !coordination.contains(session_id.as_str())
             && state.recover_orphaned_running_turns(approvals_pending, now_ms())
         {
-            state
-                .save(&self.runtime, &session_id)
-                .map_err(session_store_error_to_protocol)?;
+            self.save_state_and_sync(&session_id, &state)?;
         }
         Ok(state)
     }
@@ -845,6 +1046,10 @@ impl ProbeServerConnection {
                                 supports_pending_approval_resolution: true,
                                 supports_interrupt_requests: true,
                                 supports_queued_turns: true,
+                                supports_detached_session_registry: self
+                                    .core
+                                    .detached_registry
+                                    .is_some(),
                             },
                         }),
                     )?;
@@ -888,11 +1093,35 @@ impl ProbeServerConnection {
                 }
                 Ok(RequestHandlingOutcome::Continue)
             }
+            RuntimeRequest::ListDetachedSessions => {
+                match self.core.list_detached_sessions() {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::ListDetachedSessions(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
             RuntimeRequest::InspectSession(SessionLookupRequest { session_id }) => {
                 match self.session_snapshot(&session_id) {
                     Ok(snapshot) => self.writer.send_response_ok(
                         request_id.as_str(),
                         RuntimeResponse::InspectSession(snapshot),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
+            RuntimeRequest::InspectDetachedSession(SessionLookupRequest { session_id }) => {
+                match self.core.inspect_detached_session(&session_id) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::InspectDetachedSession(response),
                     )?,
                     Err(error) => self
                         .writer
@@ -1019,28 +1248,10 @@ impl ProbeServerConnection {
         &self,
         session_id: &SessionId,
     ) -> Result<SessionSnapshot, RuntimeProtocolError> {
-        let session = self
-            .core
-            .runtime
-            .session_store()
-            .read_metadata(session_id)
-            .map_err(session_store_error_to_protocol)?;
-        let transcript = self
-            .core
-            .runtime
-            .session_store()
-            .read_transcript(session_id)
-            .map_err(session_store_error_to_protocol)?;
-        let pending_approvals = self
-            .core
-            .runtime
-            .pending_tool_approvals(session_id)
-            .map_err(runtime_error_to_protocol)?;
-        Ok(SessionSnapshot {
-            session,
-            transcript,
-            pending_approvals,
-        })
+        let snapshot = session_snapshot_from_runtime(&self.core.runtime, session_id)?;
+        self.core
+            .ensure_detached_session_registered(&snapshot.session)?;
+        Ok(snapshot)
     }
 
     fn list_pending_approvals(
@@ -1079,10 +1290,13 @@ impl ProbeServerConnection {
         &self,
         session_id: &SessionId,
     ) -> Result<InspectSessionTurnsResponse, RuntimeProtocolError> {
+        self.core.sync_detached_session_if_tracked(session_id)?;
         self.core.turn_control.inspect_session_turns(session_id)
     }
 
     fn queue_turn(&self, request: TurnRequest) -> Result<QueueTurnResponse, RuntimeProtocolError> {
+        self.core
+            .ensure_detached_session_registered_by_id(&request.session_id)?;
         let reservation = self.core.turn_control.reserve_queue_turn(&request)?;
         if reservation.should_start {
             spawn_turn_worker(
@@ -1108,6 +1322,8 @@ impl ProbeServerConnection {
         &self,
         session_id: SessionId,
     ) -> Result<InterruptTurnResponse, RuntimeProtocolError> {
+        self.core
+            .ensure_detached_session_registered_by_id(&session_id)?;
         let outcome = self.core.turn_control.interrupt_turn(session_id.clone())?;
         if outcome.should_start_next {
             spawn_next_queued_turn_if_ready(
@@ -1124,6 +1340,8 @@ impl ProbeServerConnection {
         &self,
         request: CancelQueuedTurnRequest,
     ) -> Result<CancelQueuedTurnResponse, RuntimeProtocolError> {
+        self.core
+            .ensure_detached_session_registered_by_id(&request.session_id)?;
         self.core.turn_control.cancel_queued_turn(request)
     }
 
@@ -1133,6 +1351,14 @@ impl ProbeServerConnection {
         request: TurnRequest,
         mode: TurnMode,
     ) -> Result<(), ServerError> {
+        if let Err(error) = self
+            .core
+            .ensure_detached_session_registered_by_id(&request.session_id)
+        {
+            self.writer
+                .send_response_error(request_id.as_str(), error)?;
+            return Ok(());
+        }
         let turn_id = match self.core.turn_control.reserve_direct_turn(&request, mode) {
             Ok(turn_id) => turn_id,
             Err(error) => {
@@ -1172,6 +1398,14 @@ impl ProbeServerConnection {
         request_id: String,
         request: probe_protocol::runtime::ResolvePendingApprovalRequest,
     ) -> Result<(), ServerError> {
+        if let Err(error) = self
+            .core
+            .ensure_detached_session_registered_by_id(&request.session_id)
+        {
+            self.writer
+                .send_response_error(request_id.as_str(), error)?;
+            return Ok(());
+        }
         let turn_id = match self
             .core
             .turn_control
@@ -1569,6 +1803,112 @@ fn run_pending_approval_resolution(
     }
 }
 
+fn session_snapshot_from_runtime(
+    runtime: &ProbeRuntime,
+    session_id: &SessionId,
+) -> Result<SessionSnapshot, RuntimeProtocolError> {
+    let session = runtime
+        .session_store()
+        .read_metadata(session_id)
+        .map_err(session_store_error_to_protocol)?;
+    let transcript = runtime
+        .session_store()
+        .read_transcript(session_id)
+        .map_err(session_store_error_to_protocol)?;
+    let pending_approvals = runtime
+        .pending_tool_approvals(session_id)
+        .map_err(runtime_error_to_protocol)?;
+    Ok(SessionSnapshot {
+        session,
+        transcript,
+        pending_approvals,
+    })
+}
+
+fn detached_session_summary_from_state(
+    metadata: &SessionMetadata,
+    state: &SessionTurnControlState,
+    pending_approval_count: usize,
+    previous: Option<&DetachedSessionSummary>,
+    now_ms: u64,
+) -> DetachedSessionSummary {
+    let view = state.inspect_view(&metadata.id);
+    let active_turn = view.active_turn.as_ref();
+    let last_terminal_turn = view.recent_turns.first();
+    let (status, recovery_state, recovery_note) = if let Some(active_turn) = active_turn {
+        if active_turn.awaiting_approval {
+            (
+                DetachedSessionStatus::ApprovalPaused,
+                DetachedSessionRecoveryState::ApprovalPausedResumable,
+                Some(String::from(
+                    "daemon restart can resume this session after the pending approval is resolved",
+                )),
+            )
+        } else {
+            (
+                DetachedSessionStatus::Running,
+                DetachedSessionRecoveryState::Clean,
+                None,
+            )
+        }
+    } else if !view.queued_turns.is_empty() {
+        (
+            DetachedSessionStatus::Queued,
+            DetachedSessionRecoveryState::Clean,
+            None,
+        )
+    } else if let Some(last_terminal_turn) = last_terminal_turn {
+        let status = match last_terminal_turn.status {
+            QueuedTurnStatus::Completed => DetachedSessionStatus::Completed,
+            QueuedTurnStatus::Failed => DetachedSessionStatus::Failed,
+            QueuedTurnStatus::Cancelled => DetachedSessionStatus::Cancelled,
+            QueuedTurnStatus::Queued | QueuedTurnStatus::Running => DetachedSessionStatus::Idle,
+        };
+        let recovery_state = if last_terminal_turn
+            .failure_message
+            .as_deref()
+            .is_some_and(|message| message.contains("restarted before this running turn completed"))
+        {
+            DetachedSessionRecoveryState::RunningTurnFailedOnRestart
+        } else {
+            DetachedSessionRecoveryState::Clean
+        };
+        let recovery_note = if matches!(
+            recovery_state,
+            DetachedSessionRecoveryState::RunningTurnFailedOnRestart
+        ) {
+            last_terminal_turn.failure_message.clone()
+        } else {
+            None
+        };
+        (status, recovery_state, recovery_note)
+    } else {
+        (
+            DetachedSessionStatus::Idle,
+            DetachedSessionRecoveryState::Clean,
+            None,
+        )
+    };
+
+    DetachedSessionSummary {
+        session_id: metadata.id.clone(),
+        title: metadata.title.clone(),
+        cwd: metadata.cwd.clone(),
+        status,
+        active_turn_id: active_turn.map(|turn| turn.turn_id.clone()),
+        queued_turn_count: view.queued_turns.len(),
+        pending_approval_count,
+        last_terminal_turn_id: last_terminal_turn.map(|turn| turn.turn_id.clone()),
+        last_terminal_status: last_terminal_turn.map(|turn| turn.status),
+        registered_at_ms: previous
+            .map(|summary| summary.registered_at_ms)
+            .unwrap_or(now_ms),
+        updated_at_ms: now_ms,
+        recovery_state,
+        recovery_note,
+    }
+}
+
 fn turn_response_to_runtime_response(response: TurnResponse, mode: TurnMode) -> RuntimeResponse {
     match mode {
         TurnMode::Start => RuntimeResponse::StartTurn(response),
@@ -1929,6 +2269,10 @@ fn protocol_error(code: impl Into<String>, message: impl Into<String>) -> Runtim
     }
 }
 
+fn runtime_protocol_error_to_io(error: RuntimeProtocolError) -> io::Error {
+    io::Error::other(format!("{} ({})", error.message, error.code))
+}
+
 fn session_store_error_to_protocol(error: SessionStoreError) -> RuntimeProtocolError {
     match error {
         SessionStoreError::NotFound(_) => protocol_error("session_not_found", error.to_string()),
@@ -1937,6 +2281,10 @@ fn session_store_error_to_protocol(error: SessionStoreError) -> RuntimeProtocolE
             protocol_error("session_store_error", error.to_string())
         }
     }
+}
+
+fn detached_registry_error_to_protocol(error: DetachedRegistryError) -> RuntimeProtocolError {
+    protocol_error("detached_registry_error", error.to_string())
 }
 
 fn runtime_error_to_protocol(error: RuntimeError) -> RuntimeProtocolError {

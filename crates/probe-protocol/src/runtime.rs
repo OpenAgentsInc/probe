@@ -99,6 +99,7 @@ pub struct RuntimeCapabilities {
     pub supports_pending_approval_resolution: bool,
     pub supports_interrupt_requests: bool,
     pub supports_queued_turns: bool,
+    pub supports_detached_session_registry: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +200,47 @@ pub struct InspectSessionTurnsResponse {
     pub queued_turns: Vec<SessionTurnControlRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_turns: Vec<SessionTurnControlRecord>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetachedSessionStatus {
+    Idle,
+    Running,
+    Queued,
+    ApprovalPaused,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetachedSessionRecoveryState {
+    Clean,
+    ApprovalPausedResumable,
+    RunningTurnFailedOnRestart,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetachedSessionSummary {
+    pub session_id: SessionId,
+    pub title: String,
+    pub cwd: PathBuf,
+    pub status: DetachedSessionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_turn_id: Option<String>,
+    pub queued_turn_count: usize,
+    pub pending_approval_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_terminal_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_terminal_status: Option<QueuedTurnStatus>,
+    pub registered_at_ms: TimestampMs,
+    pub updated_at_ms: TimestampMs,
+    pub recovery_state: DetachedSessionRecoveryState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_note: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,8 +368,20 @@ pub struct ListSessionsResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListDetachedSessionsResponse {
+    pub sessions: Vec<DetachedSessionSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListPendingApprovalsResponse {
     pub approvals: Vec<PendingToolApproval>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectDetachedSessionResponse {
+    pub summary: DetachedSessionSummary,
+    pub session: SessionSnapshot,
+    pub turn_control: InspectSessionTurnsResponse,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,7 +523,9 @@ pub enum RuntimeRequest {
     StartSession(StartSessionRequest),
     ResumeSession(SessionLookupRequest),
     ListSessions,
+    ListDetachedSessions,
     InspectSession(SessionLookupRequest),
+    InspectDetachedSession(SessionLookupRequest),
     StartTurn(TurnRequest),
     ContinueTurn(TurnRequest),
     QueueTurn(TurnRequest),
@@ -488,7 +544,9 @@ pub enum RuntimeResponse {
     StartSession(SessionSnapshot),
     ResumeSession(SessionSnapshot),
     ListSessions(ListSessionsResponse),
+    ListDetachedSessions(ListDetachedSessionsResponse),
     InspectSession(SessionSnapshot),
+    InspectDetachedSession(InspectDetachedSessionResponse),
     StartTurn(TurnResponse),
     ContinueTurn(TurnResponse),
     QueueTurn(QueueTurnResponse),
@@ -632,6 +690,7 @@ mod tests {
             supports_pending_approval_resolution: true,
             supports_interrupt_requests: true,
             supports_queued_turns: true,
+            supports_detached_session_registry: false,
         };
 
         let response_json = serde_json::to_value(&response).expect("response should encode");

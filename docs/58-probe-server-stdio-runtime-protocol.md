@@ -156,7 +156,7 @@ inside it. `SessionSnapshot` remains the transcript plus approval view, while
 Request:
 
 ```json
-{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":2}}
+{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":3}}
 ```
 
 Event:

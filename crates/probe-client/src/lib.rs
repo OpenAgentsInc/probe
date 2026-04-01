@@ -13,10 +13,11 @@ use probe_core::runtime::{
 };
 use probe_core::tools::{ExecutedToolCall, ProbeToolChoice, ToolDeniedAction, ToolLoopConfig};
 use probe_protocol::runtime::{
-    CancelQueuedTurnRequest, CancelQueuedTurnResponse, ClientMessage, EventEnvelope,
-    InitializeRequest, InspectSessionTurnsResponse, InterruptTurnResponse, ListSessionsResponse,
-    QueueTurnResponse, RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody,
-    ResponseEnvelope, RuntimeProgressEvent, RuntimeProtocolError, RuntimeRequest, RuntimeResponse,
+    CancelQueuedTurnRequest, CancelQueuedTurnResponse, ClientMessage, DetachedSessionSummary,
+    EventEnvelope, InitializeRequest, InspectDetachedSessionResponse, InspectSessionTurnsResponse,
+    InterruptTurnResponse, ListDetachedSessionsResponse, ListSessionsResponse, QueueTurnResponse,
+    RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope,
+    RuntimeProgressEvent, RuntimeProtocolError, RuntimeRequest, RuntimeResponse,
     RuntimeToolCallDelta, RuntimeUsage, ServerEvent, ServerMessage, SessionLookupRequest,
     SessionSnapshot, StartSessionRequest, ToolApprovalRecipe, ToolCallResult, ToolChoice,
     ToolDeniedAction as ProtocolDeniedAction, ToolLongContextRecipe, ToolLoopRecipe,
@@ -401,6 +402,19 @@ impl ProbeClient {
         }
     }
 
+    pub fn list_detached_sessions(
+        &mut self,
+    ) -> Result<Vec<DetachedSessionSummary>, ProbeClientError> {
+        match self.send_request(RuntimeRequest::ListDetachedSessions, None)? {
+            RuntimeResponse::ListDetachedSessions(ListDetachedSessionsResponse { sessions }) => {
+                Ok(sessions)
+            }
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected list_detached_sessions response, got {other:?}"
+            ))),
+        }
+    }
+
     pub fn inspect_session(
         &mut self,
         session_id: &SessionId,
@@ -414,6 +428,23 @@ impl ProbeClient {
             RuntimeResponse::InspectSession(snapshot) => Ok(snapshot),
             other => Err(ProbeClientError::UnexpectedServerMessage(format!(
                 "expected inspect_session response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub fn inspect_detached_session(
+        &mut self,
+        session_id: &SessionId,
+    ) -> Result<InspectDetachedSessionResponse, ProbeClientError> {
+        match self.send_request(
+            RuntimeRequest::InspectDetachedSession(SessionLookupRequest {
+                session_id: session_id.clone(),
+            }),
+            None,
+        )? {
+            RuntimeResponse::InspectDetachedSession(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected inspect_detached_session response, got {other:?}"
             ))),
         }
     }
@@ -548,7 +579,7 @@ impl ProbeClient {
         }
     }
 
-    fn start_session(
+    pub fn start_session(
         &mut self,
         request: StartSessionRequest,
     ) -> Result<SessionSnapshot, ProbeClientError> {

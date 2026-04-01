@@ -27,6 +27,7 @@ instead of letting `probe exec`, `probe chat`, and the TUI each wire
 - typed request and response handling
 - inline event draining during active turn or approval requests
 - queued-turn submission and inspection helpers
+- detached-session listing and inspection helpers for daemon mode
 - shutdown on drop
 
 Transport selection is now explicit:
@@ -115,6 +116,15 @@ That fallback does not create a second protocol. It only changes how the same
 The new daemon path keeps that same rule. `probe-client` now chooses between a
 spawned stdio child and the local daemon socket, but it still speaks the same
 typed request, event, and response contract either way.
+
+The shared client also now exposes the first daemon-owned session helpers:
+
+- explicit session creation through `start_session`
+- `list_detached_sessions`
+- `inspect_detached_session`
+
+That keeps later `probe ps` and attach work on the same shared client seam
+instead of growing a second daemon-only control client.
 
 ## New Shared Control Calls
 

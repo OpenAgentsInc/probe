@@ -12,3 +12,4 @@ probe-server.workspace = true
 
 [dev-dependencies]
 probe-test-support.workspace = true
+serde_json.workspace = true
