@@ -1040,6 +1040,7 @@ mod tests {
             kind: BackendKind::OpenAiChatCompletions,
             base_url: String::from(base_url),
             model: String::from(TEST_MODEL),
+            reasoning_level: None,
             api_key_env: String::from("PROBE_OPENAI_API_KEY"),
             timeout_secs: 30,
             attach_mode: ServerAttachMode::AttachToExisting,

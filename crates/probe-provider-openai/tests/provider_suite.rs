@@ -30,6 +30,7 @@ fn provider_suite_executes_plain_text_chat_completion() {
     let client = OpenAiProviderClient::new(OpenAiProviderConfig {
         base_url: server.base_url().to_string(),
         model: String::from("tiny-qwen35"),
+        reasoning_level: None,
         auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
         timeout: Duration::from_secs(5),
         stream: false,
@@ -61,6 +62,7 @@ fn provider_suite_surfaces_http_status_errors_with_body_context() {
     let client = OpenAiProviderClient::new(OpenAiProviderConfig {
         base_url: server.base_url().to_string(),
         model: String::from("tiny-qwen35"),
+        reasoning_level: None,
         auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
         timeout: Duration::from_secs(5),
         stream: false,

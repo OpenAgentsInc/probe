@@ -108,14 +108,16 @@ cargo run -p probe-cli -- tui
 Then verify:
 
 1. press `Tab` until the `Codex` lane is selected
-2. press `Ctrl+S` to open the backend overlay
-3. confirm the overlay shows:
+2. press `Shift+Tab` to cycle Codex reasoning levels if you want a different
+   effort than `backend_default`
+3. press `Ctrl+S` to open the backend overlay
+4. confirm the overlay shows:
    - `backend_kind: openai_codex_subscription`
    - `base_url: https://chatgpt.com/backend-api/codex`
-   - `reasoning_level: backend_default`
+   - `reasoning_level:` with the currently selected Codex effort
    - `OpenAI Subscription Auth`
-4. dismiss the overlay and submit a prompt
-5. confirm the turn executes against Codex and persists a normal Probe session
+5. dismiss the overlay and submit a prompt
+6. confirm the turn executes against Codex and persists a normal Probe session
 
 CLI reproduction for the same lane:
 

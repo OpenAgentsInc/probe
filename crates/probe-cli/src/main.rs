@@ -17,8 +17,8 @@ use probe_client::{INTERNAL_SERVER_SUBCOMMAND, ProbeClient, ProbeClientConfig};
 use probe_core::backend_profiles::{
     PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE,
     PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
-    default_reasoning_level_for_backend, named_backend_profile, openai_codex_subscription,
-    psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
+    named_backend_profile, openai_codex_subscription, psionic_apple_fm_bridge,
+    psionic_qwen35_2b_q8_registry, resolved_reasoning_level_for_backend,
 };
 use probe_core::dataset_export::{
     DatasetExportConfig, DatasetKind, DecisionCaseRecord, DecisionSessionSummary, export_dataset,
@@ -484,7 +484,8 @@ fn run_codex_login(args: CodexLoginArgs) -> Result<(), String> {
             ));
         }
     };
-    print_codex_auth_record("status=authenticated", &status);
+    let profile = resolve_codex_backend_profile(probe_home.as_path());
+    print_codex_auth_record("status=authenticated", &status, &profile);
     Ok(())
 }
 
@@ -495,7 +496,8 @@ fn run_codex_status(args: CodexStatusArgs) -> Result<(), String> {
     let controller =
         OpenAiCodexAuthController::new(probe_home.as_path()).map_err(|error| error.to_string())?;
     let status = controller.status().map_err(|error| error.to_string())?;
-    print_codex_auth_status(&status);
+    let profile = resolve_codex_backend_profile(probe_home.as_path());
+    print_codex_auth_status(&status, &profile);
     Ok(())
 }
 
@@ -1664,7 +1666,17 @@ fn profile_from_server_config(
     if let Some(model_id) = config.resolved_model_id() {
         profile.model = model_id;
     }
+    profile.reasoning_level = config.reasoning_level.clone();
     profile
+}
+
+fn resolve_codex_backend_profile(probe_home: &Path) -> probe_protocol::backend::BackendProfile {
+    PsionicServerConfig::load_or_default_for_backend(
+        probe_home,
+        BackendKind::OpenAiCodexSubscription,
+    )
+    .map(|config| profile_from_server_config(&config))
+    .unwrap_or_else(|_| openai_codex_subscription())
 }
 
 fn build_tui_runtime_config(
@@ -1773,13 +1785,17 @@ fn print_backend_target_summary_from_summary(
     }
 }
 
-fn print_codex_auth_record(prefix: &str, record: &probe_openai_auth::OpenAiCodexAuthRecord) {
-    let profile = openai_codex_subscription();
+fn print_codex_auth_record(
+    prefix: &str,
+    record: &probe_openai_auth::OpenAiCodexAuthRecord,
+    profile: &probe_protocol::backend::BackendProfile,
+) {
     println!("{prefix}");
     println!("model={}", profile.model);
     println!(
         "reasoning_level={}",
-        default_reasoning_level_for_backend(profile.kind).unwrap_or("none")
+        resolved_reasoning_level_for_backend(profile.kind, profile.reasoning_level.as_deref())
+            .unwrap_or("none")
     );
     println!("expires_ms={}", record.expires);
     println!(
@@ -1788,13 +1804,16 @@ fn print_codex_auth_record(prefix: &str, record: &probe_openai_auth::OpenAiCodex
     );
 }
 
-fn print_codex_auth_status(status: &OpenAiCodexAuthStatus) {
-    let profile = openai_codex_subscription();
+fn print_codex_auth_status(
+    status: &OpenAiCodexAuthStatus,
+    profile: &probe_protocol::backend::BackendProfile,
+) {
     println!("path={}", status.path.display());
     println!("model={}", profile.model);
     println!(
         "reasoning_level={}",
-        default_reasoning_level_for_backend(profile.kind).unwrap_or("none")
+        resolved_reasoning_level_for_backend(profile.kind, profile.reasoning_level.as_deref())
+            .unwrap_or("none")
     );
     println!("authenticated={}", status.authenticated);
     println!("expired={}", status.expired);

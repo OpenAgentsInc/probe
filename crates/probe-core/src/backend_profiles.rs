@@ -8,7 +8,14 @@ pub const PSIONIC_APPLE_FM_MODEL: &str = "apple-foundation-model";
 pub const DEFAULT_APPLE_FM_BRIDGE_BASE_URL: &str = "http://127.0.0.1:11435";
 pub const OPENAI_CODEX_SUBSCRIPTION_PROFILE: &str = "openai-codex-subscription";
 pub const OPENAI_CODEX_SUBSCRIPTION_MODEL: &str = "gpt-5.4";
-pub const OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL: &str = "backend_default";
+pub const OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL_DEFAULT: &str = "backend_default";
+pub const OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVELS: [&str; 5] = [
+    OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL_DEFAULT,
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+];
 pub const DEFAULT_OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub const PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE: &str = "psionic-qwen35-2b-q8-registry";
 pub const PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE: &str = "psionic-qwen35-2b-q8-oracle";
@@ -38,6 +45,7 @@ pub fn openai_codex_subscription() -> BackendProfile {
         kind: BackendKind::OpenAiCodexSubscription,
         base_url: String::from(DEFAULT_OPENAI_CODEX_BASE_URL),
         model: String::from(OPENAI_CODEX_SUBSCRIPTION_MODEL),
+        reasoning_level: None,
         api_key_env: String::new(),
         timeout_secs: 60,
         attach_mode: ServerAttachMode::AttachToExisting,
@@ -50,9 +58,66 @@ pub const fn default_reasoning_level_for_backend(
     backend_kind: BackendKind,
 ) -> Option<&'static str> {
     match backend_kind {
-        BackendKind::OpenAiCodexSubscription => Some(OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL),
+        BackendKind::OpenAiCodexSubscription => {
+            Some(OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL_DEFAULT)
+        }
         BackendKind::OpenAiChatCompletions | BackendKind::AppleFmBridge => None,
     }
+}
+
+#[must_use]
+pub const fn supported_reasoning_levels_for_backend(
+    backend_kind: BackendKind,
+) -> &'static [&'static str] {
+    match backend_kind {
+        BackendKind::OpenAiCodexSubscription => &OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVELS,
+        BackendKind::OpenAiChatCompletions | BackendKind::AppleFmBridge => &[],
+    }
+}
+
+#[must_use]
+pub fn resolved_reasoning_level_for_backend(
+    backend_kind: BackendKind,
+    configured: Option<&str>,
+) -> Option<&'static str> {
+    let supported = supported_reasoning_levels_for_backend(backend_kind);
+    if supported.is_empty() {
+        return None;
+    }
+
+    configured
+        .and_then(|value| {
+            supported
+                .iter()
+                .copied()
+                .find(|candidate| *candidate == value)
+        })
+        .or_else(|| default_reasoning_level_for_backend(backend_kind))
+}
+
+#[must_use]
+pub fn persisted_reasoning_level_for_backend(
+    backend_kind: BackendKind,
+    configured: Option<&str>,
+) -> Option<String> {
+    match resolved_reasoning_level_for_backend(backend_kind, configured) {
+        Some(OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL_DEFAULT) | None => None,
+        Some(level) => Some(level.to_string()),
+    }
+}
+
+#[must_use]
+pub fn next_reasoning_level_for_backend(
+    backend_kind: BackendKind,
+    current: Option<&str>,
+) -> Option<&'static str> {
+    let supported = supported_reasoning_levels_for_backend(backend_kind);
+    let current = resolved_reasoning_level_for_backend(backend_kind, current)?;
+    let index = supported
+        .iter()
+        .position(|candidate| *candidate == current)
+        .unwrap_or(0);
+    Some(supported[(index + 1) % supported.len()])
 }
 
 #[must_use]
@@ -62,6 +127,7 @@ pub fn psionic_apple_fm_bridge() -> BackendProfile {
         kind: BackendKind::AppleFmBridge,
         base_url: resolved_apple_fm_bridge_base_url(),
         model: String::from(PSIONIC_APPLE_FM_MODEL),
+        reasoning_level: None,
         api_key_env: String::new(),
         timeout_secs: 45,
         attach_mode: ServerAttachMode::AttachToExisting,
@@ -76,6 +142,7 @@ pub fn psionic_apple_fm_oracle() -> BackendProfile {
         kind: BackendKind::AppleFmBridge,
         base_url: resolved_apple_fm_bridge_base_url(),
         model: String::from(PSIONIC_APPLE_FM_MODEL),
+        reasoning_level: None,
         api_key_env: String::new(),
         timeout_secs: 30,
         attach_mode: ServerAttachMode::AttachToExisting,
@@ -90,6 +157,7 @@ pub fn psionic_qwen35_2b_q8_registry() -> BackendProfile {
         kind: BackendKind::OpenAiChatCompletions,
         base_url: String::from("http://127.0.0.1:8080/v1"),
         model: String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL),
+        reasoning_level: None,
         api_key_env: String::from("PROBE_OPENAI_API_KEY"),
         timeout_secs: 45,
         attach_mode: ServerAttachMode::AttachToExisting,
@@ -104,6 +172,7 @@ pub fn psionic_qwen35_2b_q8_oracle() -> BackendProfile {
         kind: BackendKind::OpenAiChatCompletions,
         base_url: String::from("http://127.0.0.1:8080/v1"),
         model: String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL),
+        reasoning_level: None,
         api_key_env: String::from("PROBE_OPENAI_API_KEY"),
         timeout_secs: 30,
         attach_mode: ServerAttachMode::AttachToExisting,
@@ -118,6 +187,7 @@ pub fn psionic_qwen35_2b_q8_long_context() -> BackendProfile {
         kind: BackendKind::OpenAiChatCompletions,
         base_url: String::from("http://127.0.0.1:8080/v1"),
         model: String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL),
+        reasoning_level: None,
         api_key_env: String::from("PROBE_OPENAI_API_KEY"),
         timeout_secs: 60,
         attach_mode: ServerAttachMode::AttachToExisting,
@@ -154,14 +224,17 @@ mod tests {
     use super::{
         DEFAULT_APPLE_FM_BRIDGE_BASE_URL, DEFAULT_OPENAI_CODEX_BASE_URL,
         OPENAI_CODEX_SUBSCRIPTION_MODEL, OPENAI_CODEX_SUBSCRIPTION_PROFILE,
-        OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL, PSIONIC_APPLE_FM_BRIDGE_PROFILE,
+        OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL_DEFAULT,
+        OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVELS, PSIONIC_APPLE_FM_BRIDGE_PROFILE,
         PSIONIC_APPLE_FM_MODEL, PSIONIC_APPLE_FM_ORACLE_PROFILE,
         PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE, PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE,
         PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
-        default_reasoning_level_for_backend, named_backend_profile, openai_codex_subscription,
-        psionic_apple_fm_bridge, psionic_apple_fm_oracle, psionic_qwen35_2b_q8_long_context,
-        psionic_qwen35_2b_q8_oracle, psionic_qwen35_2b_q8_registry,
-        resolve_apple_fm_bridge_base_url_with,
+        default_reasoning_level_for_backend, named_backend_profile,
+        next_reasoning_level_for_backend, openai_codex_subscription,
+        persisted_reasoning_level_for_backend, psionic_apple_fm_bridge, psionic_apple_fm_oracle,
+        psionic_qwen35_2b_q8_long_context, psionic_qwen35_2b_q8_oracle,
+        psionic_qwen35_2b_q8_registry, resolve_apple_fm_bridge_base_url_with,
+        resolved_reasoning_level_for_backend, supported_reasoning_levels_for_backend,
     };
 
     #[test]
@@ -192,7 +265,53 @@ mod tests {
             default_reasoning_level_for_backend(
                 probe_protocol::backend::BackendKind::OpenAiCodexSubscription
             ),
-            Some(OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL)
+            Some(OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL_DEFAULT)
+        );
+    }
+
+    #[test]
+    fn codex_reasoning_levels_are_stable() {
+        assert_eq!(
+            supported_reasoning_levels_for_backend(
+                probe_protocol::backend::BackendKind::OpenAiCodexSubscription
+            ),
+            &OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVELS
+        );
+        assert_eq!(
+            resolved_reasoning_level_for_backend(
+                probe_protocol::backend::BackendKind::OpenAiCodexSubscription,
+                Some("invalid")
+            ),
+            Some(OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL_DEFAULT)
+        );
+        assert_eq!(
+            next_reasoning_level_for_backend(
+                probe_protocol::backend::BackendKind::OpenAiCodexSubscription,
+                Some("high")
+            ),
+            Some("xhigh")
+        );
+        assert_eq!(
+            next_reasoning_level_for_backend(
+                probe_protocol::backend::BackendKind::OpenAiCodexSubscription,
+                Some("xhigh")
+            ),
+            Some(OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL_DEFAULT)
+        );
+        assert_eq!(
+            persisted_reasoning_level_for_backend(
+                probe_protocol::backend::BackendKind::OpenAiCodexSubscription,
+                Some("backend_default")
+            ),
+            None
+        );
+        assert_eq!(
+            persisted_reasoning_level_for_backend(
+                probe_protocol::backend::BackendKind::OpenAiCodexSubscription,
+                Some("xhigh")
+            )
+            .as_deref(),
+            Some("xhigh")
         );
     }
 

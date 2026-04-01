@@ -71,8 +71,9 @@ The first remote Probe lane stays narrow:
   reconstruction
 - the top strip in `probe tui` is a backend selector, not a `Chat` / `Events`
   view toggle
-- `Tab` and `Shift+Tab` now flip the active runtime between the prepared
-  Qwen or Tailnet lane and the Apple FM lane
+- `Tab` flips the active runtime between the prepared lanes
+- `Shift+Tab` still moves backward between prepared lanes, except on Codex
+  where it cycles reasoning level instead
 - switching backend resets the visible chat shell so the next submit starts a
   fresh session on that backend
 - the TUI bottom status bar shows backend kind, target, attach mode, model, and

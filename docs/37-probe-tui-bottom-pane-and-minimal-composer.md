@@ -59,7 +59,9 @@ loop is already wired through the TUI.
 
 Global shell commands moved to modifier-driven bindings:
 
-- `Tab` and `Shift+Tab` switch tabs
+- `Tab` switches tabs
+- `Shift+Tab` cycles Codex reasoning on the Codex lane and otherwise moves to
+  the previous backend
 - `Ctrl+R` reruns Apple FM setup
 - `Ctrl+T` toggles operator notes
 - `F1` opens help

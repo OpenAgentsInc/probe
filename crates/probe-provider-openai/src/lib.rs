@@ -34,6 +34,7 @@ pub enum OpenAiTransport {
 pub struct OpenAiProviderConfig {
     pub base_url: String,
     pub model: String,
+    pub reasoning_level: Option<String>,
     pub auth: OpenAiRequestAuth,
     pub timeout: Duration,
     pub stream: bool,
@@ -50,6 +51,7 @@ impl OpenAiProviderConfig {
         Self {
             base_url: String::from("http://127.0.0.1:8080/v1"),
             model: model.into(),
+            reasoning_level: None,
             auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: Duration::from_secs(30),
             stream: false,
@@ -81,6 +83,7 @@ impl OpenAiProviderConfig {
         Self {
             base_url: profile.base_url.clone(),
             model: profile.model.clone(),
+            reasoning_level: profile.reasoning_level.clone(),
             auth: match profile.kind {
                 probe_protocol::backend::BackendKind::OpenAiCodexSubscription => {
                     OpenAiRequestAuth::None
@@ -280,6 +283,8 @@ struct CodexResponsesRequest {
     pub input: Vec<CodexInputItem>,
     pub stream: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<CodexReasoning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<CodexToolDefinition>,
@@ -292,7 +297,10 @@ struct CodexResponsesRequest {
 
 impl CodexResponsesRequest {
     #[must_use]
-    fn from_chat_completion(request: &ChatCompletionRequest) -> Self {
+    fn from_chat_completion(
+        request: &ChatCompletionRequest,
+        config: &OpenAiProviderConfig,
+    ) -> Self {
         let mut instructions = Vec::new();
         let mut input = Vec::new();
         for message in &request.messages {
@@ -353,6 +361,7 @@ impl CodexResponsesRequest {
             instructions: instructions.join("\n\n"),
             input,
             stream: request.stream,
+            reasoning: codex_reasoning_from_level(config.reasoning_level.as_deref()),
             max_output_tokens: None,
             tools: request
                 .tools
@@ -363,6 +372,20 @@ impl CodexResponsesRequest {
             parallel_tool_calls: request.parallel_tool_calls,
             store: false,
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct CodexReasoning {
+    pub effort: String,
+}
+
+fn codex_reasoning_from_level(level: Option<&str>) -> Option<CodexReasoning> {
+    match level {
+        Some("backend_default") | None => None,
+        Some(level) => Some(CodexReasoning {
+            effort: level.to_string(),
+        }),
     }
 }
 
@@ -758,7 +781,7 @@ impl OpenAiProviderClient {
         request: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, OpenAiProviderError> {
         self.validate_request()?;
-        let request = CodexResponsesRequest::from_chat_completion(request);
+        let request = CodexResponsesRequest::from_chat_completion(request, &self.config);
         let response = self
             .request_builder(self.http.post(self.config.request_endpoint()))
             .json(&request)
@@ -878,7 +901,7 @@ impl OpenAiProviderClient {
         mut on_chunk: impl FnMut(&ChatCompletionChunk),
     ) -> Result<ChatCompletionResponse, OpenAiProviderError> {
         self.validate_request()?;
-        let request = CodexResponsesRequest::from_chat_completion(request);
+        let request = CodexResponsesRequest::from_chat_completion(request, &self.config);
         let response = self
             .request_builder(
                 self.http
@@ -1374,6 +1397,7 @@ mod tests {
             kind: BackendKind::OpenAiChatCompletions,
             base_url: String::from("http://127.0.0.1:8080/v1"),
             model: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+            reasoning_level: None,
             api_key_env: String::from("PROBE_OPENAI_API_KEY"),
             timeout_secs: 45,
             attach_mode: ServerAttachMode::AttachToExisting,
@@ -1398,6 +1422,7 @@ mod tests {
             kind: BackendKind::OpenAiCodexSubscription,
             base_url: String::from("https://chatgpt.com/backend-api/codex"),
             model: String::from("gpt-5.4"),
+            reasoning_level: Some(String::from("high")),
             api_key_env: String::new(),
             timeout_secs: 60,
             attach_mode: ServerAttachMode::AttachToExisting,
@@ -1410,12 +1435,14 @@ mod tests {
         );
         assert_eq!(config.transport, OpenAiTransport::CodexResponses);
         assert_eq!(config.auth, OpenAiRequestAuth::None);
+        assert_eq!(config.reasoning_level.as_deref(), Some("high"));
     }
 
     fn streaming_config(base_url: &str) -> OpenAiProviderConfig {
         OpenAiProviderConfig {
             base_url: base_url.to_string(),
             model: String::from("tiny-qwen35"),
+            reasoning_level: None,
             auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: Duration::from_secs(5),
             stream: true,
@@ -1434,6 +1461,7 @@ mod tests {
         OpenAiProviderConfig {
             base_url: base_url.to_string(),
             model: String::from("gpt-5.4"),
+            reasoning_level: None,
             auth: OpenAiRequestAuth::BearerToken(String::from("access-token")),
             timeout: Duration::from_secs(5),
             stream: false,
@@ -1471,6 +1499,7 @@ mod tests {
         let config = OpenAiProviderConfig {
             base_url: String::from(server.base_url()),
             model: String::from("tiny-qwen35"),
+            reasoning_level: None,
             auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: std::time::Duration::from_secs(5),
             stream: false,
@@ -1518,6 +1547,7 @@ mod tests {
         let config = OpenAiProviderConfig {
             base_url: String::from(server.base_url()),
             model: String::from("tiny-qwen35"),
+            reasoning_level: None,
             auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: Duration::from_secs(5),
             stream: false,
@@ -1549,8 +1579,11 @@ mod tests {
             ],
         );
 
-        let encoded = serde_json::to_value(CodexResponsesRequest::from_chat_completion(&request))
-            .expect("serialize codex request");
+        let encoded = serde_json::to_value(CodexResponsesRequest::from_chat_completion(
+            &request,
+            &codex_config("https://chatgpt.com/backend-api/codex"),
+        ))
+        .expect("serialize codex request");
 
         assert_eq!(encoded["instructions"], "You are helpful");
         assert_eq!(encoded["input"][0]["role"], "user");
@@ -1559,6 +1592,7 @@ mod tests {
             encoded["input"][0]["content"][0]["text"],
             "hello from probe"
         );
+        assert!(encoded.get("reasoning").is_none());
         assert!(encoded.get("messages").is_none());
     }
 
@@ -1598,8 +1632,11 @@ mod tests {
             Some(false),
         );
 
-        let encoded = serde_json::to_value(CodexResponsesRequest::from_chat_completion(&request))
-            .expect("serialize codex tool request");
+        let encoded = serde_json::to_value(CodexResponsesRequest::from_chat_completion(
+            &request,
+            &codex_config("https://chatgpt.com/backend-api/codex"),
+        ))
+        .expect("serialize codex tool request");
 
         assert_eq!(encoded["instructions"], "You are helpful");
         assert_eq!(encoded["tools"][0]["type"], "function");
@@ -1612,6 +1649,26 @@ mod tests {
         assert_eq!(encoded["input"][1]["type"], "function_call_output");
         assert_eq!(encoded["input"][1]["call_id"], "call_1");
         assert_eq!(encoded["input"][1]["output"], "{\"contents\":\"hi\"}");
+    }
+
+    #[test]
+    fn codex_request_includes_reasoning_effort_when_configured() {
+        let mut config = codex_config("https://chatgpt.com/backend-api/codex");
+        config.reasoning_level = Some(String::from("xhigh"));
+        let request = ChatCompletionRequest::from_config(
+            &config,
+            vec![
+                ChatMessage::system("You are helpful"),
+                ChatMessage::user("hello from probe"),
+            ],
+        );
+
+        let encoded = serde_json::to_value(CodexResponsesRequest::from_chat_completion(
+            &request, &config,
+        ))
+        .expect("serialize codex request");
+
+        assert_eq!(encoded["reasoning"]["effort"], "xhigh");
     }
 
     #[test]
@@ -1749,6 +1806,7 @@ mod tests {
         let config = OpenAiProviderConfig {
             base_url: String::from(server.base_url()),
             model: String::from("tiny-qwen35"),
+            reasoning_level: None,
             auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: std::time::Duration::from_secs(5),
             stream: false,

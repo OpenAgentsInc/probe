@@ -8,11 +8,12 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use probe_core::backend_profiles::{
-    openai_codex_subscription, psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
+    next_reasoning_level_for_backend, openai_codex_subscription,
+    persisted_reasoning_level_for_backend, psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
 };
 use probe_core::harness::resolve_prompt_contract;
 use probe_core::runtime::{current_working_dir, default_probe_home};
-use probe_core::server_control::{PsionicServerConfig, PsionicServerMode, ServerOperatorSummary};
+use probe_core::server_control::{PsionicServerConfig, ServerOperatorSummary};
 use probe_core::tools::{ProbeToolChoice, ToolApprovalConfig, ToolLoopConfig};
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use ratatui::backend::CrosstermBackend;
@@ -253,6 +254,10 @@ impl AppShell {
                     return;
                 }
                 UiEvent::PreviousView => {
+                    if self.cycle_codex_reasoning_level() {
+                        self.poll_background_messages();
+                        return;
+                    }
                     self.switch_backend(self.base_screen().active_tab().previous());
                     self.poll_background_messages();
                     return;
@@ -583,6 +588,12 @@ impl AppShell {
         &self.backend_lanes[self.active_backend_index].chat_runtime
     }
 
+    fn active_backend_kind(&self) -> BackendKind {
+        self.backend_lanes[self.active_backend_index]
+            .operator_backend
+            .backend_kind
+    }
+
     fn backend_selector_labels(&self) -> Vec<String> {
         self.backend_lanes
             .iter()
@@ -601,6 +612,22 @@ impl AppShell {
     fn persist_active_chat_lane(&mut self) {
         let screen = self.base_screen().clone();
         self.chat_lanes[self.active_backend_index] = screen;
+    }
+
+    fn persist_backend_lane_snapshot(&self, lane_index: usize) -> Result<(), String> {
+        let lane = &self.backend_lanes[lane_index];
+        let Some(probe_home) = lane.chat_runtime.probe_home.as_deref() else {
+            return Ok(());
+        };
+        server_config_from_profile(&lane.chat_runtime.profile)
+            .save(
+                PsionicServerConfig::backend_config_path(
+                    probe_home,
+                    lane.chat_runtime.profile.kind,
+                )
+                .as_path(),
+            )
+            .map_err(|error| error.to_string())
     }
 
     fn restore_chat_lane(&mut self, lane_index: usize, active_tab: ActiveTab) {
@@ -624,6 +651,54 @@ impl AppShell {
         let lane = self.backend_lanes[self.active_backend_index].clone();
         self.restore_chat_lane(self.active_backend_index, active_tab);
         self.last_status = format!("active backend: {}", lane.label);
+    }
+
+    fn cycle_codex_reasoning_level(&mut self) -> bool {
+        if self.active_backend_kind() != BackendKind::OpenAiCodexSubscription {
+            return false;
+        }
+        if self.base_screen().has_pending_tool_approvals() {
+            self.last_status =
+                String::from("resolve pending approvals before changing Codex reasoning");
+            self.base_screen_mut()
+                .record_event("codex reasoning change blocked by pending approvals");
+            return true;
+        }
+
+        let lane_index = self.active_backend_index;
+        let current_level = self.backend_lanes[lane_index]
+            .chat_runtime
+            .profile
+            .reasoning_level
+            .as_deref();
+        let Some(next_level) =
+            next_reasoning_level_for_backend(BackendKind::OpenAiCodexSubscription, current_level)
+        else {
+            return false;
+        };
+
+        {
+            let lane = &mut self.backend_lanes[lane_index];
+            lane.chat_runtime.profile.reasoning_level = persisted_reasoning_level_for_backend(
+                BackendKind::OpenAiCodexSubscription,
+                Some(next_level),
+            );
+            lane.operator_backend = operator_summary_from_profile(&lane.chat_runtime.profile);
+        }
+
+        let active_tab = ActiveTab::from_index(lane_index);
+        let mut refreshed_lane = build_chat_lane(&self.backend_lanes, lane_index, active_tab);
+        refreshed_lane.record_event(format!("codex reasoning level set to {next_level}"));
+        self.chat_lanes[lane_index] = refreshed_lane.clone();
+        self.screens[0] = ScreenState::Chat(refreshed_lane);
+        self.sync_backend_selector();
+        self.last_status = format!("codex reasoning level: {next_level}");
+        if let Err(error) = self.persist_backend_lane_snapshot(lane_index) {
+            self.base_screen_mut()
+                .record_event(format!("failed to persist Codex reasoning level: {error}"));
+            self.last_status = error;
+        }
+        true
     }
 }
 
@@ -651,25 +726,16 @@ fn profile_from_server_config(config: &PsionicServerConfig) -> BackendProfile {
     if let Some(model_id) = config.resolved_model_id() {
         profile.model = model_id;
     }
+    profile.reasoning_level = config.reasoning_level.clone();
     profile
 }
 
+fn server_config_from_profile(profile: &BackendProfile) -> PsionicServerConfig {
+    PsionicServerConfig::from_backend_profile(profile)
+}
+
 fn operator_summary_from_profile(profile: &BackendProfile) -> ServerOperatorSummary {
-    let (host, port) = parse_profile_host_port(profile);
-    let mut config = PsionicServerConfig {
-        mode: PsionicServerMode::Attach,
-        api_kind: profile.kind,
-        host,
-        port,
-        backend: String::from("cpu"),
-        binary_path: None,
-        model_path: None,
-        model_id: Some(profile.model.clone()),
-        reasoning_budget: None,
-    };
-    config.set_api_kind(profile.kind);
-    config.model_id = Some(profile.model.clone());
-    config.operator_summary()
+    server_config_from_profile(profile).operator_summary()
 }
 
 fn runtime_for_profile(
@@ -793,34 +859,6 @@ fn build_chat_lanes(
             ActiveTab::from_index(active_backend_index),
         ),
     ]
-}
-
-fn parse_profile_host_port(profile: &BackendProfile) -> (String, u16) {
-    let without_scheme = profile
-        .base_url
-        .strip_prefix("http://")
-        .or_else(|| profile.base_url.strip_prefix("https://"))
-        .unwrap_or(profile.base_url.as_str());
-    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
-    let (host, port) = authority
-        .rsplit_once(':')
-        .map(|(host, port)| {
-            (
-                host.to_string(),
-                port.parse::<u16>()
-                    .unwrap_or_else(|_| default_port_for_kind(profile.kind)),
-            )
-        })
-        .unwrap_or_else(|| (authority.to_string(), default_port_for_kind(profile.kind)));
-    (host, port)
-}
-
-fn default_port_for_kind(kind: BackendKind) -> u16 {
-    match kind {
-        BackendKind::OpenAiChatCompletions => 8080,
-        BackendKind::OpenAiCodexSubscription => 443,
-        BackendKind::AppleFmBridge => 11435,
-    }
 }
 
 fn preview(value: &str, max_chars: usize) -> String {
@@ -1054,6 +1092,46 @@ mod tests {
             ]
         );
         assert_eq!(app.active_tab(), ActiveTab::Secondary);
+    }
+
+    #[test]
+    fn shift_tab_on_codex_cycles_reasoning_and_resets_the_lane() {
+        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
+        config.profile.reasoning_level = Some(String::from("high"));
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_codex"),
+            profile_name: String::from("openai-codex-subscription"),
+            model_id: String::from("gpt-5.4"),
+            cwd: String::from("/tmp/probe-workspace"),
+        });
+        app.apply_message(AppMessage::TranscriptEntryCommitted {
+            entry: TranscriptEntry::new(
+                TranscriptRole::User,
+                "You",
+                vec![String::from("codex lane message")],
+            ),
+        });
+
+        app.dispatch(UiEvent::PreviousView);
+
+        assert_eq!(app.active_tab(), ActiveTab::Primary);
+        assert_eq!(
+            probe_core::backend_profiles::resolved_reasoning_level_for_backend(
+                BackendKind::OpenAiCodexSubscription,
+                app.backend_lanes[0]
+                    .chat_runtime
+                    .profile
+                    .reasoning_level
+                    .as_deref()
+            ),
+            Some("xhigh")
+        );
+        assert_eq!(app.runtime_session_id(), None);
+        let rendered = app.render_to_string(120, 32);
+        assert!(rendered.contains("Transcript is empty."));
+        assert!(!rendered.contains("codex lane message"));
+        assert_eq!(app.last_status(), "codex reasoning level: xhigh");
     }
 
     #[test]

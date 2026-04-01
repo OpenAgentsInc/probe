@@ -153,7 +153,8 @@ cargo run -p probe-cli -- exec \
 ```
 
 In the TUI, launch `cargo probe` or `probe tui`, press `Tab` until the
-`Codex` lane is selected, and submit the prompt there.
+`Codex` lane is selected, use `Shift+Tab` there to cycle Codex reasoning if
+needed, and submit the prompt there.
 
 The canonical Codex backend profile sends requests to
 `https://chatgpt.com/backend-api/codex/responses` with subscription bearer auth
@@ -202,9 +203,10 @@ The first supported remote-Qwen posture stays narrow and explicit:
 The top selector is now a backend switcher, not a view switcher. Probe keeps one
 transcript-first home shell on screen at a time, and `Tab` flips the active
 backend between the Codex subscription lane, the current Qwen or Tailnet lane,
-and the Apple FM lane. When the backend changes, Probe resets the chat surface
-so the next submit starts a fresh session on that backend instead of continuing
-the previous backend lane.
+and the Apple FM lane. `Shift+Tab` moves backward between lanes except on the
+Codex lane, where it cycles reasoning instead. When the backend changes, Probe
+resets the chat surface so the next submit starts a fresh session on that
+backend instead of continuing the previous backend lane.
 Each backend lane now keeps its own saved attach config under
 `~/.probe/server/psionic-openai-chat-completions.json`,
 `~/.probe/server/openai-codex-subscription.json`, or
@@ -217,7 +219,8 @@ path, or error summaries instead of debug-shaped JSON blobs.
 
 Keys:
 
-- `Tab`, `Shift+Tab`: switch active backend
+- `Tab`: switch active backend
+- `Shift+Tab`: on Codex, cycle reasoning; otherwise move to the previous backend
 - `Enter`: submit the composer
 - `Ctrl+J`: insert a newline
 - `Up`, `Down`: recall draft history

@@ -74,6 +74,7 @@ fn server_suite_waits_for_ready_apple_fm_bridge() {
         host: host.to_string(),
         port,
         model_id: Some(String::from("apple-foundation-model")),
+        reasoning_level: None,
         ..PsionicServerConfig::default()
     };
 

@@ -1,7 +1,9 @@
 use assert_cmd::prelude::*;
 use insta::{assert_json_snapshot, assert_snapshot};
 use predicates::prelude::*;
+use probe_core::server_control::{PsionicServerConfig, PsionicServerMode};
 use probe_openai_auth::{OpenAiCodexAuthRecord, OpenAiCodexAuthStore};
+use probe_protocol::backend::BackendKind;
 use probe_test_support::{
     FakeOpenAiServer, ProbeTestEnvironment, configure_snapshot_root,
     normalize_exec_stderr_for_snapshot, normalized_acceptance_report_snapshot, probe_cli_command,
@@ -110,6 +112,38 @@ fn codex_status_reports_missing_auth_state() {
         .stdout(predicate::str::contains(
             "hint=run `probe codex login --method browser`",
         ));
+}
+
+#[test]
+fn codex_status_uses_saved_reasoning_level_override() {
+    let environment = ProbeTestEnvironment::new();
+    let config_path = PsionicServerConfig::backend_config_path(
+        environment.probe_home(),
+        BackendKind::OpenAiCodexSubscription,
+    );
+    PsionicServerConfig {
+        mode: PsionicServerMode::Attach,
+        api_kind: BackendKind::OpenAiCodexSubscription,
+        host: String::from("chatgpt.com"),
+        port: 443,
+        backend: String::from("cpu"),
+        binary_path: None,
+        model_path: None,
+        model_id: Some(String::from("gpt-5.4")),
+        reasoning_budget: None,
+        reasoning_level: Some(String::from("xhigh")),
+    }
+    .save(config_path.as_path())
+    .expect("save codex config");
+
+    probe_cli_command()
+        .arg("codex")
+        .arg("status")
+        .arg("--probe-home")
+        .arg(environment.probe_home())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("reasoning_level=xhigh"));
 }
 
 #[test]

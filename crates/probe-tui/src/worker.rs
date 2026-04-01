@@ -57,6 +57,7 @@ struct ProbeRuntimeSessionState {
     profile_name: String,
     profile_base_url: String,
     profile_model: String,
+    profile_reasoning_level: Option<String>,
 }
 
 #[derive(Debug)]
@@ -465,6 +466,7 @@ impl ProbeRuntimeSessionState {
             && self.profile_name == config.profile.name
             && self.profile_base_url == config.profile.base_url
             && self.profile_model == config.profile.model
+            && self.profile_reasoning_level == config.profile.reasoning_level
     }
 
     fn same_runtime_config(&self, other: &Self) -> bool {
@@ -473,6 +475,7 @@ impl ProbeRuntimeSessionState {
             && self.profile_name == other.profile_name
             && self.profile_base_url == other.profile_base_url
             && self.profile_model == other.profile_model
+            && self.profile_reasoning_level == other.profile_reasoning_level
     }
 
     fn from_metadata(
@@ -488,6 +491,7 @@ impl ProbeRuntimeSessionState {
             profile_name: config.profile.name.clone(),
             profile_base_url: config.profile.base_url.clone(),
             profile_model: config.profile.model.clone(),
+            profile_reasoning_level: config.profile.reasoning_level.clone(),
         }
     }
 }
@@ -1012,6 +1016,7 @@ mod tests {
                 kind: BackendKind::OpenAiChatCompletions,
                 base_url: base_url.to_string(),
                 model: model.to_string(),
+                reasoning_level: None,
                 api_key_env: String::from("OPENAI_API_KEY"),
                 timeout_secs: 120,
                 attach_mode: ServerAttachMode::AttachToExisting,
@@ -1036,6 +1041,7 @@ mod tests {
                 kind: BackendKind::AppleFmBridge,
                 base_url: String::from("http://127.0.0.1:11435"),
                 model: String::from("apple-foundation-model"),
+                reasoning_level: None,
                 api_key_env: String::from("OPENAI_API_KEY"),
                 timeout_secs: 120,
                 attach_mode: ServerAttachMode::AttachToExisting,
@@ -1057,6 +1063,7 @@ mod tests {
             profile_name: qwen.profile.name.clone(),
             profile_base_url: qwen.profile.base_url.clone(),
             profile_model: qwen.profile.model.clone(),
+            profile_reasoning_level: qwen.profile.reasoning_level.clone(),
         });
         state.upsert_runtime_session(ProbeRuntimeSessionState {
             session_id: probe_protocol::session::SessionId::new("sess_apple"),
@@ -1066,6 +1073,7 @@ mod tests {
             profile_name: apple.profile.name.clone(),
             profile_base_url: apple.profile.base_url.clone(),
             profile_model: apple.profile.model.clone(),
+            profile_reasoning_level: apple.profile.reasoning_level.clone(),
         });
 
         assert_eq!(

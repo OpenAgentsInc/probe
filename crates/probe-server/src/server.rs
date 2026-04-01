@@ -1897,6 +1897,7 @@ mod tests {
             kind: BackendKind::OpenAiChatCompletions,
             base_url: String::from("http://127.0.0.1:11434/v1"),
             model: String::from("tiny"),
+            reasoning_level: None,
             api_key_env: String::from("PROBE_OPENAI_API_KEY"),
             timeout_secs: 30,
             attach_mode: ServerAttachMode::AttachToExisting,

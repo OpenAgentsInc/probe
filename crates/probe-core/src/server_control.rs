@@ -6,13 +6,14 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use probe_protocol::backend::BackendKind;
+use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig};
 use psionic_apple_fm::AppleFmSystemLanguageModelAvailability;
 use serde::{Deserialize, Serialize};
 
 use crate::backend_profiles::{
     OPENAI_CODEX_SUBSCRIPTION_MODEL, PSIONIC_APPLE_FM_MODEL, PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL,
+    persisted_reasoning_level_for_backend, resolved_reasoning_level_for_backend,
 };
 
 const DEFAULT_SERVER_CONFIG_PATH: &str = "server/psionic-local.json";
@@ -45,6 +46,8 @@ pub struct PsionicServerConfig {
     pub model_path: Option<PathBuf>,
     pub model_id: Option<String>,
     pub reasoning_budget: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_level: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,6 +67,7 @@ pub struct ServerOperatorSummary {
     pub port: u16,
     pub base_url: String,
     pub model_id: Option<String>,
+    pub reasoning_level: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -171,11 +175,34 @@ impl Default for PsionicServerConfig {
             model_path: None,
             model_id: Some(String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL)),
             reasoning_budget: None,
+            reasoning_level: None,
         }
     }
 }
 
 impl PsionicServerConfig {
+    #[must_use]
+    pub fn from_backend_profile(profile: &BackendProfile) -> Self {
+        let (host, port) = parse_profile_host_port(profile);
+        let mut config = Self {
+            mode: PsionicServerMode::Attach,
+            api_kind: profile.kind,
+            host,
+            port,
+            backend: String::from(DEFAULT_SERVER_BACKEND),
+            binary_path: None,
+            model_path: None,
+            model_id: Some(profile.model.clone()),
+            reasoning_budget: None,
+            reasoning_level: profile.reasoning_level.clone(),
+        };
+        config.set_api_kind(profile.kind);
+        config.model_id = Some(profile.model.clone());
+        config.reasoning_level =
+            persisted_reasoning_level_for_backend(profile.kind, profile.reasoning_level.as_deref());
+        config
+    }
+
     #[must_use]
     pub fn config_path(probe_home: &Path) -> PathBuf {
         probe_home.join(DEFAULT_SERVER_CONFIG_PATH)
@@ -249,6 +276,8 @@ impl PsionicServerConfig {
         {
             self.model_id = default_model_id_for(self.api_kind);
         }
+        self.reasoning_level =
+            persisted_reasoning_level_for_backend(self.api_kind, self.reasoning_level.as_deref());
     }
 
     #[must_use]
@@ -261,6 +290,11 @@ impl PsionicServerConfig {
             port: self.port,
             base_url: self.base_url(),
             model_id: self.resolved_model_id(),
+            reasoning_level: resolved_reasoning_level_for_backend(
+                self.api_kind,
+                self.reasoning_level.as_deref(),
+            )
+            .map(str::to_string),
         }
     }
 
@@ -462,6 +496,26 @@ fn classify_target_kind(mode: PsionicServerMode, host: &str) -> ServerTargetKind
         PsionicServerMode::Attach if is_tailnet_host(host) => ServerTargetKind::TailnetAttach,
         PsionicServerMode::Attach => ServerTargetKind::RemoteAttach,
     }
+}
+
+fn parse_profile_host_port(profile: &BackendProfile) -> (String, u16) {
+    let without_scheme = profile
+        .base_url
+        .strip_prefix("http://")
+        .or_else(|| profile.base_url.strip_prefix("https://"))
+        .unwrap_or(profile.base_url.as_str());
+    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+    let (host, port) = authority
+        .rsplit_once(':')
+        .map(|(host, port)| {
+            (
+                host.to_string(),
+                port.parse::<u16>()
+                    .unwrap_or_else(|_| default_port_for(profile.kind)),
+            )
+        })
+        .unwrap_or_else(|| (authority.to_string(), default_port_for(profile.kind)));
+    (host, port)
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -764,6 +818,7 @@ mod tests {
             model_path: None,
             model_id: Some(String::from("gpt-5.3-codex")),
             reasoning_budget: None,
+            reasoning_level: Some(String::from("invalid")),
         };
         legacy.save(path.as_path()).expect("save legacy config");
 
@@ -774,6 +829,45 @@ mod tests {
         .expect("load migrated codex snapshot");
 
         assert_eq!(loaded.resolved_model_id().as_deref(), Some("gpt-5.4"));
+        assert_eq!(loaded.reasoning_level, None);
+        assert_eq!(
+            loaded.operator_summary().reasoning_level.as_deref(),
+            Some("backend_default")
+        );
+    }
+
+    #[test]
+    fn codex_backend_retains_reasoning_level_override() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = PsionicServerConfig::backend_config_path(
+            temp.path(),
+            BackendKind::OpenAiCodexSubscription,
+        );
+        let config = PsionicServerConfig {
+            mode: PsionicServerMode::Attach,
+            api_kind: BackendKind::OpenAiCodexSubscription,
+            host: String::from("chatgpt.com"),
+            port: DEFAULT_CODEX_SERVER_PORT,
+            backend: String::from("cpu"),
+            binary_path: None,
+            model_path: None,
+            model_id: Some(String::from("gpt-5.4")),
+            reasoning_budget: None,
+            reasoning_level: Some(String::from("xhigh")),
+        };
+        config.save(path.as_path()).expect("save codex config");
+
+        let loaded = PsionicServerConfig::load_or_default_for_backend(
+            temp.path(),
+            BackendKind::OpenAiCodexSubscription,
+        )
+        .expect("load saved codex config");
+
+        assert_eq!(loaded.reasoning_level.as_deref(), Some("xhigh"));
+        assert_eq!(
+            loaded.operator_summary().reasoning_level.as_deref(),
+            Some("xhigh")
+        );
     }
 
     #[test]
@@ -828,6 +922,7 @@ mod tests {
             host: host.to_string(),
             port,
             model_id: Some(String::from("apple-foundation-model")),
+            reasoning_level: None,
             ..PsionicServerConfig::default()
         };
         let guard = config
@@ -863,6 +958,7 @@ mod tests {
             host: host.to_string(),
             port,
             model_id: Some(String::from("apple-foundation-model")),
+            reasoning_level: None,
             ..PsionicServerConfig::default()
         };
         let error = config
@@ -926,6 +1022,7 @@ cd "$(dirname "$0")" && exec python3 -m http.server "$PORT" --bind "$HOST"
             model_path: Some(root.join("fake.gguf")),
             model_id: Some(String::from("fake.gguf")),
             reasoning_budget: None,
+            reasoning_level: None,
         };
 
         let guard: ServerProcessGuard = config

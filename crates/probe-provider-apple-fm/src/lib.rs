@@ -993,6 +993,7 @@ mod tests {
             kind: BackendKind::AppleFmBridge,
             base_url: String::from("http://127.0.0.1:11435"),
             model: String::from("apple-foundation-model"),
+            reasoning_level: None,
             api_key_env: String::new(),
             timeout_secs: 45,
             attach_mode: ServerAttachMode::AttachToExisting,

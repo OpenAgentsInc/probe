@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use probe_core::backend_profiles::default_reasoning_level_for_backend;
+use probe_core::backend_profiles::resolved_reasoning_level_for_backend;
 use probe_core::provider::normalize_openai_stream_display_text;
 use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_core::server_control::ServerOperatorSummary;
@@ -352,7 +352,8 @@ impl Default for ChatScreen {
         screen.record_event("press Ctrl+R to rerun backend check when supported");
         screen.record_event("press Ctrl+S to inspect backend status");
         screen.record_event("press F1 for help");
-        screen.record_event("press Tab or Shift+Tab to switch backends");
+        screen.record_event("press Tab to switch backends");
+        screen.record_event("press Shift+Tab for Codex reasoning or previous backend");
         screen
     }
 }
@@ -1496,7 +1497,13 @@ impl ChatScreen {
             )),
             Line::from(format!(
                 "reasoning_level: {}",
-                default_reasoning_level_for_backend(summary.backend_kind).unwrap_or("none")
+                summary
+                    .reasoning_level
+                    .as_deref()
+                    .or_else(|| {
+                        resolved_reasoning_level_for_backend(summary.backend_kind, None)
+                    })
+                    .unwrap_or("none")
             )),
             Line::from(""),
             Line::from("Contract"),
@@ -1881,7 +1888,7 @@ impl HelpScreen {
         let content = Paragraph::new(Text::from(vec![
             Line::from("Probe Chat Shell Keys"),
             Line::from(""),
-            Line::from("Tab / Shift+Tab     switch active backend"),
+            Line::from("Tab / Shift+Tab     backend / Codex effort"),
             Line::from("Enter / Ctrl+J      submit / newline"),
             Line::from("Up / Down           draft history recall"),
             Line::from("Mouse wheel / PgUp  scroll active panel"),

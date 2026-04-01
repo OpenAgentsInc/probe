@@ -63,7 +63,9 @@ structure.
 
 ## Control Model
 
-- `Tab` / `Shift+Tab`: switch the active backend lane
+- `Tab`: switch the active backend lane
+- `Shift+Tab`: cycle Codex reasoning on the Codex lane or move to the previous
+  backend elsewhere
 - `Ctrl+S`: open setup overlay
 - `Ctrl+A`: open approval overlay
 - `F1`: open help overlay
