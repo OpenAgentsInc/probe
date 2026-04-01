@@ -24,7 +24,7 @@ use probe_core::dataset_export::{
 };
 use probe_core::harness::{
     HarnessCandidateManifest, builtin_harness_candidate_manifests, render_harness_profile,
-    resolve_harness_profile,
+    resolve_prompt_contract,
 };
 use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, current_working_dir,
@@ -655,6 +655,7 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
         args.harness_profile.as_deref(),
         args.system.as_deref(),
         cwd.as_path(),
+        profile.kind,
     )?;
     let outcome = runtime
         .exec_plain_text(PlainTextExecRequest {
@@ -784,6 +785,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
             args.harness_profile.as_deref(),
             args.system.as_deref(),
             cwd.as_path(),
+            initial_profile.kind,
         )?
     };
     let mut session_id = args.resume.map(SessionId::new);
@@ -912,11 +914,15 @@ fn resolve_prompt_config(
     harness_profile: Option<&str>,
     operator_system: Option<&str>,
     cwd: &Path,
+    backend_kind: BackendKind,
 ) -> Result<(Option<String>, Option<SessionHarnessProfile>), String> {
-    match resolve_harness_profile(tool_set, harness_profile, cwd, operator_system)? {
-        Some(resolved) => Ok((Some(resolved.system_prompt), Some(resolved.profile))),
-        None => Ok((operator_system.map(String::from), None)),
-    }
+    resolve_prompt_contract(
+        tool_set,
+        harness_profile,
+        cwd,
+        operator_system,
+        backend_kind,
+    )
 }
 
 fn run_accept(args: AcceptArgs) -> Result<(), String> {
@@ -1654,17 +1660,21 @@ fn build_tui_runtime_config(
     profile: probe_protocol::backend::BackendProfile,
 ) -> Result<probe_tui::ProbeRuntimeTurnConfig, String> {
     let cwd = cwd.unwrap_or(current_working_dir().map_err(|error| error.to_string())?);
-    let harness = resolve_harness_profile(Some("coding_bootstrap"), None, cwd.as_path(), None)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| String::from("coding_bootstrap harness profile should exist"))?;
+    let (system_prompt, harness_profile) = resolve_prompt_contract(
+        Some("coding_bootstrap"),
+        None,
+        cwd.as_path(),
+        None,
+        profile.kind,
+    )?;
     let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Auto, false);
     tool_loop.approval = ToolApprovalConfig::allow_all();
     Ok(probe_tui::ProbeRuntimeTurnConfig {
         probe_home,
         cwd,
         profile,
-        system_prompt: Some(harness.system_prompt),
-        harness_profile: Some(harness.profile),
+        system_prompt,
+        harness_profile,
         tool_loop: Some(tool_loop),
     })
 }

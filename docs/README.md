@@ -172,8 +172,8 @@ This folder holds technical planning docs for the Probe runtime.
 - `54-openai-codex-subscription-auth.md`
   - Probe-owned browser PKCE and headless device auth for ChatGPT/Codex
     subscriptions, including persisted token state, CLI commands, TUI backend
-    overlay status, and the concrete reproduction flow before the dedicated
-    Codex inference lane lands
+    overlay status, and the concrete reproduction flow for the shipped Codex
+    subscription path
 - `55-openai-codex-subscription-backend.md`
   - dedicated Codex subscription backend profile and transport, including the
     canonical `openai-codex-subscription` profile, request rewrite to
@@ -183,6 +183,11 @@ This folder holds technical planning docs for the Probe runtime.
   - pure workspace lifecycle state, timeout, restart, and circuit-breaker
     decisions for the serverized Probe path before detached workers or
     prepared baselines land
+- `57-codex-third-inference-mode.md`
+  - the third Probe TUI inference lane, backend selector order
+    `Qwen|Codex|Apple FM`, Codex-specific prompt contracts for plain and
+    tool-enabled turns, and the reproduction path for lane switching and
+    hosted Codex execution
 - `59-shared-test-support-and-stable-snapshot-root.md`
   - the completed shared test-support boundary for fake backends, temp Probe
     homes and workspaces, CLI launch helpers, stable snapshot-root setup, and

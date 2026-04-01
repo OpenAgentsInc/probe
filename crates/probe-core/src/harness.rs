@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use probe_protocol::backend::BackendKind;
 use probe_protocol::session::SessionHarnessProfile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -70,6 +71,7 @@ impl HarnessCandidateManifest {
 pub fn builtin_harness_candidate_manifests() -> Vec<HarnessCandidateManifest> {
     vec![
         coding_bootstrap_default_manifest(),
+        coding_bootstrap_codex_manifest(),
         coding_bootstrap_patch_guard_manifest(),
         coding_bootstrap_verify_first_manifest(),
     ]
@@ -123,6 +125,27 @@ pub fn render_harness_profile(profile: &SessionHarnessProfile) -> String {
     format!("{}@{}", profile.name, profile.version)
 }
 
+pub fn resolve_prompt_contract(
+    tool_set: Option<&str>,
+    requested_profile: Option<&str>,
+    cwd: &Path,
+    operator_system: Option<&str>,
+    backend_kind: BackendKind,
+) -> Result<(Option<String>, Option<SessionHarnessProfile>), String> {
+    let requested_profile =
+        requested_profile.or_else(|| default_harness_profile_for_backend(tool_set, backend_kind));
+    match resolve_harness_profile(tool_set, requested_profile, cwd, operator_system)? {
+        Some(resolved) => Ok((Some(resolved.system_prompt), Some(resolved.profile))),
+        None => Ok((
+            append_operator_addendum(
+                default_system_prompt_for_backend(backend_kind, cwd),
+                operator_system,
+            ),
+            None,
+        )),
+    }
+}
+
 fn resolve_manifest(manifest: HarnessCandidateManifest, cwd: &Path) -> ResolvedHarnessProfile {
     let shell = if cfg!(target_family = "windows") {
         "cmd"
@@ -141,6 +164,59 @@ fn resolve_manifest(manifest: HarnessCandidateManifest, cwd: &Path) -> ResolvedH
         },
         system_prompt: prompt,
     }
+}
+
+fn default_harness_profile_for_backend(
+    tool_set: Option<&str>,
+    backend_kind: BackendKind,
+) -> Option<&'static str> {
+    match (tool_set, backend_kind) {
+        (Some("coding_bootstrap"), BackendKind::OpenAiCodexSubscription) => {
+            Some("coding_bootstrap_codex")
+        }
+        _ => None,
+    }
+}
+
+fn default_system_prompt_for_backend(backend_kind: BackendKind, cwd: &Path) -> Option<String> {
+    match backend_kind {
+        BackendKind::OpenAiCodexSubscription => Some(codex_plain_system_prompt(cwd)),
+        BackendKind::OpenAiChatCompletions | BackendKind::AppleFmBridge => None,
+    }
+}
+
+fn append_operator_addendum(base: Option<String>, operator_system: Option<&str>) -> Option<String> {
+    let operator_system = operator_system
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (base, operator_system) {
+        (Some(base), Some(operator_system)) => {
+            Some(format!("{base}\n\nOperator Addendum:\n{operator_system}"))
+        }
+        (Some(base), None) => Some(base),
+        (None, Some(operator_system)) => Some(operator_system.to_string()),
+        (None, None) => None,
+    }
+}
+
+fn codex_plain_system_prompt(cwd: &Path) -> String {
+    format!(
+        "You are operating inside Probe's hosted Codex backend lane.\n\
+         \n\
+         Environment:\n\
+         - cwd: {}\n\
+         - operating_system: {}\n\
+         \n\
+         Operating rules:\n\
+         - Default to direct software-engineering help instead of long preambles.\n\
+         - When the task depends on repository truth, inspect the workspace before deciding.\n\
+         - Keep replies terse, concrete, and action-oriented.\n\
+         - Do not claim edits, tests, or command results that you did not actually verify.\n\
+         - If you edit code, prefer deterministic changes and explicit verification.\n\
+         - If the request is unclear, say what is missing instead of guessing.",
+        cwd.display(),
+        std::env::consts::OS
+    )
 }
 
 fn coding_bootstrap_default_manifest() -> HarnessCandidateManifest {
@@ -168,6 +244,33 @@ fn coding_bootstrap_default_manifest() -> HarnessCandidateManifest {
          - Verify relevant files after editing before claiming success.\n\
          - Keep tool usage bounded and avoid repeating large reads when a narrower read or search would do.\n\
          - If a tool returns truncated output, narrow the next call instead of guessing.\n\
+         - Ground final answers in observed tool output.",
+    )
+}
+
+fn coding_bootstrap_codex_manifest() -> HarnessCandidateManifest {
+    HarnessCandidateManifest::new(
+        "coding_bootstrap_codex@v1",
+        "coding_bootstrap",
+        "coding_bootstrap_codex",
+        "v1",
+        "Codex-tuned Probe coding harness profile.",
+        "You are operating inside Probe's coding_bootstrap Codex harness profile v1.\n\
+         \n\
+         Environment:\n\
+         - cwd: {cwd}\n\
+         - shell: {shell}\n\
+         - operating_system: {operating_system}\n\
+         \n\
+         Operating rules:\n\
+         - Treat this session as one coding activity and stay focused on that activity.\n\
+         - Default to concise, action-oriented software-engineering help.\n\
+         - Prefer read_file, list_files, and code_search before using shell.\n\
+         - Use apply_patch for deterministic text changes instead of describing edits abstractly.\n\
+         - Verify the relevant file or test path after editing before claiming success.\n\
+         - Avoid repeating large reads when a narrower read or search would do.\n\
+         - If a tool returns truncated output, narrow the next call instead of guessing.\n\
+         - Do not claim edits, test results, or repo facts that you have not actually observed.\n\
          - Ground final answers in observed tool output.",
     )
 }
@@ -234,7 +337,9 @@ fn coding_bootstrap_verify_first_manifest() -> HarnessCandidateManifest {
 mod tests {
     use std::path::Path;
 
-    use super::{render_harness_profile, resolve_harness_profile};
+    use probe_protocol::backend::BackendKind;
+
+    use super::{render_harness_profile, resolve_harness_profile, resolve_prompt_contract};
 
     #[test]
     fn coding_bootstrap_default_profile_is_selected_automatically() {
@@ -249,7 +354,11 @@ mod tests {
         assert_eq!(resolved.profile.name, "coding_bootstrap_default");
         assert_eq!(resolved.profile.version, "v1");
         assert!(resolved.system_prompt.contains("cwd: /tmp/probe"));
-        assert!(resolved.system_prompt.contains("Do not invent fake limitations"));
+        assert!(
+            resolved
+                .system_prompt
+                .contains("Do not invent fake limitations")
+        );
     }
 
     #[test]
@@ -295,6 +404,44 @@ mod tests {
         assert_eq!(
             render_harness_profile(&resolved.profile),
             "coding_bootstrap_default@v1"
+        );
+    }
+
+    #[test]
+    fn codex_backend_uses_codex_harness_by_default_for_coding_bootstrap() {
+        let (system_prompt, harness_profile) = resolve_prompt_contract(
+            Some("coding_bootstrap"),
+            None,
+            Path::new("/tmp/probe"),
+            None,
+            BackendKind::OpenAiCodexSubscription,
+        )
+        .expect("resolve prompt contract");
+        let harness_profile = harness_profile.expect("codex harness should exist");
+        assert_eq!(harness_profile.name, "coding_bootstrap_codex");
+        assert_eq!(harness_profile.version, "v1");
+        assert!(
+            system_prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("Codex harness profile v1"))
+        );
+    }
+
+    #[test]
+    fn codex_backend_uses_plain_system_prompt_without_tool_set() {
+        let (system_prompt, harness_profile) = resolve_prompt_contract(
+            None,
+            None,
+            Path::new("/tmp/probe"),
+            None,
+            BackendKind::OpenAiCodexSubscription,
+        )
+        .expect("resolve prompt contract");
+        assert!(harness_profile.is_none());
+        assert!(
+            system_prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("hosted Codex backend lane"))
         );
     }
 }

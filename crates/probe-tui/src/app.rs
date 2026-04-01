@@ -10,7 +10,7 @@ use crossterm::terminal::{
 use probe_core::backend_profiles::{
     openai_codex_subscription, psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
 };
-use probe_core::harness::resolve_harness_profile;
+use probe_core::harness::resolve_prompt_contract;
 use probe_core::runtime::{current_working_dir, default_probe_home};
 use probe_core::server_control::{PsionicServerConfig, PsionicServerMode, ServerOperatorSummary};
 use probe_core::tools::{ProbeToolChoice, ToolApprovalConfig, ToolLoopConfig};
@@ -30,6 +30,11 @@ use crate::screens::{
 use crate::worker::BackgroundWorker;
 
 const TICK_RATE: Duration = Duration::from_millis(33);
+const BACKEND_SELECTOR_ORDER: [BackendKind; 3] = [
+    BackendKind::OpenAiChatCompletions,
+    BackendKind::OpenAiCodexSubscription,
+    BackendKind::AppleFmBridge,
+];
 
 #[derive(Debug, Clone)]
 struct BackendLaneConfig {
@@ -45,8 +50,8 @@ pub struct AppShell {
     should_quit: bool,
     bottom_pane: BottomPane,
     worker: BackgroundWorker,
-    backend_lanes: [BackendLaneConfig; 2],
-    chat_lanes: [ChatScreen; 2],
+    backend_lanes: [BackendLaneConfig; 3],
+    chat_lanes: [ChatScreen; 3],
     active_backend_index: usize,
 }
 
@@ -82,16 +87,20 @@ impl AppShell {
 
     fn with_launch_config(config: TuiLaunchConfig) -> Self {
         let backend_lanes = build_backend_lanes(&config);
-        let chat_lanes = build_chat_lanes(&backend_lanes);
+        let active_backend_index = BACKEND_SELECTOR_ORDER
+            .iter()
+            .position(|kind| *kind == config.operator_backend.backend_kind)
+            .unwrap_or(0);
+        let chat_lanes = build_chat_lanes(&backend_lanes, active_backend_index);
         let mut app = Self {
-            screens: vec![ScreenState::Chat(chat_lanes[0].clone())],
+            screens: vec![ScreenState::Chat(chat_lanes[active_backend_index].clone())],
             last_status: String::from("probe tui launched"),
             should_quit: false,
             bottom_pane: BottomPane::new(),
             worker: BackgroundWorker::new(),
             backend_lanes,
             chat_lanes,
-            active_backend_index: 0,
+            active_backend_index,
         };
         app.sync_backend_selector();
         if config.autostart_apple_fm_setup
@@ -161,19 +170,22 @@ impl AppShell {
         profile: BackendProfile,
     ) -> ProbeRuntimeTurnConfig {
         let cwd = current_working_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let harness = resolve_harness_profile(Some("coding_bootstrap"), None, cwd.as_path(), None)
-            .ok()
-            .flatten();
+        let (system_prompt, harness_profile) = resolve_prompt_contract(
+            Some("coding_bootstrap"),
+            None,
+            cwd.as_path(),
+            None,
+            profile.kind,
+        )
+        .unwrap_or((None, None));
         let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Auto, false);
         tool_loop.approval = ToolApprovalConfig::allow_all();
         ProbeRuntimeTurnConfig {
             probe_home,
             cwd,
             profile,
-            system_prompt: harness
-                .as_ref()
-                .map(|resolved| resolved.system_prompt.clone()),
-            harness_profile: harness.map(|resolved| resolved.profile),
+            system_prompt,
+            harness_profile,
             tool_loop: Some(tool_loop),
         }
     }
@@ -571,19 +583,15 @@ impl AppShell {
         &self.backend_lanes[self.active_backend_index].chat_runtime
     }
 
-    fn backend_selector_labels(&self) -> [String; 2] {
-        [
-            self.backend_lanes[0].label.clone(),
-            self.backend_lanes[1].label.clone(),
-        ]
+    fn backend_selector_labels(&self) -> Vec<String> {
+        self.backend_lanes
+            .iter()
+            .map(|lane| lane.label.clone())
+            .collect()
     }
 
     fn sync_backend_selector(&mut self) {
-        let active_tab = if self.active_backend_index == 0 {
-            ActiveTab::Primary
-        } else {
-            ActiveTab::Secondary
-        };
+        let active_tab = ActiveTab::from_index(self.active_backend_index);
         let labels = self.backend_selector_labels();
         self.chat_lanes[self.active_backend_index].set_backend_selector(labels.clone(), active_tab);
         self.base_screen_mut()
@@ -664,16 +672,24 @@ fn operator_summary_from_profile(profile: &BackendProfile) -> ServerOperatorSumm
     config.operator_summary()
 }
 
-fn clone_runtime_with_profile(
+fn runtime_for_profile(
     base: &ProbeRuntimeTurnConfig,
     profile: BackendProfile,
 ) -> ProbeRuntimeTurnConfig {
+    let (system_prompt, harness_profile) = resolve_prompt_contract(
+        Some("coding_bootstrap"),
+        None,
+        base.cwd.as_path(),
+        None,
+        profile.kind,
+    )
+    .unwrap_or((None, None));
     ProbeRuntimeTurnConfig {
         probe_home: base.probe_home.clone(),
         cwd: base.cwd.clone(),
         profile,
-        system_prompt: base.system_prompt.clone(),
-        harness_profile: base.harness_profile.clone(),
+        system_prompt,
+        harness_profile,
         tool_loop: base.tool_loop.clone(),
     }
 }
@@ -706,13 +722,13 @@ fn build_saved_or_default_lane(
         .map(|config| {
             let profile = profile_from_server_config(&config);
             (
-                clone_runtime_with_profile(base, profile),
+                runtime_for_profile(base, profile),
                 config.operator_summary(),
             )
         })
         .unwrap_or_else(|| {
             let profile = default_profile_for_backend_kind(backend_kind);
-            let runtime = clone_runtime_with_profile(base, profile.clone());
+            let runtime = runtime_for_profile(base, profile.clone());
             let summary = operator_summary_from_profile(&profile);
             (runtime, summary)
         });
@@ -724,34 +740,31 @@ fn build_saved_or_default_lane(
     }
 }
 
-fn build_backend_lanes(config: &TuiLaunchConfig) -> [BackendLaneConfig; 2] {
-    let primary = BackendLaneConfig {
-        label: backend_selector_label(&config.operator_backend),
-        chat_runtime: config.chat_runtime.clone(),
-        operator_backend: config.operator_backend.clone(),
-    };
-    let alternate = build_saved_or_default_lane(
-        &config.chat_runtime,
-        match config.operator_backend.backend_kind {
-            BackendKind::AppleFmBridge => BackendKind::OpenAiChatCompletions,
-            BackendKind::OpenAiChatCompletions => BackendKind::AppleFmBridge,
-            BackendKind::OpenAiCodexSubscription => BackendKind::AppleFmBridge,
-        },
-    );
-    [primary, alternate]
+fn build_backend_lanes(config: &TuiLaunchConfig) -> [BackendLaneConfig; 3] {
+    BACKEND_SELECTOR_ORDER.map(|backend_kind| {
+        if backend_kind == config.operator_backend.backend_kind {
+            BackendLaneConfig {
+                label: backend_selector_label(&config.operator_backend),
+                chat_runtime: config.chat_runtime.clone(),
+                operator_backend: config.operator_backend.clone(),
+            }
+        } else {
+            build_saved_or_default_lane(&config.chat_runtime, backend_kind)
+        }
+    })
 }
 
 fn build_chat_lane(
-    backend_lanes: &[BackendLaneConfig; 2],
+    backend_lanes: &[BackendLaneConfig; 3],
     lane_index: usize,
     active_tab: ActiveTab,
 ) -> ChatScreen {
     let mut screen = ChatScreen::default();
     screen.set_backend_selector(
-        [
-            backend_lanes[0].label.clone(),
-            backend_lanes[1].label.clone(),
-        ],
+        backend_lanes
+            .iter()
+            .map(|lane| lane.label.clone())
+            .collect(),
         active_tab,
     );
     screen.set_probe_home(backend_lanes[lane_index].chat_runtime.probe_home.clone());
@@ -759,10 +772,26 @@ fn build_chat_lane(
     screen
 }
 
-fn build_chat_lanes(backend_lanes: &[BackendLaneConfig; 2]) -> [ChatScreen; 2] {
+fn build_chat_lanes(
+    backend_lanes: &[BackendLaneConfig; 3],
+    active_backend_index: usize,
+) -> [ChatScreen; 3] {
     [
-        build_chat_lane(backend_lanes, 0, ActiveTab::Primary),
-        build_chat_lane(backend_lanes, 1, ActiveTab::Primary),
+        build_chat_lane(
+            backend_lanes,
+            0,
+            ActiveTab::from_index(active_backend_index),
+        ),
+        build_chat_lane(
+            backend_lanes,
+            1,
+            ActiveTab::from_index(active_backend_index),
+        ),
+        build_chat_lane(
+            backend_lanes,
+            2,
+            ActiveTab::from_index(active_backend_index),
+        ),
     ]
 }
 
@@ -900,8 +929,10 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use probe_core::backend_profiles::{psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry};
-    use probe_core::harness::resolve_harness_profile;
+    use probe_core::backend_profiles::{
+        openai_codex_subscription, psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
+    };
+    use probe_core::harness::resolve_prompt_contract;
     use probe_core::server_control::PsionicServerConfig;
     use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
     use probe_protocol::backend::BackendKind;
@@ -926,20 +957,20 @@ mod tests {
     ) -> ProbeRuntimeTurnConfig {
         let mut profile = psionic_qwen35_2b_q8_registry();
         profile.base_url = base_url.to_string();
-        let harness = resolve_harness_profile(
+        let (system_prompt, harness_profile) = resolve_prompt_contract(
             Some("coding_bootstrap"),
             None,
             environment.workspace(),
             None,
+            profile.kind,
         )
-        .expect("resolve coding bootstrap harness")
-        .expect("coding bootstrap harness should exist");
+        .expect("resolve coding bootstrap prompt contract");
         ProbeRuntimeTurnConfig {
             probe_home: Some(environment.probe_home().to_path_buf()),
             cwd: environment.workspace().to_path_buf(),
             profile,
-            system_prompt: Some(harness.system_prompt),
-            harness_profile: Some(harness.profile),
+            system_prompt,
+            harness_profile,
             tool_loop: Some(ToolLoopConfig::coding_bootstrap(
                 ProbeToolChoice::Auto,
                 false,
@@ -1056,8 +1087,8 @@ mod tests {
         assert!(!rendered_secondary.contains("primary lane message"));
         app.apply_message(AppMessage::ProbeRuntimeSessionReady {
             session_id: String::from("sess_secondary"),
-            profile_name: String::from("psionic-apple-fm-bridge"),
-            model_id: String::from("apple-foundation-model"),
+            profile_name: String::from("openai-codex-subscription"),
+            model_id: String::from("gpt-5.3-codex"),
             cwd: String::from("/tmp/probe-workspace"),
         });
         app.apply_message(AppMessage::TranscriptEntryCommitted {
@@ -1119,14 +1150,49 @@ mod tests {
 
         let rendered = app.render_to_string(120, 32);
         assert!(rendered.contains("100.108.56.85:8080"));
-        assert_eq!(app.backend_lanes[1].label, "Tailnet");
-        assert_eq!(app.backend_lanes[1].operator_backend.host, "100.108.56.85");
-        assert_eq!(app.backend_lanes[1].operator_backend.port, 8080);
+        assert_eq!(app.backend_lanes[0].label, "Tailnet");
+        assert_eq!(app.backend_lanes[0].operator_backend.host, "100.108.56.85");
+        assert_eq!(app.backend_lanes[0].operator_backend.port, 8080);
         assert_eq!(
-            app.backend_lanes[1].chat_runtime.profile.base_url,
+            app.backend_lanes[0].chat_runtime.profile.base_url,
             "http://100.108.56.85:8080/v1"
         );
         assert_eq!(app.last_status(), "active backend: Tailnet");
+    }
+
+    #[test]
+    fn codex_lane_uses_codex_prompt_contract_and_auth_overlay() {
+        let probe_home = tempdir().expect("temp probe home");
+        let profile = openai_codex_subscription();
+        let config = AppShell::build_chat_runtime_config(
+            Some(probe_home.path().to_path_buf()),
+            profile.clone(),
+        );
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        assert_eq!(app.active_tab(), ActiveTab::Secondary);
+        assert_eq!(app.backend_lanes[1].label, "Codex");
+        assert_eq!(
+            app.backend_lanes[1]
+                .chat_runtime
+                .harness_profile
+                .as_ref()
+                .map(|profile| profile.name.as_str()),
+            Some("coding_bootstrap_codex")
+        );
+        assert!(
+            app.backend_lanes[1]
+                .chat_runtime
+                .system_prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("Codex harness profile v1"))
+        );
+
+        app.dispatch(UiEvent::OpenSetupOverlay);
+        let rendered = app.render_to_string(120, 48);
+        assert!(rendered.contains("OpenAI Subscription Auth"));
+        assert!(rendered.contains("status: disconnected"));
+        assert!(rendered.contains("probe codex login --method browser"));
     }
 
     #[test]
@@ -1540,7 +1606,7 @@ mod tests {
         }
 
         assert_eq!(app.task_phase(), TaskPhase::Unavailable);
-        assert_eq!(app.active_tab(), ActiveTab::Primary);
+        assert_eq!(app.active_tab(), ActiveTab::Tertiary);
         app.dispatch(UiEvent::OpenSetupOverlay);
         assert_eq!(app.active_screen_id(), ScreenId::SetupOverlay);
         assert!(
@@ -1595,7 +1661,7 @@ mod tests {
         }
 
         assert_eq!(app.task_phase(), TaskPhase::Failed);
-        assert_eq!(app.active_tab(), ActiveTab::Primary);
+        assert_eq!(app.active_tab(), ActiveTab::Tertiary);
         app.dispatch(UiEvent::OpenSetupOverlay);
         assert_eq!(app.active_screen_id(), ScreenId::SetupOverlay);
         let rendered = app.render_to_string(120, 32);

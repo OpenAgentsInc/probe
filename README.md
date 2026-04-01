@@ -13,6 +13,7 @@ Current shipped surface:
 - `probe chat` for interactive sessions plus resume
 - `probe codex login|status|logout` for ChatGPT/Codex subscription auth
 - `probe tui` / `cargo probe` for the local terminal UI
+- three inference lanes in the TUI: Qwen or Tailnet, Codex, and Apple FM
 - `coding_bootstrap` tools, approvals, and harness profiles
 - append-only local transcripts under `PROBE_HOME` or `~/.probe`
 - bounded oracle and long-context escalation lanes
@@ -39,6 +40,9 @@ Apple FM is attach-only. Probe checks `GET /health` before use and stays honest
 about unavailable or non-admitted machines.
 Codex is also attach-only, but its attach target is the hosted ChatGPT Codex
 endpoint rather than a local Psionic server.
+Tool-enabled Codex turns default to the Probe-owned
+`coding_bootstrap_codex@v1` prompt contract, while plain Codex turns use a
+small Codex-specific system prompt instead of the generic local-Qwen path.
 
 ## Quick Start
 
@@ -133,8 +137,9 @@ stream summary.
 Setup, help, and approval flows live in a typed overlay stack above or in
 place of the composer. The old setup surface is now a backend overlay:
 Apple FM launches still foreground local Apple FM admission and setup truth,
-while Qwen launches show the prepared backend target and the remote operator
-contract instead of unrelated Apple FM chrome.
+while Qwen or Tailnet launches show the prepared attach target and operator
+contract. The Codex lane instead shows the hosted backend contract plus local
+ChatGPT subscription auth status from `PROBE_HOME/auth/openai-codex.json`.
 
 The first supported remote-Qwen posture stays narrow and explicit:
 
@@ -145,13 +150,15 @@ The first supported remote-Qwen posture stays narrow and explicit:
 
 The top selector is now a backend switcher, not a view switcher. Probe keeps one
 transcript-first home shell on screen at a time, and `Tab` flips the active
-backend between the current Qwen or Tailnet lane and the Apple FM lane. When
-the backend changes, Probe resets the chat surface so the next submit starts a
-fresh session on that backend instead of continuing the previous backend lane.
+backend between the current Qwen or Tailnet lane, the Codex subscription lane,
+and the Apple FM lane. When the backend changes, Probe resets the chat surface
+so the next submit starts a fresh session on that backend instead of continuing
+the previous backend lane.
 Each backend lane now keeps its own saved attach config under
-`~/.probe/server/psionic-openai-chat-completions.json` or
+`~/.probe/server/psionic-openai-chat-completions.json`,
+`~/.probe/server/openai-codex-subscription.json`, or
 `~/.probe/server/psionic-apple-fm.json`, so switching back does not fabricate a
-fresh localhost target.
+fresh target.
 
 The default `cargo probe` chat lane now auto-approves local tools and keeps
 tool transcript rows terse. Tool calls and results render as compact command,

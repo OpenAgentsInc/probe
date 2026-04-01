@@ -24,18 +24,19 @@ fn panel_padding() -> Padding {
 }
 
 pub struct TabStrip {
-    labels: [String; 2],
+    labels: Vec<String>,
     selected: usize,
 }
 
 impl TabStrip {
-    pub fn new(labels: [String; 2], selected: usize) -> Self {
+    pub fn new(labels: Vec<String>, selected: usize) -> Self {
         Self { labels, selected }
     }
 
     pub fn render(self, frame: &mut Frame<'_>, area: Rect) {
-        let tabs = Tabs::new(self.labels.into_iter().collect::<Vec<_>>())
-            .select(self.selected.min(1))
+        let max_index = self.labels.len().saturating_sub(1);
+        let tabs = Tabs::new(self.labels)
+            .select(self.selected.min(max_index))
             .padding(" ", " ")
             .block(
                 Block::default()

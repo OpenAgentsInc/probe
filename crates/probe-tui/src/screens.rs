@@ -48,6 +48,7 @@ impl ScreenId {
 pub enum ActiveTab {
     Primary,
     Secondary,
+    Tertiary,
 }
 
 impl ActiveTab {
@@ -55,20 +56,31 @@ impl ActiveTab {
         match self {
             Self::Primary => 0,
             Self::Secondary => 1,
+            Self::Tertiary => 2,
+        }
+    }
+
+    pub(crate) const fn from_index(index: usize) -> Self {
+        match index {
+            0 => Self::Primary,
+            1 => Self::Secondary,
+            _ => Self::Tertiary,
         }
     }
 
     pub(crate) fn next(self) -> Self {
         match self {
             Self::Primary => Self::Secondary,
-            Self::Secondary => Self::Primary,
+            Self::Secondary => Self::Tertiary,
+            Self::Tertiary => Self::Primary,
         }
     }
 
     pub(crate) fn previous(self) -> Self {
         match self {
-            Self::Primary => Self::Secondary,
+            Self::Primary => Self::Tertiary,
             Self::Secondary => Self::Primary,
+            Self::Tertiary => Self::Secondary,
         }
     }
 }
@@ -302,7 +314,7 @@ impl Default for AppleFmSetupState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatScreen {
     active_tab: ActiveTab,
-    tab_labels: [String; 2],
+    tab_labels: Vec<String>,
     emphasized_copy: bool,
     recent_events: VecDeque<String>,
     task_events: VecDeque<String>,
@@ -319,7 +331,11 @@ impl Default for ChatScreen {
     fn default() -> Self {
         let mut screen = Self {
             active_tab: ActiveTab::Primary,
-            tab_labels: [String::from("Qwen"), String::from("Apple FM")],
+            tab_labels: vec![
+                String::from("Qwen"),
+                String::from("Codex"),
+                String::from("Apple FM"),
+            ],
             emphasized_copy: false,
             recent_events: VecDeque::new(),
             task_events: VecDeque::new(),
@@ -345,7 +361,7 @@ impl ChatScreen {
         self.active_tab
     }
 
-    pub fn set_backend_selector(&mut self, labels: [String; 2], active_tab: ActiveTab) {
+    pub fn set_backend_selector(&mut self, labels: Vec<String>, active_tab: ActiveTab) {
         self.tab_labels = labels;
         self.active_tab = active_tab;
     }
@@ -1452,8 +1468,18 @@ impl ChatScreen {
             ]);
         };
 
+        let headline = match summary.backend_kind {
+            probe_protocol::backend::BackendKind::OpenAiCodexSubscription => {
+                "Probe is attached to the hosted Codex subscription backend."
+            }
+            probe_protocol::backend::BackendKind::OpenAiChatCompletions
+            | probe_protocol::backend::BackendKind::AppleFmBridge => {
+                "Probe is attached to a prepared backend target."
+            }
+        };
+
         let mut lines = vec![
-            Line::from("Probe is attached to an inference-only backend target."),
+            Line::from(headline),
             Line::from(""),
             Line::from(format!(
                 "backend_kind: {}",
@@ -1469,11 +1495,6 @@ impl ChatScreen {
             )),
             Line::from(""),
             Line::from("Contract"),
-            Line::from("  local Probe owns sessions, transcripts, tools, approvals, and UI"),
-            Line::from("  remote Psionic serves inference only"),
-            Line::from("  loopback attach may be a local server or an SSH-forwarded remote target"),
-            Line::from("  direct Tailnet attach is supported when intentionally configured"),
-            Line::from(""),
             Line::from("State"),
             Line::from(format!(
                 "  phase: {}",
@@ -1481,16 +1502,22 @@ impl ChatScreen {
             )),
             Line::from(format!("  stack_depth: {stack_depth}")),
         ];
+        for line in render_remote_contract_lines(summary) {
+            lines.insert(lines.len() - 3, Line::from(format!("  {line}")));
+        }
+        lines.insert(lines.len() - 3, Line::from(""));
         if let Some(round_trip) = self.runtime.round_trip {
             lines.push(Line::from(format!("  round_trip: {round_trip}")));
         }
         if let Some(tool) = self.runtime.active_tool.as_deref() {
             lines.push(Line::from(format!("  active_tool: {tool}")));
         }
-        lines.push(Line::from(""));
-        lines.push(Line::from("OpenAI Subscription Auth"));
-        for line in self.render_codex_auth_lines() {
-            lines.push(Line::from(format!("  {line}")));
+        if summary.backend_kind == probe_protocol::backend::BackendKind::OpenAiCodexSubscription {
+            lines.push(Line::from(""));
+            lines.push(Line::from("OpenAI Subscription Auth"));
+            for line in self.render_codex_auth_lines() {
+                lines.push(Line::from(format!("  {line}")));
+            }
         }
         Text::from(lines)
     }
@@ -2319,6 +2346,22 @@ fn compact_runtime_policy_reason(reason: Option<&str>, tool_name: &str) -> Strin
         return fallback.to_string();
     }
     value.to_string()
+}
+
+fn render_remote_contract_lines(summary: &ServerOperatorSummary) -> Vec<&'static str> {
+    match summary.backend_kind {
+        probe_protocol::backend::BackendKind::OpenAiCodexSubscription => vec![
+            "model inference is sent to ChatGPT's hosted Codex backend",
+            "the local OpenAI subscription token is attached from Probe auth state",
+            "tool execution, approvals, transcripts, and the TUI remain local to Probe",
+        ],
+        probe_protocol::backend::BackendKind::OpenAiChatCompletions
+        | probe_protocol::backend::BackendKind::AppleFmBridge => vec![
+            "only model inference is delegated to the backend target",
+            "tool execution, approvals, transcripts, and the TUI remain local to Probe",
+            "switch targets through saved backend configs or `probe server`",
+        ],
+    }
 }
 
 fn render_backend_kind(value: probe_protocol::backend::BackendKind) -> &'static str {

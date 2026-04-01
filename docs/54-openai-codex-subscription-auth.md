@@ -3,8 +3,8 @@
 Issue `#72` adds Probe-owned subscription auth for OpenAI ChatGPT Plus/Pro or
 Codex access without requiring `PROBE_OPENAI_API_KEY`.
 
-This issue only lands the auth substrate and operator surfaces. The dedicated
-Codex transport and third inference lane still live in `#73` and `#74`.
+The auth substrate now backs the shipped Codex backend transport from `#73`
+and the third TUI inference lane from `#74`.
 
 ## Ownership
 
@@ -99,8 +99,8 @@ overlay now shows:
 - the saved `account_id` when present
 - the CLI command to run next for login, status, or logout
 
-That keeps the TUI honest about the local auth state before the dedicated
-Codex inference lane lands.
+That keeps the TUI honest about the local auth state before the Codex lane
+submits any real request.
 
 ## Reproduction Checklist
 
