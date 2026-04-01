@@ -83,9 +83,9 @@ This folder holds technical planning docs for the Probe runtime.
 - `27-apple-fm-qwen-comparison-suite.md`
   - admitted-Mac Apple FM acceptance runs, the retained overlapping case set,
     and the Probe-owned comparison artifact for Apple FM versus Psionic Qwen
-- `28-admitted-mac-comparison-workflow.md`
-  - the separate GitHub Actions workflow and local wrapper for the heavy Apple
-    FM versus Qwen comparison lane on admitted self-hosted Apple hardware
+- `28-admitted-mac-comparison-runbook.md`
+  - the local admitted-Mac runbook for the heavy Apple FM versus Qwen
+    comparison lane on self-hosted Apple hardware
 - `30-textual-inspired-rust-tui-shell.md`
   - first Rust-native TUI bootstrap issue for a Textual-inspired Probe screen
     shell, proving basic app/screen/widget structure, keyboard-driven state

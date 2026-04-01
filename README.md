@@ -263,6 +263,13 @@ Repo-local helpers:
 ./probe-dev accept-live
 ```
 
+Probe intentionally does not keep GitHub CI workflows. Run the precommit lane
+locally before pushing:
+
+```bash
+./probe-dev pr-fast
+```
+
 Useful focused lanes:
 
 - `./probe-dev pr-fast`

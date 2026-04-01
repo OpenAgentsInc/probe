@@ -111,10 +111,9 @@ For now `accept-compare` expects both endpoints to already be reachable:
 - the Psionic Qwen OpenAI-compatible endpoint
 - the Apple FM bridge endpoint
 
-It is not a merge-safe default path. It now runs through the dedicated
-`.github/workflows/apple-fm-qwen-compare.yml` lane, which stays separate from
-the default PR workflow and can be triggered manually or on its admitted-Mac
-schedule.
+It is not a merge-safe default path. It is an explicit local admitted-Mac lane
+run through `./probe-dev accept-compare` when an operator actually has the
+required hardware and backend reachability.
 
 ## What It Proves
 

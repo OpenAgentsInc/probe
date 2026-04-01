@@ -42,7 +42,7 @@ This is the foundation for the follow-on work in the testing expansion stack:
 - richer acceptance and eval receipts
 - first-person self-tests
 - matrix eval execution
-- explicit CI lane codification
+- explicit local lane codification
 
 Without this patch, those later suites would keep re-copying binary launch,
 server attach config, and snapshot normalization logic into unrelated test

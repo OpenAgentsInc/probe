@@ -19,9 +19,6 @@ This lane is intentionally limited to:
 It is the command an operator should reach for before pushing or merging normal
 runtime changes.
 
-Probe now wires this lane into `.github/workflows/probe-ci.yml` as the routine
-PR safety job.
-
 ## Tier 2: Targeted Binary Regression Path
 
 Use:
@@ -60,10 +57,6 @@ Those suites still run under the normal workspace `test` lane, but the docs now
 name them explicitly so contributors stop treating the whole repo as one
 undifferentiated cargo-test bucket.
 
-Probe now wires this lane into `.github/workflows/probe-ci.yml` as a separate
-job from `pr-fast` so subprocess regressions stay visible without forcing live
-backend lanes into the default path.
-
 ## Tier 3: Live Acceptance Path
 
 Use:
@@ -99,18 +92,9 @@ The Apple FM admitted-Mac paths live here too:
 
 - `cargo run -p probe-cli -- accept --profile psionic-apple-fm-bridge`
 - `cargo run -p probe-cli -- accept-compare`
-- `.github/workflows/apple-fm-qwen-compare.yml`
+- `./probe-dev accept-compare`
 
 Those commands are explicit operator lanes, not merge-safe defaults.
-
-The general heavy lane is now `.github/workflows/probe-heavy-evals.yml`.
-
-That workflow is manual by design. It can run:
-
-- `accept-live`
-- `self-test`
-- `matrix-eval`
-- `optimizer-eval`
 
 Acceptance, self-test, and matrix remain operator-triggered because they still
 depend on explicit backend reachability rather than guaranteed CI-local
@@ -137,6 +121,4 @@ Direct aliases still exist when a shorter local command is useful:
 These remain local, explicit, and opt-in. They are part of the evaluation and
 optimization workflow, not the default fast regression pass.
 
-The manual `.github/workflows/probe-heavy-evals.yml` workflow can also launch
-these lanes through `optimizer-eval` when the required datasets and artifacts
-are supplied explicitly.
+Probe intentionally does not keep a GitHub CI mirror of these lanes.

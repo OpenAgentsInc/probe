@@ -25,6 +25,12 @@ This repo should not quietly absorb unrelated product-shell concerns.
 - Keep session, turn, item, and task models explicit in code and docs.
 - Separate execution policy from sandbox and executor mechanics.
 - Prefer append-only runtime artifacts plus indexed metadata over opaque blobs.
+- Probe intentionally uses local precommit validation only. Do not add or rely
+  on GitHub Actions workflows unless the user explicitly asks for them.
+- Treat `./probe-dev pr-fast` as the default precommit gate and use the other
+  `./probe-dev` lanes locally when the change needs broader validation.
+- Keep validation and release discipline in repo scripts and local operator
+  commands, not in `.github/workflows`.
 
 ## Early Priorities
 
@@ -59,5 +65,7 @@ This repo should not quietly absorb unrelated product-shell concerns.
 - `docs/48-apple-fm-streaming-and-snapshot-events.md`
 - `docs/49-probe-tui-streamed-output-rendering.md`
 - `docs/50-tailnet-qwen-operator-lane.md`
+- `docs/20-testing-and-local-runner.md`
+- `docs/23-local-test-tiers.md`
 
 Add more canonical docs here as the repo grows.

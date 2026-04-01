@@ -114,22 +114,24 @@ It includes:
   submit a real background turn, wait for the reply, and retain a structured
   report artifact without requiring PTY orchestration in the test harness
 
-## CI Execution Policy
+## Local Execution Policy
 
-Probe now wires those tiers into explicit GitHub workflows instead of leaving
-them as docs-only conventions.
+Probe keeps these tiers local and explicit rather than mirroring them in
+GitHub workflows.
 
-- `.github/workflows/probe-ci.yml`
-  - routine merge-safe policy on `pull_request` and pushes to `main`
-  - runs `./probe-dev pr-fast`
-  - runs `./probe-dev integration`
-- `.github/workflows/probe-heavy-evals.yml`
-  - manual operator-triggered heavy lane
-  - exposes `accept-live`, `self-test`, `matrix-eval`, and `optimizer-eval`
-  - keeps live backend and repeated-matrix work out of the default green path
-- `.github/workflows/apple-fm-qwen-compare.yml`
-  - dedicated admitted-Mac comparison lane
-  - remains intentionally separate from standard PR safety
+- `./probe-dev pr-fast`
+  - default precommit and pre-push lane
+- `./probe-dev integration`
+  - targeted subprocess regression lane
+- `./probe-dev accept-live` and `./probe-dev self-test`
+  - operator-triggered live backend lanes
+- `./probe-dev matrix-eval`, `./probe-dev accept-compare`, and
+  `./probe-dev optimizer-eval <lane>`
+  - heavier local-only lanes for admitted hardware, repeated runs, or offline
+    optimization work
+
+That is an intentional repo policy, not an omission. Probe does not keep a
+GitHub CI copy of these commands.
 
 ## Why This Matters
 
