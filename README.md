@@ -2,9 +2,10 @@
 
 # Probe
 
-Probe is a Rust-first coding-agent runtime. It owns session lifecycle,
-transcript persistence, tool execution, approvals, backend attachment, and the
-CLI/TUI surfaces above that runtime.
+Probe is a coding agent.
+
+It ships session persistence, tool execution, approvals, backend attachment,
+and CLI/TUI surfaces for local coding work.
 
 Current shipped surface:
 
@@ -72,20 +73,20 @@ cargo run -p probe-cli -- exec \
 `cargo probe` is the current top-level Probe UI entrypoint. The current shell
 uses a retained transcript widget with committed user, tool, and assistant
 turns plus one explicit active-turn cell. `Chat` is the home surface and the
-composer now submits through the real Probe runtime. `probe tui` now uses the
+composer now submits through the real Probe session loop. `probe tui` now uses the
 same prepared backend contract as `probe chat`: it resolves the selected
 backend, runs server readiness or attach preparation first, and then carries
 the prepared host, port, model, backend kind, and attach mode into the UI.
 The first submit creates a persisted Probe session; later submits continue that
-same session. The active-turn cell is now driven by real runtime lifecycle
+same session. The active-turn cell is now driven by real session lifecycle
 events, so the TUI can show model requests, tool request/start/completion,
 refusal or pause, and the final assistant commit before the transcript delta
 is rendered. Persisted tool activity renders as first-class transcript rows
 such as `[tool call]`, `[tool result]`, and `[approval pending]` rather than
 generic notes.
 
-At the runtime layer, Probe now distinguishes backend streaming truth
-explicitly: OpenAI-compatible backends stream assistant deltas, while Apple FM
+Probe now distinguishes backend streaming truth explicitly:
+OpenAI-compatible backends stream assistant deltas, while Apple FM
 streams full session snapshots rather than fake token deltas. The chat surface
 now renders those streams honestly in place: one retained active cell grows
 with streamed deltas or snapshot replacement until the authoritative
@@ -108,9 +109,9 @@ The first supported remote-Qwen posture stays narrow and explicit:
 
 The top selector is now a backend switcher, not a view switcher. Probe keeps one
 transcript-first home shell on screen at a time, and `Tab` flips the active
-runtime between the current Qwen or Tailnet lane and the Apple FM lane. When
+backend between the current Qwen or Tailnet lane and the Apple FM lane. When
 the backend changes, Probe resets the chat surface so the next submit starts a
-fresh session on that backend instead of continuing the previous runtime lane.
+fresh session on that backend instead of continuing the previous backend lane.
 Each backend lane now keeps its own saved attach config under
 `~/.probe/server/psionic-openai-chat-completions.json` or
 `~/.probe/server/psionic-apple-fm.json`, so switching back does not fabricate a
