@@ -230,8 +230,9 @@ fn streaming_message_envelope_stays_condensed_until_plain_text_is_visible() {
     });
 
     let waiting = app.render_to_string(100, 24);
-    assert!(waiting.contains("waiting for backend reply"));
+    assert!(waiting.contains("[active assistant] Waiting for Reply"));
     assert!(!waiting.contains("\"kind\""));
+    assert!(!waiting.contains("waiting for backend reply"));
 
     app.apply_message(AppMessage::AssistantDeltaAppended {
         session_id: String::from("sess_tui_stream_envelope"),
@@ -243,6 +244,30 @@ fn streaming_message_envelope_stays_condensed_until_plain_text_is_visible() {
     assert!(rendered.contains("hello world"));
     assert!(!rendered.contains("\"kind\""));
     assert!(!rendered.contains("waiting for backend reply"));
+}
+
+#[test]
+fn model_request_placeholder_stays_on_one_line_until_stream_events_arrive() {
+    let mut app = AppShell::new_for_tests();
+    app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+        session_id: String::from("sess_tui_waiting"),
+        profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+        model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+        cwd: String::from("/tmp/probe-workspace"),
+    });
+    app.apply_message(AppMessage::ProbeRuntimeEvent {
+        event: RuntimeEvent::ModelRequestStarted {
+            session_id: probe_protocol::session::SessionId::new("sess_tui_waiting"),
+            round_trip: 1,
+            backend_kind: BackendKind::OpenAiChatCompletions,
+        },
+    });
+
+    let rendered = app.render_to_string(100, 24);
+    assert!(rendered.contains("[active assistant] Waiting for Reply"));
+    assert!(!rendered.contains("stream_state: awaiting first backend event"));
+    assert!(!rendered.contains("round_trip: 1"));
+    assert!(!rendered.contains("session: sess_"));
 }
 
 #[test]

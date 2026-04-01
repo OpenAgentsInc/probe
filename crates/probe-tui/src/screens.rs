@@ -845,12 +845,7 @@ impl ChatScreen {
                 self.transcript.set_active_turn(ActiveTurn::new(
                     TranscriptRole::Assistant,
                     "Waiting for Reply",
-                    vec![
-                        format!("backend: {:?}", backend_kind),
-                        format!("round_trip: {round_trip}"),
-                        String::from("stream_state: awaiting first backend event"),
-                        format!("session: {}", short_session_id(session_id.as_str())),
-                    ],
+                    Vec::new(),
                 ));
                 self.snap_transcript_to_latest();
                 self.record_worker_event(format!("model request started: round {round_trip}"));
@@ -2061,6 +2056,7 @@ impl ApprovalOverlay {
 
 fn render_stream_active_turn(stream: &AssistantStreamState) -> ActiveTurn {
     let display_text = normalize_openai_stream_display_text(stream.assistant_text.as_str());
+    let is_waiting = display_text.is_empty() && stream.tool_calls.is_empty() && stream.failure.is_none();
     let mut body = Vec::new();
     if let Some(error) = stream.failure.as_deref() {
         body.push(format!("backend request failed: {error}"));
@@ -2084,18 +2080,20 @@ fn render_stream_active_turn(stream: &AssistantStreamState) -> ActiveTurn {
 
     if !display_text.is_empty() {
         body.extend(split_text_lines(display_text.as_str()));
-    } else if stream.failure.is_none() && stream.tool_calls.is_empty() {
-        body.push(String::from("waiting for backend reply"));
     }
 
-    let role = if display_text.is_empty() && !stream.tool_calls.is_empty() {
+    let role = if is_waiting {
+        TranscriptRole::Assistant
+    } else if display_text.is_empty() && !stream.tool_calls.is_empty() {
         TranscriptRole::Tool
     } else if stream.failure.is_some() {
         TranscriptRole::Status
     } else {
         TranscriptRole::Assistant
     };
-    let title = if stream.failure.is_some() {
+    let title = if is_waiting {
+        "Waiting for Reply"
+    } else if stream.failure.is_some() {
         "Assistant Stream Failed"
     } else if display_text.is_empty() && !stream.tool_calls.is_empty() {
         "Streaming Tool Call"
