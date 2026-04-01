@@ -86,17 +86,43 @@ cargo run -p probe-cli -- exec \
   "Read README.md and summarize what this repository does."
 ```
 
-Manage ChatGPT/Codex subscription auth:
+## Auth With ChatGPT
+
+Probe can use your ChatGPT subscription for the hosted Codex lane. This does
+not use `PROBE_OPENAI_API_KEY`.
+
+Prerequisite:
+
+- sign in to a ChatGPT account with the Codex-capable subscription you want to use
+
+Recommended browser flow:
 
 ```bash
-# browser PKCE flow
+# start local browser auth
 cargo run -p probe-cli -- codex login --method browser
+```
 
-# headless device flow
+Probe will print the authorize URL, open the browser when possible, wait for
+the localhost callback, and then persist the resulting auth state at
+`PROBE_HOME/auth/openai-codex.json`.
+
+If you are on a headless machine or do not want Probe to open the browser:
+
+```bash
+# browser auth, but copy the URL manually
+cargo run -p probe-cli -- codex login --method browser --no-open-browser
+
+# device-code auth
 cargo run -p probe-cli -- codex login --method headless
+```
 
-# inspect or clear persisted auth state
+Verify or clear the saved ChatGPT auth:
+
+```bash
+# inspect the saved auth record
 cargo run -p probe-cli -- codex status
+
+# delete the saved auth record
 cargo run -p probe-cli -- codex logout
 ```
 
@@ -104,7 +130,22 @@ Probe persists this state at `PROBE_HOME/auth/openai-codex.json` with private
 file permissions. The current TUI backend overlay also shows whether that auth
 state exists and whether it is expired.
 
-After login, the canonical Codex backend profile sends requests to
+After auth succeeds, use the ChatGPT-backed Codex profile directly:
+
+```bash
+# interactive Codex chat
+cargo run -p probe-cli -- chat --profile openai-codex-subscription
+
+# one-shot Codex turn
+cargo run -p probe-cli -- exec \
+  --profile openai-codex-subscription \
+  "Reply with the exact text: codex backend ready"
+```
+
+In the TUI, launch `cargo probe` or `probe tui`, press `Tab` until the
+`Codex` lane is selected, and submit the prompt there.
+
+The canonical Codex backend profile sends requests to
 `https://chatgpt.com/backend-api/codex/responses` with subscription bearer auth
 instead of using `PROBE_OPENAI_API_KEY`.
 
