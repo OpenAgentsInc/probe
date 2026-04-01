@@ -32,6 +32,7 @@ The detached summary carries:
   - `completed`
   - `failed`
   - `cancelled`
+  - `timed_out`
 - active-turn id when present
 - queued-turn count
 - pending-approval count
@@ -85,9 +86,11 @@ This layer is no longer summary-only.
 Detached watch and log subscriptions now exist above it in
 `63-detached-session-watch-and-log-subscriptions.md`.
 
+Detached watchdog and timeout policy now also exists above it in
+`65-detached-watchdog-and-timeout-policy.md`.
+
 The remaining gap is now above the registry and watch substrate:
 
-- timeout or watchdog policy
 - first-party chat or TUI default attach flows
 
 Those remain the next Phase 2 items above the detached-session registry.

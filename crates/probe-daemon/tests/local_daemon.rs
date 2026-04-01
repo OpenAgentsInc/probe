@@ -17,6 +17,7 @@ use probe_protocol::runtime::{
     DetachedSessionEventPayload, DetachedSessionEventTruth, DetachedSessionRecoveryState,
     DetachedSessionStatus, StartSessionRequest, WatchDetachedSessionRequest,
 };
+use probe_server::detached_watchdog::DetachedTurnWatchdogPolicy;
 use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
 const TEST_MODEL: &str = "tiny-qwen35";
@@ -457,6 +458,175 @@ fn detached_session_watch_surfaces_approval_pause_updates_without_polling() {
     daemon.kill_ungraceful();
 }
 
+#[test]
+fn detached_watchdog_times_out_stalled_turn_and_cancels_follow_up_queue() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let fake_backend = delayed_completion_backend(Duration::from_millis(500), "too late");
+    let profile = test_profile(fake_backend.base_url());
+    let mut daemon = DaemonProcess::start_with_watchdog_policy(
+        environment.probe_home(),
+        DetachedTurnWatchdogPolicy {
+            poll_interval_ms: 20,
+            stall_timeout_ms: 80,
+            execution_timeout_ms: 600,
+        },
+    );
+    let mut client = daemon_client(environment.probe_home());
+    let session = client
+        .start_session(StartSessionRequest {
+            title: Some(String::from("watchdog timeout")),
+            cwd: environment.workspace().to_path_buf(),
+            profile: profile.clone(),
+            system_prompt: None,
+            harness_profile: None,
+        })
+        .expect("daemon should start session");
+    let session_id = session.session.id.clone();
+
+    let first_turn = client
+        .queue_plain_text_session_turn(PlainTextResumeRequest {
+            session_id: session_id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("run long enough to trigger the watchdog"),
+            tool_loop: None,
+        })
+        .expect("first queued turn should be accepted");
+    let second_turn = client
+        .queue_plain_text_session_turn(PlainTextResumeRequest {
+            session_id: session_id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("this follow-up should be cancelled by watchdog policy"),
+            tool_loop: None,
+        })
+        .expect("second queued turn should be accepted");
+    drop(client);
+
+    let timed_out = wait_for_detached_status(
+        environment.probe_home(),
+        &session_id,
+        DetachedSessionStatus::TimedOut,
+    );
+    assert_eq!(timed_out.queued_turn_count, 0);
+    assert_eq!(timed_out.active_turn_id, None);
+
+    let mut inspect_client = daemon_client(environment.probe_home());
+    let inspected = inspect_client
+        .inspect_detached_session(&session_id)
+        .expect("timed-out detached session should be inspectable");
+    assert_eq!(inspected.summary.status, DetachedSessionStatus::TimedOut);
+    assert!(inspected.turn_control.recent_turns.iter().any(|turn| {
+        turn.turn_id == first_turn.turn.turn_id
+            && turn.status == probe_protocol::runtime::QueuedTurnStatus::TimedOut
+            && turn
+                .failure_message
+                .as_deref()
+                .is_some_and(|message| message.contains("watchdog"))
+    }));
+    assert!(inspected.turn_control.recent_turns.iter().any(|turn| {
+        turn.turn_id == second_turn.turn.turn_id
+            && turn.status == probe_protocol::runtime::QueuedTurnStatus::Cancelled
+            && turn.cancellation_reason.as_deref().is_some_and(|reason| {
+                reason.contains(first_turn.turn.turn_id.as_str()) && reason.contains("timed out")
+            })
+    }));
+    assert!(inspected.session.transcript.iter().any(|event| {
+        event.turn.items.iter().any(|item| {
+            item.text
+                .contains("probe-daemon watchdog timed out detached turn")
+        })
+    }));
+
+    let log = inspect_client
+        .read_detached_session_log(&session_id, None, 64)
+        .expect("timed-out detached session log should be readable");
+    assert!(log.events.iter().any(|record| {
+        matches!(
+            &record.payload,
+            DetachedSessionEventPayload::Note { code, .. }
+                if code == "detached_turn_watchdog_stalled"
+        )
+    }));
+
+    drop(inspect_client);
+    daemon.stop();
+}
+
+#[test]
+fn approval_paused_detached_turns_are_exempt_from_watchdog_timeout() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let fake_backend = approval_pause_backend(Duration::from_millis(25));
+    let profile = test_profile(fake_backend.base_url());
+    let mut daemon = DaemonProcess::start_with_watchdog_policy(
+        environment.probe_home(),
+        DetachedTurnWatchdogPolicy {
+            poll_interval_ms: 20,
+            stall_timeout_ms: 200,
+            execution_timeout_ms: 200,
+        },
+    );
+    let mut client = daemon_client(environment.probe_home());
+    let session = client
+        .start_session(StartSessionRequest {
+            title: Some(String::from("approval pause watchdog exemption")),
+            cwd: environment.workspace().to_path_buf(),
+            profile: profile.clone(),
+            system_prompt: None,
+            harness_profile: None,
+        })
+        .expect("daemon should start session");
+    let session_id = session.session.id.clone();
+
+    client
+        .queue_plain_text_session_turn(PlainTextResumeRequest {
+            session_id: session_id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("pause and wait longer than the watchdog budget"),
+            tool_loop: Some(approval_pause_tool_loop()),
+        })
+        .expect("approval-paused turn should be accepted");
+    drop(client);
+    wait_for_detached_status(
+        environment.probe_home(),
+        &session_id,
+        DetachedSessionStatus::ApprovalPaused,
+    );
+    thread::sleep(Duration::from_millis(350));
+
+    let mut inspect_client = daemon_client(environment.probe_home());
+    let inspected = inspect_client
+        .inspect_detached_session(&session_id)
+        .expect("approval-paused session should remain inspectable");
+    assert_eq!(
+        inspected.summary.status,
+        DetachedSessionStatus::ApprovalPaused
+    );
+    assert!(
+        inspected
+            .turn_control
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| {
+                turn.awaiting_approval
+                    && turn.status == probe_protocol::runtime::QueuedTurnStatus::Running
+            })
+    );
+    let log = inspect_client
+        .read_detached_session_log(&session_id, None, 64)
+        .expect("approval-paused detached session log should be readable");
+    assert!(!log.events.iter().any(|record| {
+        matches!(
+            &record.payload,
+            DetachedSessionEventPayload::Note { code, .. }
+                if code.starts_with("detached_turn_")
+        )
+    }));
+
+    drop(inspect_client);
+    daemon.kill_ungraceful();
+}
+
 struct DaemonProcess {
     child: Child,
     probe_home: PathBuf,
@@ -464,10 +634,23 @@ struct DaemonProcess {
 
 impl DaemonProcess {
     fn start(probe_home: &Path) -> Self {
+        Self::start_with_watchdog_policy(probe_home, DetachedTurnWatchdogPolicy::default())
+    }
+
+    fn start_with_watchdog_policy(
+        probe_home: &Path,
+        watchdog_policy: DetachedTurnWatchdogPolicy,
+    ) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_probe-daemon"))
             .arg("run")
             .arg("--probe-home")
             .arg(probe_home)
+            .arg("--watchdog-poll-ms")
+            .arg(watchdog_policy.poll_interval_ms.to_string())
+            .arg("--watchdog-stall-ms")
+            .arg(watchdog_policy.stall_timeout_ms.to_string())
+            .arg("--watchdog-timeout-ms")
+            .arg(watchdog_policy.execution_timeout_ms.to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()

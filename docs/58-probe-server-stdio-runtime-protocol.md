@@ -77,8 +77,10 @@ Queued follow-up work is now explicit.
 - `queue_turn` accepts a follow-up prompt even when another turn is already
   running
 - the accepted record persists queued-turn state as `queued`, `running`,
-  `completed`, `failed`, or `cancelled`
+  `completed`, `failed`, `cancelled`, or `timed_out`
 - every queued turn carries per-turn author metadata plus queue position
+- detached supervision now also persists per-turn progress timestamps and
+  execution deadlines for watchdog decisions
 - `inspect_session_turns` returns the current active turn, the queued follow-up
   list, and recent terminal turns for a session
 - `cancel_queued_turn` can remove queued work before it starts and appends an
@@ -169,7 +171,7 @@ inside it. `SessionSnapshot` remains the transcript plus approval view, while
 Request:
 
 ```json
-{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":4}}
+{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":5}}
 ```
 
 Event:
@@ -202,3 +204,4 @@ The main detached-only additions on top of this contract are documented in:
 - `61-probe-daemon-and-local-socket-transport.md`
 - `62-daemon-owned-detached-session-registry.md`
 - `63-detached-session-watch-and-log-subscriptions.md`
+- `65-detached-watchdog-and-timeout-policy.md`

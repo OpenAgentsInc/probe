@@ -41,6 +41,9 @@ use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
 
 use crate::detached_events::{DetachedEventError, DetachedSessionEventHub};
 use crate::detached_registry::{DetachedRegistryError, DetachedSessionRegistry};
+use crate::detached_watchdog::{
+    DetachedTurnWatchdogPolicy, DetachedTurnWatchdogTrigger, evaluate_detached_turn_watchdog,
+};
 use crate::turn_control::{SessionTurnControlState, StoredTurnControlRecord, now_ms};
 
 #[cfg(unix)]
@@ -151,14 +154,29 @@ pub fn run_local_daemon(
     probe_home: Option<PathBuf>,
     socket_path: Option<PathBuf>,
 ) -> Result<(), ServerError> {
+    run_local_daemon_with_watchdog_policy(
+        probe_home,
+        socket_path,
+        DetachedTurnWatchdogPolicy::default(),
+    )
+}
+
+#[cfg(unix)]
+pub fn run_local_daemon_with_watchdog_policy(
+    probe_home: Option<PathBuf>,
+    socket_path: Option<PathBuf>,
+    watchdog_policy: DetachedTurnWatchdogPolicy,
+) -> Result<(), ServerError> {
     let home = resolve_probe_home(probe_home, "probe-daemon")?;
     let socket_path = socket_path.unwrap_or_else(|| default_local_daemon_socket_path(&home));
     prepare_daemon_socket(socket_path.as_path())?;
     let _cleanup_guard = SocketCleanupGuard::new(socket_path.clone());
     let listener = UnixListener::bind(&socket_path)?;
-    let core = ProbeServerCore::daemon(ProbeRuntime::new(home));
+    let core = ProbeServerCore::daemon(ProbeRuntime::new(home), watchdog_policy);
     core.reconcile_detached_sessions()
         .map_err(runtime_protocol_error_to_io)?;
+    spawn_detached_watchdog(core.clone(), watchdog_policy)
+        .map_err(|error| ServerError::Io(io::Error::other(error.to_string())))?;
 
     loop {
         let (stream, _) = listener.accept()?;
@@ -180,6 +198,17 @@ pub fn run_local_daemon(
 pub fn run_local_daemon(
     _probe_home: Option<PathBuf>,
     _socket_path: Option<PathBuf>,
+) -> Result<(), ServerError> {
+    Err(ServerError::Io(io::Error::other(
+        "local probe-daemon socket transport is only implemented on unix platforms",
+    )))
+}
+
+#[cfg(not(unix))]
+pub fn run_local_daemon_with_watchdog_policy(
+    _probe_home: Option<PathBuf>,
+    _socket_path: Option<PathBuf>,
+    _watchdog_policy: DetachedTurnWatchdogPolicy,
 ) -> Result<(), ServerError> {
     Err(ServerError::Io(io::Error::other(
         "local probe-daemon socket transport is only implemented on unix platforms",
@@ -284,6 +313,7 @@ struct TurnControlPlane {
     coordination: Arc<Mutex<HashSet<String>>>,
     detached_registry: Option<Arc<DetachedSessionRegistry>>,
     detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
+    watchdog_policy: DetachedTurnWatchdogPolicy,
 }
 
 struct QueuedTurnReservation {
@@ -305,14 +335,26 @@ struct InterruptOutcome {
 
 impl ProbeServerCore {
     pub fn new(runtime: ProbeRuntime) -> Self {
-        Self::with_mode(runtime, ServerOwnershipMode::ForegroundStdio)
+        Self::with_mode(
+            runtime,
+            ServerOwnershipMode::ForegroundStdio,
+            DetachedTurnWatchdogPolicy::default(),
+        )
     }
 
-    fn daemon(runtime: ProbeRuntime) -> Self {
-        Self::with_mode(runtime, ServerOwnershipMode::DetachedDaemon)
+    fn daemon(runtime: ProbeRuntime, watchdog_policy: DetachedTurnWatchdogPolicy) -> Self {
+        Self::with_mode(
+            runtime,
+            ServerOwnershipMode::DetachedDaemon,
+            watchdog_policy,
+        )
     }
 
-    fn with_mode(runtime: ProbeRuntime, mode: ServerOwnershipMode) -> Self {
+    fn with_mode(
+        runtime: ProbeRuntime,
+        mode: ServerOwnershipMode,
+        watchdog_policy: DetachedTurnWatchdogPolicy,
+    ) -> Self {
         let detached_registry = mode
             .is_daemon()
             .then(|| Arc::new(DetachedSessionRegistry::new(runtime.session_store().root())));
@@ -324,6 +366,7 @@ impl ProbeServerCore {
                 runtime.clone(),
                 detached_registry.clone(),
                 detached_event_hub.clone(),
+                watchdog_policy,
             )),
             runtime,
             detached_registry,
@@ -493,13 +536,25 @@ impl TurnControlPlane {
         runtime: ProbeRuntime,
         detached_registry: Option<Arc<DetachedSessionRegistry>>,
         detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
+        watchdog_policy: DetachedTurnWatchdogPolicy,
     ) -> Self {
         Self {
             runtime,
             coordination: Arc::new(Mutex::new(HashSet::new())),
             detached_registry,
             detached_event_hub,
+            watchdog_policy,
         }
+    }
+
+    fn save_state_only(
+        &self,
+        session_id: &SessionId,
+        state: &SessionTurnControlState,
+    ) -> Result<(), RuntimeProtocolError> {
+        state
+            .save(&self.runtime, session_id)
+            .map_err(session_store_error_to_protocol)
     }
 
     fn save_state_and_sync(
@@ -602,6 +657,15 @@ impl TurnControlPlane {
                 ),
             ));
         }
+        if coordination.contains(request.session_id.as_str()) {
+            return Err(protocol_error(
+                "session_draining",
+                format!(
+                    "session {} is still draining a previously timed-out detached turn; retry after the worker exits",
+                    request.session_id.as_str()
+                ),
+            ));
+        }
         let requested_at_ms = now_ms();
         let turn_id = state
             .push_turn(
@@ -611,6 +675,7 @@ impl TurnControlPlane {
                 request,
                 requested_at_ms,
                 Some(requested_at_ms),
+                Some(self.watchdog_policy.execution_timeout_ms),
             )
             .turn_id;
         self.save_state_and_sync(&request.session_id, &state)?;
@@ -627,6 +692,16 @@ impl TurnControlPlane {
             .lock()
             .expect("probe-server coordination mutex should not be poisoned");
         let mut state = self.load_state_locked(request.session_id.as_str(), &mut coordination)?;
+        if state.unfinished_turn_count() == 0 && coordination.contains(request.session_id.as_str())
+        {
+            return Err(protocol_error(
+                "session_draining",
+                format!(
+                    "session {} is still draining a previously timed-out detached turn; retry after the worker exits",
+                    request.session_id.as_str()
+                ),
+            ));
+        }
         let should_start = state.unfinished_turn_count() == 0
             && !coordination.contains(request.session_id.as_str());
         let requested_at_ms = now_ms();
@@ -643,6 +718,7 @@ impl TurnControlPlane {
                 request,
                 requested_at_ms,
                 should_start.then_some(requested_at_ms),
+                should_start.then_some(self.watchdog_policy.execution_timeout_ms),
             )
             .turn_id;
         let response = QueueTurnResponse {
@@ -688,7 +764,11 @@ impl TurnControlPlane {
                 ),
             ));
         }
+        let resumed_at_ms = now_ms();
         active_turn.record.awaiting_approval = false;
+        active_turn.record.last_progress_at_ms = Some(resumed_at_ms);
+        active_turn.record.execution_timeout_at_ms =
+            Some(resumed_at_ms.saturating_add(self.watchdog_policy.execution_timeout_ms));
         let turn_id = active_turn.record.turn_id.clone();
         self.save_state_and_sync(&request.session_id, &state)?;
         coordination.insert(String::from(request.session_id.as_str()));
@@ -881,16 +961,22 @@ impl TurnControlPlane {
             .lock()
             .expect("probe-server coordination mutex should not be poisoned");
         let mut state = self.load_state_locked(session_id.as_str(), &mut coordination)?;
+        let mut completed = false;
         if let Some(turn) = state.turn_by_id_mut(turn_id) {
-            turn.record.status = QueuedTurnStatus::Completed;
-            turn.record.awaiting_approval = false;
-            turn.record.finished_at_ms = Some(now_ms());
-            turn.record.failure_message = None;
-            turn.record.cancellation_reason = None;
+            if turn.record.status == QueuedTurnStatus::Running {
+                turn.record.status = QueuedTurnStatus::Completed;
+                turn.record.awaiting_approval = false;
+                turn.record.finished_at_ms = Some(now_ms());
+                turn.record.failure_message = None;
+                turn.record.cancellation_reason = None;
+                completed = true;
+            }
         }
         coordination.remove(session_id.as_str());
-        let should_start_next = state.queued_turn_count() > 0;
-        self.save_state_and_sync(session_id, &state)?;
+        let should_start_next = completed && state.queued_turn_count() > 0;
+        if completed {
+            self.save_state_and_sync(session_id, &state)?;
+        }
         Ok(should_start_next)
     }
 
@@ -905,9 +991,13 @@ impl TurnControlPlane {
             .expect("probe-server coordination mutex should not be poisoned");
         let mut state = self.load_state_locked(session_id.as_str(), &mut coordination)?;
         if let Some(turn) = state.turn_by_id_mut(turn_id) {
-            turn.record.status = QueuedTurnStatus::Running;
-            turn.record.awaiting_approval = true;
-            turn.record.finished_at_ms = None;
+            if turn.record.status == QueuedTurnStatus::Running {
+                turn.record.status = QueuedTurnStatus::Running;
+                turn.record.awaiting_approval = true;
+                turn.record.finished_at_ms = None;
+                turn.record.last_progress_at_ms = Some(now_ms());
+                turn.record.execution_timeout_at_ms = None;
+            }
         }
         coordination.remove(session_id.as_str());
         self.save_state_and_sync(session_id, &state)
@@ -924,11 +1014,31 @@ impl TurnControlPlane {
             .expect("probe-server coordination mutex should not be poisoned");
         let mut state = self.load_state_locked(session_id.as_str(), &mut coordination)?;
         if let Some(turn) = state.turn_by_id_mut(turn_id) {
-            turn.record.status = QueuedTurnStatus::Running;
-            turn.record.awaiting_approval = true;
+            if turn.record.status == QueuedTurnStatus::Running {
+                turn.record.status = QueuedTurnStatus::Running;
+                turn.record.awaiting_approval = true;
+                turn.record.last_progress_at_ms = Some(now_ms());
+                turn.record.execution_timeout_at_ms = None;
+            }
         }
         coordination.remove(session_id.as_str());
         self.save_state_and_sync(session_id, &state)
+    }
+
+    fn record_runtime_progress(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+    ) -> Result<(), RuntimeProtocolError> {
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let mut state = self.load_state_locked(session_id.as_str(), &mut coordination)?;
+        if state.record_runtime_progress(turn_id, now_ms()) {
+            self.save_state_only(session_id, &state)?;
+        }
+        Ok(())
     }
 
     fn mark_turn_failed(
@@ -942,16 +1052,22 @@ impl TurnControlPlane {
             .lock()
             .expect("probe-server coordination mutex should not be poisoned");
         let mut state = self.load_state_locked(session_id.as_str(), &mut coordination)?;
+        let mut failed = false;
         if let Some(turn) = state.turn_by_id_mut(turn_id) {
-            turn.record.status = QueuedTurnStatus::Failed;
-            turn.record.awaiting_approval = false;
-            turn.record.finished_at_ms = Some(now_ms());
-            turn.record.failure_message = Some(message);
-            turn.record.cancellation_reason = None;
+            if turn.record.status == QueuedTurnStatus::Running {
+                turn.record.status = QueuedTurnStatus::Failed;
+                turn.record.awaiting_approval = false;
+                turn.record.finished_at_ms = Some(now_ms());
+                turn.record.failure_message = Some(message);
+                turn.record.cancellation_reason = None;
+                failed = true;
+            }
         }
         coordination.remove(session_id.as_str());
-        let should_start_next = state.queued_turn_count() > 0;
-        self.save_state_and_sync(session_id, &state)?;
+        let should_start_next = failed && state.queued_turn_count() > 0;
+        if failed {
+            self.save_state_and_sync(session_id, &state)?;
+        }
         Ok(should_start_next)
     }
 
@@ -971,13 +1087,11 @@ impl TurnControlPlane {
             return Ok(None);
         };
         let turn_id = next_turn.record.turn_id.clone();
-        if let Some(turn) = state.turn_by_id_mut(turn_id.as_str()) {
-            turn.record.status = QueuedTurnStatus::Running;
-            turn.record.started_at_ms = Some(now_ms());
-            turn.record.awaiting_approval = false;
-            turn.record.failure_message = None;
-            turn.record.cancellation_reason = None;
-        }
+        state.mark_turn_running(
+            turn_id.as_str(),
+            now_ms(),
+            self.watchdog_policy.execution_timeout_ms,
+        );
         self.save_state_and_sync(session_id, &state)?;
         coordination.insert(String::from(session_id.as_str()));
         Ok(Some(BackgroundTurnWorkItem {
@@ -1000,7 +1114,12 @@ impl TurnControlPlane {
         let mut active_turns = 0usize;
         for session in sessions {
             let state = self.load_state_locked(session.id.as_str(), &mut coordination)?;
-            active_turns += state.unfinished_turn_count();
+            let unfinished = state.unfinished_turn_count();
+            if unfinished == 0 && coordination.contains(session.id.as_str()) {
+                active_turns += 1;
+            } else {
+                active_turns += unfinished;
+            }
         }
         Ok(active_turns)
     }
@@ -1024,6 +1143,92 @@ impl TurnControlPlane {
             self.save_state_and_sync(&session_id, &state)?;
         }
         Ok(state)
+    }
+
+    fn enforce_detached_watchdog_policy(&self) -> Result<(), RuntimeProtocolError> {
+        let Some(registry) = self.detached_registry.as_ref() else {
+            return Ok(());
+        };
+        for session_id in registry
+            .tracked_session_ids()
+            .map_err(detached_registry_error_to_protocol)?
+        {
+            self.enforce_detached_watchdog_for_session(&session_id)?;
+        }
+        Ok(())
+    }
+
+    fn enforce_detached_watchdog_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeProtocolError> {
+        let now_ms = now_ms();
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let mut state = self.load_state_locked(session_id.as_str(), &mut coordination)?;
+        let Some(active_turn) = state.active_turn().cloned() else {
+            return Ok(());
+        };
+        let Some(trigger) =
+            evaluate_detached_turn_watchdog(&active_turn.record, now_ms, self.watchdog_policy)
+        else {
+            return Ok(());
+        };
+
+        let failure_message = watchdog_failure_message(&active_turn, trigger);
+        let transcript_note = watchdog_transcript_note(&active_turn, trigger);
+        let queued_cancelled = cancel_queued_turns_after_watchdog(
+            &mut state,
+            active_turn.record.turn_id.as_str(),
+            now_ms,
+        );
+
+        if let Some(turn) = state.turn_by_id_mut(active_turn.record.turn_id.as_str()) {
+            if turn.record.status != QueuedTurnStatus::Running {
+                return Ok(());
+            }
+            turn.record.status = QueuedTurnStatus::TimedOut;
+            turn.record.awaiting_approval = false;
+            turn.record.finished_at_ms = Some(now_ms);
+            turn.record.failure_message = Some(failure_message.clone());
+            turn.record.cancellation_reason = None;
+        }
+
+        let mut notes = vec![NewItem::new(
+            probe_protocol::session::TranscriptItemKind::Note,
+            transcript_note,
+        )];
+        notes.extend(queued_cancelled.iter().map(|note| {
+            NewItem::new(
+                probe_protocol::session::TranscriptItemKind::Note,
+                note.clone(),
+            )
+        }));
+        self.runtime
+            .session_store()
+            .append_turn(session_id, &notes)
+            .map_err(session_store_error_to_protocol)?;
+        self.save_state_and_sync(session_id, &state)?;
+        if let Some(event_hub) = self.detached_event_hub.as_ref() {
+            event_hub
+                .append(
+                    session_id,
+                    DetachedSessionEventTruth::Authoritative,
+                    DetachedSessionEventPayload::Note {
+                        code: watchdog_note_code(trigger).to_string(),
+                        message: watchdog_event_message(
+                            &active_turn,
+                            trigger,
+                            queued_cancelled.len(),
+                        ),
+                    },
+                    now_ms,
+                )
+                .map_err(detached_event_error_to_protocol)?;
+        }
+        Ok(())
     }
 }
 
@@ -1648,15 +1853,18 @@ fn spawn_turn_worker(
     turn_id: String,
 ) -> Result<(), ServerError> {
     let session_id = request.session_id.clone();
+    let turn_id_for_worker = turn_id.clone();
     let thread_name = format!("probe-server-turn-{}", session_id.as_str());
     thread::Builder::new().name(thread_name).spawn(move || {
         let response = run_turn_request(
+            Arc::clone(&turn_control),
             &runtime,
             &writer,
             detached_event_hub.clone(),
             request_id.as_deref(),
             request,
             mode,
+            turn_id_for_worker.as_str(),
         );
 
         let should_start_next = match &response {
@@ -1719,11 +1927,13 @@ fn spawn_approval_resolution_worker(
     let thread_name = format!("probe-server-approval-{}", session_id.as_str());
     thread::Builder::new().name(thread_name).spawn(move || {
         let response = run_pending_approval_resolution(
+            Arc::clone(&turn_control),
             &runtime,
             &writer,
             detached_event_hub.clone(),
             Some(request_id.as_str()),
             request,
+            turn_id.as_str(),
         );
 
         let should_start_next = match &response {
@@ -1808,6 +2018,21 @@ fn spawn_next_queued_turn_if_ready(
     }
 }
 
+fn spawn_detached_watchdog(
+    core: ProbeServerCore,
+    watchdog_policy: DetachedTurnWatchdogPolicy,
+) -> Result<(), io::Error> {
+    thread::Builder::new()
+        .name(String::from("probe-daemon-watchdog"))
+        .spawn(move || {
+            loop {
+                thread::sleep(Duration::from_millis(watchdog_policy.poll_interval_ms));
+                let _ = core.turn_control.enforce_detached_watchdog_policy();
+            }
+        })?;
+    Ok(())
+}
+
 fn approval_error_keeps_turn_paused(error: &RuntimeProtocolError) -> bool {
     matches!(
         error.code.as_str(),
@@ -1834,6 +2059,120 @@ fn interrupted_turn_note(turn: &StoredTurnControlRecord, pending_approvals: usiz
     )
 }
 
+fn cancel_queued_turns_after_watchdog(
+    state: &mut SessionTurnControlState,
+    active_turn_id: &str,
+    now_ms: u64,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    for turn in &mut state.turns {
+        if turn.record.status != QueuedTurnStatus::Queued {
+            continue;
+        }
+        turn.record.status = QueuedTurnStatus::Cancelled;
+        turn.record.finished_at_ms = Some(now_ms);
+        turn.record.cancellation_reason = Some(format!(
+            "cancelled because detached turn {} timed out before this queued turn could start",
+            active_turn_id
+        ));
+        notes.push(format!(
+            "probe-daemon cancelled queued turn {} from {} after detached turn {} timed out: {}",
+            turn.record.turn_id,
+            render_turn_author(&turn.record.author),
+            active_turn_id,
+            render_prompt_excerpt(turn.record.prompt.as_str()),
+        ));
+    }
+    notes
+}
+
+fn watchdog_note_code(trigger: DetachedTurnWatchdogTrigger) -> &'static str {
+    match trigger {
+        DetachedTurnWatchdogTrigger::ProgressStalled { .. } => "detached_turn_watchdog_stalled",
+        DetachedTurnWatchdogTrigger::ExecutionTimedOut { .. } => "detached_turn_execution_timeout",
+    }
+}
+
+fn watchdog_failure_message(
+    turn: &StoredTurnControlRecord,
+    trigger: DetachedTurnWatchdogTrigger,
+) -> String {
+    match trigger {
+        DetachedTurnWatchdogTrigger::ProgressStalled {
+            last_progress_at_ms,
+            stall_timeout_ms,
+        } => format!(
+            "probe-daemon watchdog marked detached turn {} as timed out after {}ms without runtime progress since {}",
+            turn.record.turn_id, stall_timeout_ms, last_progress_at_ms
+        ),
+        DetachedTurnWatchdogTrigger::ExecutionTimedOut {
+            timeout_at_ms,
+            execution_timeout_ms,
+        } => format!(
+            "probe-daemon timed out detached turn {} after exceeding the {}ms execution limit at {}",
+            turn.record.turn_id, execution_timeout_ms, timeout_at_ms
+        ),
+    }
+}
+
+fn watchdog_transcript_note(
+    turn: &StoredTurnControlRecord,
+    trigger: DetachedTurnWatchdogTrigger,
+) -> String {
+    match trigger {
+        DetachedTurnWatchdogTrigger::ProgressStalled {
+            last_progress_at_ms,
+            stall_timeout_ms,
+        } => format!(
+            "probe-daemon watchdog timed out detached turn {} from {} after {}ms without runtime progress since {}: {}",
+            turn.record.turn_id,
+            render_turn_author(&turn.record.author),
+            stall_timeout_ms,
+            last_progress_at_ms,
+            render_prompt_excerpt(turn.record.prompt.as_str()),
+        ),
+        DetachedTurnWatchdogTrigger::ExecutionTimedOut {
+            timeout_at_ms,
+            execution_timeout_ms,
+        } => format!(
+            "probe-daemon timed out detached turn {} from {} after exceeding the {}ms execution limit at {}: {}",
+            turn.record.turn_id,
+            render_turn_author(&turn.record.author),
+            execution_timeout_ms,
+            timeout_at_ms,
+            render_prompt_excerpt(turn.record.prompt.as_str()),
+        ),
+    }
+}
+
+fn watchdog_event_message(
+    turn: &StoredTurnControlRecord,
+    trigger: DetachedTurnWatchdogTrigger,
+    queued_cancelled: usize,
+) -> String {
+    let summary = match trigger {
+        DetachedTurnWatchdogTrigger::ProgressStalled {
+            last_progress_at_ms,
+            stall_timeout_ms,
+        } => format!(
+            "detached turn {} stalled for {}ms after last progress at {}",
+            turn.record.turn_id, stall_timeout_ms, last_progress_at_ms
+        ),
+        DetachedTurnWatchdogTrigger::ExecutionTimedOut {
+            timeout_at_ms,
+            execution_timeout_ms,
+        } => format!(
+            "detached turn {} exceeded the {}ms execution limit at {}",
+            turn.record.turn_id, execution_timeout_ms, timeout_at_ms
+        ),
+    };
+    if queued_cancelled == 0 {
+        summary
+    } else {
+        format!("{summary}; cancelled {queued_cancelled} queued follow-up turn(s)")
+    }
+}
+
 fn render_turn_author(author: &probe_protocol::runtime::TurnAuthor) -> String {
     author
         .display_name
@@ -1855,12 +2194,14 @@ fn render_prompt_excerpt(prompt: &str) -> String {
 }
 
 fn run_turn_request(
+    turn_control: Arc<TurnControlPlane>,
     runtime: &ProbeRuntime,
     writer: &SharedJsonlWriter,
     detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
     request_id: Option<&str>,
     request: TurnRequest,
     mode: TurnMode,
+    turn_id: &str,
 ) -> Result<RuntimeResponse, RuntimeProtocolError> {
     let tool_loop = request.tool_loop.map(tool_loop_from_recipe).transpose()?;
     let event_sink = request_id
@@ -1869,7 +2210,11 @@ fn run_turn_request(
         .map(|(request_id, detached_event_hub)| {
             let writer_for_events = writer.clone();
             let session_id_for_events = request.session_id.clone();
+            let turn_control_for_events = Arc::clone(&turn_control);
+            let turn_id_for_events = String::from(turn_id);
             Arc::new(move |event| {
+                let _ = turn_control_for_events
+                    .record_runtime_progress(&session_id_for_events, turn_id_for_events.as_str());
                 let delivery = delivery_for_runtime_event(&event);
                 let encoded = encode_runtime_event(event);
                 if let Some(request_id_for_events) = request_id.as_ref() {
@@ -1967,11 +2312,13 @@ fn run_turn_request(
 }
 
 fn run_pending_approval_resolution(
+    turn_control: Arc<TurnControlPlane>,
     runtime: &ProbeRuntime,
     writer: &SharedJsonlWriter,
     detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
     request_id: Option<&str>,
     request: probe_protocol::runtime::ResolvePendingApprovalRequest,
+    turn_id: &str,
 ) -> Result<RuntimeResponse, RuntimeProtocolError> {
     let tool_loop = tool_loop_from_recipe(request.tool_loop)?;
     let event_sink = request_id
@@ -1980,7 +2327,11 @@ fn run_pending_approval_resolution(
         .map(|(request_id, detached_event_hub)| {
             let writer_for_events = writer.clone();
             let session_id_for_events = request.session_id.clone();
+            let turn_control_for_events = Arc::clone(&turn_control);
+            let turn_id_for_events = String::from(turn_id);
             Arc::new(move |event| {
+                let _ = turn_control_for_events
+                    .record_runtime_progress(&session_id_for_events, turn_id_for_events.as_str());
                 let delivery = delivery_for_runtime_event(&event);
                 let encoded = encode_runtime_event(event);
                 if let Some(request_id_for_events) = request_id.as_ref() {
@@ -2095,7 +2446,7 @@ fn detached_session_summary_from_state(
 ) -> DetachedSessionSummary {
     let view = state.inspect_view(&metadata.id);
     let active_turn = view.active_turn.as_ref();
-    let last_terminal_turn = view.recent_turns.first();
+    let last_terminal_turn = preferred_terminal_turn(view.recent_turns.as_slice());
     let (status, recovery_state, recovery_note) = if let Some(active_turn) = active_turn {
         if active_turn.awaiting_approval {
             (
@@ -2123,6 +2474,7 @@ fn detached_session_summary_from_state(
             QueuedTurnStatus::Completed => DetachedSessionStatus::Completed,
             QueuedTurnStatus::Failed => DetachedSessionStatus::Failed,
             QueuedTurnStatus::Cancelled => DetachedSessionStatus::Cancelled,
+            QueuedTurnStatus::TimedOut => DetachedSessionStatus::TimedOut,
             QueuedTurnStatus::Queued | QueuedTurnStatus::Running => DetachedSessionStatus::Idle,
         };
         let recovery_state = if last_terminal_turn
@@ -2174,6 +2526,27 @@ fn turn_response_to_runtime_response(response: TurnResponse, mode: TurnMode) -> 
     match mode {
         TurnMode::Start => RuntimeResponse::StartTurn(response),
         TurnMode::Continue => RuntimeResponse::ContinueTurn(response),
+    }
+}
+
+fn preferred_terminal_turn(
+    turns: &[probe_protocol::runtime::SessionTurnControlRecord],
+) -> Option<&probe_protocol::runtime::SessionTurnControlRecord> {
+    turns.iter().max_by_key(|turn| {
+        (
+            turn.finished_at_ms.unwrap_or(0),
+            terminal_status_rank(turn.status),
+        )
+    })
+}
+
+fn terminal_status_rank(status: QueuedTurnStatus) -> u8 {
+    match status {
+        QueuedTurnStatus::TimedOut => 4,
+        QueuedTurnStatus::Failed => 3,
+        QueuedTurnStatus::Cancelled => 2,
+        QueuedTurnStatus::Completed => 1,
+        QueuedTurnStatus::Queued | QueuedTurnStatus::Running => 0,
     }
 }
 

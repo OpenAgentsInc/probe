@@ -2,14 +2,17 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use probe_client::{ProbeClient, ProbeClientConfig, ProbeClientTransportConfig};
-use probe_server::server::run_local_daemon;
+use probe_server::detached_watchdog::DetachedTurnWatchdogPolicy;
+use probe_server::server::run_local_daemon_with_watchdog_policy;
 
 fn main() -> ExitCode {
     match parse_args() {
         Ok(Action::Run {
             probe_home,
             socket_path,
-        }) => match run_local_daemon(probe_home, socket_path) {
+            watchdog_policy,
+        }) => match run_local_daemon_with_watchdog_policy(probe_home, socket_path, watchdog_policy)
+        {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("{error}");
@@ -42,6 +45,7 @@ enum Action {
     Run {
         probe_home: Option<PathBuf>,
         socket_path: Option<PathBuf>,
+        watchdog_policy: DetachedTurnWatchdogPolicy,
     },
     Stop {
         probe_home: Option<PathBuf>,
@@ -55,6 +59,7 @@ fn parse_args() -> Result<Action, String> {
     let mut action = DaemonAction::Run;
     let mut probe_home = None;
     let mut socket_path = None;
+    let mut watchdog_policy = DetachedTurnWatchdogPolicy::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "run" => action = DaemonAction::Run,
@@ -71,6 +76,30 @@ fn parse_args() -> Result<Action, String> {
                 };
                 socket_path = Some(PathBuf::from(value));
             }
+            "--watchdog-poll-ms" => {
+                let Some(value) = args.next() else {
+                    return Err(String::from("--watchdog-poll-ms requires a value"));
+                };
+                watchdog_policy.poll_interval_ms = value
+                    .parse()
+                    .map_err(|_| format!("invalid --watchdog-poll-ms value: {value}"))?;
+            }
+            "--watchdog-stall-ms" => {
+                let Some(value) = args.next() else {
+                    return Err(String::from("--watchdog-stall-ms requires a value"));
+                };
+                watchdog_policy.stall_timeout_ms = value
+                    .parse()
+                    .map_err(|_| format!("invalid --watchdog-stall-ms value: {value}"))?;
+            }
+            "--watchdog-timeout-ms" => {
+                let Some(value) = args.next() else {
+                    return Err(String::from("--watchdog-timeout-ms requires a value"));
+                };
+                watchdog_policy.execution_timeout_ms = value
+                    .parse()
+                    .map_err(|_| format!("invalid --watchdog-timeout-ms value: {value}"))?;
+            }
             "--help" | "-h" => return Ok(Action::Help),
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -79,6 +108,7 @@ fn parse_args() -> Result<Action, String> {
         DaemonAction::Run => Action::Run {
             probe_home,
             socket_path,
+            watchdog_policy,
         },
         DaemonAction::Stop => Action::Stop {
             probe_home,
@@ -109,6 +139,8 @@ fn stop_local_daemon(
 }
 
 fn print_usage() {
-    eprintln!("usage: probe-daemon [run|stop] [--probe-home <path>] [--socket-path <path>]");
+    eprintln!(
+        "usage: probe-daemon [run|stop] [--probe-home <path>] [--socket-path <path>] [--watchdog-poll-ms <ms>] [--watchdog-stall-ms <ms>] [--watchdog-timeout-ms <ms>]"
+    );
     eprintln!("transport: unix socket jsonl");
 }

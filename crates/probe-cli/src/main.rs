@@ -67,7 +67,8 @@ use probe_protocol::session::{
     ToolPolicyDecision, ToolRiskClass, TranscriptEvent, TranscriptItemKind, UsageMeasurement,
     UsageTruth,
 };
-use probe_server::server::{run_local_daemon, run_stdio_server};
+use probe_server::detached_watchdog::DetachedTurnWatchdogPolicy;
+use probe_server::server::{run_local_daemon_with_watchdog_policy, run_stdio_server};
 use probe_tui::{AppShell, TuiLaunchConfig, UiEvent, run_probe_tui_with_config};
 use serde::Serialize;
 
@@ -137,6 +138,12 @@ enum DaemonCommands {
 struct DaemonControlArgs {
     #[arg(long)]
     probe_home: Option<PathBuf>,
+    #[arg(long)]
+    watchdog_poll_ms: Option<u64>,
+    #[arg(long)]
+    watchdog_stall_ms: Option<u64>,
+    #[arg(long)]
+    watchdog_timeout_ms: Option<u64>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -213,6 +220,12 @@ struct InternalServerArgs {
 struct InternalDaemonArgs {
     #[arg(long)]
     probe_home: Option<PathBuf>,
+    #[arg(long)]
+    watchdog_poll_ms: Option<u64>,
+    #[arg(long)]
+    watchdog_stall_ms: Option<u64>,
+    #[arg(long)]
+    watchdog_timeout_ms: Option<u64>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1013,7 +1026,13 @@ fn run_daemon(args: DaemonArgs) -> Result<(), String> {
     match args.command {
         DaemonCommands::Run(args) => {
             let probe_home = resolve_probe_home_path(args.probe_home)?;
-            run_local_daemon(Some(probe_home), None).map_err(|error| error.to_string())
+            let watchdog_policy = watchdog_policy_from_args(
+                args.watchdog_poll_ms,
+                args.watchdog_stall_ms,
+                args.watchdog_timeout_ms,
+            );
+            run_local_daemon_with_watchdog_policy(Some(probe_home), None, watchdog_policy)
+                .map_err(|error| error.to_string())
         }
         DaemonCommands::Stop(args) => {
             let probe_home = resolve_probe_home_path(args.probe_home)?;
@@ -1196,7 +1215,13 @@ fn run_stop(args: StopArgs) -> Result<(), String> {
 }
 
 fn run_internal_daemon(args: InternalDaemonArgs) -> Result<(), String> {
-    run_local_daemon(args.probe_home, None).map_err(|error| error.to_string())
+    let watchdog_policy = watchdog_policy_from_args(
+        args.watchdog_poll_ms,
+        args.watchdog_stall_ms,
+        args.watchdog_timeout_ms,
+    );
+    run_local_daemon_with_watchdog_policy(args.probe_home, None, watchdog_policy)
+        .map_err(|error| error.to_string())
 }
 
 fn resolve_probe_home_path(probe_home: Option<PathBuf>) -> Result<PathBuf, String> {
@@ -1210,6 +1235,24 @@ fn daemon_client_config(probe_home: PathBuf, surface: &str) -> ProbeClientConfig
     config.client_version = Some(String::from(env!("CARGO_PKG_VERSION")));
     config.transport = ProbeClientTransportConfig::LocalDaemon { socket_path: None };
     config
+}
+
+fn watchdog_policy_from_args(
+    watchdog_poll_ms: Option<u64>,
+    watchdog_stall_ms: Option<u64>,
+    watchdog_timeout_ms: Option<u64>,
+) -> DetachedTurnWatchdogPolicy {
+    let mut policy = DetachedTurnWatchdogPolicy::default();
+    if let Some(value) = watchdog_poll_ms {
+        policy.poll_interval_ms = value;
+    }
+    if let Some(value) = watchdog_stall_ms {
+        policy.stall_timeout_ms = value;
+    }
+    if let Some(value) = watchdog_timeout_ms {
+        policy.execution_timeout_ms = value;
+    }
+    policy
 }
 
 fn try_daemon_client(probe_home: PathBuf, surface: &str) -> Result<ProbeClient, ProbeClientError> {
@@ -2459,6 +2502,7 @@ fn render_detached_status(status: DetachedSessionStatus) -> &'static str {
         DetachedSessionStatus::Completed => "completed",
         DetachedSessionStatus::Failed => "failed",
         DetachedSessionStatus::Cancelled => "cancelled",
+        DetachedSessionStatus::TimedOut => "timed_out",
     }
 }
 
@@ -2473,28 +2517,61 @@ fn render_detached_recovery_state(state: DetachedSessionRecoveryState) -> &'stat
 }
 
 fn render_turn_control_kv(turn: &SessionTurnControlRecord) -> String {
-    format!(
-        "turn_id={} submission={} status={} awaiting_approval={} queue_position={} requested_at_ms={} started_at_ms={} finished_at_ms={} author={:?} prompt={:?}",
-        turn.turn_id,
-        render_turn_submission_kind(turn.submission_kind),
-        render_queued_turn_status(turn.status),
-        turn.awaiting_approval,
-        turn.queue_position
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| String::from("none")),
-        turn.requested_at_ms,
-        turn.started_at_ms
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| String::from("none")),
-        turn.finished_at_ms
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| String::from("none")),
+    let mut parts = vec![
+        format!("turn_id={}", turn.turn_id),
+        format!(
+            "submission={}",
+            render_turn_submission_kind(turn.submission_kind)
+        ),
+        format!("status={}", render_queued_turn_status(turn.status)),
+        format!("awaiting_approval={}", turn.awaiting_approval),
+        format!(
+            "queue_position={}",
+            turn.queue_position
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| String::from("none"))
+        ),
+        format!("requested_at_ms={}", turn.requested_at_ms),
+        format!(
+            "started_at_ms={}",
+            turn.started_at_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| String::from("none"))
+        ),
+        format!(
+            "finished_at_ms={}",
+            turn.finished_at_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| String::from("none"))
+        ),
+        format!(
+            "last_progress_at_ms={}",
+            turn.last_progress_at_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| String::from("none"))
+        ),
+        format!(
+            "execution_timeout_at_ms={}",
+            turn.execution_timeout_at_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| String::from("none"))
+        ),
+    ];
+    if let Some(failure_message) = turn.failure_message.as_ref() {
+        parts.push(format!("failure_message={failure_message:?}"));
+    }
+    if let Some(cancellation_reason) = turn.cancellation_reason.as_ref() {
+        parts.push(format!("cancellation_reason={cancellation_reason:?}"));
+    }
+    parts.push(format!(
+        "author={:?}",
         turn.author
             .display_name
             .as_deref()
-            .unwrap_or(&turn.author.client_name),
-        turn.prompt,
-    )
+            .unwrap_or(&turn.author.client_name)
+    ));
+    parts.push(format!("prompt={:?}", turn.prompt));
+    parts.join(" ")
 }
 
 fn render_turn_submission_kind(value: probe_protocol::runtime::TurnSubmissionKind) -> &'static str {
@@ -2511,6 +2588,7 @@ fn render_queued_turn_status(value: probe_protocol::runtime::QueuedTurnStatus) -
         probe_protocol::runtime::QueuedTurnStatus::Completed => "completed",
         probe_protocol::runtime::QueuedTurnStatus::Failed => "failed",
         probe_protocol::runtime::QueuedTurnStatus::Cancelled => "cancelled",
+        probe_protocol::runtime::QueuedTurnStatus::TimedOut => "timed_out",
     }
 }
 

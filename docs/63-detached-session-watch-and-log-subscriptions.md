@@ -86,10 +86,10 @@ It gives Probe:
 - push-style local watch streams without polling `inspect_session_turns`
 - visible approval-paused lifecycle and runtime progress in detached logs
 - operator CLI commands above this surface
+- watchdog timeout notes and `timed_out` summary transitions in detached logs
 
 It does not yet give Probe:
 
-- watchdog or timeout actions
 - remote or multi-tenant subscriptions
 - a browser-facing transport
 

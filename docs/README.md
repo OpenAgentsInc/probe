@@ -221,3 +221,7 @@ This folder holds technical planning docs for the Probe runtime.
   - the first human-facing daemon operator surface for Phase 2, including
     `probe daemon run|stop`, `probe ps|attach|logs|stop`, daemon autostart,
     and the bounded binary-regression coverage for those commands
+- `65-detached-watchdog-and-timeout-policy.md`
+  - daemon-owned stalled-turn and total-timeout policy for detached sessions,
+    including `timed_out` status, per-turn progress metadata, queued follow-up
+    cancellation, and the watchdog configuration knobs on daemon startup

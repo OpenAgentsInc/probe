@@ -530,6 +530,9 @@ fn normalize_daemon_cli_snapshot(
         .replace(session_id, "<SESSION_ID>");
     let normalized = normalize_key_value_field(normalized.as_str(), "requested_at_ms", "<TS>");
     let normalized = normalize_key_value_field(normalized.as_str(), "started_at_ms", "<TS>");
+    let normalized = normalize_key_value_field(normalized.as_str(), "last_progress_at_ms", "<TS>");
+    let normalized =
+        normalize_key_value_field(normalized.as_str(), "execution_timeout_at_ms", "<TS>");
     normalize_key_value_field(normalized.as_str(), "cursor", "<CURSOR>")
 }
 

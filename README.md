@@ -89,6 +89,15 @@ Run the long-lived local daemon:
 cargo run -p probe-daemon -- run --probe-home ~/.probe
 ```
 
+Tune detached watchdog budgets when needed:
+
+```bash
+cargo run -p probe-cli -- daemon run \
+  --probe-home ~/.probe \
+  --watchdog-stall-ms 30000 \
+  --watchdog-timeout-ms 300000
+```
+
 Inspect detached sessions:
 
 ```bash

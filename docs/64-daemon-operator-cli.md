@@ -21,6 +21,15 @@ richer TUI attach flow sits on top.
 These commands all use the shared `probe-client` daemon transport instead of
 reaching into daemon files directly.
 
+`probe daemon run` also now accepts:
+
+- `--watchdog-poll-ms`
+- `--watchdog-stall-ms`
+- `--watchdog-timeout-ms`
+
+That keeps the detached watchdog policy configurable without introducing a
+second daemon-only configuration path.
+
 ## Autostart Rule
 
 `probe ps`, `probe attach`, `probe logs`, and `probe stop` now try the local
@@ -93,6 +102,5 @@ Current limits remain:
 
 - the daemon is still effectively single-connection in practice
 - `probe stop` is only as cooperative as the existing runtime interrupt path
-- watchdog and timeout policy still live in the next Phase 2 issue
 - first-party `probe chat` and TUI default daemon attach flows still live in
   the next Phase 2 issue

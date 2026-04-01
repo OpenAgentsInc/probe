@@ -104,6 +104,7 @@ impl SessionTurnControlState {
             } else {
                 String::from("probe-server restarted before this running turn completed")
             });
+            turn.record.last_progress_at_ms = Some(now_ms);
             mutated = true;
         }
         mutated
@@ -117,7 +118,9 @@ impl SessionTurnControlState {
         request: &TurnRequest,
         requested_at_ms: TimestampMs,
         started_at_ms: Option<TimestampMs>,
+        execution_timeout_ms: Option<u64>,
     ) -> SessionTurnControlRecord {
+        let last_progress_at_ms = started_at_ms;
         let record = SessionTurnControlRecord {
             turn_id: format!("turn-{}", self.next_turn_id),
             session_id: session_id.clone(),
@@ -132,6 +135,12 @@ impl SessionTurnControlState {
             awaiting_approval: false,
             failure_message: None,
             cancellation_reason: None,
+            last_progress_at_ms,
+            execution_timeout_at_ms: started_at_ms.zip(execution_timeout_ms).map(
+                |(started_at_ms, execution_timeout_ms)| {
+                    started_at_ms.saturating_add(execution_timeout_ms)
+                },
+            ),
         };
         self.next_turn_id += 1;
         self.turns.push(StoredTurnControlRecord {
@@ -167,6 +176,42 @@ impl SessionTurnControlState {
         self.turns
             .iter_mut()
             .find(|turn| turn.record.turn_id == turn_id)
+    }
+
+    pub(crate) fn mark_turn_running(
+        &mut self,
+        turn_id: &str,
+        started_at_ms: TimestampMs,
+        execution_timeout_ms: u64,
+    ) -> bool {
+        let Some(turn) = self.turn_by_id_mut(turn_id) else {
+            return false;
+        };
+        turn.record.status = QueuedTurnStatus::Running;
+        turn.record.started_at_ms = Some(started_at_ms);
+        turn.record.finished_at_ms = None;
+        turn.record.awaiting_approval = false;
+        turn.record.failure_message = None;
+        turn.record.cancellation_reason = None;
+        turn.record.last_progress_at_ms = Some(started_at_ms);
+        turn.record.execution_timeout_at_ms =
+            Some(started_at_ms.saturating_add(execution_timeout_ms));
+        true
+    }
+
+    pub(crate) fn record_runtime_progress(
+        &mut self,
+        turn_id: &str,
+        progress_at_ms: TimestampMs,
+    ) -> bool {
+        let Some(turn) = self.turn_by_id_mut(turn_id) else {
+            return false;
+        };
+        if turn.record.status != QueuedTurnStatus::Running || turn.record.awaiting_approval {
+            return false;
+        }
+        turn.record.last_progress_at_ms = Some(progress_at_ms);
+        true
     }
 
     pub(crate) fn queued_turn_count(&self) -> usize {
@@ -240,6 +285,7 @@ impl SessionTurnControlState {
                     QueuedTurnStatus::Completed
                         | QueuedTurnStatus::Failed
                         | QueuedTurnStatus::Cancelled
+                        | QueuedTurnStatus::TimedOut
                 )
             })
             .map(|turn| {
@@ -310,9 +356,10 @@ fn decorate_queue_position(
                     index
                 }
             }),
-        QueuedTurnStatus::Completed | QueuedTurnStatus::Failed | QueuedTurnStatus::Cancelled => {
-            None
-        }
+        QueuedTurnStatus::Completed
+        | QueuedTurnStatus::Failed
+        | QueuedTurnStatus::Cancelled
+        | QueuedTurnStatus::TimedOut => None,
     };
     record
 }

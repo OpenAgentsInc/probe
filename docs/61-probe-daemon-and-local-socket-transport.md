@@ -21,7 +21,7 @@ The daemon socket defaults to:
 
 - `PROBE_HOME/daemon/probe-daemon.sock`
 
-The current protocol version is now `4` so transport-capability changes fail
+The current protocol version is now `5` so transport-capability changes fail
 honestly during initialize instead of silently drifting.
 
 ## Startup And Shutdown Semantics
@@ -84,10 +84,10 @@ It gives Probe:
 - the detached watch or log lane documented in
   `63-detached-session-watch-and-log-subscriptions.md`
 - the operator CLI documented in `64-daemon-operator-cli.md`
+- the watchdog policy documented in `65-detached-watchdog-and-timeout-policy.md`
 
 It does not yet give Probe:
 
-- timeout and watchdog policy
 - first-party chat or TUI defaulting to daemon attach
 
 Those are the next Phase 2 layers on top of this transport foundation.

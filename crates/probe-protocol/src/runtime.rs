@@ -162,6 +162,7 @@ pub enum QueuedTurnStatus {
     Completed,
     Failed,
     Cancelled,
+    TimedOut,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +186,10 @@ pub struct SessionTurnControlRecord {
     pub failure_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancellation_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_progress_at_ms: Option<TimestampMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_timeout_at_ms: Option<TimestampMs>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +218,7 @@ pub enum DetachedSessionStatus {
     Completed,
     Failed,
     Cancelled,
+    TimedOut,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -381,7 +381,9 @@ Useful moves:
 - automatic pause after repeated failures
 
 Probe should copy these operational rules when it eventually adds recurring
-background tasks. The first automation lane should stay conservative instead of
+background tasks. Local detached watchdogs now exist in Probe itself, so the
+remaining gap is recurring-run discipline rather than "add the first stuck-turn
+watchdog at all." The first automation lane should stay conservative instead of
 trying to overlap many runs on one repo by default.
 
 ## Remaining Gap After Recent Landings
@@ -421,7 +423,6 @@ Probe now ships a canonical local `probe-server` path for:
 The remaining gap is no longer "add a daemon transport," "add a detached
 registry," or "add detached watch." It is:
 
-- watchdog and timeout policy
 - first-party chat and TUI adoption of daemon attach flows
 - richer remote execution and workspace ownership beyond the local daemon
 
@@ -476,10 +477,11 @@ Detached supervision is now partly real:
 - push-style detached session watch
 - approval-paused and runtime-progress visibility in daemon event logs
 - operator `probe daemon run|stop` and `probe ps|attach|logs|stop` commands
+- watchdog and total-timeout enforcement for detached running turns
+- explicit `timed_out` detached status plus transcript or event-log notes
 
 The remaining gap is around operating that supervision safely:
 
-- timeout and watchdog enforcement for stuck detached turns
 - recurring-run discipline once automation exists
 
 ## 5. No branch or PR closure lane yet
@@ -779,7 +781,6 @@ Shipped:
 
 Still open in Phase 2:
 
-- timeout and watchdog behavior for stuck turns
 - first-party daemon attach adoption in `probe chat` and the TUI
 - first consumer adoption from Autopilot sidecar launch in `openagents`
 
@@ -789,7 +790,7 @@ Success condition:
   losing runtime state
 - a second first-party client can reattach to the same daemon-owned session
   without fabricating a second runtime
-- the remaining local gap is no longer operator control, but watchdogs and
+- the remaining local gap is no longer operator control or timeout policy, but
   default client adoption
 
 ## Phase 3: Remote worker mode
