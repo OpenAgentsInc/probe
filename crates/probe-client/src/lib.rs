@@ -2,7 +2,7 @@ use std::env;
 use std::fmt::{Display, Formatter};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 
 use probe_core::provider::{ProviderUsage, ProviderUsageMeasurement, ProviderUsageTruth};
@@ -26,6 +26,10 @@ use probe_protocol::runtime::{
 use probe_protocol::session::{
     PendingToolApproval, SessionId, SessionMetadata, UsageMeasurement, UsageTruth,
 };
+use probe_protocol::{PROBE_PROTOCOL_VERSION, default_local_daemon_socket_path};
+
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 
 pub const INTERNAL_SERVER_SUBCOMMAND: &str = "__internal-probe-server";
 
@@ -35,6 +39,7 @@ pub struct ProbeClientConfig {
     pub client_name: String,
     pub client_version: Option<String>,
     pub server_binary: Option<PathBuf>,
+    pub transport: ProbeClientTransportConfig,
 }
 
 impl ProbeClientConfig {
@@ -45,14 +50,22 @@ impl ProbeClientConfig {
             client_name: client_name.into(),
             client_version: None,
             server_binary: None,
+            transport: ProbeClientTransportConfig::SpawnStdio,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProbeClientTransportConfig {
+    SpawnStdio,
+    LocalDaemon { socket_path: Option<PathBuf> },
 }
 
 #[derive(Debug)]
 pub enum ProbeClientError {
     CurrentExecutable(std::io::Error),
     Spawn(std::io::Error),
+    ConnectDaemon(std::io::Error),
     MissingChildStdin,
     MissingChildStdout,
     Io(std::io::Error),
@@ -85,6 +98,9 @@ impl Display for ProbeClientError {
                 )
             }
             Self::Spawn(error) => write!(f, "failed to spawn probe-server: {error}"),
+            Self::ConnectDaemon(error) => {
+                write!(f, "failed to connect to probe-daemon: {error}")
+            }
             Self::MissingChildStdin => write!(f, "probe-server child did not expose stdin"),
             Self::MissingChildStdout => write!(f, "probe-server child did not expose stdout"),
             Self::Io(error) => write!(f, "probe-server io error: {error}"),
@@ -136,10 +152,15 @@ impl From<serde_json::Error> for ProbeClientError {
     }
 }
 
+struct ClientTransport {
+    child: Option<Child>,
+    writer: Box<dyn Write + Send>,
+    reader: Box<dyn BufRead + Send>,
+    shutdown_on_drop: bool,
+}
+
 pub struct ProbeClient {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    transport: ClientTransport,
     next_request_id: u64,
     client_name: String,
     client_version: Option<String>,
@@ -147,32 +168,32 @@ pub struct ProbeClient {
 
 impl ProbeClient {
     pub fn spawn(config: ProbeClientConfig) -> Result<Self, ProbeClientError> {
-        let mut command = build_server_command(&config)?;
-        let mut child = command.spawn().map_err(ProbeClientError::Spawn)?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or(ProbeClientError::MissingChildStdin)?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(ProbeClientError::MissingChildStdout)?;
+        Self::connect(config)
+    }
+
+    pub fn connect(config: ProbeClientConfig) -> Result<Self, ProbeClientError> {
+        let transport = build_transport(&config)?;
         let mut client = Self {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
+            transport,
             next_request_id: 0,
             client_name: config.client_name.clone(),
             client_version: config.client_version.clone(),
         };
-        let _ = client.send_request(
+        match client.send_request(
             RuntimeRequest::Initialize(InitializeRequest {
                 client_name: config.client_name,
                 client_version: config.client_version,
-                protocol_version: probe_protocol::PROBE_PROTOCOL_VERSION,
+                protocol_version: PROBE_PROTOCOL_VERSION,
             }),
             None,
-        )?;
+        )? {
+            RuntimeResponse::Initialize(_) => {}
+            other => {
+                return Err(ProbeClientError::UnexpectedServerMessage(format!(
+                    "expected initialize response, got {other:?}"
+                )));
+            }
+        }
         Ok(client)
     }
 
@@ -505,7 +526,9 @@ impl ProbeClient {
     pub fn shutdown(&mut self) -> Result<(), ProbeClientError> {
         match self.send_request(RuntimeRequest::Shutdown, None)? {
             RuntimeResponse::Shutdown(response) if response.accepted => {
-                let _ = self.child.wait();
+                if let Some(child) = self.transport.child.as_mut() {
+                    let _ = child.wait();
+                }
                 Ok(())
             }
             RuntimeResponse::Shutdown(response) => Err(ProbeClientError::ShutdownRejected {
@@ -584,15 +607,15 @@ impl ProbeClient {
             request_id: String::from(request_id),
             request,
         });
-        serde_json::to_writer(&mut self.stdin, &message)?;
-        self.stdin.write_all(b"\n")?;
-        self.stdin.flush()?;
+        serde_json::to_writer(&mut self.transport.writer, &message)?;
+        self.transport.writer.write_all(b"\n")?;
+        self.transport.writer.flush()?;
         Ok(())
     }
 
     fn read_message(&mut self) -> Result<ServerMessage, ProbeClientError> {
         let mut line = String::new();
-        let bytes = self.stdout.read_line(&mut line)?;
+        let bytes = self.transport.reader.read_line(&mut line)?;
         if bytes == 0 {
             return Err(ProbeClientError::UnexpectedServerMessage(String::from(
                 "probe-server exited before sending a response",
@@ -604,10 +627,72 @@ impl ProbeClient {
 
 impl Drop for ProbeClient {
     fn drop(&mut self) {
-        let _ = self.shutdown();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if self.transport.shutdown_on_drop {
+            let _ = self.shutdown();
+        }
+        if let Some(child) = self.transport.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
+}
+
+fn build_transport(config: &ProbeClientConfig) -> Result<ClientTransport, ProbeClientError> {
+    match &config.transport {
+        ProbeClientTransportConfig::SpawnStdio => spawn_server_transport(config),
+        ProbeClientTransportConfig::LocalDaemon { socket_path } => {
+            connect_local_daemon_transport(config, socket_path.as_ref())
+        }
+    }
+}
+
+fn spawn_server_transport(config: &ProbeClientConfig) -> Result<ClientTransport, ProbeClientError> {
+    let mut command = build_server_command(config)?;
+    let mut child = command.spawn().map_err(ProbeClientError::Spawn)?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or(ProbeClientError::MissingChildStdin)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(ProbeClientError::MissingChildStdout)?;
+    Ok(ClientTransport {
+        child: Some(child),
+        writer: Box::new(stdin),
+        reader: Box::new(BufReader::new(stdout)),
+        shutdown_on_drop: true,
+    })
+}
+
+#[cfg(unix)]
+fn connect_local_daemon_transport(
+    config: &ProbeClientConfig,
+    socket_path: Option<&PathBuf>,
+) -> Result<ClientTransport, ProbeClientError> {
+    let socket_path = socket_path
+        .cloned()
+        .unwrap_or_else(|| default_local_daemon_socket_path(config.probe_home.as_path()));
+    let stream = UnixStream::connect(&socket_path).map_err(ProbeClientError::ConnectDaemon)?;
+    let writer = stream
+        .try_clone()
+        .map_err(ProbeClientError::ConnectDaemon)?;
+    Ok(ClientTransport {
+        child: None,
+        writer: Box::new(writer),
+        reader: Box::new(BufReader::new(stream)),
+        shutdown_on_drop: false,
+    })
+}
+
+#[cfg(not(unix))]
+fn connect_local_daemon_transport(
+    _config: &ProbeClientConfig,
+    _socket_path: Option<&PathBuf>,
+) -> Result<ClientTransport, ProbeClientError> {
+    Err(ProbeClientError::ConnectDaemon(std::io::Error::other(
+        "local daemon transport is only implemented on unix platforms",
+    )))
 }
 
 fn build_server_command(config: &ProbeClientConfig) -> Result<Command, ProbeClientError> {
@@ -975,7 +1060,6 @@ fn default_session_title(prompt: &str) -> String {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use assert_cmd::cargo::cargo_bin;
     use probe_core::runtime::{PlainTextExecRequest, RuntimeEvent};
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
     use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
@@ -999,7 +1083,7 @@ mod tests {
             ),
         ]);
         let mut config = ProbeClientConfig::new(environment.probe_home(), "probe-client-test");
-        config.server_binary = Some(cargo_bin("probe-server"));
+        config.server_binary = Some(workspace_binary("probe-server"));
         let mut client = ProbeClient::spawn(config).expect("client should spawn");
         let events = Arc::new(Mutex::new(Vec::<RuntimeEvent>::new()));
         let captured = Arc::clone(&events);
@@ -1032,6 +1116,27 @@ mod tests {
         let requests = fake_backend.finish();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].contains("hello"));
+    }
+
+    fn workspace_binary(name: &str) -> std::path::PathBuf {
+        let current_exe = std::env::current_exe().expect("test binary path should resolve");
+        let base_dir = current_exe
+            .parent()
+            .and_then(|parent| {
+                if parent.file_name().is_some_and(|value| value == "deps") {
+                    parent.parent()
+                } else {
+                    Some(parent)
+                }
+            })
+            .expect("test binary should have a parent directory");
+        let candidate = base_dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        assert!(
+            candidate.exists(),
+            "expected workspace binary at {}",
+            candidate.display()
+        );
+        candidate
     }
 
     fn test_profile(base_url: &str) -> BackendProfile {

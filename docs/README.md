@@ -202,3 +202,8 @@ This folder holds technical planning docs for the Probe runtime.
   - shared `probe-client` spawn and transport ownership, the hidden internal
     server fallback for local development, and the first-party adoption path
     for `probe exec`, `probe chat`, and the TUI worker
+- `61-probe-daemon-and-local-socket-transport.md`
+  - the first detached-local transport layer for Phase 2, including the
+    long-lived `probe-daemon`, Unix-socket JSONL reuse of the shipped runtime
+    protocol, stale-socket cleanup, explicit run or stop entrypoints, and the
+    shared client split between spawned stdio children and daemon attaches

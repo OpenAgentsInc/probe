@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use probe_protocol::PROBE_PROTOCOL_VERSION;
 use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
 use probe_protocol::runtime::{
     ClientMessage, InspectSessionTurnsResponse, QueueTurnResponse, QueuedTurnStatus,
@@ -38,13 +39,13 @@ fn stdio_protocol_can_initialize_start_resume_and_run_a_turn() {
         RuntimeRequest::Initialize(probe_protocol::runtime::InitializeRequest {
             client_name: String::from("probe-server-test"),
             client_version: Some(String::from("0.1.0")),
-            protocol_version: 1,
+            protocol_version: PROBE_PROTOCOL_VERSION,
         }),
     );
     let RuntimeResponse::Initialize(response) = expect_ok_response(initialize) else {
         panic!("expected initialize response");
     };
-    assert_eq!(response.protocol_version, 1);
+    assert_eq!(response.protocol_version, PROBE_PROTOCOL_VERSION);
     assert_eq!(response.capabilities.transport, TransportKind::StdioJsonl);
     assert!(response.capabilities.supports_queued_turns);
 

@@ -1556,6 +1556,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "probe-daemon"
+version = "0.1.0"
+dependencies = [
+ "probe-client",
+ "probe-core",
+ "probe-protocol",
+ "probe-server",
+ "probe-test-support",
+]
+
+[[package]]
 name = "probe-decisions"
 version = "0.1.0"
 dependencies = [

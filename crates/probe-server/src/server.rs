@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
+use std::fs;
 use std::io::{self, BufRead, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -15,6 +16,7 @@ use probe_core::tools::{
     ExecutedToolCall, ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction as CoreDeniedAction,
     ToolLongContextConfig, ToolLoopConfig, ToolOracleConfig,
 };
+use probe_protocol::default_local_daemon_socket_path;
 use probe_protocol::runtime::{
     CancelQueuedTurnRequest, CancelQueuedTurnResponse, ClientMessage, EventDeliveryGuarantee,
     EventEnvelope, InitializeResponse, InspectSessionTurnsResponse, InterruptTurnResponse,
@@ -31,6 +33,11 @@ use probe_protocol::session::{SessionBackendTarget, SessionId, UsageMeasurement,
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
 
 use crate::turn_control::{SessionTurnControlState, StoredTurnControlRecord, now_ms};
+
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
 
 #[derive(Debug)]
 pub enum ServerError {
@@ -62,15 +69,19 @@ impl From<serde_json::Error> for ServerError {
 }
 
 #[derive(Clone)]
-struct SharedJsonlWriter {
-    stdout: Arc<Mutex<BufWriter<io::Stdout>>>,
+pub(crate) struct SharedJsonlWriter {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
 }
 
 impl SharedJsonlWriter {
-    fn new() -> Self {
+    pub(crate) fn new(writer: Box<dyn Write + Send>) -> Self {
         Self {
-            stdout: Arc::new(Mutex::new(BufWriter::new(io::stdout()))),
+            writer: Arc::new(Mutex::new(writer)),
         }
+    }
+
+    fn stdio() -> Self {
+        Self::new(Box::new(BufWriter::new(io::stdout())))
     }
 
     fn send_response_ok(
@@ -103,35 +114,155 @@ impl SharedJsonlWriter {
     }
 
     fn send(&self, message: ServerMessage) -> Result<(), ServerError> {
-        let mut stdout = self
-            .stdout
+        let mut writer = self
+            .writer
             .lock()
-            .expect("probe-server stdout mutex should not be poisoned");
-        serde_json::to_writer(&mut *stdout, &message)?;
-        stdout.write_all(b"\n")?;
-        stdout.flush()?;
+            .expect("probe-server writer mutex should not be poisoned");
+        serde_json::to_writer(&mut *writer, &message)?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
         Ok(())
     }
 }
 
 pub fn run_stdio_server(probe_home: Option<PathBuf>) -> Result<(), ServerError> {
-    let home = match probe_home {
-        Some(home) => home,
-        None => default_probe_home().map_err(|error| {
-            io::Error::other(format!(
-                "failed to resolve probe home for probe-server: {error}"
-            ))
-        })?,
-    };
-    let server = ProbeStdioServer::new(ProbeRuntime::new(home));
+    let home = resolve_probe_home(probe_home, "probe-server")?;
+    let server = ProbeServerConnection::new(
+        ProbeServerCore::new(ProbeRuntime::new(home)),
+        SharedJsonlWriter::stdio(),
+        TransportKind::StdioJsonl,
+    );
     let stdin = io::stdin();
-    server.run(stdin.lock())
+    let _ = server.run(stdin.lock())?;
+    Ok(())
 }
 
-struct ProbeStdioServer {
+#[cfg(unix)]
+pub fn run_local_daemon(
+    probe_home: Option<PathBuf>,
+    socket_path: Option<PathBuf>,
+) -> Result<(), ServerError> {
+    let home = resolve_probe_home(probe_home, "probe-daemon")?;
+    let socket_path = socket_path.unwrap_or_else(|| default_local_daemon_socket_path(&home));
+    prepare_daemon_socket(socket_path.as_path())?;
+    let _cleanup_guard = SocketCleanupGuard::new(socket_path.clone());
+    let listener = UnixListener::bind(&socket_path)?;
+    let core = ProbeServerCore::new(ProbeRuntime::new(home));
+
+    loop {
+        let (stream, _) = listener.accept()?;
+        let server = ProbeServerConnection::new(
+            core.clone(),
+            SharedJsonlWriter::new(Box::new(BufWriter::new(stream.try_clone()?))),
+            TransportKind::UnixSocketJsonl,
+        );
+        match server.run(io::BufReader::new(stream))? {
+            ConnectionRunOutcome::ClientDisconnected => {}
+            ConnectionRunOutcome::ServerShutdown => break,
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn run_local_daemon(
+    _probe_home: Option<PathBuf>,
+    _socket_path: Option<PathBuf>,
+) -> Result<(), ServerError> {
+    Err(ServerError::Io(io::Error::other(
+        "local probe-daemon socket transport is only implemented on unix platforms",
+    )))
+}
+
+fn resolve_probe_home(
+    probe_home: Option<PathBuf>,
+    process_name: &str,
+) -> Result<PathBuf, ServerError> {
+    match probe_home {
+        Some(home) => Ok(home),
+        None => default_probe_home().map_err(|error| {
+            io::Error::other(format!(
+                "failed to resolve probe home for {process_name}: {error}"
+            ))
+            .into()
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn prepare_daemon_socket(socket_path: &Path) -> Result<(), ServerError> {
+    let Some(parent) = socket_path.parent() else {
+        return Err(ServerError::Io(io::Error::other(format!(
+            "daemon socket path {} has no parent directory",
+            socket_path.display()
+        ))));
+    };
+    fs::create_dir_all(parent)?;
+
+    if !socket_path.exists() {
+        return Ok(());
+    }
+
+    let file_type = fs::symlink_metadata(socket_path)?.file_type();
+    if !file_type.is_socket() {
+        return Err(ServerError::Io(io::Error::other(format!(
+            "daemon socket path {} already exists and is not a unix socket",
+            socket_path.display()
+        ))));
+    }
+
+    match UnixStream::connect(socket_path) {
+        Ok(_) => Err(ServerError::Io(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "probe-daemon is already listening at {}",
+                socket_path.display()
+            ),
+        ))),
+        Err(_) => {
+            fs::remove_file(socket_path)?;
+            Ok(())
+        }
+    }
+}
+
+struct SocketCleanupGuard {
+    path: PathBuf,
+}
+
+impl SocketCleanupGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for SocketCleanupGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[derive(Clone)]
+pub struct ProbeServerCore {
     runtime: ProbeRuntime,
-    writer: SharedJsonlWriter,
     turn_control: Arc<TurnControlPlane>,
+}
+
+struct ProbeServerConnection {
+    core: ProbeServerCore,
+    writer: SharedJsonlWriter,
+    transport: TransportKind,
+}
+
+enum ConnectionRunOutcome {
+    ClientDisconnected,
+    ServerShutdown,
+}
+
+enum RequestHandlingOutcome {
+    Continue,
+    ShutdownAccepted,
 }
 
 #[derive(Clone)]
@@ -155,6 +286,15 @@ struct BackgroundTurnWorkItem {
 struct InterruptOutcome {
     response: InterruptTurnResponse,
     should_start_next: bool,
+}
+
+impl ProbeServerCore {
+    pub fn new(runtime: ProbeRuntime) -> Self {
+        Self {
+            turn_control: Arc::new(TurnControlPlane::new(runtime.clone())),
+            runtime,
+        }
+    }
 }
 
 impl TurnControlPlane {
@@ -631,17 +771,16 @@ impl TurnControlPlane {
     }
 }
 
-impl ProbeStdioServer {
-    fn new(runtime: ProbeRuntime) -> Self {
-        let writer = SharedJsonlWriter::new();
+impl ProbeServerConnection {
+    fn new(core: ProbeServerCore, writer: SharedJsonlWriter, transport: TransportKind) -> Self {
         Self {
-            turn_control: Arc::new(TurnControlPlane::new(runtime.clone())),
-            runtime,
+            core,
             writer,
+            transport,
         }
     }
 
-    fn run(&self, reader: impl BufRead) -> Result<(), ServerError> {
+    fn run(&self, reader: impl BufRead) -> Result<ConnectionRunOutcome, ServerError> {
         for line in reader.lines() {
             let line = line?;
             if line.trim().is_empty() {
@@ -657,14 +796,20 @@ impl ProbeStdioServer {
             };
 
             let ClientMessage::Request(envelope) = message;
-            if !self.handle_request(envelope)? {
-                break;
+            if matches!(
+                self.handle_request(envelope)?,
+                RequestHandlingOutcome::ShutdownAccepted
+            ) {
+                return Ok(ConnectionRunOutcome::ServerShutdown);
             }
         }
-        Ok(())
+        Ok(ConnectionRunOutcome::ClientDisconnected)
     }
 
-    fn handle_request(&self, envelope: RequestEnvelope) -> Result<bool, ServerError> {
+    fn handle_request(
+        &self,
+        envelope: RequestEnvelope,
+    ) -> Result<RequestHandlingOutcome, ServerError> {
         let request_id = envelope.request_id.clone();
         match envelope.request {
             RuntimeRequest::Initialize(request) => {
@@ -686,8 +831,15 @@ impl ProbeStdioServer {
                             runtime_name: String::from(PROBE_RUNTIME_NAME),
                             protocol_version: PROBE_PROTOCOL_VERSION,
                             capabilities: RuntimeCapabilities {
-                                transport: TransportKind::StdioJsonl,
-                                supports_stdio_child_process: true,
+                                transport: self.transport,
+                                supports_stdio_child_process: matches!(
+                                    self.transport,
+                                    TransportKind::StdioJsonl
+                                ),
+                                supports_local_daemon_socket: matches!(
+                                    self.transport,
+                                    TransportKind::UnixSocketJsonl
+                                ),
                                 supports_session_resume: true,
                                 supports_session_inspect: true,
                                 supports_pending_approval_resolution: true,
@@ -697,7 +849,7 @@ impl ProbeStdioServer {
                         }),
                     )?;
                 }
-                Ok(true)
+                Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::StartSession(request) => {
                 match self.start_session(request) {
@@ -709,7 +861,7 @@ impl ProbeStdioServer {
                         .writer
                         .send_response_error(request_id.as_str(), error)?,
                 }
-                Ok(true)
+                Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::ResumeSession(SessionLookupRequest { session_id }) => {
                 match self.session_snapshot(&session_id) {
@@ -721,10 +873,10 @@ impl ProbeStdioServer {
                         .writer
                         .send_response_error(request_id.as_str(), error)?,
                 }
-                Ok(true)
+                Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::ListSessions => {
-                match self.runtime.session_store().list_sessions() {
+                match self.core.runtime.session_store().list_sessions() {
                     Ok(sessions) => self.writer.send_response_ok(
                         request_id.as_str(),
                         RuntimeResponse::ListSessions(ListSessionsResponse { sessions }),
@@ -734,7 +886,7 @@ impl ProbeStdioServer {
                         session_store_error_to_protocol(error),
                     )?,
                 }
-                Ok(true)
+                Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::InspectSession(SessionLookupRequest { session_id }) => {
                 match self.session_snapshot(&session_id) {
@@ -746,15 +898,15 @@ impl ProbeStdioServer {
                         .writer
                         .send_response_error(request_id.as_str(), error)?,
                 }
-                Ok(true)
+                Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::StartTurn(request) => {
                 self.spawn_turn_request(request_id, request, TurnMode::Start)?;
-                Ok(true)
+                Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::ContinueTurn(request) => {
                 self.spawn_turn_request(request_id, request, TurnMode::Continue)?;
-                Ok(true)
+                Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::QueueTurn(request) => {
                 match self.queue_turn(request) {
@@ -766,7 +918,7 @@ impl ProbeStdioServer {
                         .writer
                         .send_response_error(request_id.as_str(), error)?,
                 }
-                Ok(true)
+                Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::InspectSessionTurns(SessionLookupRequest { session_id }) => {
                 match self.inspect_session_turns(&session_id) {
@@ -778,7 +930,7 @@ impl ProbeStdioServer {
                         .writer
                         .send_response_error(request_id.as_str(), error)?,
                 }
-                Ok(true)
+                Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::InterruptTurn(request) => {
                 match self.interrupt_turn(request.session_id) {
@@ -790,7 +942,7 @@ impl ProbeStdioServer {
                         .writer
                         .send_response_error(request_id.as_str(), error)?,
                 }
-                Ok(true)
+                Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::CancelQueuedTurn(request) => {
                 match self.cancel_queued_turn(request) {
@@ -802,7 +954,7 @@ impl ProbeStdioServer {
                         .writer
                         .send_response_error(request_id.as_str(), error)?,
                 }
-                Ok(true)
+                Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::ListPendingApprovals(request) => {
                 match self.list_pending_approvals(request) {
@@ -816,11 +968,11 @@ impl ProbeStdioServer {
                         .writer
                         .send_response_error(request_id.as_str(), error)?,
                 }
-                Ok(true)
+                Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::ResolvePendingApproval(request) => {
                 self.spawn_resolve_pending_approval(request_id, request)?;
-                Ok(true)
+                Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::Shutdown => {
                 let active_turns = self.active_turn_count();
@@ -832,7 +984,11 @@ impl ProbeStdioServer {
                         active_turns,
                     }),
                 )?;
-                Ok(!accepted)
+                if accepted {
+                    Ok(RequestHandlingOutcome::ShutdownAccepted)
+                } else {
+                    Ok(RequestHandlingOutcome::Continue)
+                }
             }
         }
     }
@@ -842,6 +998,7 @@ impl ProbeStdioServer {
         request: StartSessionRequest,
     ) -> Result<SessionSnapshot, RuntimeProtocolError> {
         let session = self
+            .core
             .runtime
             .session_store()
             .create_session_with(
@@ -863,16 +1020,19 @@ impl ProbeStdioServer {
         session_id: &SessionId,
     ) -> Result<SessionSnapshot, RuntimeProtocolError> {
         let session = self
+            .core
             .runtime
             .session_store()
             .read_metadata(session_id)
             .map_err(session_store_error_to_protocol)?;
         let transcript = self
+            .core
             .runtime
             .session_store()
             .read_transcript(session_id)
             .map_err(session_store_error_to_protocol)?;
         let pending_approvals = self
+            .core
             .runtime
             .pending_tool_approvals(session_id)
             .map_err(runtime_error_to_protocol)?;
@@ -889,6 +1049,7 @@ impl ProbeStdioServer {
     ) -> Result<Vec<probe_protocol::session::PendingToolApproval>, RuntimeProtocolError> {
         if let Some(session_id) = request.session_id {
             return self
+                .core
                 .runtime
                 .pending_tool_approvals(&session_id)
                 .map_err(runtime_error_to_protocol);
@@ -896,13 +1057,16 @@ impl ProbeStdioServer {
 
         let mut approvals = Vec::new();
         let sessions = self
+            .core
             .runtime
             .session_store()
             .list_sessions()
             .map_err(session_store_error_to_protocol)?;
         for session in sessions {
             approvals.extend(
-                self.runtime
+                self.core
+                    .runtime
+                    .clone()
                     .pending_tool_approvals(&session.id)
                     .map_err(runtime_error_to_protocol)?,
             );
@@ -915,15 +1079,15 @@ impl ProbeStdioServer {
         &self,
         session_id: &SessionId,
     ) -> Result<InspectSessionTurnsResponse, RuntimeProtocolError> {
-        self.turn_control.inspect_session_turns(session_id)
+        self.core.turn_control.inspect_session_turns(session_id)
     }
 
     fn queue_turn(&self, request: TurnRequest) -> Result<QueueTurnResponse, RuntimeProtocolError> {
-        let reservation = self.turn_control.reserve_queue_turn(&request)?;
+        let reservation = self.core.turn_control.reserve_queue_turn(&request)?;
         if reservation.should_start {
             spawn_turn_worker(
-                Arc::clone(&self.turn_control),
-                self.runtime.clone(),
+                Arc::clone(&self.core.turn_control),
+                self.core.runtime.clone(),
                 self.writer.clone(),
                 None,
                 request,
@@ -944,11 +1108,11 @@ impl ProbeStdioServer {
         &self,
         session_id: SessionId,
     ) -> Result<InterruptTurnResponse, RuntimeProtocolError> {
-        let outcome = self.turn_control.interrupt_turn(session_id.clone())?;
+        let outcome = self.core.turn_control.interrupt_turn(session_id.clone())?;
         if outcome.should_start_next {
             spawn_next_queued_turn_if_ready(
-                Arc::clone(&self.turn_control),
-                self.runtime.clone(),
+                Arc::clone(&self.core.turn_control),
+                self.core.runtime.clone(),
                 self.writer.clone(),
                 session_id,
             );
@@ -960,7 +1124,7 @@ impl ProbeStdioServer {
         &self,
         request: CancelQueuedTurnRequest,
     ) -> Result<CancelQueuedTurnResponse, RuntimeProtocolError> {
-        self.turn_control.cancel_queued_turn(request)
+        self.core.turn_control.cancel_queued_turn(request)
     }
 
     fn spawn_turn_request(
@@ -969,7 +1133,7 @@ impl ProbeStdioServer {
         request: TurnRequest,
         mode: TurnMode,
     ) -> Result<(), ServerError> {
-        let turn_id = match self.turn_control.reserve_direct_turn(&request, mode) {
+        let turn_id = match self.core.turn_control.reserve_direct_turn(&request, mode) {
             Ok(turn_id) => turn_id,
             Err(error) => {
                 self.writer
@@ -979,15 +1143,15 @@ impl ProbeStdioServer {
         };
 
         if let Err(error) = spawn_turn_worker(
-            Arc::clone(&self.turn_control),
-            self.runtime.clone(),
+            Arc::clone(&self.core.turn_control),
+            self.core.runtime.clone(),
             self.writer.clone(),
             Some(request_id.clone()),
             request.clone(),
             mode,
             turn_id.clone(),
         ) {
-            let _ = self.turn_control.mark_turn_failed(
+            let _ = self.core.turn_control.mark_turn_failed(
                 &request.session_id,
                 turn_id.as_str(),
                 format!("failed to spawn turn worker: {error}"),
@@ -1009,6 +1173,7 @@ impl ProbeStdioServer {
         request: probe_protocol::runtime::ResolvePendingApprovalRequest,
     ) -> Result<(), ServerError> {
         let turn_id = match self
+            .core
             .turn_control
             .reserve_pending_approval_resolution(&request)
         {
@@ -1021,14 +1186,15 @@ impl ProbeStdioServer {
         };
 
         if let Err(error) = spawn_approval_resolution_worker(
-            Arc::clone(&self.turn_control),
-            self.runtime.clone(),
+            Arc::clone(&self.core.turn_control),
+            self.core.runtime.clone(),
             self.writer.clone(),
             request_id.clone(),
             request.clone(),
             turn_id.clone(),
         ) {
             let _ = self
+                .core
                 .turn_control
                 .restore_paused_turn(&request.session_id, turn_id.as_str());
             self.writer.send_response_error(
@@ -1043,7 +1209,7 @@ impl ProbeStdioServer {
     }
 
     fn active_turn_count(&self) -> usize {
-        self.turn_control.unfinished_turn_count().unwrap_or(1)
+        self.core.turn_control.unfinished_turn_count().unwrap_or(1)
     }
 }
 
@@ -1813,7 +1979,7 @@ mod tests {
     use probe_protocol::runtime::{ToolApprovalRecipe, ToolChoice, ToolDeniedAction};
 
     use super::{
-        ProbeStdioServer, ProbeToolChoice, ToolLoopRecipe, ToolSetKind, approval_from_recipe,
+        ProbeServerCore, ProbeToolChoice, ToolLoopRecipe, ToolSetKind, approval_from_recipe,
         normalize_session_title, tool_choice_from_recipe, tool_loop_from_recipe,
     };
 
@@ -1878,7 +2044,7 @@ mod tests {
     #[test]
     fn server_constructs_with_detected_runtime() {
         let runtime = probe_core::runtime::ProbeRuntime::new("/tmp/probe-server-test");
-        let _server = ProbeStdioServer::new(runtime);
+        let _server = ProbeServerCore::new(runtime);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 Its job is narrow:
 
-- spawn the local server seam
+- own the local server transport seam
 - run the startup handshake
 - send typed runtime requests
 - drain typed streamed events until the matching final response arrives
@@ -19,6 +19,7 @@ instead of letting `probe exec`, `probe chat`, and the TUI each wire
 `probe-client` now owns:
 
 - local child-process spawn for `probe-server`
+- local daemon-socket attach for `probe-daemon`
 - explicit fallback to the hidden `probe-cli __internal-probe-server` mode when
   a standalone sibling `probe-server` binary is not present
 - protocol request ids and JSONL framing
@@ -27,6 +28,16 @@ instead of letting `probe exec`, `probe chat`, and the TUI each wire
 - inline event draining during active turn or approval requests
 - queued-turn submission and inspection helpers
 - shutdown on drop
+
+Transport selection is now explicit:
+
+- `SpawnStdio`
+- `LocalDaemon`
+
+The shutdown contract differs by transport:
+
+- spawned child transports still shut down with the client
+- daemon transports only close the client connection on drop
 
 ## Why The API Adapts Back Into Core Value Types
 
@@ -100,6 +111,10 @@ been materialized yet.
 
 That fallback does not create a second protocol. It only changes how the same
 `probe-server::server::run_stdio_server` entrypoint is launched.
+
+The new daemon path keeps that same rule. `probe-client` now chooses between a
+spawned stdio child and the local daemon socket, but it still speaks the same
+typed request, event, and response contract either way.
 
 ## New Shared Control Calls
 

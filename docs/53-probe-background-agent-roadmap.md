@@ -403,7 +403,7 @@ That means the next phases should optimize for daemonization, remote execution,
 delivery, and consumer adoption rather than reopening local client or backend
 foundation work.
 
-## 1. `probe-server` is shipped locally, but it is not daemonized yet
+## 1. `probe-server` is shipped locally, and the first daemon transport now exists
 
 The earlier roadmap gap here is no longer the server seam itself.
 
@@ -415,10 +415,15 @@ Probe now ships a canonical local `probe-server` path for:
 - approval resolution
 - interrupt or cancel
 - queued follow-up turns
+- a local `probe-daemon` socket transport that reuses the same protocol
 
-The remaining gap is that this is still a foreground child-process control
-plane rather than a durable detached daemon with its own long-lived operator
-surface.
+The remaining gap is no longer "add a daemon transport." It is:
+
+- daemon-owned detached session registry
+- push watch and log subscriptions
+- operator CLI surfaces above the daemon
+- watchdog and timeout policy
+- first-party chat and TUI adoption of daemon attach flows
 
 ## 2. Remote inference is not remote execution
 

@@ -13,6 +13,10 @@ This is the first cut that lets Probe clients supervise the runtime through a
 stable contract instead of linking directly to `probe-core` session and turn
 internals.
 
+Phase 2 now reuses this same typed contract over the local `probe-daemon`
+socket transport. The message shapes stay the same; only the transport and the
+reported runtime capabilities change.
+
 ## Message Framing
 
 Each frame is one JSON object per line.
@@ -152,7 +156,7 @@ inside it. `SessionSnapshot` remains the transcript plus approval view, while
 Request:
 
 ```json
-{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":1}}
+{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":2}}
 ```
 
 Event:
@@ -173,9 +177,9 @@ This stdio protocol is the canonical Phase 1 local server seam.
 
 It is intentionally not yet:
 
-- a detached local daemon
 - a remote Probe worker transport
 - a multi-tenant or browser-facing API
 
-Those layers only become worth adding after first-party clients use this same
-contract end to end.
+Detached local daemon transport now exists in Phase 2, but it is still the same
+runtime protocol rather than a second API surface. Remote-worker and
+browser-facing layers still do not exist.

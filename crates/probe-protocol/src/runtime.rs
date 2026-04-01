@@ -14,6 +14,7 @@ use crate::session::{
 #[serde(rename_all = "snake_case")]
 pub enum TransportKind {
     StdioJsonl,
+    UnixSocketJsonl,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +93,7 @@ pub struct InitializeRequest {
 pub struct RuntimeCapabilities {
     pub transport: TransportKind,
     pub supports_stdio_child_process: bool,
+    pub supports_local_daemon_socket: bool,
     pub supports_session_resume: bool,
     pub supports_session_inspect: bool,
     pub supports_pending_approval_resolution: bool,
@@ -624,6 +626,7 @@ mod tests {
         let capabilities = RuntimeCapabilities {
             transport: TransportKind::StdioJsonl,
             supports_stdio_child_process: true,
+            supports_local_daemon_socket: false,
             supports_session_resume: true,
             supports_session_inspect: true,
             supports_pending_approval_resolution: true,

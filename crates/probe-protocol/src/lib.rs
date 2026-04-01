@@ -2,7 +2,9 @@ pub mod backend;
 pub mod runtime;
 pub mod session;
 
-pub const PROBE_PROTOCOL_VERSION: u32 = 1;
+use std::path::{Path, PathBuf};
+
+pub const PROBE_PROTOCOL_VERSION: u32 = 2;
 pub const PROBE_RUNTIME_NAME: &str = "probe";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,6 +23,11 @@ impl ProtocolDescriptor {
     }
 }
 
+#[must_use]
+pub fn default_local_daemon_socket_path(probe_home: &Path) -> PathBuf {
+    probe_home.join("daemon").join("probe-daemon.sock")
+}
+
 #[cfg(test)]
 mod tests {
     use super::ProtocolDescriptor;
@@ -31,7 +38,7 @@ mod tests {
     fn current_descriptor_is_stable() {
         let descriptor = ProtocolDescriptor::current();
         assert_eq!(descriptor.runtime_name, "probe");
-        assert_eq!(descriptor.version, 1);
+        assert_eq!(descriptor.version, 2);
     }
 
     #[test]

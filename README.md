@@ -15,6 +15,7 @@ Current shipped surface:
 - `probe tui` / `cargo probe` for the local terminal UI
 - three inference lanes in the TUI: Codex, Qwen or Tailnet, and Apple FM
 - `probe-server` for the first typed local stdio supervision contract
+- `probe-daemon` for the first long-lived local Unix-socket supervision path
 - a shared `probe-client` layer underneath `exec`, `chat`, and the TUI so
   first-party surfaces now speak one server contract
 - `coding_bootstrap` tools, approvals, and harness profiles
@@ -78,6 +79,12 @@ Run the local stdio server contract directly:
 
 ```bash
 cargo run -p probe-server -- --probe-home ~/.probe
+```
+
+Run the long-lived local daemon:
+
+```bash
+cargo run -p probe-daemon -- run --probe-home ~/.probe
 ```
 
 Resume a session:
