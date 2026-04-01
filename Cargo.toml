@@ -2,6 +2,7 @@
 members = [
     "crates/probe-cli",
     "crates/probe-core",
+    "crates/probe-server",
     "crates/probe-decisions",
     "crates/probe-optimizer",
     "crates/probe-openai-auth",
@@ -31,6 +32,7 @@ probe-decisions = { path = "crates/probe-decisions" }
 probe-optimizer = { path = "crates/probe-optimizer" }
 probe-openai-auth = { path = "crates/probe-openai-auth" }
 probe-protocol = { path = "crates/probe-protocol" }
+probe-server = { path = "crates/probe-server" }
 probe-provider-apple-fm = { path = "crates/probe-provider-apple-fm" }
 probe-provider-openai = { path = "crates/probe-provider-openai" }
 probe-test-support = { path = "crates/probe-test-support" }

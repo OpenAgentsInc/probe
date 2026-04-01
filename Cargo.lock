@@ -1614,6 +1614,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "probe-server"
+version = "0.1.0"
+dependencies = [
+ "probe-protocol",
+]
+
+[[package]]
 name = "probe-test-support"
 version = "0.1.0"
 dependencies = [

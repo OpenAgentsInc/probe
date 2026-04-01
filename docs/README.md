@@ -179,6 +179,10 @@ This folder holds technical planning docs for the Probe runtime.
     canonical `openai-codex-subscription` profile, request rewrite to
     `https://chatgpt.com/backend-api/codex/responses`, subscription header
     injection, model gating, and the CLI reproduction flow
+- `56-probe-server-workspace-lifecycle-decisions.md`
+  - pure workspace lifecycle state, timeout, restart, and circuit-breaker
+    decisions for the serverized Probe path before detached workers or
+    prepared baselines land
 - `59-shared-test-support-and-stable-snapshot-root.md`
   - the completed shared test-support boundary for fake backends, temp Probe
     homes and workspaces, CLI launch helpers, stable snapshot-root setup, and
