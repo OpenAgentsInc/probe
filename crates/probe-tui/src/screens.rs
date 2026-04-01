@@ -2,11 +2,12 @@ use std::collections::VecDeque;
 
 use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_core::server_control::ServerOperatorSummary;
+use probe_core::tools::tool_result_model_text;
 use probe_protocol::session::{PendingToolApproval, ToolApprovalResolution};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use crate::bottom_pane::ComposerSubmission;
 use crate::event::UiEvent;
@@ -197,7 +198,6 @@ impl ScreenOutcome {
             transcript_entry: None,
         }
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,10 +385,7 @@ impl ChatScreen {
             render_backend_kind(summary.backend_kind),
             summary.attach_mode_label(),
             summary.endpoint_label(),
-            summary
-                .model_id
-                .as_deref()
-                .unwrap_or("unknown")
+            summary.model_id.as_deref().unwrap_or("unknown")
         ));
         self.record_event(format!(
             "backend transport: {} ({})",
@@ -458,11 +455,8 @@ impl ChatScreen {
         if submission.pasted_multiline {
             body.push(String::from("paste_mode: multiline"));
         }
-        self.transcript.push_entry(TranscriptEntry::new(
-            TranscriptRole::User,
-            "You",
-            body,
-        ));
+        self.transcript
+            .push_entry(TranscriptEntry::new(TranscriptRole::User, "You", body));
         self.snap_transcript_to_latest();
         self.record_event(format!(
             "submitted chat turn ({} chars)",
@@ -485,9 +479,9 @@ impl ChatScreen {
     }
 
     fn uses_apple_fm_backend(&self) -> bool {
-        self.operator_backend
-            .as_ref()
-            .is_some_and(|summary| summary.backend_kind == probe_protocol::backend::BackendKind::AppleFmBridge)
+        self.operator_backend.as_ref().is_some_and(|summary| {
+            summary.backend_kind == probe_protocol::backend::BackendKind::AppleFmBridge
+        })
     }
 
     pub fn compact_runtime_status(&self) -> String {
@@ -495,7 +489,11 @@ impl ChatScreen {
             .runtime
             .backend_kind
             .as_deref()
-            .or_else(|| self.operator_backend.as_ref().map(|summary| render_backend_kind(summary.backend_kind)))
+            .or_else(|| {
+                self.operator_backend
+                    .as_ref()
+                    .map(|summary| render_backend_kind(summary.backend_kind))
+            })
             .unwrap_or("pending");
         let phase = self.runtime.phase.as_deref().unwrap_or("idle");
         let target = self
@@ -613,20 +611,18 @@ impl ChatScreen {
         self.runtime.session_id = Some(session_id.to_string());
         self.runtime.phase = Some(String::from("assistant_streaming"));
         self.runtime.round_trip = Some(round_trip);
-        let stream = self
-            .stream
-            .get_or_insert_with(|| AssistantStreamState {
-                round_trip,
-                response_id: String::from("pending"),
-                response_model: String::from("pending"),
-                mode: AssistantStreamMode::Delta,
-                backend_kind: self.runtime.backend_kind.clone(),
-                first_chunk_ms: None,
-                assistant_text: String::new(),
-                tool_calls: Vec::new(),
-                finish_reason: None,
-                failure: None,
-            });
+        let stream = self.stream.get_or_insert_with(|| AssistantStreamState {
+            round_trip,
+            response_id: String::from("pending"),
+            response_model: String::from("pending"),
+            mode: AssistantStreamMode::Delta,
+            backend_kind: self.runtime.backend_kind.clone(),
+            first_chunk_ms: None,
+            assistant_text: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: None,
+            failure: None,
+        });
         stream.mode = AssistantStreamMode::Delta;
         stream.assistant_text.push_str(delta);
         stream.failure = None;
@@ -637,20 +633,18 @@ impl ChatScreen {
         self.runtime.session_id = Some(session_id.to_string());
         self.runtime.phase = Some(String::from("assistant_snapshot"));
         self.runtime.round_trip = Some(round_trip);
-        let stream = self
-            .stream
-            .get_or_insert_with(|| AssistantStreamState {
-                round_trip,
-                response_id: String::from("pending"),
-                response_model: String::from("pending"),
-                mode: AssistantStreamMode::Snapshot,
-                backend_kind: self.runtime.backend_kind.clone(),
-                first_chunk_ms: None,
-                assistant_text: String::new(),
-                tool_calls: Vec::new(),
-                finish_reason: None,
-                failure: None,
-            });
+        let stream = self.stream.get_or_insert_with(|| AssistantStreamState {
+            round_trip,
+            response_id: String::from("pending"),
+            response_model: String::from("pending"),
+            mode: AssistantStreamMode::Snapshot,
+            backend_kind: self.runtime.backend_kind.clone(),
+            first_chunk_ms: None,
+            assistant_text: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: None,
+            failure: None,
+        });
         stream.mode = AssistantStreamMode::Snapshot;
         stream.assistant_text = snapshot.to_string();
         stream.failure = None;
@@ -666,20 +660,18 @@ impl ChatScreen {
         self.runtime.session_id = Some(session_id.to_string());
         self.runtime.phase = Some(String::from("tool_call_streaming"));
         self.runtime.round_trip = Some(round_trip);
-        let stream = self
-            .stream
-            .get_or_insert_with(|| AssistantStreamState {
-                round_trip,
-                response_id: String::from("pending"),
-                response_model: String::from("pending"),
-                mode: AssistantStreamMode::Delta,
-                backend_kind: self.runtime.backend_kind.clone(),
-                first_chunk_ms: None,
-                assistant_text: String::new(),
-                tool_calls: Vec::new(),
-                finish_reason: None,
-                failure: None,
-            });
+        let stream = self.stream.get_or_insert_with(|| AssistantStreamState {
+            round_trip,
+            response_id: String::from("pending"),
+            response_model: String::from("pending"),
+            mode: AssistantStreamMode::Delta,
+            backend_kind: self.runtime.backend_kind.clone(),
+            first_chunk_ms: None,
+            assistant_text: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: None,
+            failure: None,
+        });
         for delta in deltas {
             if let Some(existing) = stream
                 .tool_calls
@@ -743,20 +735,18 @@ impl ChatScreen {
         self.runtime.round_trip = Some(round_trip);
         self.runtime.active_tool = None;
         self.runtime.backend_kind = Some(backend_kind.to_string());
-        let stream = self
-            .stream
-            .get_or_insert_with(|| AssistantStreamState {
-                round_trip,
-                response_id: String::from("failed"),
-                response_model: String::from("failed"),
-                mode: AssistantStreamMode::Delta,
-                backend_kind: Some(backend_kind.to_string()),
-                first_chunk_ms: None,
-                assistant_text: String::new(),
-                tool_calls: Vec::new(),
-                finish_reason: None,
-                failure: None,
-            });
+        let stream = self.stream.get_or_insert_with(|| AssistantStreamState {
+            round_trip,
+            response_id: String::from("failed"),
+            response_model: String::from("failed"),
+            mode: AssistantStreamMode::Delta,
+            backend_kind: Some(backend_kind.to_string()),
+            first_chunk_ms: None,
+            assistant_text: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: None,
+            failure: None,
+        });
         stream.backend_kind = Some(backend_kind.to_string());
         stream.failure = Some(error.to_string());
         self.sync_stream_active_turn();
@@ -791,7 +781,14 @@ impl ChatScreen {
                     "Probe Runtime",
                     vec![
                         format!("profile: {profile_name}"),
-                        format!("tool_loop: {}", if tool_loop_enabled { "enabled" } else { "disabled" }),
+                        format!(
+                            "tool_loop: {}",
+                            if tool_loop_enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            }
+                        ),
                         format!("prompt_preview: {}", preview(prompt.as_str(), 72)),
                         format!("session: {}", short_session_id(session_id.as_str())),
                     ],
@@ -882,10 +879,7 @@ impl ChatScreen {
                 deltas,
             } => {
                 self.update_stream_tool_calls(session_id.as_str(), round_trip, &deltas);
-                self.record_worker_event(format!(
-                    "streamed {} tool call delta(s)",
-                    deltas.len()
-                ));
+                self.record_worker_event(format!("streamed {} tool call delta(s)", deltas.len()));
                 String::from("tool call delta received")
             }
             RuntimeEvent::ToolCallRequested {
@@ -1117,10 +1111,7 @@ impl ChatScreen {
                 deltas,
             } => {
                 self.update_stream_tool_calls(session_id.as_str(), round_trip, deltas.as_slice());
-                self.record_worker_event(format!(
-                    "streamed {} tool call delta(s)",
-                    deltas.len()
-                ));
+                self.record_worker_event(format!("streamed {} tool call delta(s)", deltas.len()));
                 format!("tool call delta updated for round {round_trip}")
             }
             AppMessage::AssistantStreamFinished {
@@ -1519,7 +1510,10 @@ impl ChatScreen {
             Line::from("  direct Tailnet attach is supported when intentionally configured"),
             Line::from(""),
             Line::from("State"),
-            Line::from(format!("  phase: {}", self.runtime.phase.as_deref().unwrap_or("idle"))),
+            Line::from(format!(
+                "  phase: {}",
+                self.runtime.phase.as_deref().unwrap_or("idle")
+            )),
             Line::from(format!("  stack_depth: {stack_depth}")),
         ];
         if let Some(round_trip) = self.runtime.round_trip {
@@ -1586,7 +1580,9 @@ impl ChatScreen {
             return Text::from(vec![
                 Line::from("Probe is using a non-Apple-FM backend target."),
                 Line::from(""),
-                Line::from("The backend overlay shows the prepared attach target and operator contract."),
+                Line::from(
+                    "The backend overlay shows the prepared attach target and operator contract.",
+                ),
                 Line::from("Use Ctrl+S to inspect the target and Ctrl+R to reopen this overlay."),
             ]);
         }
@@ -1875,7 +1871,9 @@ impl ChatScreen {
             self.transcript_scroll_from_bottom
                 .min(max_top_scroll.min(u16::MAX as usize) as u16),
         );
-        max_top_scroll.saturating_sub(from_bottom).min(u16::MAX as usize) as u16
+        max_top_scroll
+            .saturating_sub(from_bottom)
+            .min(u16::MAX as usize) as u16
     }
 }
 
@@ -1912,7 +1910,9 @@ impl HelpScreen {
             Line::from("Ctrl+T              toggle operator notes"),
             Line::from("F1 / Esc            toggle or dismiss help"),
             Line::from("Ctrl+C              quit"),
-            Line::from("Slash commands, typed mentions, attachments, and paste state live in the draft model."),
+            Line::from(
+                "Slash commands, typed mentions, attachments, and paste state live in the draft model.",
+            ),
             Line::from(format!("Current stack depth: {stack_depth}")),
         ]));
         ModalCard::new("Help", content).render(frame, area);
@@ -2062,7 +2062,10 @@ impl ApprovalOverlay {
                 "risk: {}",
                 render_runtime_risk_class(self.approval.risk_class)
             )),
-            Line::from(format!("requested_turn: {}", self.approval.tool_call_turn_index)),
+            Line::from(format!(
+                "requested_turn: {}",
+                self.approval.tool_call_turn_index
+            )),
             Line::from(format!(
                 "paused_turn: {}",
                 self.approval.paused_result_turn_index
@@ -2188,6 +2191,7 @@ fn runtime_tool_body_lines(
     round_trip: usize,
     tool: &probe_core::tools::ExecutedToolCall,
 ) -> Vec<String> {
+    let model_text = tool_result_model_text(tool.name.as_str(), &tool.output);
     let mut lines = vec![
         format!("round_trip: {round_trip}"),
         format!("call_id: {}", tool.call_id),
@@ -2206,7 +2210,7 @@ fn runtime_tool_body_lines(
         ));
     }
     lines.push(String::from("output"));
-    lines.extend(compact_json_lines(&tool.output, 5));
+    lines.extend(compact_text_lines(model_text.as_str(), 5));
     lines
 }
 
@@ -2216,6 +2220,15 @@ fn compact_json_lines(value: &serde_json::Value, max_lines: usize) -> Vec<String
         .lines()
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        lines.push(String::from("..."));
+    }
+    lines
+}
+
+fn compact_text_lines(value: &str, max_lines: usize) -> Vec<String> {
+    let mut lines = value.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
     if lines.len() > max_lines {
         lines.truncate(max_lines);
         lines.push(String::from("..."));

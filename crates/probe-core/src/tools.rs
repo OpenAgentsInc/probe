@@ -28,6 +28,7 @@ const LIST_FILES_DEFAULT_MAX_ENTRIES: usize = 200;
 const CODE_SEARCH_DEFAULT_MAX_MATCHES: usize = 50;
 const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 5;
 const SHELL_MAX_OUTPUT_CHARS: usize = 4_000;
+const TOOL_MODEL_TEXT_MAX_CHARS: usize = 3_000;
 const LONG_CONTEXT_DEFAULT_MAX_LINES_PER_FILE: u64 = 160;
 const LONG_CONTEXT_DEFAULT_MAX_EVIDENCE_FILES: usize = 6;
 
@@ -717,14 +718,13 @@ impl ToolExecutionSession {
             },
             ToolApprovalResolution::Rejected => {}
         }
-        let denied_reason_override = matches!(resolution, ToolApprovalResolution::Rejected).then(
-            || {
+        let denied_reason_override =
+            matches!(resolution, ToolApprovalResolution::Rejected).then(|| {
                 format!(
                     "operator rejected the pending approval request for tool `{}`",
                     name
                 )
-            },
-        );
+            });
         self.execute_named_call_with_policy(
             call_id.into(),
             name,
@@ -2065,6 +2065,288 @@ fn truncate_text(text: &str) -> (String, bool) {
     )
 }
 
+#[must_use]
+pub fn tool_result_model_text(tool_name: &str, output: &serde_json::Value) -> String {
+    truncate_model_text(&match tool_name {
+        "read_file" => render_read_file_model_text(output),
+        "list_files" => render_list_files_model_text(output),
+        "code_search" => render_code_search_model_text(output),
+        "shell" => render_shell_model_text(output),
+        "apply_patch" => render_apply_patch_model_text(output),
+        "consult_oracle" => render_consult_oracle_model_text(output),
+        "analyze_repository" => render_analyze_repository_model_text(output),
+        _ => serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string()),
+    })
+}
+
+#[must_use]
+pub fn stored_tool_result_model_text(tool_name: &str, stored_text: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(stored_text) {
+        Ok(output) => tool_result_model_text(tool_name, &output),
+        Err(_) => truncate_model_text(stored_text),
+    }
+}
+
+fn render_read_file_model_text(output: &serde_json::Value) -> String {
+    let path = output
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let start_line = output.get("start_line").and_then(serde_json::Value::as_u64);
+    let end_line = output.get("end_line").and_then(serde_json::Value::as_u64);
+    let total_lines = output
+        .get("total_lines")
+        .and_then(serde_json::Value::as_u64);
+    let mut lines = vec![format!("path: {path}")];
+    match (start_line, end_line, total_lines) {
+        (Some(start), Some(end), Some(total)) => {
+            lines.push(format!("lines: {start}-{end} of {total}"));
+        }
+        (Some(start), Some(end), None) => {
+            lines.push(format!("lines: {start}-{end}"));
+        }
+        _ => {}
+    }
+    if let Some(truncated) = output.get("truncated").and_then(serde_json::Value::as_bool) {
+        lines.push(format!("tool_truncated: {truncated}"));
+    }
+    if let Some(content) = output.get("content").and_then(serde_json::Value::as_str) {
+        lines.push(String::from("content:"));
+        if content.is_empty() {
+            lines.push(String::from("[empty file segment]"));
+        } else {
+            lines.extend(content.lines().map(ToOwned::to_owned));
+        }
+    }
+    lines.join("\n")
+}
+
+fn render_list_files_model_text(output: &serde_json::Value) -> String {
+    let path = output
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(".");
+    let max_depth = output.get("max_depth").and_then(serde_json::Value::as_u64);
+    let entries = output
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut lines = vec![format!("path: {path}")];
+    if let Some(max_depth) = max_depth {
+        lines.push(format!("max_depth: {max_depth}"));
+    }
+    lines.push(format!("entries: {}", entries.len()));
+    if let Some(truncated) = output.get("truncated").and_then(serde_json::Value::as_bool) {
+        lines.push(format!("tool_truncated: {truncated}"));
+    }
+    if !entries.is_empty() {
+        lines.push(String::from("listing:"));
+        for entry in entries {
+            let entry_path = entry
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let kind = entry
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("other");
+            lines.push(format!("- {kind} {entry_path}"));
+        }
+    }
+    lines.join("\n")
+}
+
+fn render_code_search_model_text(output: &serde_json::Value) -> String {
+    let path = output
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(".");
+    let pattern = output
+        .get("pattern")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let matches = output
+        .get("matches")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut lines = vec![format!("path: {path}"), format!("pattern: {pattern}")];
+    lines.push(format!("matches: {}", matches.len()));
+    if let Some(truncated) = output.get("truncated").and_then(serde_json::Value::as_bool) {
+        lines.push(format!("tool_truncated: {truncated}"));
+    }
+    if !matches.is_empty() {
+        lines.push(String::from("results:"));
+        for entry in matches {
+            let match_path = entry
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let line = entry
+                .get("line")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let column = entry
+                .get("column")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let snippet = entry
+                .get("snippet")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            lines.push(format!("- {match_path}:{line}:{column} {snippet}"));
+        }
+    }
+    lines.join("\n")
+}
+
+fn render_shell_model_text(output: &serde_json::Value) -> String {
+    let command = output
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let timeout_secs = output
+        .get("timeout_secs")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let timed_out = output
+        .get("timed_out")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let exit_code = output
+        .get("exit_code")
+        .and_then(serde_json::Value::as_i64)
+        .map_or_else(|| String::from("none"), |value| value.to_string());
+    let stdout = output
+        .get("stdout")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let stderr = output
+        .get("stderr")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let stdout_truncated = output
+        .get("stdout_truncated")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let stderr_truncated = output
+        .get("stderr_truncated")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let mut lines = vec![
+        format!("command: {command}"),
+        format!("timeout_secs: {timeout_secs}"),
+        format!("timed_out: {timed_out}"),
+        format!("exit_code: {exit_code}"),
+    ];
+    if !stdout.is_empty() {
+        lines.push(format!("stdout_truncated: {stdout_truncated}"));
+        lines.push(String::from("stdout:"));
+        lines.extend(stdout.lines().map(ToOwned::to_owned));
+    }
+    if !stderr.is_empty() {
+        lines.push(format!("stderr_truncated: {stderr_truncated}"));
+        lines.push(String::from("stderr:"));
+        lines.extend(stderr.lines().map(ToOwned::to_owned));
+    }
+    lines.join("\n")
+}
+
+fn render_apply_patch_model_text(output: &serde_json::Value) -> String {
+    let path = output
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let created = output
+        .get("created")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let replace_all = output
+        .get("replace_all")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let bytes_written = output
+        .get("bytes_written")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    [
+        format!("path: {path}"),
+        format!("created: {created}"),
+        format!("replace_all: {replace_all}"),
+        format!("bytes_written: {bytes_written}"),
+    ]
+    .join("\n")
+}
+
+fn render_consult_oracle_model_text(output: &serde_json::Value) -> String {
+    let task_kind = output
+        .get("task_kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let answer = output
+        .get("oracle_answer")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    [
+        format!("task_kind: {task_kind}"),
+        String::from("oracle_answer:"),
+        answer.to_string(),
+    ]
+    .join("\n")
+}
+
+fn render_analyze_repository_model_text(output: &serde_json::Value) -> String {
+    let task_kind = output
+        .get("task_kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let analysis = output
+        .get("analysis")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let evidence = output
+        .get("evidence")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut lines = vec![format!("task_kind: {task_kind}")];
+    if let Some(reason) = output
+        .get("decision_reason")
+        .and_then(serde_json::Value::as_str)
+    {
+        lines.push(format!("decision_reason: {reason}"));
+    }
+    if !evidence.is_empty() {
+        lines.push(String::from("evidence_paths:"));
+        for entry in evidence {
+            let path = entry
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            lines.push(format!("- {path}"));
+        }
+    }
+    lines.push(String::from("analysis:"));
+    lines.push(analysis.to_string());
+    lines.join("\n")
+}
+
+fn truncate_model_text(text: &str) -> String {
+    let total = text.chars().count();
+    if total <= TOOL_MODEL_TEXT_MAX_CHARS {
+        return text.to_string();
+    }
+    let prefix = text
+        .chars()
+        .take(TOOL_MODEL_TEXT_MAX_CHARS)
+        .collect::<String>();
+    format!(
+        "{prefix}\n...[truncated {} chars for model replay]",
+        total - TOOL_MODEL_TEXT_MAX_CHARS
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -2084,7 +2366,7 @@ mod tests {
     use super::{
         ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolExecutionContext,
         ToolLongContextConfig, ToolLongContextContext, ToolLoopConfig, ToolOracleConfig,
-        ToolOracleContext, ToolRegistry,
+        ToolOracleContext, ToolRegistry, stored_tool_result_model_text, tool_result_model_text,
     };
 
     #[test]
@@ -2274,6 +2556,40 @@ mod tests {
             results[0].tool_execution.policy_decision,
             ToolPolicyDecision::AutoAllow
         );
+    }
+
+    #[test]
+    fn read_file_model_text_is_plain_and_truncated_for_model_replay() {
+        let rendered = tool_result_model_text(
+            "read_file",
+            &serde_json::json!({
+                "path": "README.md",
+                "start_line": 1,
+                "end_line": 240,
+                "total_lines": 240,
+                "truncated": false,
+                "content": "a".repeat(3_600),
+            }),
+        );
+
+        assert!(rendered.contains("path: README.md"));
+        assert!(rendered.contains("lines: 1-240 of 240"));
+        assert!(rendered.contains("content:"));
+        assert!(rendered.contains("truncated"));
+        assert!(!rendered.contains("\"path\""));
+    }
+
+    #[test]
+    fn stored_tool_result_model_text_converts_json_blob_into_compact_text() {
+        let rendered = stored_tool_result_model_text(
+            "read_file",
+            r##"{"path":"README.md","start_line":1,"end_line":3,"total_lines":3,"truncated":false,"content":"# Probe\nruntime"}"##,
+        );
+
+        assert!(rendered.contains("path: README.md"));
+        assert!(rendered.contains("lines: 1-3 of 3"));
+        assert!(rendered.contains("# Probe"));
+        assert!(!rendered.contains("\"content\""));
     }
 
     #[test]

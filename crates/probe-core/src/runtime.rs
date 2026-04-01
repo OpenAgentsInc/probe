@@ -13,9 +13,9 @@ use probe_protocol::session::{
 };
 use probe_provider_openai::{ChatCompletionChunk, ChatMessage, ChatToolCall};
 use psionic_apple_fm::{
-    APPLE_FM_TRANSCRIPT_TYPE, APPLE_FM_TRANSCRIPT_VERSION, AppleFmToolCallError, AppleFmTranscript,
-    AppleFmTranscriptContent, AppleFmTranscriptEntry, AppleFmTranscriptPayload,
-    AppleFmTextStreamEvent,
+    APPLE_FM_TRANSCRIPT_TYPE, APPLE_FM_TRANSCRIPT_VERSION, AppleFmTextStreamEvent,
+    AppleFmToolCallError, AppleFmTranscript, AppleFmTranscriptContent, AppleFmTranscriptEntry,
+    AppleFmTranscriptPayload,
 };
 use serde_json::Value;
 
@@ -23,14 +23,13 @@ use crate::dataset_export::build_decision_summary;
 use crate::provider::{
     PlainTextMessage, ProviderError, ProviderUsage, apple_fm_tool_loop_response,
     apple_fm_tool_loop_response_with_callback, complete_apple_fm_plain_text_with_callback,
-    complete_openai_plain_text_with_callback, complete_plain_text,
-    observability_usage_measurement, openai_tool_loop_response,
-    openai_tool_loop_response_with_callback,
+    complete_openai_plain_text_with_callback, complete_plain_text, observability_usage_measurement,
+    openai_tool_loop_response, openai_tool_loop_response_with_callback,
 };
 use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionStoreError};
 use crate::tools::{
     ExecutedToolCall, ToolExecutionContext, ToolExecutionSession, ToolLongContextContext,
-    ToolLoopConfig, ToolOracleContext,
+    ToolLoopConfig, ToolOracleContext, stored_tool_result_model_text, tool_result_model_text,
 };
 
 const DEFAULT_PROBE_HOME_DIR: &str = ".probe";
@@ -804,9 +803,7 @@ fn default_session_title(prompt: &str) -> String {
     }
 }
 
-fn latest_tool_result_positions(
-    transcript: &[TranscriptEvent],
-) -> BTreeMap<String, (u64, u32)> {
+fn latest_tool_result_positions(transcript: &[TranscriptEvent]) -> BTreeMap<String, (u64, u32)> {
     let mut positions = BTreeMap::new();
     for event in transcript {
         for item in &event.turn.items {
@@ -1016,12 +1013,7 @@ impl ProbeRuntime {
                     },
                 );
                 for tool in &executed {
-                    emit_tool_result_event(
-                        event_sink.as_ref(),
-                        &session.id,
-                        round_trip,
-                        tool,
-                    );
+                    emit_tool_result_event(event_sink.as_ref(), &session.id, round_trip, tool);
                 }
                 executed_tool_calls += executed.iter().filter(|tool| tool.was_executed()).count();
                 tool_results.extend(executed.clone());
@@ -1044,11 +1036,9 @@ impl ProbeRuntime {
                 messages.push(ChatMessage::assistant_tool_calls(tool_calls.clone()));
                 for tool_result in executed {
                     messages.push(ChatMessage::tool(
-                        tool_result.name,
+                        tool_result.name.clone(),
                         tool_result.call_id,
-                        serde_json::to_string(&tool_result.output).unwrap_or_else(|_| {
-                            String::from("{\"error\":\"tool output encode failed\"}")
-                        }),
+                        tool_result_model_text(tool_result.name.as_str(), &tool_result.output),
                     ));
                 }
                 continue;
@@ -1219,7 +1209,9 @@ impl ProbeRuntime {
                         None,
                     );
                     let tool_result_turn = self.append_tool_result_turn(&session.id, &tool_results);
-                    if let (Ok(tool_call_turn), Ok(tool_result_turn)) = (&tool_call_turn, &tool_result_turn) {
+                    if let (Ok(tool_call_turn), Ok(tool_result_turn)) =
+                        (&tool_call_turn, &tool_result_turn)
+                    {
                         let _ = self.persist_pending_tool_approvals(
                             &session.id,
                             tool_call_turn.index,
@@ -1277,7 +1269,9 @@ impl ProbeRuntime {
                             &error,
                         );
                         let mut items = Vec::new();
-                        if tool_results.is_empty() && let Some(prompt) = prompt.clone() {
+                        if tool_results.is_empty()
+                            && let Some(prompt) = prompt.clone()
+                        {
                             items.push(NewItem::new(TranscriptItemKind::UserMessage, prompt));
                         }
                         items.push(NewItem::new(TranscriptItemKind::Note, error.to_string()));
@@ -1415,15 +1409,15 @@ impl ProbeRuntime {
             BackendKind::AppleFmBridge if event_sink.is_some() => {
                 let mut stream_state = AppleFmStreamRuntimeState::default();
                 let mut callback = |event: &AppleFmTextStreamEvent| {
-                emit_apple_fm_stream_events(
-                    event_sink.as_ref(),
-                    &session.id,
-                    1,
-                    session.id.as_str(),
-                    request_started,
-                    &mut stream_state,
-                    event,
-                );
+                    emit_apple_fm_stream_events(
+                        event_sink.as_ref(),
+                        &session.id,
+                        1,
+                        session.id.as_str(),
+                        request_started,
+                        &mut stream_state,
+                        event,
+                    );
                 };
                 complete_apple_fm_plain_text_with_callback(&profile, messages, Some(&mut callback))
             }
@@ -1692,11 +1686,8 @@ impl ProbeRuntime {
                         }));
                     }
                     TranscriptItemKind::ToolResult => {
-                        if !should_replay_tool_result(
-                            event.turn.index,
-                            &item,
-                            &latest_tool_results,
-                        ) {
+                        if !should_replay_tool_result(event.turn.index, &item, &latest_tool_results)
+                        {
                             continue;
                         }
                         flush_apple_pending_tool_calls(
@@ -1711,7 +1702,7 @@ impl ProbeRuntime {
                         })?;
                         let mut extra = BTreeMap::from([(
                             String::from("toolName"),
-                            serde_json::Value::String(name),
+                            serde_json::Value::String(name.clone()),
                         )]);
                         if let Some(tool_call_id) = item.tool_call_id {
                             extra.insert(
@@ -1722,7 +1713,7 @@ impl ProbeRuntime {
                         entries.push(apple_fm_text_entry(
                             format!("turn-{}-tool-{}", event.turn.index, item.sequence),
                             "tool",
-                            item.text,
+                            stored_tool_result_model_text(name.as_str(), item.text.as_str()),
                             extra,
                         ));
                     }
@@ -1801,11 +1792,8 @@ impl ProbeRuntime {
                         });
                     }
                     TranscriptItemKind::ToolResult => {
-                        if !should_replay_tool_result(
-                            event.turn.index,
-                            &item,
-                            &latest_tool_results,
-                        ) {
+                        if !should_replay_tool_result(event.turn.index, &item, &latest_tool_results)
+                        {
                             continue;
                         }
                         if !pending_tool_calls.is_empty() {
@@ -1823,7 +1811,9 @@ impl ProbeRuntime {
                                 "tool result transcript items require a tool_call_id",
                             ))
                         })?;
-                        messages.push(ChatMessage::tool(name, tool_call_id, item.text));
+                        let tool_result_text =
+                            stored_tool_result_model_text(name.as_str(), item.text.as_str());
+                        messages.push(ChatMessage::tool(name, tool_call_id, tool_result_text));
                     }
                     TranscriptItemKind::Note => {
                         if !pending_tool_calls.is_empty() {
@@ -2100,8 +2090,7 @@ impl AppleFmToolLoopRecorder {
             },
         );
         emit_tool_result_event(self.event_sink.as_ref(), &self.session_id, 1, &executed);
-        let output = serde_json::to_string(&executed.output)
-            .unwrap_or_else(|_| String::from("{\"error\":\"tool output encode failed\"}"));
+        let output = tool_result_model_text(executed.name.as_str(), &executed.output);
         if executed.was_paused() {
             self.interruption = Some(AppleFmToolLoopInterruption::ApprovalPending {
                 tool_name: executed.name.clone(),
@@ -2234,8 +2223,8 @@ mod tests {
 
     use super::{
         PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime,
-        ResolvePendingToolApprovalOutcome, ResolvePendingToolApprovalRequest, RuntimeEvent,
-        RuntimeError, RuntimeEventSink, default_session_title,
+        ResolvePendingToolApprovalOutcome, ResolvePendingToolApprovalRequest, RuntimeError,
+        RuntimeEvent, RuntimeEventSink, default_session_title,
     };
 
     #[derive(Default)]
@@ -2648,14 +2637,30 @@ mod tests {
         let events = collector.snapshot();
         let session_id = outcome.session.id.clone();
         assert_eq!(events.len(), 8);
-        assert!(matches!(&events[0], RuntimeEvent::TurnStarted { session_id: event_session, .. } if event_session == &session_id));
-        assert!(matches!(&events[1], RuntimeEvent::ModelRequestStarted { session_id: event_session, round_trip: 1, backend_kind: probe_protocol::backend::BackendKind::AppleFmBridge } if event_session == &session_id));
-        assert!(matches!(&events[2], RuntimeEvent::AssistantStreamStarted { session_id: event_session, round_trip: 1, response_id, .. } if event_session == &session_id && response_id == session_id.as_str()));
-        assert!(matches!(&events[3], RuntimeEvent::TimeToFirstTokenObserved { session_id: event_session, round_trip: 1, .. } if event_session == &session_id));
-        assert!(matches!(&events[4], RuntimeEvent::AssistantSnapshot { session_id: event_session, round_trip: 1, snapshot } if event_session == &session_id && snapshot == "hello"));
-        assert!(matches!(&events[5], RuntimeEvent::AssistantSnapshot { session_id: event_session, round_trip: 1, snapshot } if event_session == &session_id && snapshot == "hello world"));
-        assert!(matches!(&events[6], RuntimeEvent::AssistantStreamFinished { session_id: event_session, round_trip: 1, finish_reason, .. } if event_session == &session_id && finish_reason.as_deref() == Some("snapshot_completed")));
-        assert!(matches!(&events[7], RuntimeEvent::AssistantTurnCommitted { session_id: event_session, assistant_text, .. } if event_session == &session_id && assistant_text == "hello world"));
+        assert!(
+            matches!(&events[0], RuntimeEvent::TurnStarted { session_id: event_session, .. } if event_session == &session_id)
+        );
+        assert!(
+            matches!(&events[1], RuntimeEvent::ModelRequestStarted { session_id: event_session, round_trip: 1, backend_kind: probe_protocol::backend::BackendKind::AppleFmBridge } if event_session == &session_id)
+        );
+        assert!(
+            matches!(&events[2], RuntimeEvent::AssistantStreamStarted { session_id: event_session, round_trip: 1, response_id, .. } if event_session == &session_id && response_id == session_id.as_str())
+        );
+        assert!(
+            matches!(&events[3], RuntimeEvent::TimeToFirstTokenObserved { session_id: event_session, round_trip: 1, .. } if event_session == &session_id)
+        );
+        assert!(
+            matches!(&events[4], RuntimeEvent::AssistantSnapshot { session_id: event_session, round_trip: 1, snapshot } if event_session == &session_id && snapshot == "hello")
+        );
+        assert!(
+            matches!(&events[5], RuntimeEvent::AssistantSnapshot { session_id: event_session, round_trip: 1, snapshot } if event_session == &session_id && snapshot == "hello world")
+        );
+        assert!(
+            matches!(&events[6], RuntimeEvent::AssistantStreamFinished { session_id: event_session, round_trip: 1, finish_reason, .. } if event_session == &session_id && finish_reason.as_deref() == Some("snapshot_completed"))
+        );
+        assert!(
+            matches!(&events[7], RuntimeEvent::AssistantTurnCommitted { session_id: event_session, assistant_text, .. } if event_session == &session_id && assistant_text == "hello world")
+        );
     }
 
     #[test]
@@ -2856,6 +2861,13 @@ mod tests {
                     let callback_json: serde_json::Value =
                         serde_json::from_str(callback_response.body.as_str())
                             .expect("callback json");
+                    let callback_output = callback_json["output"]
+                        .as_str()
+                        .expect("callback output text");
+                    assert!(callback_output.contains("path: hello.txt"));
+                    assert!(callback_output.contains("content:"));
+                    assert!(callback_output.contains("hello world"));
+                    assert!(!callback_output.contains("\"content\""));
                     FakeHttpResponse::json_ok(json!({
                         "session": {
                             "id": "sess-apple-tool-1",
@@ -3273,6 +3285,22 @@ mod tests {
                 && entry["contents"][0]["text"]
                     .as_str()
                     .unwrap_or_default()
+                    .contains("path: hello.txt")
+        }));
+        assert!(restored_entries.iter().any(|entry| {
+            entry["role"] == "tool"
+                && entry["toolName"] == "read_file"
+                && entry["contents"][0]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("content:")
+        }));
+        assert!(restored_entries.iter().any(|entry| {
+            entry["role"] == "tool"
+                && entry["toolName"] == "read_file"
+                && entry["contents"][0]["text"]
+                    .as_str()
+                    .unwrap_or_default()
                     .contains("hello world")
         }));
         drop(bridge_state);
@@ -3364,8 +3392,8 @@ mod tests {
                     assert!(request_body.contains("\"tool_calls\""));
                     assert!(request_body.contains("\"call_readme_1\""));
                     assert!(request_body.contains("\"read_file\""));
-                    assert!(request_body.contains("README.md"));
-                    assert!(request_body.contains("\"content\""));
+                    assert!(request_body.contains("path: README.md"));
+                    assert!(request_body.contains("content:"));
                 }
                 let body = if step == 0 {
                     serde_json::json!({
@@ -3425,8 +3453,11 @@ mod tests {
         });
 
         let temp = tempfile::tempdir().expect("temp dir");
-        std::fs::write(temp.path().join("README.md"), "# Probe\n\nA coding-agent runtime.\n")
-            .expect("write readme");
+        std::fs::write(
+            temp.path().join("README.md"),
+            "# Probe\n\nA coding-agent runtime.\n",
+        )
+        .expect("write readme");
         let runtime = ProbeRuntime::new(temp.path().join(".probe"));
         let mut profile = psionic_qwen35_2b_q8_registry();
         profile.base_url = format!("http://{address}/v1");
@@ -3635,10 +3666,7 @@ mod tests {
 
         assert_eq!(outcome.assistant_text, "hello world");
         assert_eq!(
-            outcome
-                .usage
-                .as_ref()
-                .and_then(|usage| usage.total_tokens),
+            outcome.usage.as_ref().and_then(|usage| usage.total_tokens),
             Some(5)
         );
         let events = collector.snapshot();
@@ -3768,10 +3796,18 @@ mod tests {
         let events = collector.snapshot();
         let session_id = outcome.session.id.clone();
 
-        assert!(matches!(&events[0], RuntimeEvent::TurnStarted { session_id: event_session, .. } if event_session == &session_id));
-        assert!(matches!(&events[1], RuntimeEvent::ModelRequestStarted { session_id: event_session, round_trip: 1, .. } if event_session == &session_id));
-        assert!(matches!(&events[2], RuntimeEvent::AssistantStreamStarted { session_id: event_session, round_trip: 1, response_id, .. } if event_session == &session_id && response_id == "chatcmpl_stream_tool_1"));
-        assert!(matches!(&events[3], RuntimeEvent::TimeToFirstTokenObserved { session_id: event_session, round_trip: 1, .. } if event_session == &session_id));
+        assert!(
+            matches!(&events[0], RuntimeEvent::TurnStarted { session_id: event_session, .. } if event_session == &session_id)
+        );
+        assert!(
+            matches!(&events[1], RuntimeEvent::ModelRequestStarted { session_id: event_session, round_trip: 1, .. } if event_session == &session_id)
+        );
+        assert!(
+            matches!(&events[2], RuntimeEvent::AssistantStreamStarted { session_id: event_session, round_trip: 1, response_id, .. } if event_session == &session_id && response_id == "chatcmpl_stream_tool_1")
+        );
+        assert!(
+            matches!(&events[3], RuntimeEvent::TimeToFirstTokenObserved { session_id: event_session, round_trip: 1, .. } if event_session == &session_id)
+        );
         assert!(matches!(
             &events[4],
             RuntimeEvent::ToolCallDelta {
@@ -3798,15 +3834,33 @@ mod tests {
                 && response_id == "chatcmpl_stream_tool_1"
                 && finish_reason.as_deref() == Some("tool_calls")
         ));
-        assert!(matches!(&events[6], RuntimeEvent::ToolCallRequested { session_id: event_session, round_trip: 1, call_id, tool_name, .. } if event_session == &session_id && call_id == "call_readme_1" && tool_name == "read_file"));
-        assert!(matches!(&events[7], RuntimeEvent::ToolExecutionStarted { session_id: event_session, round_trip: 1, .. } if event_session == &session_id));
-        assert!(matches!(&events[8], RuntimeEvent::ToolExecutionCompleted { session_id: event_session, round_trip: 1, .. } if event_session == &session_id));
-        assert!(matches!(&events[9], RuntimeEvent::ModelRequestStarted { session_id: event_session, round_trip: 2, .. } if event_session == &session_id));
-        assert!(matches!(&events[10], RuntimeEvent::AssistantStreamStarted { session_id: event_session, round_trip: 2, response_id, .. } if event_session == &session_id && response_id == "chatcmpl_stream_tool_2"));
-        assert!(matches!(&events[11], RuntimeEvent::TimeToFirstTokenObserved { session_id: event_session, round_trip: 2, .. } if event_session == &session_id));
-        assert!(matches!(&events[12], RuntimeEvent::AssistantDelta { session_id: event_session, round_trip: 2, delta } if event_session == &session_id && delta == "README inspected."));
-        assert!(matches!(&events[13], RuntimeEvent::AssistantStreamFinished { session_id: event_session, round_trip: 2, finish_reason, .. } if event_session == &session_id && finish_reason.as_deref() == Some("stop")));
-        assert!(matches!(&events[14], RuntimeEvent::AssistantTurnCommitted { session_id: event_session, assistant_text, .. } if event_session == &session_id && assistant_text == "README inspected."));
+        assert!(
+            matches!(&events[6], RuntimeEvent::ToolCallRequested { session_id: event_session, round_trip: 1, call_id, tool_name, .. } if event_session == &session_id && call_id == "call_readme_1" && tool_name == "read_file")
+        );
+        assert!(
+            matches!(&events[7], RuntimeEvent::ToolExecutionStarted { session_id: event_session, round_trip: 1, .. } if event_session == &session_id)
+        );
+        assert!(
+            matches!(&events[8], RuntimeEvent::ToolExecutionCompleted { session_id: event_session, round_trip: 1, .. } if event_session == &session_id)
+        );
+        assert!(
+            matches!(&events[9], RuntimeEvent::ModelRequestStarted { session_id: event_session, round_trip: 2, .. } if event_session == &session_id)
+        );
+        assert!(
+            matches!(&events[10], RuntimeEvent::AssistantStreamStarted { session_id: event_session, round_trip: 2, response_id, .. } if event_session == &session_id && response_id == "chatcmpl_stream_tool_2")
+        );
+        assert!(
+            matches!(&events[11], RuntimeEvent::TimeToFirstTokenObserved { session_id: event_session, round_trip: 2, .. } if event_session == &session_id)
+        );
+        assert!(
+            matches!(&events[12], RuntimeEvent::AssistantDelta { session_id: event_session, round_trip: 2, delta } if event_session == &session_id && delta == "README inspected.")
+        );
+        assert!(
+            matches!(&events[13], RuntimeEvent::AssistantStreamFinished { session_id: event_session, round_trip: 2, finish_reason, .. } if event_session == &session_id && finish_reason.as_deref() == Some("stop"))
+        );
+        assert!(
+            matches!(&events[14], RuntimeEvent::AssistantTurnCommitted { session_id: event_session, assistant_text, .. } if event_session == &session_id && assistant_text == "README inspected.")
+        );
     }
 
     #[test]
@@ -3817,9 +3871,11 @@ mod tests {
         let captured_state = Arc::clone(&bridge_state);
         let server = FakeAppleFmServer::from_handler(move |request| {
             match (request.method.as_str(), request.path.as_str()) {
-                ("POST", "/v1/sessions") => {
-                    record_apple_session_create(&captured_state, &request, "sess-apple-stream-tool-1")
-                }
+                ("POST", "/v1/sessions") => record_apple_session_create(
+                    &captured_state,
+                    &request,
+                    "sess-apple-stream-tool-1",
+                ),
                 ("POST", "/v1/sessions/sess-apple-stream-tool-1/responses/stream") => {
                     let callback_response = invoke_apple_tool_callback(
                         &captured_state,
@@ -3875,17 +3931,39 @@ mod tests {
         assert_eq!(outcome.tool_results.len(), 1);
         let events = collector.snapshot();
         let session_id = outcome.session.id.clone();
-        assert!(matches!(&events[0], RuntimeEvent::TurnStarted { session_id: event_session, .. } if event_session == &session_id));
-        assert!(matches!(&events[1], RuntimeEvent::ModelRequestStarted { session_id: event_session, round_trip: 1, backend_kind: probe_protocol::backend::BackendKind::AppleFmBridge } if event_session == &session_id));
-        assert!(matches!(&events[2], RuntimeEvent::ToolCallRequested { session_id: event_session, round_trip: 1, call_id, tool_name, .. } if event_session == &session_id && call_id == "apple_fm_call_1" && tool_name == "read_file"));
-        assert!(matches!(&events[3], RuntimeEvent::ToolExecutionStarted { session_id: event_session, round_trip: 1, call_id, tool_name, .. } if event_session == &session_id && call_id == "apple_fm_call_1" && tool_name == "read_file"));
-        assert!(matches!(&events[4], RuntimeEvent::ToolExecutionCompleted { session_id: event_session, round_trip: 1, tool } if event_session == &session_id && tool.name == "read_file"));
-        assert!(matches!(&events[5], RuntimeEvent::AssistantStreamStarted { session_id: event_session, round_trip: 1, response_id, .. } if event_session == &session_id && response_id == session_id.as_str()));
-        assert!(matches!(&events[6], RuntimeEvent::TimeToFirstTokenObserved { session_id: event_session, round_trip: 1, .. } if event_session == &session_id));
-        assert!(matches!(&events[7], RuntimeEvent::AssistantSnapshot { session_id: event_session, round_trip: 1, snapshot } if event_session == &session_id && snapshot == "reading README.md"));
-        assert!(matches!(&events[8], RuntimeEvent::AssistantSnapshot { session_id: event_session, round_trip: 1, snapshot } if event_session == &session_id && snapshot == "README inspected."));
-        assert!(matches!(&events[9], RuntimeEvent::AssistantStreamFinished { session_id: event_session, round_trip: 1, finish_reason, .. } if event_session == &session_id && finish_reason.as_deref() == Some("snapshot_completed")));
-        assert!(matches!(&events[10], RuntimeEvent::AssistantTurnCommitted { session_id: event_session, assistant_text, .. } if event_session == &session_id && assistant_text == "README inspected."));
+        assert!(
+            matches!(&events[0], RuntimeEvent::TurnStarted { session_id: event_session, .. } if event_session == &session_id)
+        );
+        assert!(
+            matches!(&events[1], RuntimeEvent::ModelRequestStarted { session_id: event_session, round_trip: 1, backend_kind: probe_protocol::backend::BackendKind::AppleFmBridge } if event_session == &session_id)
+        );
+        assert!(
+            matches!(&events[2], RuntimeEvent::ToolCallRequested { session_id: event_session, round_trip: 1, call_id, tool_name, .. } if event_session == &session_id && call_id == "apple_fm_call_1" && tool_name == "read_file")
+        );
+        assert!(
+            matches!(&events[3], RuntimeEvent::ToolExecutionStarted { session_id: event_session, round_trip: 1, call_id, tool_name, .. } if event_session == &session_id && call_id == "apple_fm_call_1" && tool_name == "read_file")
+        );
+        assert!(
+            matches!(&events[4], RuntimeEvent::ToolExecutionCompleted { session_id: event_session, round_trip: 1, tool } if event_session == &session_id && tool.name == "read_file")
+        );
+        assert!(
+            matches!(&events[5], RuntimeEvent::AssistantStreamStarted { session_id: event_session, round_trip: 1, response_id, .. } if event_session == &session_id && response_id == session_id.as_str())
+        );
+        assert!(
+            matches!(&events[6], RuntimeEvent::TimeToFirstTokenObserved { session_id: event_session, round_trip: 1, .. } if event_session == &session_id)
+        );
+        assert!(
+            matches!(&events[7], RuntimeEvent::AssistantSnapshot { session_id: event_session, round_trip: 1, snapshot } if event_session == &session_id && snapshot == "reading README.md")
+        );
+        assert!(
+            matches!(&events[8], RuntimeEvent::AssistantSnapshot { session_id: event_session, round_trip: 1, snapshot } if event_session == &session_id && snapshot == "README inspected.")
+        );
+        assert!(
+            matches!(&events[9], RuntimeEvent::AssistantStreamFinished { session_id: event_session, round_trip: 1, finish_reason, .. } if event_session == &session_id && finish_reason.as_deref() == Some("snapshot_completed"))
+        );
+        assert!(
+            matches!(&events[10], RuntimeEvent::AssistantTurnCommitted { session_id: event_session, assistant_text, .. } if event_session == &session_id && assistant_text == "README inspected.")
+        );
     }
 
     #[test]
@@ -4291,14 +4369,26 @@ mod tests {
                         "new_text":"probe"
                     })
                 );
-                assert_eq!(tool.tool_execution.risk_class, probe_protocol::session::ToolRiskClass::Write);
-                assert_eq!(tool.tool_execution.policy_decision, ToolPolicyDecision::Paused);
-                assert_eq!(tool.tool_execution.approval_state, ToolApprovalState::Pending);
+                assert_eq!(
+                    tool.tool_execution.risk_class,
+                    probe_protocol::session::ToolRiskClass::Write
+                );
+                assert_eq!(
+                    tool.tool_execution.policy_decision,
+                    ToolPolicyDecision::Paused
+                );
+                assert_eq!(
+                    tool.tool_execution.approval_state,
+                    ToolApprovalState::Pending
+                );
                 assert_eq!(
                     tool.tool_execution.reason.as_deref(),
                     Some("tool `apply_patch` requires write approval")
                 );
-                assert_eq!(tool.output["error"], "tool execution blocked by local approval policy");
+                assert_eq!(
+                    tool.output["error"],
+                    "tool execution blocked by local approval policy"
+                );
             }
             other => panic!("expected ToolPaused event, got {other:?}"),
         }
@@ -4382,8 +4472,11 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("temp dir");
         std::fs::create_dir_all(temp.path().join("src")).expect("create src");
-        std::fs::write(temp.path().join("README.md"), "# Probe\n\nA coding-agent runtime.\n")
-            .expect("write readme");
+        std::fs::write(
+            temp.path().join("README.md"),
+            "# Probe\n\nA coding-agent runtime.\n",
+        )
+        .expect("write readme");
         std::fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").expect("write main");
         let runtime = ProbeRuntime::new(temp.path().join(".probe"));
         let mut profile = psionic_qwen35_2b_q8_registry();
@@ -4405,7 +4498,10 @@ mod tests {
             .expect("parallel tool loop should succeed");
 
         assert_eq!(outcome.executed_tool_calls, 2);
-        assert_eq!(outcome.assistant_text, "Root files listed and README inspected.");
+        assert_eq!(
+            outcome.assistant_text,
+            "Root files listed and README inspected."
+        );
 
         let transcript = runtime
             .session_store()

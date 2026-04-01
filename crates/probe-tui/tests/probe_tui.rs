@@ -1,7 +1,10 @@
 use insta::assert_snapshot;
-use probe_protocol::backend::BackendKind;
 use probe_core::runtime::RuntimeEvent;
-use probe_protocol::session::{PendingToolApproval, ToolRiskClass};
+use probe_core::tools::ExecutedToolCall;
+use probe_protocol::backend::BackendKind;
+use probe_protocol::session::{
+    PendingToolApproval, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
+};
 use probe_tui::{
     AppMessage, AppShell, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
     AppleFmUsageSummary, ProbeRuntimeTurnConfig, TranscriptEntry, TranscriptRole, UiEvent,
@@ -45,9 +48,8 @@ fn help_modal_snapshot_is_stable() {
 
 #[test]
 fn setup_overlay_snapshot_is_stable() {
-    let mut app = AppShell::new_for_tests_with_chat_config(apple_fm_chat_config(
-        "http://127.0.0.1:11435",
-    ));
+    let mut app =
+        AppShell::new_for_tests_with_chat_config(apple_fm_chat_config("http://127.0.0.1:11435"));
     app.dispatch(UiEvent::OpenSetupOverlay);
     let snapshot = app.render_to_string(80, 24);
     assert_snapshot!("probe_tui_setup_overlay", snapshot);
@@ -114,6 +116,54 @@ fn transcript_running_turn_snapshot_is_stable() {
 
     let snapshot = app.render_to_string(80, 24);
     assert_snapshot!("probe_tui_transcript_running_turn", snapshot);
+}
+
+#[test]
+fn completed_tool_turn_renders_compact_output_text() {
+    let mut app = AppShell::new_for_tests();
+    app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+        session_id: String::from("sess_tui_tool_complete"),
+        profile_name: String::from("psionic-apple-fm-bridge"),
+        model_id: String::from("apple-foundation-model"),
+        cwd: String::from("/tmp/probe-workspace"),
+    });
+    app.apply_message(AppMessage::ProbeRuntimeEvent {
+        event: RuntimeEvent::ToolExecutionCompleted {
+            session_id: probe_protocol::session::SessionId::new("sess_tui_tool_complete"),
+            round_trip: 1,
+            tool: ExecutedToolCall {
+                call_id: String::from("apple_fm_call_1"),
+                name: String::from("read_file"),
+                arguments: json!({"path":"README.md"}),
+                output: json!({
+                    "path": "README.md",
+                    "start_line": 1,
+                    "end_line": 4,
+                    "total_lines": 4,
+                    "truncated": false,
+                    "content": "# Probe\nruntime\nnotes\nmore"
+                }),
+                tool_execution: ToolExecutionRecord {
+                    risk_class: ToolRiskClass::ReadOnly,
+                    policy_decision: ToolPolicyDecision::AutoAllow,
+                    approval_state: ToolApprovalState::NotRequired,
+                    command: None,
+                    exit_code: None,
+                    timed_out: None,
+                    truncated: Some(false),
+                    bytes_returned: Some(26),
+                    files_touched: vec![String::from("README.md")],
+                    reason: None,
+                },
+            },
+        },
+    });
+
+    let rendered = app.render_to_string(100, 24);
+    assert!(rendered.contains("path: README.md"));
+    assert!(rendered.contains("content:"));
+    assert!(rendered.contains("# Probe"));
+    assert!(!rendered.contains("\"content\""));
 }
 
 #[test]
@@ -345,9 +395,8 @@ fn committed_transcript_replaces_live_stream_cell() {
 
 #[test]
 fn unavailable_state_snapshot_is_stable() {
-    let mut app = AppShell::new_for_tests_with_chat_config(apple_fm_chat_config(
-        "http://127.0.0.1:11435",
-    ));
+    let mut app =
+        AppShell::new_for_tests_with_chat_config(apple_fm_chat_config("http://127.0.0.1:11435"));
     let backend = AppleFmBackendSummary {
         profile_name: String::from("psionic-apple-fm-bridge"),
         base_url: String::from("http://127.0.0.1:11435"),
@@ -372,9 +421,8 @@ fn unavailable_state_snapshot_is_stable() {
 
 #[test]
 fn running_state_snapshot_is_stable() {
-    let mut app = AppShell::new_for_tests_with_chat_config(apple_fm_chat_config(
-        "http://127.0.0.1:11435",
-    ));
+    let mut app =
+        AppShell::new_for_tests_with_chat_config(apple_fm_chat_config("http://127.0.0.1:11435"));
     let backend = AppleFmBackendSummary {
         profile_name: String::from("psionic-apple-fm-bridge"),
         base_url: String::from("http://127.0.0.1:11435"),
@@ -409,9 +457,8 @@ fn running_state_snapshot_is_stable() {
 
 #[test]
 fn running_state_keeps_completed_reply_visible_while_next_call_waits() {
-    let mut app = AppShell::new_for_tests_with_chat_config(apple_fm_chat_config(
-        "http://127.0.0.1:11435",
-    ));
+    let mut app =
+        AppShell::new_for_tests_with_chat_config(apple_fm_chat_config("http://127.0.0.1:11435"));
     let backend = AppleFmBackendSummary {
         profile_name: String::from("psionic-apple-fm-bridge"),
         base_url: String::from("http://127.0.0.1:11435"),
@@ -463,9 +510,8 @@ fn running_state_keeps_completed_reply_visible_while_next_call_waits() {
 
 #[test]
 fn completed_state_snapshot_is_stable() {
-    let mut app = AppShell::new_for_tests_with_chat_config(apple_fm_chat_config(
-        "http://127.0.0.1:11435",
-    ));
+    let mut app =
+        AppShell::new_for_tests_with_chat_config(apple_fm_chat_config("http://127.0.0.1:11435"));
     let backend = AppleFmBackendSummary {
         profile_name: String::from("psionic-apple-fm-bridge"),
         base_url: String::from("http://127.0.0.1:11435"),
