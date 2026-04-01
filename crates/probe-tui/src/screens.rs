@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
+use probe_core::backend_profiles::default_reasoning_level_for_backend;
 use probe_core::provider::normalize_openai_stream_display_text;
 use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_core::server_control::ServerOperatorSummary;
@@ -1492,6 +1493,10 @@ impl ChatScreen {
             Line::from(format!(
                 "model: {}",
                 summary.model_id.as_deref().unwrap_or("unknown")
+            )),
+            Line::from(format!(
+                "reasoning_level: {}",
+                default_reasoning_level_for_backend(summary.backend_kind).unwrap_or("none")
             )),
             Line::from(""),
             Line::from("Contract"),

@@ -17,8 +17,8 @@ use probe_client::{INTERNAL_SERVER_SUBCOMMAND, ProbeClient, ProbeClientConfig};
 use probe_core::backend_profiles::{
     PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE,
     PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
-    named_backend_profile, openai_codex_subscription, psionic_apple_fm_bridge,
-    psionic_qwen35_2b_q8_registry,
+    default_reasoning_level_for_backend, named_backend_profile, openai_codex_subscription,
+    psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
 };
 use probe_core::dataset_export::{
     DatasetExportConfig, DatasetKind, DecisionCaseRecord, DecisionSessionSummary, export_dataset,
@@ -1774,7 +1774,13 @@ fn print_backend_target_summary_from_summary(
 }
 
 fn print_codex_auth_record(prefix: &str, record: &probe_openai_auth::OpenAiCodexAuthRecord) {
+    let profile = openai_codex_subscription();
     println!("{prefix}");
+    println!("model={}", profile.model);
+    println!(
+        "reasoning_level={}",
+        default_reasoning_level_for_backend(profile.kind).unwrap_or("none")
+    );
     println!("expires_ms={}", record.expires);
     println!(
         "account_id={}",
@@ -1783,7 +1789,13 @@ fn print_codex_auth_record(prefix: &str, record: &probe_openai_auth::OpenAiCodex
 }
 
 fn print_codex_auth_status(status: &OpenAiCodexAuthStatus) {
+    let profile = openai_codex_subscription();
     println!("path={}", status.path.display());
+    println!("model={}", profile.model);
+    println!(
+        "reasoning_level={}",
+        default_reasoning_level_for_backend(profile.kind).unwrap_or("none")
+    );
     println!("authenticated={}", status.authenticated);
     println!("expired={}", status.expired);
     println!(

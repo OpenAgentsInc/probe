@@ -241,7 +241,12 @@ impl PsionicServerConfig {
     }
 
     fn ensure_kind_defaults(&mut self) {
-        if self.model_id.is_none() {
+        if self.model_id.is_none()
+            || self
+                .model_id
+                .as_deref()
+                .is_some_and(|model_id| is_legacy_default_model(self.api_kind, model_id))
+        {
             self.model_id = default_model_id_for(self.api_kind);
         }
     }
@@ -571,6 +576,13 @@ fn default_model_id_for(api_kind: BackendKind) -> Option<String> {
     }
 }
 
+fn is_legacy_default_model(api_kind: BackendKind, model_id: &str) -> bool {
+    match api_kind {
+        BackendKind::OpenAiCodexSubscription => model_id == "gpt-5.3-codex",
+        BackendKind::OpenAiChatCompletions | BackendKind::AppleFmBridge => false,
+    }
+}
+
 fn format_apple_fm_unavailability(availability: &AppleFmSystemLanguageModelAvailability) -> String {
     let mut fields = vec![format!("model={}", availability.model.id)];
     if let Some(reason) = availability.unavailable_reason {
@@ -728,11 +740,40 @@ mod tests {
         assert_eq!(codex.host, "chatgpt.com");
         assert_eq!(codex.port, DEFAULT_CODEX_SERVER_PORT);
         assert_eq!(codex.base_url(), "https://chatgpt.com/backend-api/codex");
-        assert_eq!(codex.resolved_model_id().as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(codex.resolved_model_id().as_deref(), Some("gpt-5.4"));
         assert_eq!(
             codex.operator_summary().target_kind,
             ServerTargetKind::RemoteAttach
         );
+    }
+
+    #[test]
+    fn codex_backend_migrates_legacy_default_model_id() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = PsionicServerConfig::backend_config_path(
+            temp.path(),
+            BackendKind::OpenAiCodexSubscription,
+        );
+        let legacy = PsionicServerConfig {
+            mode: PsionicServerMode::Attach,
+            api_kind: BackendKind::OpenAiCodexSubscription,
+            host: String::from("chatgpt.com"),
+            port: DEFAULT_CODEX_SERVER_PORT,
+            backend: String::from("cpu"),
+            binary_path: None,
+            model_path: None,
+            model_id: Some(String::from("gpt-5.3-codex")),
+            reasoning_budget: None,
+        };
+        legacy.save(path.as_path()).expect("save legacy config");
+
+        let loaded = PsionicServerConfig::load_or_default_for_backend(
+            temp.path(),
+            BackendKind::OpenAiCodexSubscription,
+        )
+        .expect("load migrated codex snapshot");
+
+        assert_eq!(loaded.resolved_model_id().as_deref(), Some("gpt-5.4"));
     }
 
     #[test]

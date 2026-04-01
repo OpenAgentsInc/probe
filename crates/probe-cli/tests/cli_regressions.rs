@@ -104,6 +104,8 @@ fn codex_status_reports_missing_auth_state() {
         .arg(environment.probe_home())
         .assert()
         .success()
+        .stdout(predicate::str::contains("model=gpt-5.4"))
+        .stdout(predicate::str::contains("reasoning_level=backend_default"))
         .stdout(predicate::str::contains("authenticated=false"))
         .stdout(predicate::str::contains(
             "hint=run `probe codex login --method browser`",

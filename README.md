@@ -32,7 +32,8 @@ Probe currently ships three backend families:
 - `openai-codex-subscription`
   - base URL: `https://chatgpt.com/backend-api/codex`
   - request endpoint: `https://chatgpt.com/backend-api/codex/responses`
-  - model: `gpt-5.3-codex`
+  - model: `gpt-5.4`
+  - reasoning level: `backend_default`
   - auth source: `PROBE_HOME/auth/openai-codex.json`
 - `psionic-apple-fm-bridge`
   - default base URL: `http://127.0.0.1:11435`

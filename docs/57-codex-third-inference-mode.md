@@ -111,6 +111,7 @@ Then verify:
 3. confirm the overlay shows:
    - `backend_kind: openai_codex_subscription`
    - `base_url: https://chatgpt.com/backend-api/codex`
+   - `reasoning_level: backend_default`
    - `OpenAI Subscription Auth`
 4. dismiss the overlay and submit a prompt
 5. confirm the turn executes against Codex and persists a normal Probe session

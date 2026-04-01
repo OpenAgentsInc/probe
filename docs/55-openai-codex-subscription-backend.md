@@ -23,7 +23,8 @@ not target a local `/v1/chat/completions` server and does not rely on
 - backend kind: `openai_codex_subscription`
 - base URL: `https://chatgpt.com/backend-api/codex`
 - request endpoint: `https://chatgpt.com/backend-api/codex/responses`
-- default model: `gpt-5.3-codex`
+- default model: `gpt-5.4`
+- reasoning level: `backend_default`
 - attach mode: `attach`
 - saved backend config path: `PROBE_HOME/server/openai-codex-subscription.json`
 

@@ -1088,7 +1088,7 @@ mod tests {
         app.apply_message(AppMessage::ProbeRuntimeSessionReady {
             session_id: String::from("sess_secondary"),
             profile_name: String::from("openai-codex-subscription"),
-            model_id: String::from("gpt-5.3-codex"),
+            model_id: String::from("gpt-5.4"),
             cwd: String::from("/tmp/probe-workspace"),
         });
         app.apply_message(AppMessage::TranscriptEntryCommitted {
@@ -1191,6 +1191,7 @@ mod tests {
         app.dispatch(UiEvent::OpenSetupOverlay);
         let rendered = app.render_to_string(120, 48);
         assert!(rendered.contains("OpenAI Subscription Auth"));
+        assert!(rendered.contains("reasoning_level: backend_default"));
         assert!(rendered.contains("status: disconnected"));
         assert!(rendered.contains("probe codex login --method browser"));
     }

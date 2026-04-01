@@ -1397,7 +1397,7 @@ mod tests {
             name: String::from("openai-codex-subscription"),
             kind: BackendKind::OpenAiCodexSubscription,
             base_url: String::from("https://chatgpt.com/backend-api/codex"),
-            model: String::from("gpt-5.3-codex"),
+            model: String::from("gpt-5.4"),
             api_key_env: String::new(),
             timeout_secs: 60,
             attach_mode: ServerAttachMode::AttachToExisting,
@@ -1433,7 +1433,7 @@ mod tests {
         extra_headers.insert(String::from("User-Agent"), String::from("probe/test"));
         OpenAiProviderConfig {
             base_url: base_url.to_string(),
-            model: String::from("gpt-5.3-codex"),
+            model: String::from("gpt-5.4"),
             auth: OpenAiRequestAuth::BearerToken(String::from("access-token")),
             timeout: Duration::from_secs(5),
             stream: false,
@@ -1618,7 +1618,7 @@ mod tests {
     fn codex_transport_rewrites_to_subscription_endpoint_and_injects_headers() {
         let server = FakeAppleFmServer::from_json_responses(vec![serde_json::json!({
             "id": "codex_resp_1",
-            "model": "gpt-5.3-codex",
+            "model": "gpt-5.4",
             "output": [
                 {
                     "type": "message",
@@ -1664,7 +1664,7 @@ mod tests {
     fn codex_transport_decodes_function_call_responses() {
         let server = FakeAppleFmServer::from_json_responses(vec![serde_json::json!({
             "id": "codex_tool_resp_1",
-            "model": "gpt-5.3-codex",
+            "model": "gpt-5.4",
             "output": [
                 {
                     "type": "function_call",
@@ -1847,7 +1847,7 @@ mod tests {
     #[test]
     fn codex_streaming_plain_text_requests_are_assembled_from_responses_events() {
         let body = concat!(
-            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_stream_text\",\"model\":\"gpt-5.3-codex\",\"created_at\":1}}\n\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_stream_text\",\"model\":\"gpt-5.4\",\"created_at\":1}}\n\n",
             "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_1\"}}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"delta\":\"hello\"}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"delta\":\" world\"}\n\n",
@@ -1889,7 +1889,7 @@ mod tests {
     #[test]
     fn codex_streaming_tool_call_requests_are_assembled_from_responses_events() {
         let body = concat!(
-            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_stream_tool\",\"model\":\"gpt-5.3-codex\",\"created_at\":1}}\n\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_stream_tool\",\"model\":\"gpt-5.4\",\"created_at\":1}}\n\n",
             "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"read_file\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
             "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"path\\\":\"}\n\n",
             "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"\\\"README.md\\\"}\"}\n\n",
@@ -1946,7 +1946,7 @@ mod tests {
         let server =
             FakeOpenAiServer::from_responses(vec![FakeHttpResponse::json_ok(serde_json::json!({
                 "id": "resp_fallback",
-                "model": "gpt-5.3-codex",
+                "model": "gpt-5.4",
                 "output": [{
                     "type": "message",
                     "id": "msg_1",

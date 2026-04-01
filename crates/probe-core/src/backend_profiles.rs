@@ -7,7 +7,8 @@ pub const PSIONIC_APPLE_FM_ORACLE_PROFILE: &str = "psionic-apple-fm-oracle";
 pub const PSIONIC_APPLE_FM_MODEL: &str = "apple-foundation-model";
 pub const DEFAULT_APPLE_FM_BRIDGE_BASE_URL: &str = "http://127.0.0.1:11435";
 pub const OPENAI_CODEX_SUBSCRIPTION_PROFILE: &str = "openai-codex-subscription";
-pub const OPENAI_CODEX_SUBSCRIPTION_MODEL: &str = "gpt-5.3-codex";
+pub const OPENAI_CODEX_SUBSCRIPTION_MODEL: &str = "gpt-5.4";
+pub const OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL: &str = "backend_default";
 pub const DEFAULT_OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub const PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE: &str = "psionic-qwen35-2b-q8-registry";
 pub const PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE: &str = "psionic-qwen35-2b-q8-oracle";
@@ -41,6 +42,16 @@ pub fn openai_codex_subscription() -> BackendProfile {
         timeout_secs: 60,
         attach_mode: ServerAttachMode::AttachToExisting,
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
+    }
+}
+
+#[must_use]
+pub const fn default_reasoning_level_for_backend(
+    backend_kind: BackendKind,
+) -> Option<&'static str> {
+    match backend_kind {
+        BackendKind::OpenAiCodexSubscription => Some(OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL),
+        BackendKind::OpenAiChatCompletions | BackendKind::AppleFmBridge => None,
     }
 }
 
@@ -143,12 +154,14 @@ mod tests {
     use super::{
         DEFAULT_APPLE_FM_BRIDGE_BASE_URL, DEFAULT_OPENAI_CODEX_BASE_URL,
         OPENAI_CODEX_SUBSCRIPTION_MODEL, OPENAI_CODEX_SUBSCRIPTION_PROFILE,
-        PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_APPLE_FM_MODEL, PSIONIC_APPLE_FM_ORACLE_PROFILE,
+        OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL, PSIONIC_APPLE_FM_BRIDGE_PROFILE,
+        PSIONIC_APPLE_FM_MODEL, PSIONIC_APPLE_FM_ORACLE_PROFILE,
         PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE, PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE,
         PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
-        named_backend_profile, openai_codex_subscription, psionic_apple_fm_bridge,
-        psionic_apple_fm_oracle, psionic_qwen35_2b_q8_long_context, psionic_qwen35_2b_q8_oracle,
-        psionic_qwen35_2b_q8_registry, resolve_apple_fm_bridge_base_url_with,
+        default_reasoning_level_for_backend, named_backend_profile, openai_codex_subscription,
+        psionic_apple_fm_bridge, psionic_apple_fm_oracle, psionic_qwen35_2b_q8_long_context,
+        psionic_qwen35_2b_q8_oracle, psionic_qwen35_2b_q8_registry,
+        resolve_apple_fm_bridge_base_url_with,
     };
 
     #[test]
@@ -171,6 +184,16 @@ mod tests {
             .expect("codex subscription profile");
         assert_eq!(profile.base_url, DEFAULT_OPENAI_CODEX_BASE_URL);
         assert_eq!(profile.model, OPENAI_CODEX_SUBSCRIPTION_MODEL);
+    }
+
+    #[test]
+    fn codex_subscription_reasoning_level_is_stable() {
+        assert_eq!(
+            default_reasoning_level_for_backend(
+                probe_protocol::backend::BackendKind::OpenAiCodexSubscription
+            ),
+            Some(OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL)
+        );
     }
 
     #[test]
