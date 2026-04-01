@@ -255,6 +255,55 @@ fn streaming_message_envelope_stays_condensed_until_plain_text_is_visible() {
 }
 
 #[test]
+fn manual_scroll_pauses_stream_follow_until_return_to_bottom() {
+    let mut app = AppShell::new_for_tests();
+    app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+        session_id: String::from("sess_tui_scroll_follow"),
+        profile_name: String::from("openai-codex-subscription"),
+        model_id: String::from("gpt-5.4"),
+        cwd: String::from("/tmp/probe-workspace"),
+    });
+    app.apply_message(AppMessage::TranscriptEntryCommitted {
+        entry: TranscriptEntry::new(
+            TranscriptRole::Assistant,
+            "Probe",
+            (0..40)
+                .map(|index| format!("older line {index:02}"))
+                .collect(),
+        ),
+    });
+
+    app.dispatch(UiEvent::PageUp);
+    let scrolled = app.render_to_string(100, 24);
+    assert!(scrolled.contains("Transcript v "));
+    assert!(!scrolled.contains("older line 39"));
+
+    app.apply_message(AppMessage::AssistantStreamStarted {
+        session_id: String::from("sess_tui_scroll_follow"),
+        round_trip: 1,
+        response_id: String::from("chatcmpl_scroll_follow"),
+        response_model: String::from("gpt-5.4"),
+    });
+    app.apply_message(AppMessage::AssistantDeltaAppended {
+        session_id: String::from("sess_tui_scroll_follow"),
+        round_trip: 1,
+        delta: String::from("STREAMING MARKER"),
+    });
+
+    let still_scrolled = app.render_to_string(100, 24);
+    assert!(still_scrolled.contains("Transcript v "));
+    assert!(!still_scrolled.contains("STREAMING MARKER"));
+
+    for _ in 0..8 {
+        app.dispatch(UiEvent::PageDown);
+    }
+
+    let at_bottom = app.render_to_string(100, 24);
+    assert!(!at_bottom.contains("Transcript v "));
+    assert!(at_bottom.contains("STREAMING MARKER"));
+}
+
+#[test]
 fn model_request_placeholder_stays_on_one_line_until_stream_events_arrive() {
     let mut app = AppShell::new_for_tests();
     app.apply_message(AppMessage::ProbeRuntimeSessionReady {

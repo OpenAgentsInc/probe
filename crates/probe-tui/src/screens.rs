@@ -321,6 +321,8 @@ pub struct ChatScreen {
     task_events: VecDeque<String>,
     transcript: RetainedTranscript,
     transcript_scroll_from_bottom: u16,
+    transcript_follow_latest: bool,
+    transcript_line_count: usize,
     runtime: ProbeRuntimeState,
     stream: Option<AssistantStreamState>,
     operator_backend: Option<ServerOperatorSummary>,
@@ -342,6 +344,8 @@ impl Default for ChatScreen {
             task_events: VecDeque::new(),
             transcript: RetainedTranscript::new(),
             transcript_scroll_from_bottom: 0,
+            transcript_follow_latest: true,
+            transcript_line_count: 0,
             runtime: ProbeRuntimeState::default(),
             stream: None,
             operator_backend: None,
@@ -1335,7 +1339,8 @@ impl ChatScreen {
             UiEvent::PreviousView => ScreenOutcome::idle(),
             UiEvent::ToggleBody => {
                 self.emphasized_copy = !self.emphasized_copy;
-                self.snap_transcript_to_latest();
+                self.resume_transcript_follow();
+                self.sync_transcript_scroll_after_update();
                 let status = if self.emphasized_copy {
                     String::from("showing operator notes instead of live response detail")
                 } else {
@@ -1421,7 +1426,8 @@ impl ChatScreen {
     fn render_chat_shell(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
         let body = self.render_primary_body();
         let scroll_y = self.transcript_scroll_y(body.lines.len(), area.height);
-        InfoPanel::new("Transcript", body)
+        let title = self.transcript_panel_title();
+        InfoPanel::new(title.as_str(), body)
             .with_scroll(scroll_y)
             .render(frame, area);
     }
@@ -1822,8 +1828,38 @@ impl ChatScreen {
         }
     }
 
-    fn snap_transcript_to_latest(&mut self) {
+    fn resume_transcript_follow(&mut self) {
+        self.transcript_follow_latest = true;
         self.transcript_scroll_from_bottom = 0;
+    }
+
+    fn transcript_panel_title(&self) -> String {
+        if self.transcript_follow_latest || self.transcript_scroll_from_bottom == 0 {
+            return String::from("Transcript");
+        }
+        format!("Transcript v {} below", self.transcript_scroll_from_bottom)
+    }
+
+    fn sync_transcript_scroll_after_update(&mut self) {
+        let line_count = self.render_primary_body().lines.len();
+        if self.transcript_follow_latest {
+            self.transcript_scroll_from_bottom = 0;
+        } else if line_count > self.transcript_line_count {
+            let added = line_count.saturating_sub(self.transcript_line_count);
+            self.transcript_scroll_from_bottom = self
+                .transcript_scroll_from_bottom
+                .saturating_add(added.min(u16::MAX as usize) as u16)
+                .min(self.max_transcript_scroll_from_bottom_for_line_count(line_count));
+        } else {
+            self.transcript_scroll_from_bottom = self
+                .transcript_scroll_from_bottom
+                .min(self.max_transcript_scroll_from_bottom_for_line_count(line_count));
+        }
+        self.transcript_line_count = line_count;
+    }
+
+    fn snap_transcript_to_latest(&mut self) {
+        self.sync_transcript_scroll_after_update();
     }
 
     fn scroll_transcript_up(&mut self, amount: u16) {
@@ -1832,19 +1868,25 @@ impl ChatScreen {
             .transcript_scroll_from_bottom
             .saturating_add(amount)
             .min(max);
+        self.transcript_follow_latest = self.transcript_scroll_from_bottom == 0;
+        self.transcript_line_count = self.render_primary_body().lines.len();
     }
 
     fn scroll_transcript_down(&mut self, amount: u16) {
         self.transcript_scroll_from_bottom =
             self.transcript_scroll_from_bottom.saturating_sub(amount);
+        self.transcript_follow_latest = self.transcript_scroll_from_bottom == 0;
+        self.transcript_line_count = self.render_primary_body().lines.len();
+    }
+
+    fn max_transcript_scroll_from_bottom_for_line_count(&self, line_count: usize) -> u16 {
+        line_count.saturating_sub(1).min(u16::MAX as usize) as u16
     }
 
     fn max_transcript_scroll_from_bottom(&self) -> u16 {
-        self.render_primary_body()
-            .lines
-            .len()
-            .saturating_sub(1)
-            .min(u16::MAX as usize) as u16
+        self.max_transcript_scroll_from_bottom_for_line_count(
+            self.render_primary_body().lines.len(),
+        )
     }
 
     fn transcript_scroll_y(&self, line_count: usize, panel_height: u16) -> u16 {
