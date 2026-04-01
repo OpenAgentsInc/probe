@@ -23,8 +23,9 @@ use crate::dataset_export::build_decision_summary;
 use crate::provider::{
     PlainTextMessage, ProviderError, ProviderUsage, apple_fm_tool_loop_response,
     apple_fm_tool_loop_response_with_callback, complete_apple_fm_plain_text_with_callback,
-    complete_openai_plain_text_with_callback, complete_plain_text, observability_usage_measurement,
-    openai_tool_loop_response, openai_tool_loop_response_with_callback,
+    complete_openai_plain_text_with_callback, complete_plain_text,
+    normalize_openai_stream_display_text, observability_usage_measurement, openai_tool_loop_response,
+    openai_tool_loop_response_with_callback,
 };
 use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionStoreError};
 use crate::tools::{
@@ -598,6 +599,8 @@ struct OpenAiStreamRuntimeState {
     stream_started: bool,
     ttft_recorded: bool,
     stream_finished: bool,
+    raw_assistant_text: String,
+    rendered_assistant_text: String,
 }
 
 fn emit_openai_stream_events(
@@ -636,14 +639,23 @@ fn emit_openai_stream_events(
         if let Some(content) = choice.delta.content.as_ref()
             && !content.is_empty()
         {
-            emit_runtime_event(
-                event_sink,
-                RuntimeEvent::AssistantDelta {
-                    session_id: session_id.clone(),
-                    round_trip,
-                    delta: content.clone(),
-                },
-            );
+            state.raw_assistant_text.push_str(content);
+            let normalized = normalize_openai_stream_display_text(state.raw_assistant_text.as_str());
+            let delta = normalized
+                .strip_prefix(state.rendered_assistant_text.as_str())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| normalized.clone());
+            state.rendered_assistant_text = normalized;
+            if !delta.is_empty() {
+                emit_runtime_event(
+                    event_sink,
+                    RuntimeEvent::AssistantDelta {
+                        session_id: session_id.clone(),
+                        round_trip,
+                        delta,
+                    },
+                );
+            }
         }
         if let Some(tool_calls) = choice.delta.tool_calls.as_ref()
             && !tool_calls.is_empty()
@@ -3781,6 +3793,18 @@ mod tests {
         assert_eq!(outcome.assistant_text, "hello world");
         let events = collector.snapshot();
         let session_id = outcome.session.id.clone();
+        let deltas = events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::AssistantDelta {
+                    session_id: event_session,
+                    delta,
+                    ..
+                } if event_session == &session_id => Some(delta.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deltas, vec![String::from("hello world")]);
         assert!(events.iter().any(|event| matches!(
             event,
             RuntimeEvent::AssistantTurnCommitted {

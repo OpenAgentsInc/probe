@@ -470,7 +470,7 @@ fn plain_text_provider_response_from_apple_session(
 
 #[must_use]
 pub fn normalize_openai_assistant_text(raw: &str) -> String {
-    normalized_message_envelope_content(raw).unwrap_or_else(|| raw.to_string())
+    normalize_openai_stream_display_text(raw)
 }
 
 #[must_use]
@@ -592,6 +592,12 @@ mod tests {
     #[test]
     fn openai_assistant_text_unwraps_message_envelope() {
         let raw = r#"{"kind":"message","content":"hello from qwen"}"#;
+        assert_eq!(normalize_openai_assistant_text(raw), "hello from qwen");
+    }
+
+    #[test]
+    fn openai_assistant_text_unwraps_truncated_message_envelope() {
+        let raw = r#"{"kind":"message","content":"hello from qwen"#;
         assert_eq!(normalize_openai_assistant_text(raw), "hello from qwen");
     }
 
