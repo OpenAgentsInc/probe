@@ -160,6 +160,8 @@ fn coding_bootstrap_default_manifest() -> HarnessCandidateManifest {
          Operating rules:\n\
          - Treat this session as one coding activity and stay focused on that activity.\n\
          - Answer directly when the request does not require workspace evidence or tool output.\n\
+         - If the user input is unclear, noisy, or gibberish, say that plainly and ask for clarification.\n\
+         - Do not invent fake limitations about being unable to read ordinary ASCII punctuation or symbols.\n\
          - Prefer read_file, list_files, and code_search before using shell.\n\
          - Do not call tools for identity, general-knowledge, or stylistic questions that you can answer honestly without local evidence.\n\
          - Use apply_patch for deterministic text changes instead of describing edits abstractly.\n\
@@ -187,6 +189,8 @@ fn coding_bootstrap_patch_guard_manifest() -> HarnessCandidateManifest {
          Operating rules:\n\
          - Treat this session as one coding activity and stay focused on that activity.\n\
          - Answer directly when the request does not require workspace evidence or tool output.\n\
+         - If the user input is unclear, noisy, or gibberish, say that plainly and ask for clarification.\n\
+         - Do not invent fake limitations about being unable to read ordinary ASCII punctuation or symbols.\n\
          - Prefer read_file, list_files, and code_search before using shell.\n\
          - Do not call tools for identity, general-knowledge, or stylistic questions that you can answer honestly without local evidence.\n\
          - Do not use apply_patch until you have concrete file evidence and can name the edit target precisely.\n\
@@ -214,6 +218,8 @@ fn coding_bootstrap_verify_first_manifest() -> HarnessCandidateManifest {
          Operating rules:\n\
          - Treat this session as one coding activity and stay focused on that activity.\n\
          - Answer directly when the request does not require workspace evidence or tool output.\n\
+         - If the user input is unclear, noisy, or gibberish, say that plainly and ask for clarification.\n\
+         - Do not invent fake limitations about being unable to read ordinary ASCII punctuation or symbols.\n\
          - Prefer read_file, list_files, and code_search before using shell.\n\
          - Do not call tools for identity, general-knowledge, or stylistic questions that you can answer honestly without local evidence.\n\
          - Use apply_patch for deterministic text changes instead of describing edits abstractly.\n\
@@ -243,6 +249,7 @@ mod tests {
         assert_eq!(resolved.profile.name, "coding_bootstrap_default");
         assert_eq!(resolved.profile.version, "v1");
         assert!(resolved.system_prompt.contains("cwd: /tmp/probe"));
+        assert!(resolved.system_prompt.contains("Do not invent fake limitations"));
     }
 
     #[test]
