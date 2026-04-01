@@ -19,6 +19,27 @@ It also builds on the existing Probe direction in:
   - `/Users/christopherdavid/work/docs/probe/03-autopilot-product-surface-and-probe-integration.md`
   - `/Users/christopherdavid/work/docs/probe/04-openai-codex-architecture-and-lessons.md`
 
+Additional code-audit basis:
+
+- reference clone:
+  `/Users/christopherdavid/work/competition/repos/background-agents`
+- audited snapshot commit:
+  `c2ea13dadd72f647a5de0b2ab0c98d5a62dad5f6`
+- primary files reviewed:
+  - `README.md`
+  - `docs/HOW_IT_WORKS.md`
+  - `docs/IMAGE_PREBUILD.md`
+  - `docs/AUTOMATIONS.md`
+  - `packages/control-plane/src/session/message-queue.ts`
+  - `packages/control-plane/src/session/pull-request-service.ts`
+  - `packages/control-plane/src/session/http/handlers/child-sessions.handler.ts`
+  - `packages/control-plane/src/source-control/branch-resolution.ts`
+  - `packages/control-plane/src/sandbox/lifecycle/decisions.ts`
+  - `packages/control-plane/src/sandbox/lifecycle/manager.ts`
+  - `packages/control-plane/src/session/alarm/handler.ts`
+  - `packages/control-plane/src/session/contracts.ts`
+  - `packages/shared/src/git.ts`
+
 This is not a plan to copy Ramp's full product stack.
 
 It is a narrower plan for how Probe should become an honest background coding
@@ -181,6 +202,187 @@ The clean split remains:
 - Probe owns coding-runtime truth
 - `openagents` owns Autopilot product truth
 - `psionic` owns inference or execution substrate truth
+
+## What `background-agents` Proves In Code
+
+The new `background-agents` reference is useful because it turns several of the
+Ramp article's recommendations into actual code instead of just product prose.
+
+Probe should harvest the following ideas.
+
+## 1. A real queued-prompt contract
+
+`packages/control-plane/src/session/message-queue.ts` is the clearest concrete
+example in the repo.
+
+Useful moves:
+
+- persist prompts as queued runtime objects with `pending` and `processing`
+  state
+- acknowledge queue position immediately through a typed `prompt_queued`
+  response
+- carry per-prompt model, reasoning, attachment, and author metadata
+- broadcast coarse `processing_status` truth independently of token streaming
+- synthesize a terminal event when stop or timeout happens mid-execution
+
+Probe should copy the queue discipline, not the exact WebSocket vocabulary.
+
+That means Probe background mode should have explicit turn states such as:
+
+- queued
+- running
+- completed
+- failed
+- cancelled
+
+and a typed way to queue follow-ups while the current turn is still running.
+
+## 2. Guarded child-session spawning
+
+The combination of:
+
+- `packages/control-plane/src/router.ts`
+- `packages/control-plane/src/session/http/handlers/child-sessions.handler.ts`
+
+shows a good first fan-out model.
+
+Useful moves:
+
+- explicit spawn context instead of letting child sessions guess their repo and
+  owner state
+- same-repo guardrails by default
+- bounded spawn depth and bounded concurrent or total children
+- a small child-summary surface instead of forcing the parent to stream the
+  whole child transcript
+- explicit child-session status update events back to the parent session
+
+Probe should copy this bias toward constrained fan-out.
+
+The first Probe session-spawn tool should not be an unconstrained "launch any
+agent anywhere" escape hatch. It should start with:
+
+- same-repo child sessions by default
+- bounded depth
+- bounded child count
+- typed child summaries and status updates
+
+## 3. Delivery state should be deterministic, not ad hoc
+
+`packages/control-plane/src/source-control/branch-resolution.ts`,
+`packages/control-plane/src/session/pull-request-service.ts`, and
+`packages/shared/src/git.ts` show several useful details.
+
+Useful moves:
+
+- deterministic branch-name precedence:
+  - requested branch
+  - existing session branch
+  - generated session branch
+- conservative branch-name sanitization before PR creation
+- update session branch state after push succeeds
+- record branch and PR outputs as session artifacts
+- fall back gracefully when full PR creation auth is unavailable
+
+Probe should copy the deterministic delivery contract.
+
+That means the Probe session model should carry:
+
+- generated branch name
+- resolved active branch name
+- push outcome
+- PR or MR outcome
+- delivery artifacts
+
+Probe should also support a narrow fallback where it can still surface a pushed
+branch artifact even if the forge-specific PR step cannot run.
+
+## 4. Workspace lifecycle policy should be pure and testable
+
+`packages/control-plane/src/sandbox/lifecycle/decisions.ts` is the strongest
+code-level pattern in this repo.
+
+Useful moves:
+
+- keep spawn, restore, warm, cooldown, timeout, and circuit-breaker policy in
+  pure functions
+- let one manager execute side effects after those decisions are made
+- separate connecting timeout from long execution timeout
+- treat restore-from-snapshot, fresh spawn, wait, and skip as explicit states
+
+Probe should copy this architecture directly.
+
+Probe's prepared-workspace subsystem should have a narrow pure-decision layer
+for:
+
+- whether to prepare or reuse a workspace
+- whether to restore, wait, or spawn fresh
+- whether setup is still healthy
+- whether a turn or workspace has timed out
+- whether repeated workspace-launch failures should open a circuit breaker
+
+This is better than scattering that policy across CLI flags, shell scripts, and
+worker code.
+
+## 5. Prepared workspace baselines need explicit boot modes
+
+The `background-agents` docs separate:
+
+- build-time provisioning via `.openinspect/setup.sh`
+- per-session startup via `.openinspect/start.sh`
+
+and they carry explicit boot modes such as:
+
+- `build`
+- `fresh`
+- `repo_image`
+- `snapshot_restore`
+
+Probe should copy the shape, not the exact file names.
+
+The important lesson is to make workspace-prep phases explicit:
+
+- baseline build
+- fresh session start
+- restored-session start
+- per-session runtime startup
+
+That lets Probe move expensive repo-specific work out of the interactive path
+while still keeping per-session startup honest.
+
+## 6. Prebuilt repo baselines should degrade gracefully
+
+`packages/control-plane/src/sandbox/lifecycle/manager.ts` handles repo-image
+lookup as an optimization, not a hard dependency.
+
+That is the right posture for Probe.
+
+Prepared workspace baselines should:
+
+- speed up startup when available
+- fall back cleanly to fresh checkout when missing or stale
+- never make the session unusable just because the cached baseline path failed
+
+Probe should also keep the baseline keyed by repo and base branch, not treat
+"cached workspace" as one global blob.
+
+## 7. Detached runs need watchdogs and recurring-run discipline
+
+`packages/control-plane/src/session/alarm/handler.ts` plus
+`docs/AUTOMATIONS.md` add two useful operational rules:
+
+- long-running work needs a watchdog that can fail a stuck processing turn
+- recurring jobs need strict concurrency and failure semantics
+
+Useful moves:
+
+- execution-timeout watchdog as defense in depth
+- one active run per automation
+- skipped runs when prior work is still active
+- automatic pause after repeated failures
+
+Probe should copy these operational rules when it eventually adds recurring
+background tasks. The first automation lane should stay conservative instead of
+trying to overlap many runs on one repo by default.
 
 ## Current Gap
 
@@ -502,6 +704,9 @@ Ship:
 - typed session and turn APIs
 - typed live event streaming
 - attach, list, inspect, interrupt, and approval APIs
+- an explicit queued-turn contract with queue position and per-turn author
+  metadata
+- pure workspace-lifecycle decision functions separated from provider effects
 
 Success condition:
 
@@ -515,6 +720,7 @@ Ship:
 - detached session execution away from the foreground terminal
 - `probe ps`, `probe attach`, `probe logs`, `probe stop`
 - queued follow-up prompts
+- stop and timeout watchdog behavior for stuck turns
 
 Success condition:
 
@@ -530,6 +736,8 @@ Ship:
 - per-session isolated checkouts
 - prepared workspace baselines
 - workspace sync state and write gating
+- explicit workspace boot modes for fresh, restored, and baseline-backed starts
+- graceful fallback from prepared baselines to fresh workspace start
 
 Success condition:
 
@@ -546,6 +754,8 @@ Ship:
 - delivery state in the session model
 - richer verification artifacts such as test receipts and screenshots where
   available
+- deterministic branch resolution and sanitized head-branch handling
+- branch-only fallback artifacts when PR creation cannot proceed
 
 Success condition:
 
@@ -559,6 +769,7 @@ Ship:
 - child-session status tools
 - authorship-aware prompt records
 - minimal multi-client collaboration semantics
+- same-repo default child-session guardrails plus depth and count limits
 
 Success condition:
 
