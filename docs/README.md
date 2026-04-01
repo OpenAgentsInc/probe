@@ -160,3 +160,8 @@ This folder holds technical planning docs for the Probe runtime.
   - canonical end-to-end map of the offline optimizer subsystem, including
     retained source artifacts, manifest families, the Probe-to-Psionic bridge,
     promotion ledgers, adoption state, and current runtime boundaries
+- `52-self-optimization-loop-and-long-horizon-learning-audit.md`
+  - audit of what Probe still needs for a real self-optimization loop,
+    including optimize-campaign runtime objects, long-horizon study lanes,
+    richer export shapes, isolated candidate worktrees, stronger evals, and
+    promotion-safe adoption stages
