@@ -504,7 +504,7 @@ impl ToolRegistry {
             .register(
                 String::from("shell"),
                 Some(String::from(
-                    "Run a bounded shell command inside the session cwd and capture stdout, stderr, exit code, and timeout state.",
+                    "Run a bounded literal shell command inside the session cwd and capture stdout, stderr, exit code, and timeout state. Do not pass user questions or natural-language requests as command text.",
                 )),
                 Some(shell_parameters()),
                 RegisteredToolRisk::Shell,
@@ -1093,6 +1093,11 @@ fn run_shell(
 ) -> Result<ToolInvocationOutcome, ToolInvocationError> {
     let command_text = expect_string(arguments, "command", "shell")?;
     let timeout_secs = expect_u64(arguments, "timeout_secs").unwrap_or(SHELL_DEFAULT_TIMEOUT_SECS);
+    if looks_like_natural_language_shell_misuse(command_text) {
+        return Err(ToolInvocationError::InvalidArguments(String::from(
+            "shell requires a literal shell command, not a natural-language request",
+        )));
+    }
     if timeout_secs == 0 {
         return Err(ToolInvocationError::InvalidArguments(String::from(
             "shell requires timeout_secs >= 1",
@@ -1708,6 +1713,94 @@ fn denied_tool_invocation(
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn looks_like_natural_language_shell_misuse(command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if trimmed.ends_with('?') {
+        return true;
+    }
+    if contains_any(trimmed, &["\n", "\r"]) {
+        return false;
+    }
+
+    let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 3 {
+        return false;
+    }
+
+    let first = tokens[0].to_ascii_lowercase();
+    if is_common_shell_command(first.as_str()) {
+        return false;
+    }
+
+    let all_word_tokens = tokens.iter().all(|token| {
+        token
+            .chars()
+            .all(|ch| ch.is_ascii_alphabetic() || ch == '\'' || ch == '"')
+    });
+    let has_shell_punctuation = trimmed.chars().any(|ch| {
+        matches!(
+            ch,
+            '/' | '\\' | '.' | '-' | '_' | '=' | ':' | '$' | '~' | '*' | '|' | '&' | ';' | '<'
+                | '>' | '(' | ')' | '[' | ']' | '{' | '}' | '@'
+        )
+    });
+
+    all_word_tokens && !has_shell_punctuation
+}
+
+fn is_common_shell_command(token: &str) -> bool {
+    matches!(
+        token,
+        "ls"
+            | "cat"
+            | "pwd"
+            | "cd"
+            | "git"
+            | "cargo"
+            | "rg"
+            | "grep"
+            | "find"
+            | "sed"
+            | "awk"
+            | "bash"
+            | "sh"
+            | "zsh"
+            | "python"
+            | "python3"
+            | "node"
+            | "npm"
+            | "pnpm"
+            | "yarn"
+            | "uv"
+            | "pip"
+            | "make"
+            | "cmake"
+            | "cp"
+            | "mv"
+            | "rm"
+            | "mkdir"
+            | "touch"
+            | "echo"
+            | "printf"
+            | "whoami"
+            | "uname"
+            | "ps"
+            | "kill"
+            | "chmod"
+            | "chown"
+            | "tar"
+            | "zip"
+            | "unzip"
+            | "brew"
+            | "swift"
+            | "swiftc"
+            | "xcodebuild"
+    )
 }
 
 fn is_read_only_shell_command(command: &str) -> bool {
@@ -2555,6 +2648,33 @@ mod tests {
         assert_eq!(
             results[0].tool_execution.policy_decision,
             ToolPolicyDecision::AutoAllow
+        );
+    }
+
+    #[test]
+    fn shell_rejects_natural_language_requests() {
+        let tempdir = tempdir().expect("tempdir");
+        let registry = ToolRegistry::coding_bootstrap(false, false);
+        let context = ToolExecutionContext::new(tempdir.path());
+        let results = registry.execute_batch(
+            &context,
+            &[ChatToolCall {
+                id: String::from("call_shell"),
+                kind: String::from("function"),
+                function: ChatToolCallFunction {
+                    name: String::from("shell"),
+                    arguments: String::from(
+                        "{\"command\":\"WHAT AI LAB TRAINED YOU\",\"timeout_secs\":2}",
+                    ),
+                },
+            }],
+            &ToolApprovalConfig::allow_all(),
+        );
+
+        assert_eq!(results[0].tool_execution.policy_decision, ToolPolicyDecision::Approved);
+        assert_eq!(
+            results[0].output["error"],
+            "shell requires a literal shell command, not a natural-language request"
         );
     }
 
