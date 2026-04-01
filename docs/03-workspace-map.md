@@ -6,6 +6,9 @@
   - shared protocol-level types and constants
 - `probe-core`
   - controller runtime entrypoint and cross-crate coordination surface
+- `probe-server`
+  - local-first multi-client runtime server boundary with stdio protocol
+    handling and workspace lifecycle planning
 - `probe-provider-openai`
   - backend client crate for OpenAI-compatible local backends
 - `probe-provider-apple-fm`

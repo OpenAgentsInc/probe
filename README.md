@@ -14,6 +14,7 @@ Current shipped surface:
 - `probe codex login|status|logout` for ChatGPT/Codex subscription auth
 - `probe tui` / `cargo probe` for the local terminal UI
 - three inference lanes in the TUI: Qwen or Tailnet, Codex, and Apple FM
+- `probe-server` for the first typed local stdio supervision contract
 - `coding_bootstrap` tools, approvals, and harness profiles
 - append-only local transcripts under `PROBE_HOME` or `~/.probe`
 - bounded oracle and long-context escalation lanes
@@ -68,6 +69,12 @@ Start an interactive Codex-backed session:
 
 ```bash
 cargo run -p probe-cli -- chat --profile openai-codex-subscription
+```
+
+Run the local stdio server contract directly:
+
+```bash
+cargo run -p probe-server -- --probe-home ~/.probe
 ```
 
 Resume a session:

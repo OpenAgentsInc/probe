@@ -188,6 +188,10 @@ This folder holds technical planning docs for the Probe runtime.
     `Qwen|Codex|Apple FM`, Codex-specific prompt contracts for plain and
     tool-enabled turns, and the reproduction path for lane switching and
     hosted Codex execution
+- `58-probe-server-stdio-runtime-protocol.md`
+  - the first shipped `probe-server` contract: JSONL over stdio, explicit
+    session and turn APIs, serializable tool-loop recipes, and typed
+    best-effort versus lossless event classes for first-party clients
 - `59-shared-test-support-and-stable-snapshot-root.md`
   - the completed shared test-support boundary for fake backends, temp Probe
     homes and workspaces, CLI launch helpers, stable snapshot-root setup, and
