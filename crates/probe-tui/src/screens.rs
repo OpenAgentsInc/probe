@@ -2176,8 +2176,17 @@ fn runtime_tool_argument_summary(arguments: &serde_json::Value) -> String {
 }
 
 fn compact_runtime_tool_output_lines(tool: &probe_core::tools::ExecutedToolCall) -> Vec<String> {
-    if let Some(lines) = structured_runtime_tool_output_lines(&tool.output) {
-        return lines;
+    if let Some(mut lines) = structured_runtime_tool_output_lines(&tool.output) {
+        let subject = runtime_tool_subject(tool);
+        if lines
+            .first()
+            .is_some_and(|first| first.as_str() == subject.as_str())
+        {
+            lines.remove(0);
+        }
+        if !lines.is_empty() {
+            return lines;
+        }
     }
 
     let subject = runtime_tool_subject(tool);

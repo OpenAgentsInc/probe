@@ -357,6 +357,63 @@ fn transcript_committed_turn_snapshot_is_stable() {
 }
 
 #[test]
+fn completed_shell_tool_turn_does_not_repeat_command_in_result_body() {
+    let mut app = AppShell::new_for_tests();
+    app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+        session_id: String::from("sess_tui_shell_complete"),
+        profile_name: String::from("psionic-apple-fm-bridge"),
+        model_id: String::from("apple-foundation-model"),
+        cwd: String::from("/tmp/probe-workspace"),
+    });
+    app.apply_message(AppMessage::ProbeRuntimeEvent {
+        event: RuntimeEvent::ToolCallRequested {
+            session_id: probe_protocol::session::SessionId::new("sess_tui_shell_complete"),
+            round_trip: 1,
+            call_id: String::from("apple_fm_call_1"),
+            tool_name: String::from("shell"),
+            arguments: json!({"command":"whoami","timeout_secs":2}),
+        },
+    });
+    app.apply_message(AppMessage::ProbeRuntimeEvent {
+        event: RuntimeEvent::ToolExecutionCompleted {
+            session_id: probe_protocol::session::SessionId::new("sess_tui_shell_complete"),
+            round_trip: 1,
+            tool: ExecutedToolCall {
+                call_id: String::from("apple_fm_call_1"),
+                name: String::from("shell"),
+                arguments: json!({"command":"whoami","timeout_secs":2}),
+                output: json!({
+                    "command": "whoami",
+                    "timeout_secs": 2,
+                    "timed_out": false,
+                    "exit_code": 0,
+                    "stdout": "christopherdavid",
+                    "stderr": "",
+                    "stdout_truncated": false,
+                    "stderr_truncated": false
+                }),
+                tool_execution: ToolExecutionRecord {
+                    risk_class: ToolRiskClass::ShellReadOnly,
+                    policy_decision: ToolPolicyDecision::AutoAllow,
+                    approval_state: ToolApprovalState::NotRequired,
+                    command: Some(String::from("whoami")),
+                    exit_code: Some(0),
+                    timed_out: Some(false),
+                    truncated: Some(false),
+                    bytes_returned: Some(16),
+                    files_touched: Vec::new(),
+                    reason: None,
+                },
+            },
+        },
+    });
+
+    let rendered = app.render_to_string(100, 24);
+    assert!(rendered.matches("whoami").count() <= 1);
+    assert!(rendered.contains("christopherdavid"));
+}
+
+#[test]
 fn stream_failure_keeps_partial_output_visible() {
     let mut app = AppShell::new_for_tests();
     app.apply_message(AppMessage::ProbeRuntimeSessionReady {

@@ -1029,9 +1029,25 @@ fn code_search(
     }
     command.arg(pattern).arg(&search_root);
 
-    let output = command.output().map_err(|error| {
-        ToolInvocationError::ExecutionFailed(format!("failed to run ripgrep: {error}"))
-    })?;
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return code_search_without_ripgrep(
+                context,
+                search_root.as_path(),
+                pattern,
+                requested_path,
+                glob.as_deref(),
+                max_matches,
+                case_sensitive,
+            );
+        }
+        Err(error) => {
+            return Err(ToolInvocationError::ExecutionFailed(format!(
+                "failed to run ripgrep: {error}"
+            )));
+        }
+    };
     let status_code = output.status.code().unwrap_or(-1);
     if !output.status.success() && status_code != 1 {
         let (stderr, _) = truncate_text(String::from_utf8_lossy(&output.stderr).as_ref());
@@ -1085,6 +1101,148 @@ fn code_search(
         bytes_returned: Some(output.stdout.len() as u64),
         files_touched: matched_paths,
     })
+}
+
+fn code_search_without_ripgrep(
+    context: &ToolExecutionContext,
+    search_root: &Path,
+    pattern: &str,
+    requested_path: &str,
+    glob: Option<&str>,
+    max_matches: usize,
+    case_sensitive: bool,
+) -> Result<ToolInvocationOutcome, ToolInvocationError> {
+    let mut matches = Vec::new();
+    let mut hit_limit = false;
+    collect_code_search_matches_without_ripgrep(
+        context.cwd(),
+        search_root,
+        pattern,
+        glob,
+        max_matches,
+        case_sensitive,
+        &mut matches,
+        &mut hit_limit,
+    )?;
+
+    let matched_paths = matches
+        .iter()
+        .filter_map(|entry| entry.get("path").and_then(serde_json::Value::as_str))
+        .map(String::from)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let status_code = if matched_paths.is_empty() { 1 } else { 0 };
+
+    Ok(ToolInvocationOutcome {
+        output: serde_json::json!({
+            "path": requested_path,
+            "pattern": pattern,
+            "glob": glob,
+            "case_sensitive": case_sensitive,
+            "matches": matches,
+            "truncated": hit_limit,
+            "status_code": status_code,
+            "search_backend": "rust_fallback",
+        }),
+        command: None,
+        exit_code: Some(status_code),
+        timed_out: Some(false),
+        truncated: Some(hit_limit),
+        bytes_returned: None,
+        files_touched: matched_paths,
+    })
+}
+
+fn collect_code_search_matches_without_ripgrep(
+    cwd: &Path,
+    path: &Path,
+    pattern: &str,
+    glob: Option<&str>,
+    max_matches: usize,
+    case_sensitive: bool,
+    matches: &mut Vec<serde_json::Value>,
+    hit_limit: &mut bool,
+) -> Result<(), ToolInvocationError> {
+    if matches.len() >= max_matches {
+        *hit_limit = true;
+        return Ok(());
+    }
+
+    if path.is_dir() {
+        let mut entries = fs::read_dir(path)
+            .map_err(|error| ToolInvocationError::ExecutionFailed(format!("failed to read search directory: {error}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ToolInvocationError::ExecutionFailed(format!("failed to read search directory: {error}")))?;
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
+            collect_code_search_matches_without_ripgrep(
+                cwd,
+                entry.path().as_path(),
+                pattern,
+                glob,
+                max_matches,
+                case_sensitive,
+                matches,
+                hit_limit,
+            )?;
+            if *hit_limit {
+                break;
+            }
+        }
+        return Ok(());
+    }
+
+    if !path.is_file() {
+        return Ok(());
+    }
+
+    let relative_path = display_relative_path(cwd, path);
+    if let Some(glob) = glob
+        && !simple_glob_matches(glob, relative_path.as_str())
+    {
+        return Ok(());
+    }
+
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            return Err(ToolInvocationError::ExecutionFailed(format!(
+                "failed to read search file: {error}"
+            )));
+        }
+    };
+    if contents.contains(&0) {
+        return Ok(());
+    }
+    let text = String::from_utf8_lossy(&contents);
+    let needle = if case_sensitive {
+        pattern.to_string()
+    } else {
+        pattern.to_ascii_lowercase()
+    };
+
+    for (index, line) in text.lines().enumerate() {
+        let haystack = if case_sensitive {
+            line.to_string()
+        } else {
+            line.to_ascii_lowercase()
+        };
+        if let Some(column_index) = haystack.find(needle.as_str()) {
+            matches.push(serde_json::json!({
+                "path": relative_path.clone(),
+                "line": index as u64 + 1,
+                "column": column_index as u64 + 1,
+                "snippet": line,
+            }));
+            if matches.len() >= max_matches {
+                *hit_limit = true;
+                break;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn run_shell(
@@ -1728,10 +1886,6 @@ fn looks_like_natural_language_shell_misuse(command: &str) -> bool {
     }
 
     let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
-    if tokens.len() < 3 {
-        return false;
-    }
-
     let first = tokens[0].to_ascii_lowercase();
     if is_common_shell_command(first.as_str()) {
         return false;
@@ -1749,6 +1903,10 @@ fn looks_like_natural_language_shell_misuse(command: &str) -> bool {
                 | '>' | '(' | ')' | '[' | ']' | '{' | '}' | '@'
         )
     });
+
+    if tokens.len() == 1 && all_word_tokens && !has_shell_punctuation {
+        return true;
+    }
 
     all_word_tokens && !has_shell_punctuation
 }
@@ -2251,21 +2409,18 @@ fn render_list_files_model_text(output: &serde_json::Value) -> String {
 }
 
 fn render_code_search_model_text(output: &serde_json::Value) -> String {
-    let path = output
-        .get("path")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(".");
-    let pattern = output
-        .get("pattern")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
     let matches = output
         .get("matches")
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let mut lines = vec![format!("path: {path}"), format!("pattern: {pattern}")];
-    lines.push(format!("matches: {}", matches.len()));
+    let mut lines = vec![format!("matches: {}", matches.len())];
+    if let Some(search_backend) = output
+        .get("search_backend")
+        .and_then(serde_json::Value::as_str)
+    {
+        lines.push(format!("engine: {search_backend}"));
+    }
     if let Some(truncated) = output.get("truncated").and_then(serde_json::Value::as_bool) {
         lines.push(format!("tool_truncated: {truncated}"));
     }
@@ -2295,10 +2450,6 @@ fn render_code_search_model_text(output: &serde_json::Value) -> String {
 }
 
 fn render_shell_model_text(output: &serde_json::Value) -> String {
-    let command = output
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
     let timeout_secs = output
         .get("timeout_secs")
         .and_then(serde_json::Value::as_u64)
@@ -2327,15 +2478,10 @@ fn render_shell_model_text(output: &serde_json::Value) -> String {
         .get("stderr_truncated")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    let mut lines = vec![
-        format!("command: {command}"),
-        format!("timeout_secs: {timeout_secs}"),
-        format!("timed_out: {timed_out}"),
-        format!("exit_code: {exit_code}"),
-    ];
+    let mut lines = vec![format!("timed_out: {timed_out}"), format!("exit_code: {exit_code}")];
     if !stdout.is_empty() {
         lines.push(format!("stdout_truncated: {stdout_truncated}"));
-        lines.push(String::from("stdout:"));
+        lines.push(String::from("output:"));
         lines.extend(stdout.lines().map(ToOwned::to_owned));
     }
     if !stderr.is_empty() {
@@ -2343,7 +2489,29 @@ fn render_shell_model_text(output: &serde_json::Value) -> String {
         lines.push(String::from("stderr:"));
         lines.extend(stderr.lines().map(ToOwned::to_owned));
     }
+    if stdout.is_empty() && stderr.is_empty() {
+        lines.push(format!("timeout_secs: {timeout_secs}"));
+        lines.push(String::from("no output"));
+    }
     lines.join("\n")
+}
+
+fn simple_glob_matches(glob: &str, candidate: &str) -> bool {
+    fn inner(glob: &[u8], candidate: &[u8]) -> bool {
+        if glob.is_empty() {
+            return candidate.is_empty();
+        }
+        match glob[0] {
+            b'*' => inner(&glob[1..], candidate)
+                || (!candidate.is_empty() && inner(glob, &candidate[1..])),
+            b'?' => !candidate.is_empty() && inner(&glob[1..], &candidate[1..]),
+            byte => {
+                !candidate.is_empty() && byte == candidate[0] && inner(&glob[1..], &candidate[1..])
+            }
+        }
+    }
+
+    inner(glob.as_bytes(), candidate.as_bytes())
 }
 
 fn render_apply_patch_model_text(output: &serde_json::Value) -> String {
@@ -2459,7 +2627,8 @@ mod tests {
     use super::{
         ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolExecutionContext,
         ToolLongContextConfig, ToolLongContextContext, ToolLoopConfig, ToolOracleConfig,
-        ToolOracleContext, ToolRegistry, stored_tool_result_model_text, tool_result_model_text,
+        ToolOracleContext, ToolRegistry, code_search_without_ripgrep,
+        stored_tool_result_model_text, tool_result_model_text,
     };
 
     #[test]
@@ -2622,6 +2791,41 @@ mod tests {
     }
 
     #[test]
+    fn code_search_falls_back_when_ripgrep_is_unavailable() {
+        let tempdir = tempdir().expect("tempdir");
+        fs::write(
+            tempdir.path().join("lib.rs"),
+            "fn alpha() {}\nfn beta() {}\n",
+        )
+        .expect("write file");
+        let context = ToolExecutionContext::new(tempdir.path());
+
+        let result = code_search_without_ripgrep(
+            &context,
+            tempdir.path(),
+            "beta",
+            ".",
+            None,
+            5,
+            false,
+        )
+        .expect("fallback code search should succeed");
+
+        let matches = result.output["matches"]
+            .as_array()
+            .expect("matches array");
+        assert_eq!(result.output["search_backend"], "rust_fallback");
+        assert!(!matches.is_empty());
+        assert_eq!(matches[0]["path"], "lib.rs");
+        assert!(
+            matches[0]["snippet"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("beta")
+        );
+    }
+
+    #[test]
     fn coding_bootstrap_runs_bounded_shell_command() {
         let tempdir = tempdir().expect("tempdir");
         let registry = ToolRegistry::coding_bootstrap(false, false);
@@ -2679,6 +2883,30 @@ mod tests {
     }
 
     #[test]
+    fn shell_rejects_single_word_natural_language_requests() {
+        let tempdir = tempdir().expect("tempdir");
+        let registry = ToolRegistry::coding_bootstrap(false, false);
+        let context = ToolExecutionContext::new(tempdir.path());
+        let results = registry.execute_batch(
+            &context,
+            &[ChatToolCall {
+                id: String::from("call_shell"),
+                kind: String::from("function"),
+                function: ChatToolCallFunction {
+                    name: String::from("shell"),
+                    arguments: String::from("{\"command\":\"hello\",\"timeout_secs\":2}"),
+                },
+            }],
+            &ToolApprovalConfig::allow_all(),
+        );
+
+        assert_eq!(
+            results[0].output["error"],
+            "shell requires a literal shell command, not a natural-language request"
+        );
+    }
+
+    #[test]
     fn read_file_model_text_is_plain_and_truncated_for_model_replay() {
         let rendered = tool_result_model_text(
             "read_file",
@@ -2710,6 +2938,27 @@ mod tests {
         assert!(rendered.contains("lines: 1-3 of 3"));
         assert!(rendered.contains("# Probe"));
         assert!(!rendered.contains("\"content\""));
+    }
+
+    #[test]
+    fn shell_model_text_omits_redundant_command_echo() {
+        let rendered = tool_result_model_text(
+            "shell",
+            &serde_json::json!({
+                "command": "whoami",
+                "timeout_secs": 2,
+                "timed_out": false,
+                "exit_code": 0,
+                "stdout": "christopherdavid",
+                "stderr": "",
+                "stdout_truncated": false,
+                "stderr_truncated": false,
+            }),
+        );
+
+        assert!(!rendered.contains("command: whoami"));
+        assert!(rendered.contains("output:"));
+        assert!(rendered.contains("christopherdavid"));
     }
 
     #[test]
