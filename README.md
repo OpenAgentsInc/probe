@@ -178,6 +178,7 @@ Useful focused lanes:
 
 Start with:
 
+- [docs/51-probe-optimizer-system.md](docs/51-probe-optimizer-system.md)
 - [docs/02-runtime-ownership-and-boundaries.md](docs/02-runtime-ownership-and-boundaries.md)
 - [docs/03-workspace-map.md](docs/03-workspace-map.md)
 - [docs/24-apple-fm-backend-lane.md](docs/24-apple-fm-backend-lane.md)

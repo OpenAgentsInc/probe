@@ -156,3 +156,7 @@ This folder holds technical planning docs for the Probe runtime.
     `probe exec`, including prepared backend summaries, backend-aware TUI
     startup, explicit Tailnet versus SSH-forwarded attach posture, and a
     backend overlay instead of local-Apple-FM-only setup chrome
+- `51-probe-optimizer-system.md`
+  - canonical end-to-end map of the offline optimizer subsystem, including
+    retained source artifacts, manifest families, the Probe-to-Psionic bridge,
+    promotion ledgers, adoption state, and current runtime boundaries
