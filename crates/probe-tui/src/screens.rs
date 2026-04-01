@@ -1,9 +1,11 @@
 use std::collections::VecDeque;
+use std::path::PathBuf;
 
 use probe_core::provider::normalize_openai_stream_display_text;
 use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_core::server_control::ServerOperatorSummary;
 use probe_core::tools::tool_result_model_text;
+use probe_openai_auth::OpenAiCodexAuthStore;
 use probe_protocol::session::{PendingToolApproval, ToolApprovalResolution};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -309,6 +311,7 @@ pub struct ChatScreen {
     runtime: ProbeRuntimeState,
     stream: Option<AssistantStreamState>,
     operator_backend: Option<ServerOperatorSummary>,
+    probe_home: Option<PathBuf>,
     setup: AppleFmSetupState,
 }
 
@@ -325,6 +328,7 @@ impl Default for ChatScreen {
             runtime: ProbeRuntimeState::default(),
             stream: None,
             operator_backend: None,
+            probe_home: None,
             setup: AppleFmSetupState::default(),
         };
         screen.record_event("probe tui ready");
@@ -344,6 +348,10 @@ impl ChatScreen {
     pub fn set_backend_selector(&mut self, labels: [String; 2], active_tab: ActiveTab) {
         self.tab_labels = labels;
         self.active_tab = active_tab;
+    }
+
+    pub fn set_probe_home(&mut self, probe_home: Option<PathBuf>) {
+        self.probe_home = probe_home;
     }
 
     pub fn emphasized_copy(&self) -> bool {
@@ -1479,6 +1487,11 @@ impl ChatScreen {
         if let Some(tool) = self.runtime.active_tool.as_deref() {
             lines.push(Line::from(format!("  active_tool: {tool}")));
         }
+        lines.push(Line::from(""));
+        lines.push(Line::from("OpenAI Subscription Auth"));
+        for line in self.render_codex_auth_lines() {
+            lines.push(Line::from(format!("  {line}")));
+        }
         Text::from(lines)
     }
 
@@ -1733,6 +1746,35 @@ impl ChatScreen {
                     .unwrap_or_else(|| String::from("none"))
             ),
         ]
+    }
+
+    fn render_codex_auth_lines(&self) -> Vec<String> {
+        let Some(probe_home) = self.probe_home.as_ref() else {
+            return vec![
+                String::from("status: unavailable"),
+                String::from("reason: no probe_home configured for this lane"),
+            ];
+        };
+        let store = OpenAiCodexAuthStore::new(probe_home);
+        match store.status() {
+            Ok(status) if status.authenticated => vec![
+                String::from("status: connected"),
+                format!("path: {}", status.path.display()),
+                format!("expired: {}", status.expired),
+                format!(
+                    "account_id: {}",
+                    status.account_id.as_deref().unwrap_or("none")
+                ),
+                String::from("manage: `probe codex status` / `probe codex logout`"),
+            ],
+            Ok(status) => vec![
+                String::from("status: disconnected"),
+                format!("path: {}", status.path.display()),
+                String::from("connect: `probe codex login --method browser`"),
+                String::from("headless: `probe codex login --method headless`"),
+            ],
+            Err(error) => vec![String::from("status: error"), format!("detail: {error}")],
+        }
     }
 
     fn render_phase_label(&self) -> &'static str {

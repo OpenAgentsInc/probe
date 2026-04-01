@@ -4,6 +4,7 @@ members = [
     "crates/probe-core",
     "crates/probe-decisions",
     "crates/probe-optimizer",
+    "crates/probe-openai-auth",
     "crates/probe-protocol",
     "crates/probe-provider-apple-fm",
     "crates/probe-provider-openai",
@@ -19,6 +20,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 assert_cmd = "2.0"
+base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.29"
 hex = "0.4"
@@ -27,6 +29,7 @@ predicates = "3.1"
 probe-core = { path = "crates/probe-core" }
 probe-decisions = { path = "crates/probe-decisions" }
 probe-optimizer = { path = "crates/probe-optimizer" }
+probe-openai-auth = { path = "crates/probe-openai-auth" }
 probe-protocol = { path = "crates/probe-protocol" }
 probe-provider-apple-fm = { path = "crates/probe-provider-apple-fm" }
 probe-provider-openai = { path = "crates/probe-provider-openai" }
@@ -34,6 +37,7 @@ probe-test-support = { path = "crates/probe-test-support" }
 probe-tui = { path = "crates/probe-tui" }
 psionic-apple-fm = { git = "https://github.com/OpenAgentsInc/psionic.git", rev = "73e5025a3da04673331141ed33fda91a69cfbc0a", package = "psionic-apple-fm" }
 psionic-optimize = { git = "https://github.com/OpenAgentsInc/psionic.git", rev = "6f245fb64844d12bf4e277440e1d3cd2053d2e30", package = "psionic-optimize" }
+rand = { version = "0.8", features = ["std"] }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }

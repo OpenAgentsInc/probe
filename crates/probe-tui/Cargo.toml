@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 crossterm.workspace = true
 probe-core.workspace = true
+probe-openai-auth.workspace = true
 probe-protocol.workspace = true
 probe-provider-apple-fm.workspace = true
 psionic-apple-fm.workspace = true

@@ -3,8 +3,8 @@ mod acceptance;
 use std::io::{self, Write};
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::process::{Command, ExitCode, Stdio};
+use std::time::Duration;
 
 use acceptance::{
     AcceptanceComparisonConfig, AcceptanceHarnessConfig, default_comparison_report_path,
@@ -39,6 +39,7 @@ use probe_decisions::{
     builtin_decision_module_manifests, evaluate_candidate_manifest, evaluate_long_context_module,
     evaluate_patch_readiness_module, evaluate_tool_route_module,
 };
+use probe_openai_auth::{OpenAiCodexAuthController, OpenAiCodexAuthStatus};
 use probe_optimizer::{
     AdoptionState, DecisionModuleOptimizationBundle, HarnessCandidateEvaluationInput,
     HarnessEvaluationCase, HarnessOptimizationBundle, OptimizationScorecard,
@@ -52,8 +53,7 @@ use probe_protocol::session::{
     BackendTurnReceipt, CacheSignal, SessionHarnessProfile, SessionId, SessionTurn,
     ToolPolicyDecision, ToolRiskClass, UsageMeasurement, UsageTruth,
 };
-use probe_tui::{AppShell, TuiLaunchConfig, UiEvent, run_probe_tui_with_config};
-use serde::Serialize;
+use probe_tui::{TuiLaunchConfig, run_probe_tui_with_config};
 
 #[derive(Parser, Debug)]
 #[command(name = "probe")]
@@ -68,6 +68,7 @@ struct Cli {
 enum Commands {
     Exec(ExecArgs),
     Chat(ChatArgs),
+    Codex(CodexArgs),
     #[command(about = "Launch the current Probe terminal UI")]
     Tui(TuiArgs),
     Accept(AcceptArgs),
@@ -81,6 +82,41 @@ enum Commands {
 }
 
 #[derive(clap::Args, Debug)]
+struct CodexArgs {
+    #[command(subcommand)]
+    command: CodexCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum CodexCommands {
+    Login(CodexLoginArgs),
+    Status(CodexStatusArgs),
+    Logout(CodexLogoutArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct CodexLoginArgs {
+    #[arg(long, default_value = "browser")]
+    method: String,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    no_open_browser: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct CodexStatusArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct CodexLogoutArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
 struct TuiArgs {
     #[arg(long)]
     profile: Option<String>,
@@ -90,16 +126,6 @@ struct TuiArgs {
     probe_home: Option<PathBuf>,
     #[command(flatten)]
     server: ServerArgs,
-    #[arg(long, hide = true)]
-    smoke_prompt: Option<String>,
-    #[arg(long, hide = true)]
-    smoke_wait_for_text: Option<String>,
-    #[arg(long, hide = true)]
-    smoke_wait_for_worker_event: Option<String>,
-    #[arg(long, default_value_t = 5_000, hide = true)]
-    smoke_timeout_ms: u64,
-    #[arg(long, hide = true)]
-    smoke_report_path: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -326,15 +352,6 @@ struct ServerArgs {
     server_reasoning_budget: Option<u8>,
 }
 
-#[derive(Debug, Serialize)]
-struct TuiSmokeReport {
-    final_render: String,
-    recent_events: Vec<String>,
-    worker_events: Vec<String>,
-    runtime_session_id: Option<String>,
-    last_status: String,
-}
-
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -350,6 +367,7 @@ fn run() -> Result<(), String> {
     match cli.command {
         Commands::Exec(args) => run_exec(args),
         Commands::Chat(args) => run_chat(args),
+        Commands::Codex(args) => run_codex(args),
         Commands::Tui(args) => run_tui(args),
         Commands::Accept(args) => run_accept(args),
         Commands::AcceptCompare(args) => run_accept_compare(args),
@@ -362,10 +380,85 @@ fn run() -> Result<(), String> {
     }
 }
 
+fn run_codex(args: CodexArgs) -> Result<(), String> {
+    match args.command {
+        CodexCommands::Login(args) => run_codex_login(args),
+        CodexCommands::Status(args) => run_codex_status(args),
+        CodexCommands::Logout(args) => run_codex_logout(args),
+    }
+}
+
+fn run_codex_login(args: CodexLoginArgs) -> Result<(), String> {
+    let probe_home = args
+        .probe_home
+        .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
+    let controller =
+        OpenAiCodexAuthController::new(probe_home.as_path()).map_err(|error| error.to_string())?;
+    let method = args.method.trim().to_ascii_lowercase();
+    let status = match method.as_str() {
+        "browser" => {
+            let no_open_browser = args.no_open_browser;
+            controller
+                .login_browser(|prompt| {
+                    println!("method=browser");
+                    println!("authorize_url={}", prompt.authorize_url);
+                    println!("redirect_uri={}", prompt.redirect_uri);
+                    if no_open_browser {
+                        println!("browser=skipped");
+                    } else if try_open_browser(prompt.authorize_url.as_str()) {
+                        println!("browser=opened");
+                    } else {
+                        println!("browser=manual");
+                    }
+                    println!("action=complete_authorization_in_browser");
+                })
+                .map_err(|error| error.to_string())?
+        }
+        "device" | "headless" => controller
+            .login_device(|prompt| {
+                println!("method=headless");
+                println!("verification_url={}", prompt.verification_url);
+                println!("user_code={}", prompt.user_code);
+                println!("action=enter_code_then_wait_for_probe");
+            })
+            .map_err(|error| error.to_string())?,
+        other => {
+            return Err(format!(
+                "unsupported Codex login method `{other}`; expected `browser` or `headless`"
+            ));
+        }
+    };
+    print_codex_auth_record("status=authenticated", &status);
+    Ok(())
+}
+
+fn run_codex_status(args: CodexStatusArgs) -> Result<(), String> {
+    let probe_home = args
+        .probe_home
+        .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
+    let controller =
+        OpenAiCodexAuthController::new(probe_home.as_path()).map_err(|error| error.to_string())?;
+    let status = controller.status().map_err(|error| error.to_string())?;
+    print_codex_auth_status(&status);
+    Ok(())
+}
+
+fn run_codex_logout(args: CodexLogoutArgs) -> Result<(), String> {
+    let probe_home = args
+        .probe_home
+        .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
+    let controller =
+        OpenAiCodexAuthController::new(probe_home.as_path()).map_err(|error| error.to_string())?;
+    let status = controller.status().map_err(|error| error.to_string())?;
+    let deleted = controller.clear().map_err(|error| error.to_string())?;
+    println!("path={}", status.path.display());
+    println!("deleted={deleted}");
+    Ok(())
+}
+
 fn run_tui(args: TuiArgs) -> Result<(), String> {
     let probe_home = args
         .probe_home
-        .clone()
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
     let desired_profile =
         resolve_tui_profile(probe_home.as_path(), args.profile.as_deref(), &args.server)?;
@@ -391,81 +484,12 @@ fn run_tui(args: TuiArgs) -> Result<(), String> {
             (profile, summary, Some(server_guard))
         }
     };
-    let cwd = args.cwd.clone();
     let launch_config = TuiLaunchConfig {
-        chat_runtime: build_tui_runtime_config(Some(probe_home), cwd, profile.clone())?,
+        chat_runtime: build_tui_runtime_config(Some(probe_home), args.cwd, profile.clone())?,
         operator_backend,
         autostart_apple_fm_setup: profile.kind == BackendKind::AppleFmBridge,
     };
-    if args.smoke_prompt.is_some() {
-        return run_tui_smoke(launch_config, &args);
-    }
     run_probe_tui_with_config(launch_config).map_err(|error| error.to_string())
-}
-
-fn run_tui_smoke(config: TuiLaunchConfig, args: &TuiArgs) -> Result<(), String> {
-    let prompt = args
-        .smoke_prompt
-        .as_deref()
-        .ok_or_else(|| String::from("tui smoke mode requires --smoke-prompt"))?;
-    let mut app = AppShell::new_with_launch_config(config);
-    for character in prompt.chars() {
-        if character == '\n' {
-            app.dispatch(UiEvent::ComposerNewline);
-        } else {
-            app.dispatch(UiEvent::ComposerInsert(character));
-        }
-    }
-    app.dispatch(UiEvent::ComposerSubmit);
-
-    let deadline = Instant::now() + Duration::from_millis(args.smoke_timeout_ms);
-    loop {
-        app.poll_background_messages();
-        let final_render = app.render_to_string(120, 32);
-        let worker_events = app.worker_events();
-        let render_ready = args
-            .smoke_wait_for_text
-            .as_ref()
-            .is_none_or(|needle| final_render.contains(needle));
-        let worker_ready = args
-            .smoke_wait_for_worker_event
-            .as_ref()
-            .is_none_or(|needle| worker_events.iter().any(|entry| entry.contains(needle)));
-
-        if render_ready && worker_ready {
-            let report = TuiSmokeReport {
-                final_render,
-                recent_events: app.recent_events(),
-                worker_events,
-                runtime_session_id: app.runtime_session_id().map(String::from),
-                last_status: app.last_status().to_string(),
-            };
-            let encoded = serde_json::to_string_pretty(&report)
-                .map_err(|error| format!("failed to encode tui smoke report: {error}"))?;
-            if let Some(path) = args.smoke_report_path.as_ref() {
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|error| format!("failed to create report directory: {error}"))?;
-                }
-                std::fs::write(path, encoded)
-                    .map_err(|error| format!("failed to write tui smoke report: {error}"))?;
-            } else {
-                println!("{encoded}");
-            }
-            return Ok(());
-        }
-
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "tui smoke timed out waiting for the requested conditions; last_status={} runtime_session={} worker_events={}",
-                app.last_status(),
-                app.runtime_session_id().unwrap_or("none"),
-                app.worker_events().join(" | "),
-            ));
-        }
-
-        std::thread::sleep(Duration::from_millis(10));
-    }
 }
 
 fn run_exec(args: ExecArgs) -> Result<(), String> {
@@ -1461,6 +1485,55 @@ fn print_backend_target_summary_from_summary(
             "remote_contract inference_only=true local_probe_owns=sessions,transcripts,tools,approvals,ui"
         );
     }
+}
+
+fn print_codex_auth_record(prefix: &str, record: &probe_openai_auth::OpenAiCodexAuthRecord) {
+    println!("{prefix}");
+    println!("expires_ms={}", record.expires);
+    println!(
+        "account_id={}",
+        record.account_id.as_deref().unwrap_or("none")
+    );
+}
+
+fn print_codex_auth_status(status: &OpenAiCodexAuthStatus) {
+    println!("path={}", status.path.display());
+    println!("authenticated={}", status.authenticated);
+    println!("expired={}", status.expired);
+    println!(
+        "expires_ms={}",
+        status
+            .expires
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| String::from("none"))
+    );
+    println!(
+        "account_id={}",
+        status.account_id.as_deref().unwrap_or("none")
+    );
+    if !status.authenticated {
+        println!("hint=run `probe codex login --method browser`");
+    }
+}
+
+fn try_open_browser(url: &str) -> bool {
+    let commands: [(&str, &[&str]); 3] =
+        [("open", &[]), ("xdg-open", &[]), ("cmd", &["/C", "start"])];
+    for (program, fixed_args) in commands {
+        let mut command = Command::new(program);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        for arg in fixed_args {
+            command.arg(arg);
+        }
+        command.arg(url);
+        if command.status().is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 fn resolve_tool_loop(

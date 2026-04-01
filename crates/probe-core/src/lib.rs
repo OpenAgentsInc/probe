@@ -23,6 +23,7 @@ pub fn runtime_bootstrap() -> RuntimeBootstrap {
         crate_boundaries: vec![
             "probe-protocol",
             "probe-core",
+            "probe-openai-auth",
             "probe-provider-apple-fm",
             "probe-provider-openai",
             "probe-cli",
@@ -40,8 +41,9 @@ mod tests {
     fn bootstrap_mentions_all_initial_crates() {
         let bootstrap = runtime_bootstrap();
         assert_eq!(bootstrap.protocol.version, 1);
-        assert_eq!(bootstrap.crate_boundaries.len(), 5);
+        assert_eq!(bootstrap.crate_boundaries.len(), 6);
         assert!(bootstrap.crate_boundaries.contains(&"probe-cli"));
+        assert!(bootstrap.crate_boundaries.contains(&"probe-openai-auth"));
         assert!(
             bootstrap
                 .crate_boundaries

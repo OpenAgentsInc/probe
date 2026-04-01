@@ -1,6 +1,7 @@
 use assert_cmd::prelude::*;
 use insta::{assert_json_snapshot, assert_snapshot};
 use predicates::prelude::*;
+use probe_openai_auth::{OpenAiCodexAuthRecord, OpenAiCodexAuthStore};
 use probe_test_support::{
     FakeOpenAiServer, ProbeTestEnvironment, configure_snapshot_root,
     normalize_exec_stderr_for_snapshot, normalized_acceptance_report_snapshot, probe_cli_command,
@@ -90,6 +91,49 @@ fn tui_help_is_available() {
         .stdout(predicate::str::contains(
             "Launch the current Probe terminal UI",
         ));
+}
+
+#[test]
+fn codex_status_reports_missing_auth_state() {
+    let environment = ProbeTestEnvironment::new();
+
+    probe_cli_command()
+        .arg("codex")
+        .arg("status")
+        .arg("--probe-home")
+        .arg(environment.probe_home())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("authenticated=false"))
+        .stdout(predicate::str::contains(
+            "hint=run `probe codex login --method browser`",
+        ));
+}
+
+#[test]
+fn codex_logout_removes_persisted_auth_state() {
+    let environment = ProbeTestEnvironment::new();
+    let store = OpenAiCodexAuthStore::new(environment.probe_home());
+    store
+        .save(&OpenAiCodexAuthRecord {
+            refresh: String::from("refresh-token"),
+            access: String::from("access-token"),
+            expires: 1234,
+            account_id: Some(String::from("acct-logout")),
+        })
+        .expect("seed auth state");
+    assert!(store.path().exists(), "seeded auth file should exist");
+
+    probe_cli_command()
+        .arg("codex")
+        .arg("logout")
+        .arg("--probe-home")
+        .arg(environment.probe_home())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("deleted=true"));
+
+    assert!(!store.path().exists(), "logout should delete the auth file");
 }
 
 #[test]

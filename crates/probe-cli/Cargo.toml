@@ -9,6 +9,7 @@ clap.workspace = true
 probe-core.workspace = true
 probe-decisions.workspace = true
 probe-optimizer.workspace = true
+probe-openai-auth.workspace = true
 probe-protocol.workspace = true
 probe-tui.workspace = true
 serde.workspace = true

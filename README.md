@@ -11,6 +11,7 @@ Current shipped surface:
 
 - `probe exec` for one-shot turns
 - `probe chat` for interactive sessions plus resume
+- `probe codex login|status|logout` for ChatGPT/Codex subscription auth
 - `probe tui` / `cargo probe` for the local terminal UI
 - `coding_bootstrap` tools, approvals, and harness profiles
 - append-only local transcripts under `PROBE_HOME` or `~/.probe`
@@ -67,6 +68,24 @@ cargo run -p probe-cli -- exec \
   --tool-choice auto \
   "Read README.md and summarize what this repository does."
 ```
+
+Manage ChatGPT/Codex subscription auth:
+
+```bash
+# browser PKCE flow
+cargo run -p probe-cli -- codex login --method browser
+
+# headless device flow
+cargo run -p probe-cli -- codex login --method headless
+
+# inspect or clear persisted auth state
+cargo run -p probe-cli -- codex status
+cargo run -p probe-cli -- codex logout
+```
+
+Probe persists this state at `PROBE_HOME/auth/openai-codex.json` with private
+file permissions. The current TUI backend overlay also shows whether that auth
+state exists and whether it is expired.
 
 ## TUI
 

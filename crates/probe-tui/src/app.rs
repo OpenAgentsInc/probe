@@ -748,6 +748,7 @@ fn build_chat_lane(
         ],
         active_tab,
     );
+    screen.set_probe_home(backend_lanes[lane_index].chat_runtime.probe_home.clone());
     screen.set_operator_backend(backend_lanes[lane_index].operator_backend.clone());
     screen
 }
