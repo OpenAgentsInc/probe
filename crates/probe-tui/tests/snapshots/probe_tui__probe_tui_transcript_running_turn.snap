@@ -11,7 +11,7 @@ expression: snapshot
 │ [user] You                                                                   │
 │   Summarize what Probe owns.                                                 │
 │                                                                              │
-│ [active tool] Tool Requested: read_file                                      │
+│ [tool call] read_file                                                        │
 │   README.md                                                                  │
 │                                                                              │
 │                                                                              │

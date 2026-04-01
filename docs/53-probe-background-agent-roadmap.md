@@ -423,7 +423,7 @@ Probe now ships a canonical local `probe-server` path for:
 The remaining gap is no longer "add a daemon transport," "add a detached
 registry," or "add detached watch." It is:
 
-- first-party chat and TUI adoption of daemon attach flows
+- downstream consumer adoption above the shipped Probe daemon seam
 - richer remote execution and workspace ownership beyond the local daemon
 
 ## 2. Remote inference is not remote execution
@@ -764,7 +764,7 @@ Success condition:
 
 ## Phase 2: Detached local daemon mode
 
-Phase 2 is now mostly shipped locally.
+Phase 2 is now shipped locally inside Probe itself.
 
 Shipped:
 
@@ -774,6 +774,8 @@ Shipped:
   contract
 - `probe daemon run|stop`
 - `probe ps`, `probe attach`, `probe logs`, `probe stop`
+- daemon-backed `probe chat` with explicit resume
+- daemon-backed TUI attach or resume flows through `probe tui --resume`
 - detached queued follow-up prompts away from the foreground client process
 - push-style session status updates for detached work instead of poll-only
   queue inspection
@@ -781,7 +783,6 @@ Shipped:
 
 Still open in Phase 2:
 
-- first-party daemon attach adoption in `probe chat` and the TUI
 - first consumer adoption from Autopilot sidecar launch in `openagents`
 
 Success condition:
@@ -790,8 +791,8 @@ Success condition:
   losing runtime state
 - a second first-party client can reattach to the same daemon-owned session
   without fabricating a second runtime
-- the remaining local gap is no longer operator control or timeout policy, but
-  default client adoption
+- the remaining local gap is no longer operator control, timeout policy, or
+  first-party attach semantics, but downstream consumer adoption
 
 ## Phase 3: Remote worker mode
 

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
-use probe_client::{ProbeClient, ProbeClientConfig, ProbeClientError};
+use probe_client::{ProbeClient, ProbeClientConfig, ProbeClientError, ProbeClientTransportConfig};
 use probe_core::provider::{
     PlainTextMessage, PlainTextProviderResponse, ProviderError, ProviderUsageTruth,
     complete_plain_text, normalize_openai_assistant_text,
@@ -132,6 +132,9 @@ fn run_request(
 ) {
     match request {
         BackgroundTaskRequest::AppleFmSetup { profile } => run_apple_fm_setup(profile, message_tx),
+        BackgroundTaskRequest::AttachProbeRuntimeSession { session_id, config } => {
+            run_attach_probe_runtime_session(session_id, config, message_tx, state)
+        }
         BackgroundTaskRequest::ProbeRuntimeTurn { prompt, config } => {
             run_probe_runtime_turn(prompt, config, message_tx, state)
         }
@@ -144,6 +147,69 @@ fn run_request(
             session_id, call_id, resolution, config, message_tx, state,
         ),
     }
+}
+
+fn run_attach_probe_runtime_session(
+    session_id: String,
+    config: ProbeRuntimeTurnConfig,
+    message_tx: &Sender<AppMessage>,
+    state: &mut WorkerState,
+) {
+    let mut client = match resolve_probe_client(config.probe_home.clone()) {
+        Ok(client) => client,
+        Err(error) => {
+            let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
+                entry: TranscriptEntry::new(
+                    TranscriptRole::Status,
+                    "Runtime Error",
+                    vec![error.to_string()],
+                ),
+            });
+            return;
+        }
+    };
+
+    let response = match client.inspect_detached_session(&SessionId::new(session_id.clone())) {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
+                entry: TranscriptEntry::new(
+                    TranscriptRole::Status,
+                    "Runtime Error",
+                    vec![error.to_string()],
+                ),
+            });
+            return;
+        }
+    };
+
+    let previous_turns = state.rendered_turns_for_session(&response.session.session.id);
+    if emit_session_ready(message_tx, &response.session.session, &config).is_err() {
+        return;
+    }
+    if emit_transcript_delta(
+        message_tx,
+        Ok(response.session.transcript.clone()),
+        previous_turns,
+    )
+    .is_err()
+    {
+        return;
+    }
+    if message_tx
+        .send(AppMessage::PendingToolApprovalsUpdated {
+            session_id,
+            approvals: response.session.pending_approvals.clone(),
+        })
+        .is_err()
+    {
+        return;
+    }
+    state.upsert_runtime_session(ProbeRuntimeSessionState::from_metadata(
+        &response.session.session,
+        &config,
+        response.session.transcript.len(),
+    ));
 }
 
 fn run_probe_runtime_turn(
@@ -535,7 +601,8 @@ fn resolve_probe_client(
     };
     let mut config = ProbeClientConfig::new(probe_home, "probe-tui");
     config.client_version = Some(String::from(env!("CARGO_PKG_VERSION")));
-    ProbeClient::spawn(config)
+    config.transport = ProbeClientTransportConfig::LocalDaemon { socket_path: None };
+    ProbeClient::connect_or_autostart_local_daemon(config, std::time::Duration::from_secs(3))
 }
 
 fn forward_runtime_event(message_tx: &Sender<AppMessage>, event: RuntimeEvent) {

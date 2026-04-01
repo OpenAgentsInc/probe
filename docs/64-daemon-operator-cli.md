@@ -102,5 +102,5 @@ Current limits remain:
 
 - the daemon is still effectively single-connection in practice
 - `probe stop` is only as cooperative as the existing runtime interrupt path
-- first-party `probe chat` and TUI default daemon attach flows still live in
-  the next Phase 2 issue
+- the operator CLI now shares the same daemon seam as `probe chat` and
+  `probe tui --resume`, but remote worker attach still does not exist

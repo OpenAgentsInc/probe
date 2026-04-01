@@ -4,6 +4,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use probe_core::provider::{ProviderUsage, ProviderUsageMeasurement, ProviderUsageTruth};
 use probe_core::runtime::{
@@ -34,6 +36,7 @@ use probe_protocol::{PROBE_PROTOCOL_VERSION, default_local_daemon_socket_path};
 use std::os::unix::net::UnixStream;
 
 pub const INTERNAL_SERVER_SUBCOMMAND: &str = "__internal-probe-server";
+pub const INTERNAL_DAEMON_SUBCOMMAND: &str = "__internal-probe-daemon";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProbeClientConfig {
@@ -96,16 +99,16 @@ impl Display for ProbeClientError {
             Self::CurrentExecutable(error) => {
                 write!(
                     f,
-                    "failed to resolve current executable for probe-server spawn: {error}"
+                    "failed to resolve current executable for Probe helper spawn: {error}"
                 )
             }
-            Self::Spawn(error) => write!(f, "failed to spawn probe-server: {error}"),
+            Self::Spawn(error) => write!(f, "failed to spawn Probe helper process: {error}"),
             Self::ConnectDaemon(error) => {
                 write!(f, "failed to connect to probe-daemon: {error}")
             }
             Self::MissingChildStdin => write!(f, "probe-server child did not expose stdin"),
             Self::MissingChildStdout => write!(f, "probe-server child did not expose stdout"),
-            Self::Io(error) => write!(f, "probe-server io error: {error}"),
+            Self::Io(error) => write!(f, "Probe runtime io error: {error}"),
             Self::Json(error) => write!(f, "probe-server protocol json error: {error}"),
             Self::Protocol(error) => write!(f, "{} ({})", error.message, error.code),
             Self::SessionScopedProtocol { source, .. } => {
@@ -197,6 +200,21 @@ impl ProbeClient {
             }
         }
         Ok(client)
+    }
+
+    pub fn connect_or_autostart_local_daemon(
+        config: ProbeClientConfig,
+        wait_timeout: Duration,
+    ) -> Result<Self, ProbeClientError> {
+        match Self::connect(config.clone()) {
+            Ok(client) => Ok(client),
+            Err(error) if is_missing_local_daemon_error(&error) => {
+                spawn_local_daemon(config.probe_home.as_path())?;
+                wait_for_local_daemon(&config, wait_timeout)?;
+                Self::connect(config)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn exec_plain_text(
@@ -747,6 +765,16 @@ fn build_transport(config: &ProbeClientConfig) -> Result<ClientTransport, ProbeC
     }
 }
 
+pub fn is_missing_local_daemon_error(error: &ProbeClientError) -> bool {
+    match error {
+        ProbeClientError::ConnectDaemon(source) => matches!(
+            source.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+        ),
+        _ => false,
+    }
+}
+
 fn spawn_server_transport(config: &ProbeClientConfig) -> Result<ClientTransport, ProbeClientError> {
     let mut command = build_server_command(config)?;
     let mut child = command.spawn().map_err(ProbeClientError::Spawn)?;
@@ -820,6 +848,57 @@ fn build_server_command(config: &ProbeClientConfig) -> Result<Command, ProbeClie
     Ok(command)
 }
 
+fn spawn_local_daemon(probe_home: &Path) -> Result<(), ProbeClientError> {
+    let mut command = build_daemon_command()?;
+    command
+        .arg("--probe-home")
+        .arg(probe_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.spawn().map_err(ProbeClientError::Spawn)?;
+    Ok(())
+}
+
+fn build_daemon_command() -> Result<Command, ProbeClientError> {
+    if let Some(path) = env::var_os("PROBE_DAEMON_BIN").map(PathBuf::from) {
+        let mut command = Command::new(path);
+        command.arg("run");
+        return Ok(command);
+    }
+
+    let current_exe = env::current_exe().map_err(ProbeClientError::CurrentExecutable)?;
+    let sibling_daemon = sibling_named_binary_path(current_exe.as_path(), "probe-daemon");
+    if sibling_daemon.exists() {
+        let mut command = Command::new(sibling_daemon);
+        command.arg("run");
+        return Ok(command);
+    }
+
+    let mut command = Command::new(current_exe);
+    command.arg(INTERNAL_DAEMON_SUBCOMMAND);
+    Ok(command)
+}
+
+fn wait_for_local_daemon(
+    config: &ProbeClientConfig,
+    wait_timeout: Duration,
+) -> Result<(), ProbeClientError> {
+    let deadline = Instant::now() + wait_timeout;
+    loop {
+        match ProbeClient::connect(config.clone()) {
+            Ok(client) => {
+                drop(client);
+                return Ok(());
+            }
+            Err(error) if is_missing_local_daemon_error(&error) && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn explicit_server_binary(config: &ProbeClientConfig) -> Option<PathBuf> {
     config
         .server_binary
@@ -828,6 +907,10 @@ fn explicit_server_binary(config: &ProbeClientConfig) -> Option<PathBuf> {
 }
 
 fn sibling_probe_server_path(current_exe: &Path) -> PathBuf {
+    sibling_named_binary_path(current_exe, "probe-server")
+}
+
+fn sibling_named_binary_path(current_exe: &Path, binary_name: &str) -> PathBuf {
     let base_dir = current_exe
         .parent()
         .and_then(|parent| {
@@ -838,7 +921,7 @@ fn sibling_probe_server_path(current_exe: &Path) -> PathBuf {
             }
         })
         .unwrap_or_else(|| Path::new("."));
-    base_dir.join(format!("probe-server{}", env::consts::EXE_SUFFIX))
+    base_dir.join(format!("{binary_name}{}", env::consts::EXE_SUFFIX))
 }
 
 fn tool_loop_recipe_from_config(

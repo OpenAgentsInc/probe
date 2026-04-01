@@ -4,7 +4,6 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use acceptance::{
@@ -15,8 +14,8 @@ use acceptance::{
 };
 use clap::{Parser, Subcommand};
 use probe_client::{
-    INTERNAL_SERVER_SUBCOMMAND, ProbeClient, ProbeClientConfig, ProbeClientError,
-    ProbeClientTransportConfig,
+    INTERNAL_DAEMON_SUBCOMMAND, INTERNAL_SERVER_SUBCOMMAND, ProbeClient, ProbeClientConfig,
+    ProbeClientError, ProbeClientTransportConfig, is_missing_local_daemon_error,
 };
 use probe_core::backend_profiles::{
     PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE,
@@ -59,8 +58,8 @@ use probe_optimizer::{
 use probe_protocol::backend::BackendKind;
 use probe_protocol::runtime::{
     DetachedSessionEventPayload, DetachedSessionEventRecord, DetachedSessionEventTruth,
-    DetachedSessionRecoveryState, DetachedSessionStatus, RuntimeProgressEvent,
-    SessionTurnControlRecord, WatchDetachedSessionRequest,
+    DetachedSessionRecoveryState, DetachedSessionStatus, InspectDetachedSessionResponse,
+    RuntimeProgressEvent, SessionTurnControlRecord, WatchDetachedSessionRequest,
 };
 use probe_protocol::session::{
     BackendTurnReceipt, CacheSignal, SessionHarnessProfile, SessionId, SessionTurn,
@@ -71,8 +70,6 @@ use probe_server::detached_watchdog::DetachedTurnWatchdogPolicy;
 use probe_server::server::{run_local_daemon_with_watchdog_policy, run_stdio_server};
 use probe_tui::{AppShell, TuiLaunchConfig, UiEvent, run_probe_tui_with_config};
 use serde::Serialize;
-
-const INTERNAL_DAEMON_SUBCOMMAND: &str = "__internal-probe-daemon";
 
 #[derive(Parser, Debug)]
 #[command(name = "probe")]
@@ -231,6 +228,8 @@ struct InternalDaemonArgs {
 #[derive(clap::Args, Debug)]
 struct TuiArgs {
     #[arg(long)]
+    resume: Option<String>,
+    #[arg(long)]
     profile: Option<String>,
     #[arg(long)]
     cwd: Option<PathBuf>,
@@ -240,6 +239,8 @@ struct TuiArgs {
     server: ServerArgs,
     #[arg(long, hide = true)]
     smoke_prompt: Option<String>,
+    #[arg(long, default_value_t = false, hide = true)]
+    smoke_attach_only: bool,
     #[arg(long, hide = true)]
     smoke_wait_for_text: Option<String>,
     #[arg(long, hide = true)]
@@ -617,12 +618,26 @@ fn run_codex_logout(args: CodexLogoutArgs) -> Result<(), String> {
 }
 
 fn run_tui(args: TuiArgs) -> Result<(), String> {
+    if args.resume.is_some() && (args.profile.is_some() || args.cwd.is_some()) {
+        return Err(String::from(
+            "resume does not accept --profile or --cwd overrides; use the stored detached session settings",
+        ));
+    }
+
     let probe_home = args
         .probe_home
         .clone()
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
-    let desired_profile =
-        resolve_tui_profile(probe_home.as_path(), args.profile.as_deref(), &args.server)?;
+    let resume_session = args
+        .resume
+        .as_deref()
+        .map(|session_id| load_detached_session_for_resume(probe_home.clone(), session_id))
+        .transpose()?;
+    let desired_profile = if let Some(session) = resume_session.as_ref() {
+        detached_session_profile(session)?
+    } else {
+        resolve_tui_profile(probe_home.as_path(), args.profile.as_deref(), &args.server)?
+    };
     let config = resolve_server_config(probe_home.as_path(), &args.server, desired_profile.kind)?;
     let (profile, operator_backend, _server_guard) = match config.mode {
         PsionicServerMode::Attach => {
@@ -648,32 +663,41 @@ fn run_tui(args: TuiArgs) -> Result<(), String> {
     let launch_config = TuiLaunchConfig {
         chat_runtime: build_tui_runtime_config(
             Some(probe_home),
-            args.cwd.clone(),
+            resume_session
+                .as_ref()
+                .map(|session| session.session.session.cwd.clone())
+                .or_else(|| args.cwd.clone()),
             profile.clone(),
         )?,
         operator_backend,
-        autostart_apple_fm_setup: profile.kind == BackendKind::AppleFmBridge,
+        autostart_apple_fm_setup: args.resume.is_none()
+            && profile.kind == BackendKind::AppleFmBridge,
+        resume_session_id: resume_session
+            .as_ref()
+            .map(|session| session.session.session.id.as_str().to_string()),
     };
-    if args.smoke_prompt.is_some() {
+    if args.smoke_prompt.is_some() || args.smoke_attach_only {
         return run_tui_smoke(launch_config, &args);
     }
     run_probe_tui_with_config(launch_config).map_err(|error| error.to_string())
 }
 
 fn run_tui_smoke(config: TuiLaunchConfig, args: &TuiArgs) -> Result<(), String> {
-    let prompt = args
-        .smoke_prompt
-        .as_deref()
-        .ok_or_else(|| String::from("tui smoke mode requires --smoke-prompt"))?;
     let mut app = AppShell::new_with_launch_config(config);
-    for character in prompt.chars() {
-        if character == '\n' {
-            app.dispatch(UiEvent::ComposerNewline);
-        } else {
-            app.dispatch(UiEvent::ComposerInsert(character));
+    if !args.smoke_attach_only {
+        let prompt = args
+            .smoke_prompt
+            .as_deref()
+            .ok_or_else(|| String::from("tui smoke mode requires --smoke-prompt"))?;
+        for character in prompt.chars() {
+            if character == '\n' {
+                app.dispatch(UiEvent::ComposerNewline);
+            } else {
+                app.dispatch(UiEvent::ComposerInsert(character));
+            }
         }
+        app.dispatch(UiEvent::ComposerSubmit);
     }
-    app.dispatch(UiEvent::ComposerSubmit);
 
     let deadline = Instant::now() + Duration::from_millis(args.smoke_timeout_ms);
     loop {
@@ -849,7 +873,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
     let probe_home = args
         .probe_home
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
-    let mut client = resolve_client(probe_home.clone(), "chat")?;
+    let mut client = resolve_daemon_client(probe_home.clone(), "chat", true)?;
     let initial_profile_name = match (&args.resume, args.profile.as_deref()) {
         (_, Some(profile)) => profile.to_string(),
         (Some(session_id), None) => client
@@ -1264,79 +1288,17 @@ fn resolve_daemon_client(
     surface: &str,
     autostart: bool,
 ) -> Result<ProbeClient, String> {
-    match try_daemon_client(probe_home.clone(), surface) {
-        Ok(client) => Ok(client),
-        Err(error) if autostart && missing_local_daemon(&error) => {
-            spawn_background_daemon(probe_home.as_path())?;
-            wait_for_daemon_client(probe_home.clone(), surface, Duration::from_secs(3))?;
-            try_daemon_client(probe_home, surface).map_err(|error| error.to_string())
-        }
-        Err(error) => Err(error.to_string()),
+    let config = daemon_client_config(probe_home, surface);
+    if autostart {
+        ProbeClient::connect_or_autostart_local_daemon(config, Duration::from_secs(3))
+            .map_err(|error| error.to_string())
+    } else {
+        ProbeClient::connect(config).map_err(|error| error.to_string())
     }
 }
 
 fn missing_local_daemon(error: &ProbeClientError) -> bool {
-    matches!(
-        error,
-        ProbeClientError::ConnectDaemon(io_error)
-            if matches!(
-                io_error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-            )
-    )
-}
-
-fn spawn_background_daemon(probe_home: &Path) -> Result<(), String> {
-    let mut command = build_daemon_command()?;
-    command
-        .arg("--probe-home")
-        .arg(probe_home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("failed to spawn probe-daemon: {error}"))
-}
-
-fn build_daemon_command() -> Result<Command, String> {
-    let current_exe = std::env::current_exe().map_err(|error| error.to_string())?;
-    let sibling_daemon = sibling_named_binary_path(current_exe.as_path(), "probe-daemon");
-    if sibling_daemon.exists() {
-        let mut command = Command::new(sibling_daemon);
-        command.arg("run");
-        return Ok(command);
-    }
-    let mut command = Command::new(current_exe);
-    command.arg(INTERNAL_DAEMON_SUBCOMMAND);
-    Ok(command)
-}
-
-fn sibling_named_binary_path(current_exe: &Path, name: &str) -> PathBuf {
-    let mut path = current_exe.to_path_buf();
-    path.set_file_name(name);
-    path
-}
-
-fn wait_for_daemon_client(
-    probe_home: PathBuf,
-    surface: &str,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match try_daemon_client(probe_home.clone(), surface) {
-            Ok(client) => {
-                drop(client);
-                return Ok(());
-            }
-            Err(error) if missing_local_daemon(&error) && Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(50));
-            }
-            Err(error) => return Err(error.to_string()),
-        }
-    }
+    is_missing_local_daemon_error(error)
 }
 
 fn resolve_prompt_config(
@@ -2121,6 +2083,29 @@ fn build_tui_runtime_config(
         harness_profile,
         tool_loop: Some(tool_loop),
     })
+}
+
+fn load_detached_session_for_resume(
+    probe_home: PathBuf,
+    session_id: &str,
+) -> Result<InspectDetachedSessionResponse, String> {
+    let mut client = resolve_daemon_client(probe_home, "tui-resume", true)?;
+    client
+        .inspect_detached_session(&SessionId::new(session_id))
+        .map_err(|error| error.to_string())
+}
+
+fn detached_session_profile(
+    response: &InspectDetachedSessionResponse,
+) -> Result<probe_protocol::backend::BackendProfile, String> {
+    let backend =
+        response.session.session.backend.as_ref().ok_or_else(|| {
+            String::from("detached session does not have a stored backend target")
+        })?;
+    let mut profile = named_profile(backend.profile_name.as_str())?;
+    profile.base_url = backend.base_url.clone();
+    profile.model = backend.model.clone();
+    Ok(profile)
 }
 
 fn resolve_runtime(probe_home: Option<PathBuf>) -> Result<ProbeRuntime, String> {

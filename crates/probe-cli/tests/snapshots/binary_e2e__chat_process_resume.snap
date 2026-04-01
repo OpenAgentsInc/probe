@@ -11,5 +11,5 @@ chat ended
 backend_target surface=chat kind=openai_chat_completions attach_mode=attach transport=loopback_or_ssh_forward target=<target> model=tiny-qwen35 base_url=<base-url>
 resumed session=<session-id> title=hello turns=1
 session=<session-id> turn=1
-observability wallclock_ms=<dynamic> cache_signal=likely_warm model_output_ms=<dynamic> prompt_tokens=6(exact) completion_tokens=3(exact) total_tokens=9(exact) completion_tps=<dynamic>
+observability wallclock_ms=<dynamic> cache_signal=<resumed_cache_signal> model_output_ms=<dynamic> prompt_tokens=6(exact) completion_tokens=3(exact) total_tokens=9(exact) completion_tps=<dynamic>
 chat ended

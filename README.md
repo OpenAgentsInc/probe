@@ -10,9 +10,10 @@ and CLI/TUI surfaces for local coding work.
 Current shipped surface:
 
 - `probe exec` for one-shot turns
-- `probe chat` for interactive sessions plus resume
+- `probe chat` for daemon-backed interactive sessions plus resume
 - `probe codex login|status|logout` for ChatGPT/Codex subscription auth
-- `probe tui` / `cargo probe` for the local terminal UI
+- `probe tui` / `cargo probe` for the local terminal UI plus explicit
+  detached-session reattach with `--resume`
 - three inference lanes in the TUI: Codex, Qwen or Tailnet, and Apple FM
 - `probe-server` for the first typed local stdio supervision contract
 - `probe-daemon` for the first long-lived local Unix-socket supervision path
@@ -132,6 +133,12 @@ Resume a session:
 
 ```bash
 cargo run -p probe-cli -- chat --resume <session-id>
+```
+
+Reattach the TUI to a detached session:
+
+```bash
+cargo run -p probe-cli -- tui --resume <session-id>
 ```
 
 Run a tool-enabled turn:

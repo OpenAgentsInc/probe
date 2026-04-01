@@ -3,15 +3,19 @@ use std::path::PathBuf;
 use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_core::tools::ToolLoopConfig;
 use probe_protocol::backend::{BackendKind, BackendProfile};
-use probe_protocol::session::{
-    PendingToolApproval, SessionHarnessProfile, ToolApprovalResolution,
-};
+use probe_protocol::session::{PendingToolApproval, SessionHarnessProfile, ToolApprovalResolution};
 
 use crate::transcript::{ActiveTurn, TranscriptEntry};
 
 #[derive(Debug, Clone)]
 pub enum BackgroundTaskRequest {
-    AppleFmSetup { profile: BackendProfile },
+    AppleFmSetup {
+        profile: BackendProfile,
+    },
+    AttachProbeRuntimeSession {
+        session_id: String,
+        config: ProbeRuntimeTurnConfig,
+    },
     ProbeRuntimeTurn {
         prompt: String,
         config: ProbeRuntimeTurnConfig,
@@ -28,6 +32,17 @@ impl BackgroundTaskRequest {
     #[must_use]
     pub fn apple_fm_setup(profile: BackendProfile) -> Self {
         Self::AppleFmSetup { profile }
+    }
+
+    #[must_use]
+    pub fn attach_probe_runtime_session(
+        session_id: impl Into<String>,
+        config: ProbeRuntimeTurnConfig,
+    ) -> Self {
+        Self::AttachProbeRuntimeSession {
+            session_id: session_id.into(),
+            config,
+        }
     }
 
     #[must_use]
@@ -57,7 +72,9 @@ impl BackgroundTaskRequest {
     pub fn setup_backend(&self) -> Option<AppleFmBackendSummary> {
         match self {
             Self::AppleFmSetup { profile } => Some(AppleFmBackendSummary::from_profile(profile)),
-            Self::ProbeRuntimeTurn { .. } | Self::ResolvePendingToolApproval { .. } => None,
+            Self::AttachProbeRuntimeSession { .. }
+            | Self::ProbeRuntimeTurn { .. }
+            | Self::ResolvePendingToolApproval { .. } => None,
         }
     }
 
@@ -65,6 +82,7 @@ impl BackgroundTaskRequest {
     pub const fn title(&self) -> &'static str {
         match self {
             Self::AppleFmSetup { .. } => "Apple FM setup check",
+            Self::AttachProbeRuntimeSession { .. } => "Probe runtime attach",
             Self::ProbeRuntimeTurn { .. } => "Probe runtime turn",
             Self::ResolvePendingToolApproval { .. } => "pending approval decision",
         }

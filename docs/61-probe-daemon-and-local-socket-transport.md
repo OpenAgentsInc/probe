@@ -86,8 +86,6 @@ It gives Probe:
 - the operator CLI documented in `64-daemon-operator-cli.md`
 - the watchdog policy documented in `65-detached-watchdog-and-timeout-policy.md`
 
-It does not yet give Probe:
-
-- first-party chat or TUI defaulting to daemon attach
-
-Those are the next Phase 2 layers on top of this transport foundation.
+Probe now ships the first-party daemon attach layer described in
+`66-first-party-daemon-attach-flows.md`, so the remaining gaps on top of this
+transport are remote workers and a less single-connection local daemon.

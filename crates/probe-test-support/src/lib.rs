@@ -648,6 +648,11 @@ fn normalize_observability_line(line: &str) -> String {
             normalized.push(String::from("model_output_ms=<dynamic>"));
         } else if field.starts_with("completion_tps=") {
             normalized.push(String::from("completion_tps=<dynamic>"));
+        } else if matches!(
+            field,
+            "cache_signal=likely_warm" | "cache_signal=no_clear_signal"
+        ) {
+            normalized.push(String::from("cache_signal=<resumed_cache_signal>"));
         } else {
             normalized.push(field.to_string());
         }

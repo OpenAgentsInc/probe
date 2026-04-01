@@ -20,6 +20,7 @@ instead of letting `probe exec`, `probe chat`, and the TUI each wire
 
 - local child-process spawn for `probe-server`
 - local daemon-socket attach for `probe-daemon`
+- shared local-daemon autostart when the socket is missing
 - explicit fallback to the hidden `probe-cli __internal-probe-server` mode when
   a standalone sibling `probe-server` binary is not present
 - protocol request ids and JSONL framing
@@ -72,11 +73,13 @@ What changed:
 
 - `probe exec` now starts a session through `probe-server`, submits the turn,
   and prints the converted outcome
-- `probe chat` now lists or inspects stored sessions through `probe-client`
-  instead of reading the session store directly for the primary chat flow
+- `probe chat` now uses the daemon transport for its interactive session loop
+  and auto-starts the local daemon when needed
 - the TUI worker now drives turns and approval continuations through the shared
   client and uses inspect or approval APIs for transcript and pending-approval
   refresh
+- `probe tui --resume <session-id>` now attaches to a daemon-owned detached
+  session through that same shared client seam before a new prompt runs
 
 ## Backpressure And Queueing Posture
 
@@ -118,6 +121,12 @@ The new daemon path keeps that same rule. `probe-client` now chooses between a
 spawned stdio child and the local daemon socket, but it still speaks the same
 typed request, event, and response contract either way.
 
+The same crate now owns the daemon autostart helper for first-party clients:
+
+- prefer a sibling `probe-daemon` binary when one exists
+- allow `PROBE_DAEMON_BIN` override for explicit launch paths
+- otherwise fall back to `probe-cli __internal-probe-daemon`
+
 The shared client also now exposes the first daemon-owned session helpers:
 
 - explicit session creation through `start_session`
@@ -151,4 +160,5 @@ The migration is covered at two levels:
   - a real client test against a real `probe-server` child
 - `crates/probe-cli/tests/binary_e2e.rs`
   - process-level `chat` and `tui` coverage now running through the shared
-    client and server seam
+    client and server seam, including detached daemon reattach for both
+    first-party interactive surfaces

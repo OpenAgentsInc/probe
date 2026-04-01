@@ -225,3 +225,7 @@ This folder holds technical planning docs for the Probe runtime.
   - daemon-owned stalled-turn and total-timeout policy for detached sessions,
     including `timed_out` status, per-turn progress metadata, queued follow-up
     cancellation, and the watchdog configuration knobs on daemon startup
+- `66-first-party-daemon-attach-flows.md`
+  - Phase 2 first-party client adoption of the daemon seam, including
+    daemon-backed `probe chat`, explicit `probe tui --resume`, and shared
+    daemon autostart ownership in `probe-client`

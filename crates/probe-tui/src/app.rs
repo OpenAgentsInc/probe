@@ -61,6 +61,7 @@ pub struct TuiLaunchConfig {
     pub chat_runtime: ProbeRuntimeTurnConfig,
     pub operator_backend: ServerOperatorSummary,
     pub autostart_apple_fm_setup: bool,
+    pub resume_session_id: Option<String>,
 }
 
 impl Default for AppShell {
@@ -104,6 +105,13 @@ impl AppShell {
             active_backend_index,
         };
         app.sync_backend_selector();
+        if let Some(session_id) = config.resume_session_id.as_ref() {
+            let _ =
+                app.submit_background_task(BackgroundTaskRequest::attach_probe_runtime_session(
+                    session_id.clone(),
+                    app.active_chat_runtime().clone(),
+                ));
+        }
         if config.autostart_apple_fm_setup
             && let Some(request) = app.default_setup_request()
         {
@@ -147,6 +155,7 @@ impl AppShell {
             chat_runtime,
             operator_backend,
             autostart_apple_fm_setup,
+            resume_session_id: None,
         }
     }
 
@@ -1267,6 +1276,7 @@ mod tests {
             },
             operator_backend: apple.operator_summary(),
             autostart_apple_fm_setup: false,
+            resume_session_id: None,
         };
         let mut app = AppShell::new_with_launch_config(launch_config);
 
