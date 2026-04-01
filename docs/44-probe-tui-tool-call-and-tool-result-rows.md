@@ -43,6 +43,8 @@ rows:
 - tool result rows show the smallest useful result shape for the operator:
   compact output text, a short file range, a short error, or a terse approval
   reason
+- in-flight tool rows stay visible in the transcript while later tool events
+  continue, instead of being replaced by a single mutable active-tool cell
 
 This is much closer to a coding-shell transcript than dumping full pretty JSON
 blocks for every row.

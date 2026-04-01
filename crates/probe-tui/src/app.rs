@@ -971,9 +971,13 @@ mod tests {
         openai_codex_subscription, psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
     };
     use probe_core::harness::resolve_prompt_contract;
+    use probe_core::runtime::RuntimeEvent;
     use probe_core::server_control::PsionicServerConfig;
-    use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
+    use probe_core::tools::{ExecutedToolCall, ProbeToolChoice, ToolLoopConfig};
     use probe_protocol::backend::BackendKind;
+    use probe_protocol::session::{
+        SessionId, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
+    };
     use probe_test_support::{
         FakeAppleFmServer, FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment,
     };
@@ -1047,6 +1051,33 @@ mod tests {
             "timed out waiting for app condition; last_status={}",
             app.last_status()
         );
+    }
+
+    fn executed_tool(
+        call_id: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        output: serde_json::Value,
+        risk_class: ToolRiskClass,
+    ) -> ExecutedToolCall {
+        ExecutedToolCall {
+            call_id: call_id.to_string(),
+            name: tool_name.to_string(),
+            arguments,
+            output,
+            tool_execution: ToolExecutionRecord {
+                risk_class,
+                policy_decision: ToolPolicyDecision::AutoAllow,
+                approval_state: ToolApprovalState::NotRequired,
+                command: None,
+                exit_code: None,
+                timed_out: None,
+                truncated: None,
+                bytes_returned: None,
+                files_touched: Vec::new(),
+                reason: None,
+            },
+        }
     }
 
     #[test]
@@ -1422,6 +1453,100 @@ mod tests {
                 .iter()
                 .any(|entry| entry.contains("runtime session ready:"))
         );
+    }
+
+    #[test]
+    fn live_tool_rows_stay_visible_across_multiple_runtime_tools() {
+        let mut app = AppShell::new_for_tests();
+        let session_id = SessionId::new("sess_tools");
+
+        app.apply_message(AppMessage::ProbeRuntimeEvent {
+            event: RuntimeEvent::ToolCallRequested {
+                session_id: session_id.clone(),
+                round_trip: 1,
+                call_id: String::from("call_readme_1"),
+                tool_name: String::from("read_file"),
+                arguments: json!({"path":"README.md"}),
+            },
+        });
+        app.apply_message(AppMessage::ProbeRuntimeEvent {
+            event: RuntimeEvent::ToolExecutionStarted {
+                session_id: session_id.clone(),
+                round_trip: 1,
+                call_id: String::from("call_readme_1"),
+                tool_name: String::from("read_file"),
+                risk_class: ToolRiskClass::ReadOnly,
+            },
+        });
+        app.apply_message(AppMessage::ProbeRuntimeEvent {
+            event: RuntimeEvent::ToolExecutionCompleted {
+                session_id: session_id.clone(),
+                round_trip: 1,
+                tool: executed_tool(
+                    "call_readme_1",
+                    "read_file",
+                    json!({"path":"README.md"}),
+                    json!({"path":"README.md","start_line":1,"end_line":2,"content":"# Probe\n"}),
+                    ToolRiskClass::ReadOnly,
+                ),
+            },
+        });
+        app.apply_message(AppMessage::ProbeRuntimeEvent {
+            event: RuntimeEvent::ToolCallRequested {
+                session_id: session_id.clone(),
+                round_trip: 1,
+                call_id: String::from("call_ls_1"),
+                tool_name: String::from("list_files"),
+                arguments: json!({"path":"."}),
+            },
+        });
+        app.apply_message(AppMessage::ProbeRuntimeEvent {
+            event: RuntimeEvent::ToolExecutionStarted {
+                session_id,
+                round_trip: 1,
+                call_id: String::from("call_ls_1"),
+                tool_name: String::from("list_files"),
+                risk_class: ToolRiskClass::ReadOnly,
+            },
+        });
+
+        let rendered = app.render_to_string(140, 40);
+        assert!(rendered.contains("[tool call] read_file"));
+        assert!(rendered.contains("[tool result] read_file"));
+        assert!(rendered.contains("[tool call] list_files"));
+        assert!(rendered.contains("[active status] Running Tool: list_files"));
+
+        app.apply_message(AppMessage::TranscriptEntriesCommitted {
+            entries: vec![
+                TranscriptEntry::tool_call("read_file", vec![String::from("README.md")]),
+                TranscriptEntry::tool_result(
+                    "read_file",
+                    vec![String::from("README.md:1-2"), String::from("# Probe")],
+                ),
+                TranscriptEntry::tool_call("list_files", vec![String::from(".")]),
+                TranscriptEntry::tool_result(
+                    "list_files",
+                    vec![
+                        String::from("listed 2 entries"),
+                        String::from("README.md"),
+                        String::from("src"),
+                    ],
+                ),
+                TranscriptEntry::new(
+                    TranscriptRole::Assistant,
+                    "Probe",
+                    vec![String::from("Done.")],
+                ),
+            ],
+        });
+
+        let rendered = app.render_to_string(140, 40);
+        assert_eq!(rendered.matches("[tool call] read_file").count(), 1);
+        assert_eq!(rendered.matches("[tool result] read_file").count(), 1);
+        assert_eq!(rendered.matches("[tool call] list_files").count(), 1);
+        assert_eq!(rendered.matches("[tool result] list_files").count(), 1);
+        assert!(!rendered.contains("[active status] Running Tool: list_files"));
+        assert!(rendered.contains("[assistant] Probe"));
     }
 
     #[test]

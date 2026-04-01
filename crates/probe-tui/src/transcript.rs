@@ -177,6 +177,7 @@ impl ActiveTurn {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RetainedTranscript {
     entries: Vec<TranscriptEntry>,
+    live_entries: Vec<TranscriptEntry>,
     active_turn: Option<ActiveTurn>,
 }
 
@@ -188,6 +189,18 @@ impl RetainedTranscript {
 
     pub fn push_entry(&mut self, entry: TranscriptEntry) {
         self.entries.push(entry);
+    }
+
+    pub fn push_live_entry(&mut self, entry: TranscriptEntry) {
+        self.live_entries.push(entry);
+    }
+
+    pub fn clear_live_entries(&mut self) {
+        self.live_entries.clear();
+    }
+
+    pub fn commit_live_entries(&mut self) {
+        self.entries.append(&mut self.live_entries);
     }
 
     pub fn set_active_turn(&mut self, turn: ActiveTurn) {
@@ -211,16 +224,15 @@ impl RetainedTranscript {
     #[must_use]
     pub fn as_text(&self) -> Text<'static> {
         let mut lines = Vec::new();
-        if self.entries.is_empty() && self.active_turn.is_none() {
+        if self.entries.is_empty() && self.live_entries.is_empty() && self.active_turn.is_none() {
             return Text::from(lines);
         }
 
-        for (index, entry) in self.entries.iter().enumerate() {
-            if index > 0 {
-                lines.push(Line::from(""));
-            }
-            lines.extend(entry.render_lines());
+        append_entry_lines(&mut lines, &self.entries);
+        if !self.entries.is_empty() && !self.live_entries.is_empty() {
+            lines.push(Line::from(""));
         }
+        append_entry_lines(&mut lines, &self.live_entries);
 
         if let Some(active_turn) = &self.active_turn {
             if !lines.is_empty() {
@@ -230,6 +242,15 @@ impl RetainedTranscript {
         }
 
         Text::from(lines)
+    }
+}
+
+fn append_entry_lines(lines: &mut Vec<Line<'static>>, entries: &[TranscriptEntry]) {
+    for (index, entry) in entries.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.extend(entry.render_lines());
     }
 }
 
@@ -253,7 +274,9 @@ mod tests {
         transcript.push_entry(TranscriptEntry::new(
             TranscriptRole::System,
             "Shell Ready",
-            vec![String::from("Press Ctrl+R to start the Apple FM setup check.")],
+            vec![String::from(
+                "Press Ctrl+R to start the Apple FM setup check.",
+            )],
         ));
         transcript.set_active_turn(ActiveTurn::new(
             TranscriptRole::Tool,
@@ -271,5 +294,28 @@ mod tests {
         let transcript = RetainedTranscript::new();
         let rendered = lines_to_plain_text(&transcript);
         assert!(rendered.is_empty());
+    }
+
+    #[test]
+    fn retained_transcript_keeps_live_entries_before_active_turn() {
+        let mut transcript = RetainedTranscript::new();
+        transcript.push_live_entry(TranscriptEntry::tool_call(
+            "read_file",
+            vec![String::from("README.md")],
+        ));
+        transcript.push_live_entry(TranscriptEntry::tool_result(
+            "read_file",
+            vec![String::from("README.md:1-2")],
+        ));
+        transcript.set_active_turn(ActiveTurn::new(
+            TranscriptRole::Tool,
+            "Running Tool: list_files",
+            vec![String::from("risk: read")],
+        ));
+
+        let rendered = lines_to_plain_text(&transcript);
+        assert!(rendered.contains("[tool call] read_file"));
+        assert!(rendered.contains("[tool result] read_file"));
+        assert!(rendered.contains("[active tool] Running Tool: list_files"));
     }
 }

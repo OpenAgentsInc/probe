@@ -913,11 +913,9 @@ impl ChatScreen {
                 self.runtime.phase = Some(String::from("tool_requested"));
                 self.runtime.round_trip = Some(round_trip);
                 self.runtime.active_tool = Some(tool_name.clone());
-                self.transcript.set_active_turn(ActiveTurn::new(
-                    TranscriptRole::Tool,
-                    format!("Tool Requested: {tool_name}"),
-                    vec![runtime_tool_argument_summary(&arguments)],
-                ));
+                self.transcript.clear_active_turn();
+                self.transcript
+                    .push_live_entry(runtime_tool_call_entry(tool_name.as_str(), &arguments));
                 self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool call requested: {tool_name}"));
                 format!("tool call requested: {tool_name}")
@@ -935,7 +933,7 @@ impl ChatScreen {
                 self.runtime.round_trip = Some(round_trip);
                 self.runtime.active_tool = Some(tool_name.clone());
                 self.transcript.set_active_turn(ActiveTurn::new(
-                    TranscriptRole::Tool,
+                    TranscriptRole::Status,
                     format!("Running Tool: {tool_name}"),
                     vec![format!("risk: {}", render_runtime_risk_class(risk_class))],
                 ));
@@ -953,11 +951,9 @@ impl ChatScreen {
                 self.runtime.phase = Some(String::from("tool_completed"));
                 self.runtime.round_trip = Some(round_trip);
                 self.runtime.active_tool = Some(tool.name.clone());
-                self.transcript.set_active_turn(ActiveTurn::new(
-                    TranscriptRole::Tool,
-                    format!("Completed Tool: {}", tool.name),
-                    runtime_tool_body_lines(round_trip, &tool),
-                ));
+                self.transcript.clear_active_turn();
+                self.transcript
+                    .push_live_entry(runtime_tool_result_entry(round_trip, &tool));
                 self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool execution completed: {}", tool.name));
                 format!("tool execution completed: {}", tool.name)
@@ -972,11 +968,9 @@ impl ChatScreen {
                 self.runtime.phase = Some(String::from("tool_refused"));
                 self.runtime.round_trip = Some(round_trip);
                 self.runtime.active_tool = Some(tool.name.clone());
-                self.transcript.set_active_turn(ActiveTurn::new(
-                    TranscriptRole::Status,
-                    format!("Tool Refused: {}", tool.name),
-                    runtime_tool_body_lines(round_trip, &tool),
-                ));
+                self.transcript.clear_active_turn();
+                self.transcript
+                    .push_live_entry(runtime_tool_result_entry(round_trip, &tool));
                 self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool refused: {}", tool.name));
                 format!("tool refused: {}", tool.name)
@@ -991,11 +985,9 @@ impl ChatScreen {
                 self.runtime.phase = Some(String::from("tool_paused"));
                 self.runtime.round_trip = Some(round_trip);
                 self.runtime.active_tool = Some(tool.name.clone());
-                self.transcript.set_active_turn(ActiveTurn::new(
-                    TranscriptRole::Status,
-                    format!("Approval Pending: {}", tool.name),
-                    runtime_tool_body_lines(round_trip, &tool),
-                ));
+                self.transcript.clear_active_turn();
+                self.transcript
+                    .push_live_entry(runtime_tool_result_entry(round_trip, &tool));
                 self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool paused for approval: {}", tool.name));
                 format!("tool paused for approval: {}", tool.name)
@@ -1168,6 +1160,7 @@ impl ChatScreen {
                 let entry_count = entries.len();
                 self.clear_stream();
                 self.transcript.clear_active_turn();
+                self.transcript.clear_live_entries();
                 for entry in entries {
                     let label = entry.label().to_string();
                     let title = entry.title().to_string();
@@ -1182,6 +1175,7 @@ impl ChatScreen {
                 let title = entry.title().to_string();
                 self.clear_stream();
                 self.transcript.clear_active_turn();
+                self.transcript.commit_live_entries();
                 self.transcript.push_entry(entry);
                 self.snap_transcript_to_latest();
                 self.record_worker_event(format!("committed {label} row: {title}"));
@@ -2190,6 +2184,34 @@ fn runtime_tool_body_lines(
         | probe_protocol::session::ToolPolicyDecision::Approved => {
             compact_runtime_tool_output_lines(tool)
         }
+    }
+}
+
+fn runtime_tool_call_entry(tool_name: &str, arguments: &serde_json::Value) -> TranscriptEntry {
+    TranscriptEntry::tool_call(
+        tool_name.to_string(),
+        vec![runtime_tool_argument_summary(arguments)],
+    )
+}
+
+fn runtime_tool_result_entry(
+    round_trip: usize,
+    tool: &probe_core::tools::ExecutedToolCall,
+) -> TranscriptEntry {
+    match tool.tool_execution.policy_decision {
+        probe_protocol::session::ToolPolicyDecision::Paused => TranscriptEntry::approval_pending(
+            tool.name.clone(),
+            runtime_tool_body_lines(round_trip, tool),
+        ),
+        probe_protocol::session::ToolPolicyDecision::Refused => TranscriptEntry::tool_refused(
+            tool.name.clone(),
+            runtime_tool_body_lines(round_trip, tool),
+        ),
+        probe_protocol::session::ToolPolicyDecision::AutoAllow
+        | probe_protocol::session::ToolPolicyDecision::Approved => TranscriptEntry::tool_result(
+            tool.name.clone(),
+            runtime_tool_body_lines(round_trip, tool),
+        ),
     }
 }
 
