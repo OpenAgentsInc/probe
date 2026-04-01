@@ -187,15 +187,20 @@ Repo-local helpers:
 ./probe-dev fmt
 ./probe-dev check
 ./probe-dev test
-./probe-dev accept
+./probe-dev integration
+./probe-dev accept-live
 ```
 
 Useful focused lanes:
 
 - `./probe-dev pr-fast`
 - `./probe-dev cli-regressions`
+- `./probe-dev integration`
 - `./probe-dev accept-live`
+- `./probe-dev self-test`
 - `./probe-dev accept-compare`
+- `./probe-dev matrix-eval`
+- `./probe-dev optimizer-eval <lane>`
 
 ## Docs
 

@@ -13,15 +13,21 @@ Commands:
   cli-regressions          Run the dedicated probe-cli regression and snapshot test binary.
   tui [args...]            Run the current Probe terminal UI.
   pr-fast                  Run the fast local merge-safe tier: fmt-check, check, and test.
+  integration              Run the deterministic subprocess integration lane.
   accept [args...]         Backward-compatible alias for accept-live.
   accept-live [args...]    Run the live acceptance harness against the configured backend.
   self-test [args...]      Run the retained Probe self-test harness lane.
   accept-compare [args...] Run the admitted-Mac Apple FM vs Qwen comparison lane.
   matrix [args...]         Run the heavier scenario-matrix lane with worst-of-N retention.
+  matrix-eval [args...]    Alias for matrix.
+  optimizer-eval <lane> [args...]
+                           Run one offline optimizer/eval lane:
+                           decision-export | module-eval | optimize-modules | optimize-harness | optimize-skill-packs
   decision-export [args...]  Run probe export with any extra CLI args.
   module-eval [args...]      Run probe module-eval with any extra CLI args.
   optimize-modules [args...] Run probe optimize-modules with any extra CLI args.
   optimize-harness [args...] Run probe optimize-harness with any extra CLI args.
+  optimize-skill-packs [args...] Run probe optimize-skill-packs with any extra CLI args.
 EOF
 }
 
@@ -69,6 +75,9 @@ case "$command_name" in
     "$0" check
     "$0" test
     ;;
+  integration)
+    cargo test -p probe-cli --test cli_regressions --test binary_e2e "$@"
+    ;;
   accept|accept-live)
     cargo run -p probe-cli -- accept "$@"
     ;;
@@ -78,8 +87,38 @@ case "$command_name" in
   accept-compare)
     cargo run -p probe-cli -- accept-compare "$@"
     ;;
-  matrix)
+  matrix|matrix-eval)
     cargo run -p probe-cli -- matrix "$@"
+    ;;
+  optimizer-eval)
+    optimizer_lane="${1:-}"
+    if [[ -z "$optimizer_lane" ]]; then
+      echo "error: optimizer-eval requires a lane name" >&2
+      usage
+      exit 1
+    fi
+    shift
+    case "$optimizer_lane" in
+      decision-export)
+        cargo run -p probe-cli -- export "$@"
+        ;;
+      module-eval)
+        cargo run -p probe-cli -- module-eval "$@"
+        ;;
+      optimize-modules)
+        cargo run -p probe-cli -- optimize-modules "$@"
+        ;;
+      optimize-harness)
+        cargo run -p probe-cli -- optimize-harness "$@"
+        ;;
+      optimize-skill-packs)
+        cargo run -p probe-cli -- optimize-skill-packs "$@"
+        ;;
+      *)
+        echo "error: unknown optimizer-eval lane: $optimizer_lane" >&2
+        exit 1
+        ;;
+    esac
     ;;
   decision-export)
     cargo run -p probe-cli -- export "$@"
@@ -92,6 +131,9 @@ case "$command_name" in
     ;;
   optimize-harness)
     cargo run -p probe-cli -- optimize-harness "$@"
+    ;;
+  optimize-skill-packs)
+    cargo run -p probe-cli -- optimize-skill-packs "$@"
     ;;
   help|-h|--help)
     usage

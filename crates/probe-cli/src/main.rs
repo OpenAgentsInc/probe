@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use acceptance::{
     AcceptanceComparisonConfig, AcceptanceHarnessConfig, AcceptanceMatrixConfig,
@@ -55,7 +55,8 @@ use probe_protocol::session::{
     BackendTurnReceipt, CacheSignal, SessionHarnessProfile, SessionId, SessionTurn,
     ToolPolicyDecision, ToolRiskClass, UsageMeasurement, UsageTruth,
 };
-use probe_tui::{TuiLaunchConfig, run_probe_tui_with_config};
+use probe_tui::{AppShell, TuiLaunchConfig, UiEvent, run_probe_tui_with_config};
+use serde::Serialize;
 
 #[derive(Parser, Debug)]
 #[command(name = "probe")]
@@ -130,6 +131,16 @@ struct TuiArgs {
     probe_home: Option<PathBuf>,
     #[command(flatten)]
     server: ServerArgs,
+    #[arg(long, hide = true)]
+    smoke_prompt: Option<String>,
+    #[arg(long, hide = true)]
+    smoke_wait_for_text: Option<String>,
+    #[arg(long, hide = true)]
+    smoke_wait_for_worker_event: Option<String>,
+    #[arg(long, default_value_t = 5_000, hide = true)]
+    smoke_timeout_ms: u64,
+    #[arg(long, hide = true)]
+    smoke_report_path: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -374,6 +385,15 @@ struct ServerArgs {
     server_reasoning_budget: Option<u8>,
 }
 
+#[derive(Serialize)]
+struct TuiSmokeReport {
+    final_render: String,
+    recent_events: Vec<String>,
+    worker_events: Vec<String>,
+    runtime_session_id: Option<String>,
+    last_status: String,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -483,6 +503,7 @@ fn run_codex_logout(args: CodexLogoutArgs) -> Result<(), String> {
 fn run_tui(args: TuiArgs) -> Result<(), String> {
     let probe_home = args
         .probe_home
+        .clone()
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
     let desired_profile =
         resolve_tui_profile(probe_home.as_path(), args.profile.as_deref(), &args.server)?;
@@ -509,11 +530,83 @@ fn run_tui(args: TuiArgs) -> Result<(), String> {
         }
     };
     let launch_config = TuiLaunchConfig {
-        chat_runtime: build_tui_runtime_config(Some(probe_home), args.cwd, profile.clone())?,
+        chat_runtime: build_tui_runtime_config(
+            Some(probe_home),
+            args.cwd.clone(),
+            profile.clone(),
+        )?,
         operator_backend,
         autostart_apple_fm_setup: profile.kind == BackendKind::AppleFmBridge,
     };
+    if args.smoke_prompt.is_some() {
+        return run_tui_smoke(launch_config, &args);
+    }
     run_probe_tui_with_config(launch_config).map_err(|error| error.to_string())
+}
+
+fn run_tui_smoke(config: TuiLaunchConfig, args: &TuiArgs) -> Result<(), String> {
+    let prompt = args
+        .smoke_prompt
+        .as_deref()
+        .ok_or_else(|| String::from("tui smoke mode requires --smoke-prompt"))?;
+    let mut app = AppShell::new_with_launch_config(config);
+    for character in prompt.chars() {
+        if character == '\n' {
+            app.dispatch(UiEvent::ComposerNewline);
+        } else {
+            app.dispatch(UiEvent::ComposerInsert(character));
+        }
+    }
+    app.dispatch(UiEvent::ComposerSubmit);
+
+    let deadline = Instant::now() + Duration::from_millis(args.smoke_timeout_ms);
+    loop {
+        app.poll_background_messages();
+        let final_render = app.render_to_string(120, 32);
+        let worker_events = app.worker_events();
+        let render_ready = args
+            .smoke_wait_for_text
+            .as_ref()
+            .is_none_or(|needle| final_render.contains(needle));
+        let worker_ready = args
+            .smoke_wait_for_worker_event
+            .as_ref()
+            .is_none_or(|needle| worker_events.iter().any(|entry| entry.contains(needle)));
+
+        if render_ready && worker_ready {
+            let report = TuiSmokeReport {
+                final_render,
+                recent_events: app.recent_events(),
+                worker_events,
+                runtime_session_id: app.runtime_session_id().map(String::from),
+                last_status: app.last_status().to_string(),
+            };
+            let encoded = serde_json::to_string_pretty(&report)
+                .map_err(|error| format!("failed to encode tui smoke report: {error}"))?;
+            if let Some(path) = args.smoke_report_path.as_ref() {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|error| format!("failed to create report directory: {error}"))?;
+                }
+                std::fs::write(path, encoded)
+                    .map_err(|error| format!("failed to write tui smoke report: {error}"))?;
+            } else {
+                println!("{encoded}");
+            }
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "tui smoke timed out waiting for the requested conditions; last_status={} runtime_session={} worker_events={}",
+                app.last_status(),
+                app.runtime_session_id().unwrap_or("none"),
+                app.worker_events().join(" | "),
+            ));
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn run_exec(args: ExecArgs) -> Result<(), String> {

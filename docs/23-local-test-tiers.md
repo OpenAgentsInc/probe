@@ -19,18 +19,27 @@ This lane is intentionally limited to:
 It is the command an operator should reach for before pushing or merging normal
 runtime changes.
 
+Probe now wires this lane into `.github/workflows/probe-ci.yml` as the routine
+PR safety job.
+
 ## Tier 2: Targeted Binary Regression Path
 
 Use:
 
 ```bash
-./probe-dev cli-regressions
+./probe-dev integration
 ```
 
-This lane isolates the built-binary regression and snapshot surface for the
-CLI. It is useful when iterating on command output, transcript receipts,
-acceptance report shape, or other operator-visible behavior without rerunning
-everything else.
+This lane isolates the deterministic subprocess integration surface for the
+built Probe binary. It is useful when iterating on command output, transcript
+receipts, acceptance report shape, or other operator-visible behavior without
+rerunning every workspace test.
+
+The narrower CLI-only snapshot lane remains available as:
+
+```bash
+./probe-dev cli-regressions
+```
 
 That binary lane now includes:
 
@@ -50,6 +59,10 @@ The adjacent crate-level integration suites now cover:
 Those suites still run under the normal workspace `test` lane, but the docs now
 name them explicitly so contributors stop treating the whole repo as one
 undifferentiated cargo-test bucket.
+
+Probe now wires this lane into `.github/workflows/probe-ci.yml` as a separate
+job from `pr-fast` so subprocess regressions stay visible without forcing live
+backend lanes into the default path.
 
 ## Tier 3: Live Acceptance Path
 
@@ -77,7 +90,7 @@ honesty.
 The heavier matrix lane lives above both:
 
 - `cargo run -p probe-cli -- matrix --profile psionic-qwen35-2b-q8-registry`
-- `./probe-dev matrix --profile psionic-qwen35-2b-q8-registry`
+- `./probe-dev matrix-eval --profile psionic-qwen35-2b-q8-registry`
 
 That lane is for backend/model/harness/scenario combinations with repeated
 runs and worst-of-N retention, not for the default retained coding receipt.
@@ -90,14 +103,40 @@ The Apple FM admitted-Mac paths live here too:
 
 Those commands are explicit operator lanes, not merge-safe defaults.
 
+The general heavy lane is now `.github/workflows/probe-heavy-evals.yml`.
+
+That workflow is manual by design. It can run:
+
+- `accept-live`
+- `self-test`
+- `matrix-eval`
+- `optimizer-eval`
+
+Acceptance, self-test, and matrix remain operator-triggered because they still
+depend on explicit backend reachability rather than guaranteed CI-local
+inference.
+
 ## Tier 4: Offline Eval And Optimization Paths
 
 Use the wrappers for the existing Probe eval commands:
+
+- `./probe-dev optimizer-eval decision-export`
+- `./probe-dev optimizer-eval module-eval`
+- `./probe-dev optimizer-eval optimize-modules`
+- `./probe-dev optimizer-eval optimize-harness`
+- `./probe-dev optimizer-eval optimize-skill-packs`
+
+Direct aliases still exist when a shorter local command is useful:
 
 - `./probe-dev decision-export`
 - `./probe-dev module-eval`
 - `./probe-dev optimize-modules`
 - `./probe-dev optimize-harness`
+- `./probe-dev optimize-skill-packs`
 
 These remain local, explicit, and opt-in. They are part of the evaluation and
 optimization workflow, not the default fast regression pass.
+
+The manual `.github/workflows/probe-heavy-evals.yml` workflow can also launch
+these lanes through `optimizer-eval` when the required datasets and artifacts
+are supplied explicitly.

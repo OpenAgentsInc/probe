@@ -1,0 +1,141 @@
+name: Probe Heavy Evals
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: Heavy Probe lane to run
+        required: true
+        type: choice
+        default: accept-live
+        options:
+          - accept-live
+          - self-test
+          - matrix-eval
+          - optimizer-eval
+      optimizer_lane:
+        description: Optimizer lane when lane=optimizer-eval
+        required: false
+        type: choice
+        default: decision-export
+        options:
+          - decision-export
+          - module-eval
+          - optimize-modules
+          - optimize-harness
+          - optimize-skill-packs
+      extra_args:
+        description: Optional whitespace-split extra args passed after the lane name
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  heavy-eval:
+    name: Heavy Eval
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PROBE_HEAVY_LANE: ${{ inputs.lane }}
+      PROBE_OPTIMIZER_LANE: ${{ inputs.optimizer_lane }}
+      PROBE_EXTRA_ARGS: ${{ inputs.extra_args }}
+      PROBE_RUN_ROOT: ${{ runner.temp }}/probe-heavy-eval
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Prepare run root
+        shell: bash
+        run: |
+          rm -rf "$PROBE_RUN_ROOT"
+          mkdir -p "$PROBE_RUN_ROOT"
+
+      - name: Run requested lane
+        id: lane
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          cmd=(./probe-dev)
+          case "$PROBE_HEAVY_LANE" in
+            accept-live)
+              cmd+=(
+                accept-live
+                --probe-home "$PROBE_RUN_ROOT/probe-home"
+                --report-path "$PROBE_RUN_ROOT/probe_acceptance_report.json"
+              )
+              ;;
+            self-test)
+              cmd+=(
+                self-test
+                --probe-home "$PROBE_RUN_ROOT/probe-home"
+                --report-path "$PROBE_RUN_ROOT/probe_self_test_report.json"
+              )
+              ;;
+            matrix-eval)
+              cmd+=(
+                matrix-eval
+                --probe-home "$PROBE_RUN_ROOT/probe-home"
+                --report-path "$PROBE_RUN_ROOT/probe_acceptance_matrix.json"
+              )
+              ;;
+            optimizer-eval)
+              cmd+=(optimizer-eval "$PROBE_OPTIMIZER_LANE")
+              ;;
+            *)
+              echo "unsupported heavy lane: $PROBE_HEAVY_LANE" >&2
+              exit 1
+              ;;
+          esac
+
+          if [[ -n "${PROBE_EXTRA_ARGS:-}" ]]; then
+            read -r -a extra_args <<< "$PROBE_EXTRA_ARGS"
+            cmd+=("${extra_args[@]}")
+          fi
+
+          printf 'lane_command=' >> "$GITHUB_OUTPUT"
+          printf '%q ' "${cmd[@]}" >> "$GITHUB_OUTPUT"
+          printf '\n' >> "$GITHUB_OUTPUT"
+
+          set +e
+          "${cmd[@]}" 2>&1 | tee "$PROBE_RUN_ROOT/lane.log"
+          status=${PIPESTATUS[0]}
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload heavy-eval artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-heavy-eval-${{ github.run_id }}
+          path: ${{ env.PROBE_RUN_ROOT }}
+          if-no-files-found: warn
+
+      - name: Write workflow summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Probe heavy eval"
+            echo
+            echo "- lane: \`$PROBE_HEAVY_LANE\`"
+            echo "- optimizer lane: \`${PROBE_OPTIMIZER_LANE:-n/a}\`"
+            echo "- extra args: \`${PROBE_EXTRA_ARGS:-none}\`"
+            echo "- command: \`${{ steps.lane.outputs.lane_command }}\`"
+            echo "- run root: \`$PROBE_RUN_ROOT\`"
+            echo "- merge-blocking PR lane: no"
+            echo "- note: acceptance, self-test, and matrix lanes still require operator-supplied backend reachability"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mark lane failure
+        if: steps.lane.outputs.exit_code != '0'
+        shell: bash
+        run: exit 1

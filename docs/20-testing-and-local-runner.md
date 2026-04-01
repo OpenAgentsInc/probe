@@ -65,10 +65,12 @@ Primary commands:
 ./probe-dev fmt-check
 ./probe-dev check
 ./probe-dev test
+./probe-dev integration
 ./probe-dev accept-live
 ./probe-dev self-test
 ./probe-dev accept-compare
-./probe-dev matrix
+./probe-dev matrix-eval
+./probe-dev optimizer-eval decision-export
 ```
 
 `./probe-dev test` is `nextest`-first. If `cargo nextest` is installed, Probe uses
@@ -84,17 +86,24 @@ The runner now also exposes explicit local tiers:
   - merge-safe local lane: `fmt-check`, `check`, and `test`
 - `./probe-dev cli-regressions`
   - targeted binary-level Probe CLI regression and snapshot lane
+- `./probe-dev integration`
+  - deterministic subprocess integration lane for built-binary chat and TUI
+    coverage
 - `./probe-dev accept-live`
   - heavier live-backend acceptance lane
 - `./probe-dev self-test`
   - heavier retained first-person Probe behavior lane
 - `./probe-dev accept-compare`
   - heavier admitted-Mac Apple FM versus Qwen comparison lane
-- `./probe-dev matrix`
+- `./probe-dev matrix-eval`
   - heavier scenario-matrix lane with worst-of-N retention per cell
+- `./probe-dev optimizer-eval <lane>`
+  - umbrella entrypoint for offline export, eval, and optimization lanes that
+    stay out of the fast path
 - `./probe-dev decision-export`, `./probe-dev module-eval`,
-  `./probe-dev optimize-modules`, and `./probe-dev optimize-harness`
-  - explicit local eval and optimization lanes that stay out of the fast path
+  `./probe-dev optimize-modules`, `./probe-dev optimize-harness`, and
+  `./probe-dev optimize-skill-packs`
+  - retained direct aliases for the same offline eval and optimization work
 
 The binary lane now covers more than `probe exec`.
 
@@ -104,6 +113,23 @@ It includes:
 - a hidden headless `probe tui` smoke path used only by tests so the binary can
   submit a real background turn, wait for the reply, and retain a structured
   report artifact without requiring PTY orchestration in the test harness
+
+## CI Execution Policy
+
+Probe now wires those tiers into explicit GitHub workflows instead of leaving
+them as docs-only conventions.
+
+- `.github/workflows/probe-ci.yml`
+  - routine merge-safe policy on `pull_request` and pushes to `main`
+  - runs `./probe-dev pr-fast`
+  - runs `./probe-dev integration`
+- `.github/workflows/probe-heavy-evals.yml`
+  - manual operator-triggered heavy lane
+  - exposes `accept-live`, `self-test`, `matrix-eval`, and `optimizer-eval`
+  - keeps live backend and repeated-matrix work out of the default green path
+- `.github/workflows/apple-fm-qwen-compare.yml`
+  - dedicated admitted-Mac comparison lane
+  - remains intentionally separate from standard PR safety
 
 ## Why This Matters
 
