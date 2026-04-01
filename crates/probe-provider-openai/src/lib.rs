@@ -14,9 +14,12 @@ pub struct OpenAiProviderConfig {
     pub api_key: String,
     pub timeout: Duration,
     pub stream: bool,
+    pub max_tokens: Option<u32>,
 }
 
 impl OpenAiProviderConfig {
+    pub const DEFAULT_MAX_TOKENS: u32 = 1024;
+
     #[must_use]
     pub fn localhost(model: impl Into<String>) -> Self {
         Self {
@@ -25,6 +28,7 @@ impl OpenAiProviderConfig {
             api_key: String::from("dummy"),
             timeout: Duration::from_secs(30),
             stream: false,
+            max_tokens: Some(Self::DEFAULT_MAX_TOKENS),
         }
     }
 
@@ -41,6 +45,7 @@ impl OpenAiProviderConfig {
             api_key: String::from("dummy"),
             timeout: Duration::from_secs(profile.timeout_secs),
             stream: false,
+            max_tokens: Some(Self::DEFAULT_MAX_TOKENS),
         }
     }
 }
@@ -173,6 +178,8 @@ pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub stream: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ChatToolDefinitionEnvelope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -188,6 +195,7 @@ impl ChatCompletionRequest {
             model: config.model.clone(),
             messages,
             stream: config.stream,
+            max_tokens: config.max_tokens,
             tools: Vec::new(),
             tool_choice: None,
             parallel_tool_calls: None,
@@ -653,6 +661,10 @@ mod tests {
         assert_eq!(config.model, "qwen3.5-2b-q8_0-registry.gguf");
         assert_eq!(config.timeout, Duration::from_secs(45));
         assert!(!config.stream);
+        assert_eq!(
+            config.max_tokens,
+            Some(OpenAiProviderConfig::DEFAULT_MAX_TOKENS)
+        );
     }
 
     fn streaming_config(base_url: &str) -> OpenAiProviderConfig {
@@ -662,6 +674,7 @@ mod tests {
             api_key: String::from("dummy"),
             timeout: Duration::from_secs(5),
             stream: true,
+            max_tokens: Some(OpenAiProviderConfig::DEFAULT_MAX_TOKENS),
         }
     }
 
@@ -690,6 +703,7 @@ mod tests {
             api_key: String::from("dummy"),
             timeout: std::time::Duration::from_secs(5),
             stream: false,
+            max_tokens: Some(OpenAiProviderConfig::DEFAULT_MAX_TOKENS),
         };
         let client = OpenAiProviderClient::new(config).expect("client");
         let response: ChatCompletionResponse = client
@@ -734,6 +748,7 @@ mod tests {
             api_key: String::from("dummy"),
             timeout: Duration::from_secs(5),
             stream: false,
+            max_tokens: Some(OpenAiProviderConfig::DEFAULT_MAX_TOKENS),
         };
         let client = OpenAiProviderClient::new(config).expect("client");
         let response = client
@@ -783,6 +798,7 @@ mod tests {
             api_key: String::from("dummy"),
             timeout: std::time::Duration::from_secs(5),
             stream: false,
+            max_tokens: Some(OpenAiProviderConfig::DEFAULT_MAX_TOKENS),
         };
         let client = OpenAiProviderClient::new(config).expect("client");
         let error = client
@@ -831,6 +847,18 @@ mod tests {
         assert_eq!(
             response.usage.expect("usage should be preserved").total_tokens,
             5
+        );
+    }
+
+    #[test]
+    fn request_inherits_max_tokens_from_config() {
+        let request = super::ChatCompletionRequest::from_config(
+            &OpenAiProviderConfig::localhost("tiny-qwen35"),
+            vec![ChatMessage::user("hello")],
+        );
+        assert_eq!(
+            request.max_tokens,
+            Some(OpenAiProviderConfig::DEFAULT_MAX_TOKENS)
         );
     }
 

@@ -31,7 +31,7 @@ use crate::screens::{
 };
 use crate::worker::BackgroundWorker;
 
-const TICK_RATE: Duration = Duration::from_millis(250);
+const TICK_RATE: Duration = Duration::from_millis(33);
 
 #[derive(Debug, Clone)]
 struct BackendLaneConfig {
