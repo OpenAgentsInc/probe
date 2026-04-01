@@ -423,10 +423,7 @@ impl ChatScreen {
         self.transcript.push_entry(TranscriptEntry::new(
             TranscriptRole::Status,
             "Backend Switched",
-            vec![
-                format!("active_backend: {lane_label}"),
-                String::from("next submit starts a fresh session"),
-            ],
+            vec![format!("active_backend: {lane_label}")],
         ));
         self.transcript_scroll_from_bottom = 0;
         self.runtime = ProbeRuntimeState::default();
@@ -434,7 +431,7 @@ impl ChatScreen {
         self.setup = AppleFmSetupState::default();
         self.set_operator_backend(summary);
         self.record_event(format!(
-            "switched active backend to {lane_label}; next submit starts a fresh session"
+            "switched active backend to {lane_label}"
         ));
     }
 
@@ -535,11 +532,6 @@ impl ChatScreen {
             .as_ref()
             .map(ServerOperatorSummary::endpoint_label)
             .unwrap_or_else(|| String::from("pending"));
-        let attach_mode = self
-            .operator_backend
-            .as_ref()
-            .map(ServerOperatorSummary::attach_mode_label)
-            .unwrap_or("unknown");
         let model = self
             .runtime
             .model_id
@@ -558,7 +550,6 @@ impl ChatScreen {
             let mut parts = vec![
                 format!("backend: {backend}"),
                 format!("target: {target}"),
-                format!("attach: {attach_mode}"),
                 format!("model: {}", preview(model, 28)),
                 format!("phase: {phase}"),
                 format!("round: {}", stream.round_trip),
@@ -583,7 +574,6 @@ impl ChatScreen {
         let mut parts = vec![
             format!("backend: {backend}"),
             format!("target: {target}"),
-            format!("attach: {attach_mode}"),
             format!("model: {}", preview(model, 28)),
             format!("phase: {phase}"),
         ];

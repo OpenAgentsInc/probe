@@ -596,7 +596,7 @@ impl AppShell {
             lane.operator_backend,
         );
         self.last_status = format!(
-            "active backend: {} | next submit starts a fresh session",
+            "active backend: {}",
             lane.label
         );
     }
@@ -1047,7 +1047,7 @@ mod tests {
         );
         assert_eq!(
             app.last_status(),
-            "active backend: Tailnet | next submit starts a fresh session"
+            "active backend: Tailnet"
         );
     }
 
