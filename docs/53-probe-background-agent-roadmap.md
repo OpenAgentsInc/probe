@@ -716,9 +716,11 @@ Status:
   - typed session and turn APIs
   - typed live event streaming
   - attach, list, inspect, interrupt, and approval APIs
+  - queued-turn contract with persisted queued or running or completed or failed
+    or cancelled state
+  - queue-position semantics and per-turn author metadata
   - pure workspace-lifecycle decision functions
 - still split out
-  - queued-turn contract and queue-position semantics
   - Autopilot-side consumption in `openagents`
 
 Success condition:
@@ -732,7 +734,7 @@ Ship:
 - a long-lived local Probe daemon
 - detached session execution away from the foreground terminal
 - `probe ps`, `probe attach`, `probe logs`, `probe stop`
-- queued follow-up prompts
+- detached queued follow-up prompts away from the foreground client process
 - stop and timeout watchdog behavior for stuck turns
 
 Success condition:

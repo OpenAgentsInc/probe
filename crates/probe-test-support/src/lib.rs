@@ -84,6 +84,19 @@ impl FakeOpenAiServer {
     }
 
     pub fn from_responses(responses: Vec<FakeHttpResponse>) -> Self {
+        let responses = Arc::new(Mutex::new(responses.into_iter()));
+        Self::from_handler(move |_request| {
+            responses
+                .lock()
+                .expect("fake openai response lock")
+                .next()
+                .expect("fake openai response should be queued")
+        })
+    }
+
+    pub fn from_handler(
+        handler: impl Fn(FakeHttpRequest) -> FakeHttpResponse + Send + Sync + 'static,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake server");
         listener
             .set_nonblocking(true)
@@ -93,20 +106,20 @@ impl FakeOpenAiServer {
         let requests_thread = Arc::clone(&requests);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
+        let handler = Arc::new(handler);
+        let handler_thread = Arc::clone(&handler);
 
         let thread = thread::spawn(move || {
-            let mut response_index = 0_usize;
-            while response_index < responses.len() && !stop_thread.load(Ordering::SeqCst) {
+            while !stop_thread.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let request = read_request(&mut stream);
                         requests_thread
                             .lock()
                             .expect("fake server request lock")
-                            .push(request);
+                            .push(request.clone());
 
-                        let response = &responses[response_index];
-                        response_index += 1;
+                        let response = handler_thread(parse_http_request(request));
                         let payload = format!(
                             "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                             response.status_code,

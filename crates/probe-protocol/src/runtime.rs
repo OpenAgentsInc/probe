@@ -6,7 +6,8 @@ use serde_json::Value;
 use crate::backend::BackendProfile;
 use crate::session::{
     PendingToolApproval, SessionHarnessProfile, SessionId, SessionMetadata, SessionTurn,
-    ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass, TranscriptEvent, UsageMeasurement,
+    TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass, TranscriptEvent,
+    UsageMeasurement,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,7 +129,90 @@ pub struct TurnRequest {
     pub profile: BackendProfile,
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<TurnAuthor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_loop: Option<ToolLoopRecipe>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnAuthor {
+    pub client_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnSubmissionKind {
+    Start,
+    Continue,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedTurnStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTurnControlRecord {
+    pub turn_id: String,
+    pub session_id: SessionId,
+    pub submission_kind: TurnSubmissionKind,
+    pub status: QueuedTurnStatus,
+    pub prompt: String,
+    pub author: TurnAuthor,
+    pub requested_at_ms: TimestampMs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<TimestampMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<TimestampMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_position: Option<usize>,
+    #[serde(default)]
+    pub awaiting_approval: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueTurnResponse {
+    pub turn: SessionTurnControlRecord,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectSessionTurnsResponse {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_turn: Option<SessionTurnControlRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_turns: Vec<SessionTurnControlRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_turns: Vec<SessionTurnControlRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelQueuedTurnRequest {
+    pub session_id: SessionId,
+    pub turn_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelQueuedTurnResponse {
+    pub session_id: SessionId,
+    pub turn_id: String,
+    pub cancelled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +304,8 @@ pub enum TurnResponse {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InterruptTurnResponse {
     pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
     pub interrupted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<String>,
@@ -384,7 +470,10 @@ pub enum RuntimeRequest {
     InspectSession(SessionLookupRequest),
     StartTurn(TurnRequest),
     ContinueTurn(TurnRequest),
+    QueueTurn(TurnRequest),
+    InspectSessionTurns(SessionLookupRequest),
     InterruptTurn(InterruptTurnRequest),
+    CancelQueuedTurn(CancelQueuedTurnRequest),
     ListPendingApprovals(ListPendingApprovalsRequest),
     ResolvePendingApproval(ResolvePendingApprovalRequest),
     Shutdown,
@@ -400,7 +489,10 @@ pub enum RuntimeResponse {
     InspectSession(SessionSnapshot),
     StartTurn(TurnResponse),
     ContinueTurn(TurnResponse),
+    QueueTurn(QueueTurnResponse),
+    InspectSessionTurns(InspectSessionTurnsResponse),
     InterruptTurn(InterruptTurnResponse),
+    CancelQueuedTurn(CancelQueuedTurnResponse),
     ListPendingApprovals(ListPendingApprovalsResponse),
     ResolvePendingApproval(ResolvePendingApprovalResponse),
     Shutdown(ShutdownResponse),
@@ -448,20 +540,35 @@ pub enum ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientMessage, EventDeliveryGuarantee, InitializeRequest, RequestEnvelope, ResponseBody,
-        ResponseEnvelope, RuntimeCapabilities, RuntimeProgressEvent, RuntimeRequest,
-        RuntimeResponse, ServerEvent, ServerMessage, ShutdownResponse, ToolApprovalRecipe,
-        ToolChoice, ToolDeniedAction, ToolLoopRecipe, ToolSetKind, TransportKind,
+        ClientMessage, EventDeliveryGuarantee, RequestEnvelope, ResponseBody, ResponseEnvelope,
+        RuntimeCapabilities, RuntimeProgressEvent, RuntimeRequest, RuntimeResponse, ServerEvent,
+        ServerMessage, ShutdownResponse, ToolApprovalRecipe, ToolChoice, ToolDeniedAction,
+        ToolLoopRecipe, ToolSetKind, TransportKind, TurnAuthor, TurnRequest,
     };
 
     #[test]
     fn request_envelope_round_trips_through_json() {
         let message = ClientMessage::Request(RequestEnvelope {
             request_id: String::from("req-1"),
-            request: RuntimeRequest::Initialize(InitializeRequest {
-                client_name: String::from("probe-cli"),
-                client_version: Some(String::from("0.1.0")),
-                protocol_version: 1,
+            request: RuntimeRequest::QueueTurn(TurnRequest {
+                session_id: crate::session::SessionId::new("sess-1"),
+                profile: crate::backend::BackendProfile {
+                    name: String::from("test"),
+                    kind: crate::backend::BackendKind::OpenAiChatCompletions,
+                    base_url: String::from("http://127.0.0.1:11434/v1"),
+                    model: String::from("tiny"),
+                    api_key_env: String::from("PROBE_OPENAI_API_KEY"),
+                    timeout_secs: 30,
+                    attach_mode: crate::backend::ServerAttachMode::AttachToExisting,
+                    prefix_cache_mode: crate::backend::PrefixCacheMode::BackendDefault,
+                },
+                prompt: String::from("hello"),
+                author: Some(TurnAuthor {
+                    client_name: String::from("probe-cli"),
+                    client_version: Some(String::from("0.1.0")),
+                    display_name: Some(String::from("operator")),
+                }),
+                tool_loop: None,
             }),
         });
 
@@ -520,7 +627,7 @@ mod tests {
             supports_session_inspect: true,
             supports_pending_approval_resolution: true,
             supports_interrupt_requests: true,
-            supports_queued_turns: false,
+            supports_queued_turns: true,
         };
 
         let response_json = serde_json::to_value(&response).expect("response should encode");

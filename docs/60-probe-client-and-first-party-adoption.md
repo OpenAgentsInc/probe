@@ -25,6 +25,7 @@ instead of letting `probe exec`, `probe chat`, and the TUI each wire
 - handshake on startup
 - typed request and response handling
 - inline event draining during active turn or approval requests
+- queued-turn submission and inspection helpers
 - shutdown on drop
 
 ## Why The API Adapts Back Into Core Value Types
@@ -79,8 +80,12 @@ Current implications:
 
 - `lossless` versus `best_effort` event classes still come from the protocol
 - first-party clients can coalesce `best_effort` progress updates if they want
-- queued follow-up turns are still a separate later contract, so active sessions
-  return `session_busy` instead of pretending a queue exists
+- queued follow-up turns now go through explicit queue APIs instead of being
+  smuggled through direct turn requests
+- direct `start_turn` and `continue_turn` requests still return `session_busy`
+  when a session already has active or queued work
+- queued background progress is still polled through `inspect_session_turns`
+  rather than pushed through a detached subscription lane
 
 ## Hidden Internal Server Mode
 
@@ -95,6 +100,19 @@ been materialized yet.
 
 That fallback does not create a second protocol. It only changes how the same
 `probe-server::server::run_stdio_server` entrypoint is launched.
+
+## New Shared Control Calls
+
+The shared client now exposes the first queued-turn and control helpers on top
+of the wire protocol:
+
+- queue a follow-up turn for an existing session
+- inspect active, queued, and recent terminal turn-control records
+- cancel a queued turn before execution
+- interrupt an approval-paused active turn
+
+That keeps the queue and approval control surface typed at the client boundary
+instead of pushing those details back into ad-hoc filesystem reads.
 
 ## Verification
 

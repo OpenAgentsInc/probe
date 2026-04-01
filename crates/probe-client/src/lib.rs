@@ -13,13 +13,15 @@ use probe_core::runtime::{
 };
 use probe_core::tools::{ExecutedToolCall, ProbeToolChoice, ToolDeniedAction, ToolLoopConfig};
 use probe_protocol::runtime::{
-    ClientMessage, EventEnvelope, InitializeRequest, InterruptTurnResponse, ListSessionsResponse,
-    RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope,
-    RuntimeProgressEvent, RuntimeProtocolError, RuntimeRequest, RuntimeResponse,
+    CancelQueuedTurnRequest, CancelQueuedTurnResponse, ClientMessage, EventEnvelope,
+    InitializeRequest, InspectSessionTurnsResponse, InterruptTurnResponse, ListSessionsResponse,
+    QueueTurnResponse, RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody,
+    ResponseEnvelope, RuntimeProgressEvent, RuntimeProtocolError, RuntimeRequest, RuntimeResponse,
     RuntimeToolCallDelta, RuntimeUsage, ServerEvent, ServerMessage, SessionLookupRequest,
     SessionSnapshot, StartSessionRequest, ToolApprovalRecipe, ToolCallResult, ToolChoice,
     ToolDeniedAction as ProtocolDeniedAction, ToolLongContextRecipe, ToolLoopRecipe,
-    ToolOracleRecipe, ToolSetKind, TurnCompleted, TurnPaused, TurnRequest, TurnResponse,
+    ToolOracleRecipe, ToolSetKind, TurnAuthor, TurnCompleted, TurnPaused, TurnRequest,
+    TurnResponse,
 };
 use probe_protocol::session::{
     PendingToolApproval, SessionId, SessionMetadata, UsageMeasurement, UsageTruth,
@@ -139,6 +141,8 @@ pub struct ProbeClient {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_request_id: u64,
+    client_name: String,
+    client_version: Option<String>,
 }
 
 impl ProbeClient {
@@ -158,6 +162,8 @@ impl ProbeClient {
             stdin,
             stdout: BufReader::new(stdout),
             next_request_id: 0,
+            client_name: config.client_name.clone(),
+            client_version: config.client_version.clone(),
         };
         let _ = client.send_request(
             RuntimeRequest::Initialize(InitializeRequest {
@@ -207,6 +213,7 @@ impl ProbeClient {
                     session_id: session_id.clone(),
                     profile: request.profile,
                     prompt: request.prompt,
+                    author: Some(self.turn_author()),
                     tool_loop: request
                         .tool_loop
                         .as_ref()
@@ -256,6 +263,7 @@ impl ProbeClient {
                     session_id: session_id.clone(),
                     profile: request.profile,
                     prompt: request.prompt,
+                    author: Some(self.turn_author()),
                     tool_loop: request
                         .tool_loop
                         .as_ref()
@@ -274,6 +282,35 @@ impl ProbeClient {
             }
             other => Err(ProbeClientError::UnexpectedServerMessage(format!(
                 "expected continue_turn response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub fn queue_plain_text_session_turn(
+        &mut self,
+        request: PlainTextResumeRequest,
+    ) -> Result<QueueTurnResponse, ProbeClientError> {
+        let session_id = request.session_id.clone();
+        match self
+            .send_request(
+                RuntimeRequest::QueueTurn(TurnRequest {
+                    session_id: session_id.clone(),
+                    profile: request.profile,
+                    prompt: request.prompt,
+                    author: Some(self.turn_author()),
+                    tool_loop: request
+                        .tool_loop
+                        .as_ref()
+                        .map(tool_loop_recipe_from_config)
+                        .transpose()?,
+                }),
+                None,
+            )
+            .map_err(|error| session_scoped_error(session_id, error))?
+        {
+            RuntimeResponse::QueueTurn(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected queue_turn response, got {other:?}"
             ))),
         }
     }
@@ -377,6 +414,23 @@ impl ProbeClient {
         }
     }
 
+    pub fn inspect_session_turns(
+        &mut self,
+        session_id: &SessionId,
+    ) -> Result<InspectSessionTurnsResponse, ProbeClientError> {
+        match self.send_request(
+            RuntimeRequest::InspectSessionTurns(SessionLookupRequest {
+                session_id: session_id.clone(),
+            }),
+            None,
+        )? {
+            RuntimeResponse::InspectSessionTurns(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected inspect_session_turns response, got {other:?}"
+            ))),
+        }
+    }
+
     pub fn read_metadata(
         &mut self,
         session_id: &SessionId,
@@ -429,6 +483,25 @@ impl ProbeClient {
         }
     }
 
+    pub fn cancel_queued_turn(
+        &mut self,
+        session_id: &SessionId,
+        turn_id: impl Into<String>,
+    ) -> Result<CancelQueuedTurnResponse, ProbeClientError> {
+        match self.send_request(
+            RuntimeRequest::CancelQueuedTurn(CancelQueuedTurnRequest {
+                session_id: session_id.clone(),
+                turn_id: turn_id.into(),
+            }),
+            None,
+        )? {
+            RuntimeResponse::CancelQueuedTurn(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected cancel_queued_turn response, got {other:?}"
+            ))),
+        }
+    }
+
     pub fn shutdown(&mut self) -> Result<(), ProbeClientError> {
         match self.send_request(RuntimeRequest::Shutdown, None)? {
             RuntimeResponse::Shutdown(response) if response.accepted => {
@@ -441,6 +514,14 @@ impl ProbeClient {
             other => Err(ProbeClientError::UnexpectedServerMessage(format!(
                 "expected shutdown response, got {other:?}"
             ))),
+        }
+    }
+
+    fn turn_author(&self) -> TurnAuthor {
+        TurnAuthor {
+            client_name: self.client_name.clone(),
+            client_version: self.client_version.clone(),
+            display_name: None,
         }
     }
 

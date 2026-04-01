@@ -10,24 +10,27 @@ use probe_core::runtime::{
     ResolvePendingToolApprovalRequest, RuntimeError, RuntimeEvent, RuntimeEventSink,
     default_probe_home,
 };
-use probe_core::session_store::{NewSession, SessionStoreError};
+use probe_core::session_store::{NewItem, NewSession, SessionStoreError};
 use probe_core::tools::{
     ExecutedToolCall, ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction as CoreDeniedAction,
     ToolLongContextConfig, ToolLoopConfig, ToolOracleConfig,
 };
 use probe_protocol::runtime::{
-    ClientMessage, EventDeliveryGuarantee, EventEnvelope, InitializeResponse,
-    InterruptTurnResponse, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListSessionsResponse, RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody,
-    ResponseEnvelope, RuntimeCapabilities, RuntimeProgressEvent, RuntimeProtocolError,
-    RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage, ServerEvent,
-    ServerMessage, SessionLookupRequest, SessionSnapshot, ShutdownResponse, StartSessionRequest,
-    ToolApprovalRecipe, ToolCallResult, ToolChoice, ToolDeniedAction, ToolLongContextRecipe,
-    ToolLoopRecipe, ToolOracleRecipe, ToolSetKind, TransportKind, TurnCompleted, TurnPaused,
-    TurnRequest, TurnResponse,
+    CancelQueuedTurnRequest, CancelQueuedTurnResponse, ClientMessage, EventDeliveryGuarantee,
+    EventEnvelope, InitializeResponse, InspectSessionTurnsResponse, InterruptTurnResponse,
+    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListSessionsResponse,
+    QueueTurnResponse, QueuedTurnStatus, RequestEnvelope, ResolvePendingApprovalResponse,
+    ResponseBody, ResponseEnvelope, RuntimeCapabilities, RuntimeProgressEvent,
+    RuntimeProtocolError, RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage,
+    ServerEvent, ServerMessage, SessionLookupRequest, SessionSnapshot, ShutdownResponse,
+    StartSessionRequest, ToolApprovalRecipe, ToolCallResult, ToolChoice, ToolDeniedAction,
+    ToolLongContextRecipe, ToolLoopRecipe, ToolOracleRecipe, ToolSetKind, TransportKind,
+    TurnCompleted, TurnPaused, TurnRequest, TurnResponse, TurnSubmissionKind,
 };
 use probe_protocol::session::{SessionBackendTarget, SessionId, UsageMeasurement, UsageTruth};
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
+
+use crate::turn_control::{SessionTurnControlState, StoredTurnControlRecord, now_ms};
 
 #[derive(Debug)]
 pub enum ServerError {
@@ -128,15 +131,513 @@ pub fn run_stdio_server(probe_home: Option<PathBuf>) -> Result<(), ServerError> 
 struct ProbeStdioServer {
     runtime: ProbeRuntime,
     writer: SharedJsonlWriter,
-    active_turns: Arc<Mutex<HashSet<String>>>,
+    turn_control: Arc<TurnControlPlane>,
+}
+
+#[derive(Clone)]
+struct TurnControlPlane {
+    runtime: ProbeRuntime,
+    coordination: Arc<Mutex<HashSet<String>>>,
+}
+
+struct QueuedTurnReservation {
+    response: QueueTurnResponse,
+    turn_id: String,
+    should_start: bool,
+}
+
+struct BackgroundTurnWorkItem {
+    turn_id: String,
+    request: TurnRequest,
+    mode: TurnMode,
+}
+
+struct InterruptOutcome {
+    response: InterruptTurnResponse,
+    should_start_next: bool,
+}
+
+impl TurnControlPlane {
+    fn new(runtime: ProbeRuntime) -> Self {
+        Self {
+            runtime,
+            coordination: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    fn reserve_direct_turn(
+        &self,
+        request: &TurnRequest,
+        mode: TurnMode,
+    ) -> Result<String, RuntimeProtocolError> {
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let mut state = self.load_state_locked(request.session_id.as_str(), &mut coordination)?;
+        if state.unfinished_turn_count() != 0 {
+            return Err(protocol_error(
+                "session_busy",
+                format!(
+                    "session {} already has active or queued work; use queue_turn to submit follow-up prompts",
+                    request.session_id.as_str()
+                ),
+            ));
+        }
+        let requested_at_ms = now_ms();
+        let turn_id = state
+            .push_turn(
+                &request.session_id,
+                mode.submission_kind(),
+                QueuedTurnStatus::Running,
+                request,
+                requested_at_ms,
+                Some(requested_at_ms),
+            )
+            .turn_id;
+        state
+            .save(&self.runtime, &request.session_id)
+            .map_err(session_store_error_to_protocol)?;
+        coordination.insert(String::from(request.session_id.as_str()));
+        Ok(turn_id)
+    }
+
+    fn reserve_queue_turn(
+        &self,
+        request: &TurnRequest,
+    ) -> Result<QueuedTurnReservation, RuntimeProtocolError> {
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let mut state = self.load_state_locked(request.session_id.as_str(), &mut coordination)?;
+        let should_start = state.unfinished_turn_count() == 0
+            && !coordination.contains(request.session_id.as_str());
+        let requested_at_ms = now_ms();
+        let status = if should_start {
+            QueuedTurnStatus::Running
+        } else {
+            QueuedTurnStatus::Queued
+        };
+        let turn_id = state
+            .push_turn(
+                &request.session_id,
+                TurnSubmissionKind::Continue,
+                status,
+                request,
+                requested_at_ms,
+                should_start.then_some(requested_at_ms),
+            )
+            .turn_id;
+        let response = QueueTurnResponse {
+            turn: state
+                .view_for(turn_id.as_str())
+                .expect("queued turn should be visible after insert"),
+        };
+        state
+            .save(&self.runtime, &request.session_id)
+            .map_err(session_store_error_to_protocol)?;
+        if should_start {
+            coordination.insert(String::from(request.session_id.as_str()));
+        }
+        Ok(QueuedTurnReservation {
+            response,
+            turn_id,
+            should_start,
+        })
+    }
+
+    fn reserve_pending_approval_resolution(
+        &self,
+        request: &probe_protocol::runtime::ResolvePendingApprovalRequest,
+    ) -> Result<String, RuntimeProtocolError> {
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let mut state = self.load_state_locked(request.session_id.as_str(), &mut coordination)?;
+        let Some(active_turn) = state.active_turn_mut() else {
+            return Err(protocol_error(
+                "not_running",
+                format!(
+                    "session {} does not have an active turn waiting for approval",
+                    request.session_id.as_str()
+                ),
+            ));
+        };
+        if !active_turn.record.awaiting_approval {
+            return Err(protocol_error(
+                "approval_not_pending",
+                format!(
+                    "session {} is not currently paused on a pending approval",
+                    request.session_id.as_str()
+                ),
+            ));
+        }
+        active_turn.record.awaiting_approval = false;
+        let turn_id = active_turn.record.turn_id.clone();
+        state
+            .save(&self.runtime, &request.session_id)
+            .map_err(session_store_error_to_protocol)?;
+        coordination.insert(String::from(request.session_id.as_str()));
+        Ok(turn_id)
+    }
+
+    fn inspect_session_turns(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<InspectSessionTurnsResponse, RuntimeProtocolError> {
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let state = self.load_state_locked(session_id.as_str(), &mut coordination)?;
+        Ok(state.inspect_view(session_id))
+    }
+
+    fn cancel_queued_turn(
+        &self,
+        request: CancelQueuedTurnRequest,
+    ) -> Result<CancelQueuedTurnResponse, RuntimeProtocolError> {
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let mut state = self.load_state_locked(request.session_id.as_str(), &mut coordination)?;
+        let Some(turn) = state.queued_turn_mut(request.turn_id.as_str()) else {
+            let reason_code = if state
+                .turns
+                .iter()
+                .any(|turn| turn.record.turn_id == request.turn_id)
+            {
+                Some(String::from("not_queued"))
+            } else {
+                Some(String::from("not_found"))
+            };
+            return Ok(CancelQueuedTurnResponse {
+                session_id: request.session_id,
+                turn_id: request.turn_id,
+                cancelled: false,
+                reason_code,
+                message: String::from("turn is not a queued turn that can be cancelled"),
+            });
+        };
+        let turn_note = queued_turn_note(turn);
+        let turn_id = turn.record.turn_id.clone();
+        turn.record.status = QueuedTurnStatus::Cancelled;
+        turn.record.finished_at_ms = Some(now_ms());
+        turn.record.cancellation_reason = Some(String::from("cancelled before execution"));
+        self.runtime
+            .session_store()
+            .append_turn(
+                &request.session_id,
+                &[NewItem::new(
+                    probe_protocol::session::TranscriptItemKind::Note,
+                    turn_note,
+                )],
+            )
+            .map_err(session_store_error_to_protocol)?;
+        state
+            .save(&self.runtime, &request.session_id)
+            .map_err(session_store_error_to_protocol)?;
+        Ok(CancelQueuedTurnResponse {
+            session_id: request.session_id,
+            turn_id,
+            cancelled: true,
+            reason_code: None,
+            message: String::from("queued turn cancelled before execution"),
+        })
+    }
+
+    fn interrupt_turn(
+        &self,
+        session_id: SessionId,
+    ) -> Result<InterruptOutcome, RuntimeProtocolError> {
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let mut state = match self.load_state_locked(session_id.as_str(), &mut coordination) {
+            Ok(state) => state,
+            Err(error) if error.code == "session_not_found" => {
+                return Ok(InterruptOutcome {
+                    response: InterruptTurnResponse {
+                        session_id,
+                        turn_id: None,
+                        interrupted: false,
+                        reason_code: Some(String::from("not_running")),
+                        message: String::from("session is not currently running a turn"),
+                    },
+                    should_start_next: false,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(active_turn) = state.active_turn_mut() else {
+            return Ok(InterruptOutcome {
+                response: InterruptTurnResponse {
+                    session_id,
+                    turn_id: None,
+                    interrupted: false,
+                    reason_code: Some(String::from("not_running")),
+                    message: String::from("session is not currently running a turn"),
+                },
+                should_start_next: false,
+            });
+        };
+        let turn_id = active_turn.record.turn_id.clone();
+        if coordination.contains(session_id.as_str()) {
+            return Ok(InterruptOutcome {
+                response: InterruptTurnResponse {
+                    session_id,
+                    turn_id: Some(turn_id),
+                    interrupted: false,
+                    reason_code: Some(String::from("unsupported")),
+                    message: String::from(
+                        "probe-server still cannot cooperatively interrupt an in-flight runtime turn",
+                    ),
+                },
+                should_start_next: false,
+            });
+        }
+        if !active_turn.record.awaiting_approval {
+            return Ok(InterruptOutcome {
+                response: InterruptTurnResponse {
+                    session_id,
+                    turn_id: Some(turn_id),
+                    interrupted: false,
+                    reason_code: Some(String::from("not_interruptible")),
+                    message: String::from(
+                        "the active turn is not paused on approval, so there is nothing honest to interrupt yet",
+                    ),
+                },
+                should_start_next: false,
+            });
+        }
+
+        let pending_approvals = self
+            .runtime
+            .pending_tool_approvals(&session_id)
+            .map_err(runtime_error_to_protocol)?;
+        for approval in &pending_approvals {
+            self.runtime
+                .session_store()
+                .resolve_pending_tool_approval(
+                    &session_id,
+                    approval.tool_call_id.as_str(),
+                    probe_protocol::session::ToolApprovalResolution::Rejected,
+                )
+                .map_err(session_store_error_to_protocol)?;
+        }
+        let note = interrupted_turn_note(active_turn, pending_approvals.len());
+        self.runtime
+            .session_store()
+            .append_turn(
+                &session_id,
+                &[NewItem::new(
+                    probe_protocol::session::TranscriptItemKind::Note,
+                    note,
+                )],
+            )
+            .map_err(session_store_error_to_protocol)?;
+        active_turn.record.status = QueuedTurnStatus::Cancelled;
+        active_turn.record.awaiting_approval = false;
+        active_turn.record.finished_at_ms = Some(now_ms());
+        active_turn.record.cancellation_reason =
+            Some(String::from("interrupted while waiting for tool approval"));
+        let should_start_next = state.queued_turn_count() > 0;
+        state
+            .save(&self.runtime, &session_id)
+            .map_err(session_store_error_to_protocol)?;
+        Ok(InterruptOutcome {
+            response: InterruptTurnResponse {
+                session_id,
+                turn_id: Some(turn_id),
+                interrupted: true,
+                reason_code: None,
+                message: String::from(
+                    "cancelled the approval-paused turn, rejected its pending approvals, and preserved the interruption in the transcript",
+                ),
+            },
+            should_start_next,
+        })
+    }
+
+    fn mark_turn_completed(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+    ) -> Result<bool, RuntimeProtocolError> {
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let mut state = self.load_state_locked(session_id.as_str(), &mut coordination)?;
+        if let Some(turn) = state.turn_by_id_mut(turn_id) {
+            turn.record.status = QueuedTurnStatus::Completed;
+            turn.record.awaiting_approval = false;
+            turn.record.finished_at_ms = Some(now_ms());
+            turn.record.failure_message = None;
+            turn.record.cancellation_reason = None;
+        }
+        coordination.remove(session_id.as_str());
+        let should_start_next = state.queued_turn_count() > 0;
+        state
+            .save(&self.runtime, session_id)
+            .map_err(session_store_error_to_protocol)?;
+        Ok(should_start_next)
+    }
+
+    fn mark_turn_paused(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+    ) -> Result<(), RuntimeProtocolError> {
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let mut state = self.load_state_locked(session_id.as_str(), &mut coordination)?;
+        if let Some(turn) = state.turn_by_id_mut(turn_id) {
+            turn.record.status = QueuedTurnStatus::Running;
+            turn.record.awaiting_approval = true;
+            turn.record.finished_at_ms = None;
+        }
+        coordination.remove(session_id.as_str());
+        state
+            .save(&self.runtime, session_id)
+            .map_err(session_store_error_to_protocol)
+    }
+
+    fn restore_paused_turn(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+    ) -> Result<(), RuntimeProtocolError> {
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let mut state = self.load_state_locked(session_id.as_str(), &mut coordination)?;
+        if let Some(turn) = state.turn_by_id_mut(turn_id) {
+            turn.record.status = QueuedTurnStatus::Running;
+            turn.record.awaiting_approval = true;
+        }
+        coordination.remove(session_id.as_str());
+        state
+            .save(&self.runtime, session_id)
+            .map_err(session_store_error_to_protocol)
+    }
+
+    fn mark_turn_failed(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+        message: String,
+    ) -> Result<bool, RuntimeProtocolError> {
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let mut state = self.load_state_locked(session_id.as_str(), &mut coordination)?;
+        if let Some(turn) = state.turn_by_id_mut(turn_id) {
+            turn.record.status = QueuedTurnStatus::Failed;
+            turn.record.awaiting_approval = false;
+            turn.record.finished_at_ms = Some(now_ms());
+            turn.record.failure_message = Some(message);
+            turn.record.cancellation_reason = None;
+        }
+        coordination.remove(session_id.as_str());
+        let should_start_next = state.queued_turn_count() > 0;
+        state
+            .save(&self.runtime, session_id)
+            .map_err(session_store_error_to_protocol)?;
+        Ok(should_start_next)
+    }
+
+    fn maybe_start_next_queued_turn(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<BackgroundTurnWorkItem>, RuntimeProtocolError> {
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let mut state = self.load_state_locked(session_id.as_str(), &mut coordination)?;
+        if state.active_turn().is_some() || coordination.contains(session_id.as_str()) {
+            return Ok(None);
+        }
+        let Some(next_turn) = state.next_queued_turn() else {
+            return Ok(None);
+        };
+        let turn_id = next_turn.record.turn_id.clone();
+        if let Some(turn) = state.turn_by_id_mut(turn_id.as_str()) {
+            turn.record.status = QueuedTurnStatus::Running;
+            turn.record.started_at_ms = Some(now_ms());
+            turn.record.awaiting_approval = false;
+            turn.record.failure_message = None;
+            turn.record.cancellation_reason = None;
+        }
+        state
+            .save(&self.runtime, session_id)
+            .map_err(session_store_error_to_protocol)?;
+        coordination.insert(String::from(session_id.as_str()));
+        Ok(Some(BackgroundTurnWorkItem {
+            turn_id,
+            request: next_turn.to_turn_request(),
+            mode: TurnMode::Continue,
+        }))
+    }
+
+    fn unfinished_turn_count(&self) -> Result<usize, RuntimeProtocolError> {
+        let sessions = self
+            .runtime
+            .session_store()
+            .list_sessions()
+            .map_err(session_store_error_to_protocol)?;
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let mut active_turns = 0usize;
+        for session in sessions {
+            let state = self.load_state_locked(session.id.as_str(), &mut coordination)?;
+            active_turns += state.unfinished_turn_count();
+        }
+        Ok(active_turns)
+    }
+
+    fn load_state_locked(
+        &self,
+        session_id: &str,
+        coordination: &mut HashSet<String>,
+    ) -> Result<SessionTurnControlState, RuntimeProtocolError> {
+        let session_id = SessionId::new(session_id);
+        let mut state = SessionTurnControlState::load(&self.runtime, &session_id)
+            .map_err(session_store_error_to_protocol)?;
+        let approvals_pending = !self
+            .runtime
+            .pending_tool_approvals(&session_id)
+            .map_err(runtime_error_to_protocol)?
+            .is_empty();
+        if !coordination.contains(session_id.as_str())
+            && state.recover_orphaned_running_turns(approvals_pending, now_ms())
+        {
+            state
+                .save(&self.runtime, &session_id)
+                .map_err(session_store_error_to_protocol)?;
+        }
+        Ok(state)
+    }
 }
 
 impl ProbeStdioServer {
     fn new(runtime: ProbeRuntime) -> Self {
+        let writer = SharedJsonlWriter::new();
         Self {
+            turn_control: Arc::new(TurnControlPlane::new(runtime.clone())),
             runtime,
-            writer: SharedJsonlWriter::new(),
-            active_turns: Arc::new(Mutex::new(HashSet::new())),
+            writer,
         }
     }
 
@@ -191,7 +692,7 @@ impl ProbeStdioServer {
                                 supports_session_inspect: true,
                                 supports_pending_approval_resolution: true,
                                 supports_interrupt_requests: true,
-                                supports_queued_turns: false,
+                                supports_queued_turns: true,
                             },
                         }),
                     )?;
@@ -255,12 +756,52 @@ impl ProbeStdioServer {
                 self.spawn_turn_request(request_id, request, TurnMode::Continue)?;
                 Ok(true)
             }
+            RuntimeRequest::QueueTurn(request) => {
+                match self.queue_turn(request) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::QueueTurn(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(true)
+            }
+            RuntimeRequest::InspectSessionTurns(SessionLookupRequest { session_id }) => {
+                match self.inspect_session_turns(&session_id) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::InspectSessionTurns(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(true)
+            }
             RuntimeRequest::InterruptTurn(request) => {
-                let response = self.interrupt_turn(request.session_id);
-                self.writer.send_response_ok(
-                    request_id.as_str(),
-                    RuntimeResponse::InterruptTurn(response),
-                )?;
+                match self.interrupt_turn(request.session_id) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::InterruptTurn(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(true)
+            }
+            RuntimeRequest::CancelQueuedTurn(request) => {
+                match self.cancel_queued_turn(request) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::CancelQueuedTurn(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
                 Ok(true)
             }
             RuntimeRequest::ListPendingApprovals(request) => {
@@ -370,29 +911,56 @@ impl ProbeStdioServer {
         Ok(approvals)
     }
 
-    fn interrupt_turn(&self, session_id: SessionId) -> InterruptTurnResponse {
-        let active = self
-            .active_turns
-            .lock()
-            .expect("probe-server active turn mutex should not be poisoned")
-            .contains(session_id.as_str());
-        if active {
-            InterruptTurnResponse {
-                session_id,
-                interrupted: false,
-                reason_code: Some(String::from("unsupported")),
-                message: String::from(
-                    "probe-server knows the session is busy, but the current Probe runtime has no cooperative interrupt path yet",
-                ),
-            }
-        } else {
-            InterruptTurnResponse {
-                session_id,
-                interrupted: false,
-                reason_code: Some(String::from("not_running")),
-                message: String::from("session is not currently running a turn"),
-            }
+    fn inspect_session_turns(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<InspectSessionTurnsResponse, RuntimeProtocolError> {
+        self.turn_control.inspect_session_turns(session_id)
+    }
+
+    fn queue_turn(&self, request: TurnRequest) -> Result<QueueTurnResponse, RuntimeProtocolError> {
+        let reservation = self.turn_control.reserve_queue_turn(&request)?;
+        if reservation.should_start {
+            spawn_turn_worker(
+                Arc::clone(&self.turn_control),
+                self.runtime.clone(),
+                self.writer.clone(),
+                None,
+                request,
+                TurnMode::Continue,
+                reservation.turn_id,
+            )
+            .map_err(|error| {
+                protocol_error(
+                    "turn_spawn_failed",
+                    format!("failed to spawn queued turn: {error}"),
+                )
+            })?;
         }
+        Ok(reservation.response)
+    }
+
+    fn interrupt_turn(
+        &self,
+        session_id: SessionId,
+    ) -> Result<InterruptTurnResponse, RuntimeProtocolError> {
+        let outcome = self.turn_control.interrupt_turn(session_id.clone())?;
+        if outcome.should_start_next {
+            spawn_next_queued_turn_if_ready(
+                Arc::clone(&self.turn_control),
+                self.runtime.clone(),
+                self.writer.clone(),
+                session_id,
+            );
+        }
+        Ok(outcome.response)
+    }
+
+    fn cancel_queued_turn(
+        &self,
+        request: CancelQueuedTurnRequest,
+    ) -> Result<CancelQueuedTurnResponse, RuntimeProtocolError> {
+        self.turn_control.cancel_queued_turn(request)
     }
 
     fn spawn_turn_request(
@@ -401,42 +969,37 @@ impl ProbeStdioServer {
         request: TurnRequest,
         mode: TurnMode,
     ) -> Result<(), ServerError> {
-        let session_key = String::from(request.session_id.as_str());
-        if !self.mark_turn_active(session_key.as_str()) {
+        let turn_id = match self.turn_control.reserve_direct_turn(&request, mode) {
+            Ok(turn_id) => turn_id,
+            Err(error) => {
+                self.writer
+                    .send_response_error(request_id.as_str(), error)?;
+                return Ok(());
+            }
+        };
+
+        if let Err(error) = spawn_turn_worker(
+            Arc::clone(&self.turn_control),
+            self.runtime.clone(),
+            self.writer.clone(),
+            Some(request_id.clone()),
+            request.clone(),
+            mode,
+            turn_id.clone(),
+        ) {
+            let _ = self.turn_control.mark_turn_failed(
+                &request.session_id,
+                turn_id.as_str(),
+                format!("failed to spawn turn worker: {error}"),
+            );
             self.writer.send_response_error(
                 request_id.as_str(),
                 protocol_error(
-                    "session_busy",
-                    format!(
-                        "session {} already has an active turn; queued follow-ups are not available on this server cut yet",
-                        request.session_id.as_str()
-                    ),
+                    "turn_spawn_failed",
+                    format!("failed to spawn turn worker: {error}"),
                 ),
             )?;
-            return Ok(());
         }
-
-        let runtime = self.runtime.clone();
-        let writer = self.writer.clone();
-        let active_turns = Arc::clone(&self.active_turns);
-        thread::Builder::new()
-            .name(format!("probe-server-turn-{}", request.session_id.as_str()))
-            .spawn(move || {
-                let response =
-                    run_turn_request(&runtime, &writer, request_id.as_str(), request, mode);
-                active_turns
-                    .lock()
-                    .expect("probe-server active turn mutex should not be poisoned")
-                    .remove(session_key.as_str());
-                match response {
-                    Ok(response) => {
-                        let _ = writer.send_response_ok(request_id.as_str(), response);
-                    }
-                    Err(error) => {
-                        let _ = writer.send_response_error(request_id.as_str(), error);
-                    }
-                }
-            })?;
         Ok(())
     }
 
@@ -445,64 +1008,42 @@ impl ProbeStdioServer {
         request_id: String,
         request: probe_protocol::runtime::ResolvePendingApprovalRequest,
     ) -> Result<(), ServerError> {
-        let session_key = String::from(request.session_id.as_str());
-        if !self.mark_turn_active(session_key.as_str()) {
+        let turn_id = match self
+            .turn_control
+            .reserve_pending_approval_resolution(&request)
+        {
+            Ok(turn_id) => turn_id,
+            Err(error) => {
+                self.writer
+                    .send_response_error(request_id.as_str(), error)?;
+                return Ok(());
+            }
+        };
+
+        if let Err(error) = spawn_approval_resolution_worker(
+            Arc::clone(&self.turn_control),
+            self.runtime.clone(),
+            self.writer.clone(),
+            request_id.clone(),
+            request.clone(),
+            turn_id.clone(),
+        ) {
+            let _ = self
+                .turn_control
+                .restore_paused_turn(&request.session_id, turn_id.as_str());
             self.writer.send_response_error(
                 request_id.as_str(),
                 protocol_error(
-                    "session_busy",
-                    format!(
-                        "session {} already has an active turn; queued approval continuations are not available yet",
-                        request.session_id.as_str()
-                    ),
+                    "turn_spawn_failed",
+                    format!("failed to spawn approval-resolution worker: {error}"),
                 ),
             )?;
-            return Ok(());
         }
-
-        let runtime = self.runtime.clone();
-        let writer = self.writer.clone();
-        let active_turns = Arc::clone(&self.active_turns);
-        thread::Builder::new()
-            .name(format!(
-                "probe-server-approval-{}",
-                request.session_id.as_str()
-            ))
-            .spawn(move || {
-                let response = run_pending_approval_resolution(
-                    &runtime,
-                    &writer,
-                    request_id.as_str(),
-                    request,
-                );
-                active_turns
-                    .lock()
-                    .expect("probe-server active turn mutex should not be poisoned")
-                    .remove(session_key.as_str());
-                match response {
-                    Ok(response) => {
-                        let _ = writer.send_response_ok(request_id.as_str(), response);
-                    }
-                    Err(error) => {
-                        let _ = writer.send_response_error(request_id.as_str(), error);
-                    }
-                }
-            })?;
         Ok(())
     }
 
-    fn mark_turn_active(&self, session_id: &str) -> bool {
-        self.active_turns
-            .lock()
-            .expect("probe-server active turn mutex should not be poisoned")
-            .insert(String::from(session_id))
-    }
-
     fn active_turn_count(&self) -> usize {
-        self.active_turns
-            .lock()
-            .expect("probe-server active turn mutex should not be poisoned")
-            .len()
+        self.turn_control.unfinished_turn_count().unwrap_or(1)
     }
 }
 
@@ -512,37 +1053,240 @@ enum TurnMode {
     Continue,
 }
 
+impl TurnMode {
+    fn submission_kind(self) -> TurnSubmissionKind {
+        match self {
+            Self::Start => TurnSubmissionKind::Start,
+            Self::Continue => TurnSubmissionKind::Continue,
+        }
+    }
+}
+
+fn spawn_turn_worker(
+    turn_control: Arc<TurnControlPlane>,
+    runtime: ProbeRuntime,
+    writer: SharedJsonlWriter,
+    request_id: Option<String>,
+    request: TurnRequest,
+    mode: TurnMode,
+    turn_id: String,
+) -> Result<(), ServerError> {
+    let session_id = request.session_id.clone();
+    let thread_name = format!("probe-server-turn-{}", session_id.as_str());
+    thread::Builder::new().name(thread_name).spawn(move || {
+        let response = run_turn_request(&runtime, &writer, request_id.as_deref(), request, mode);
+
+        let should_start_next = match &response {
+            Ok(RuntimeResponse::StartTurn(TurnResponse::Completed(_)))
+            | Ok(RuntimeResponse::ContinueTurn(TurnResponse::Completed(_))) => turn_control
+                .mark_turn_completed(&session_id, turn_id.as_str())
+                .unwrap_or(false),
+            Ok(RuntimeResponse::StartTurn(TurnResponse::Paused(_)))
+            | Ok(RuntimeResponse::ContinueTurn(TurnResponse::Paused(_))) => {
+                let _ = turn_control.mark_turn_paused(&session_id, turn_id.as_str());
+                false
+            }
+            Ok(other) => {
+                let _ = turn_control.mark_turn_failed(
+                    &session_id,
+                    turn_id.as_str(),
+                    format!("unexpected turn response shape: {other:?}"),
+                );
+                false
+            }
+            Err(error) => turn_control
+                .mark_turn_failed(&session_id, turn_id.as_str(), error.message.clone())
+                .unwrap_or(false),
+        };
+
+        if let Some(request_id) = request_id.as_deref() {
+            match response {
+                Ok(response) => {
+                    let _ = writer.send_response_ok(request_id, response);
+                }
+                Err(error) => {
+                    let _ = writer.send_response_error(request_id, error);
+                }
+            }
+        }
+
+        if should_start_next {
+            spawn_next_queued_turn_if_ready(turn_control, runtime, writer, session_id);
+        }
+    })?;
+    Ok(())
+}
+
+fn spawn_approval_resolution_worker(
+    turn_control: Arc<TurnControlPlane>,
+    runtime: ProbeRuntime,
+    writer: SharedJsonlWriter,
+    request_id: String,
+    request: probe_protocol::runtime::ResolvePendingApprovalRequest,
+    turn_id: String,
+) -> Result<(), ServerError> {
+    let session_id = request.session_id.clone();
+    let thread_name = format!("probe-server-approval-{}", session_id.as_str());
+    thread::Builder::new().name(thread_name).spawn(move || {
+        let response =
+            run_pending_approval_resolution(&runtime, &writer, Some(request_id.as_str()), request);
+
+        let should_start_next = match &response {
+            Ok(RuntimeResponse::ResolvePendingApproval(
+                ResolvePendingApprovalResponse::StillPending { .. },
+            )) => {
+                let _ = turn_control.mark_turn_paused(&session_id, turn_id.as_str());
+                false
+            }
+            Ok(RuntimeResponse::ResolvePendingApproval(
+                ResolvePendingApprovalResponse::Resumed(_),
+            )) => turn_control
+                .mark_turn_completed(&session_id, turn_id.as_str())
+                .unwrap_or(false),
+            Ok(other) => {
+                let _ = turn_control.mark_turn_failed(
+                    &session_id,
+                    turn_id.as_str(),
+                    format!("unexpected approval response shape: {other:?}"),
+                );
+                false
+            }
+            Err(error) if approval_error_keeps_turn_paused(error) => {
+                let _ = turn_control.restore_paused_turn(&session_id, turn_id.as_str());
+                false
+            }
+            Err(error) => turn_control
+                .mark_turn_failed(&session_id, turn_id.as_str(), error.message.clone())
+                .unwrap_or(false),
+        };
+
+        match response {
+            Ok(response) => {
+                let _ = writer.send_response_ok(request_id.as_str(), response);
+            }
+            Err(error) => {
+                let _ = writer.send_response_error(request_id.as_str(), error);
+            }
+        }
+
+        if should_start_next {
+            spawn_next_queued_turn_if_ready(turn_control, runtime, writer, session_id);
+        }
+    })?;
+    Ok(())
+}
+
+fn spawn_next_queued_turn_if_ready(
+    turn_control: Arc<TurnControlPlane>,
+    runtime: ProbeRuntime,
+    writer: SharedJsonlWriter,
+    session_id: SessionId,
+) {
+    let work_item = match turn_control.maybe_start_next_queued_turn(&session_id) {
+        Ok(work_item) => work_item,
+        Err(_) => None,
+    };
+    if let Some(work_item) = work_item {
+        if let Err(error) = spawn_turn_worker(
+            Arc::clone(&turn_control),
+            runtime,
+            writer,
+            None,
+            work_item.request,
+            work_item.mode,
+            work_item.turn_id.clone(),
+        ) {
+            let _ = turn_control.mark_turn_failed(
+                &session_id,
+                work_item.turn_id.as_str(),
+                format!("failed to spawn queued turn worker: {error}"),
+            );
+        }
+    }
+}
+
+fn approval_error_keeps_turn_paused(error: &RuntimeProtocolError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "approval_not_found" | "approval_already_resolved"
+    )
+}
+
+fn queued_turn_note(turn: &StoredTurnControlRecord) -> String {
+    format!(
+        "probe-server cancelled queued turn {} from {} before execution: {}",
+        turn.record.turn_id,
+        render_turn_author(&turn.record.author),
+        render_prompt_excerpt(turn.record.prompt.as_str()),
+    )
+}
+
+fn interrupted_turn_note(turn: &StoredTurnControlRecord, pending_approvals: usize) -> String {
+    format!(
+        "probe-server interrupted approval-paused turn {} from {} and rejected {} pending approval(s): {}",
+        turn.record.turn_id,
+        render_turn_author(&turn.record.author),
+        pending_approvals,
+        render_prompt_excerpt(turn.record.prompt.as_str()),
+    )
+}
+
+fn render_turn_author(author: &probe_protocol::runtime::TurnAuthor) -> String {
+    author
+        .display_name
+        .clone()
+        .unwrap_or_else(|| match author.client_version.as_deref() {
+            Some(version) => format!("{} {}", author.client_name, version),
+            None => author.client_name.clone(),
+        })
+}
+
+fn render_prompt_excerpt(prompt: &str) -> String {
+    const MAX_CHARS: usize = 96;
+    let mut excerpt = prompt.trim().replace('\n', " ");
+    if excerpt.chars().count() <= MAX_CHARS {
+        return format!("\"{excerpt}\"");
+    }
+    excerpt = excerpt.chars().take(MAX_CHARS - 1).collect::<String>();
+    format!("\"{}...\"", excerpt.trim_end())
+}
+
 fn run_turn_request(
     runtime: &ProbeRuntime,
     writer: &SharedJsonlWriter,
-    request_id: &str,
+    request_id: Option<&str>,
     request: TurnRequest,
     mode: TurnMode,
 ) -> Result<RuntimeResponse, RuntimeProtocolError> {
     let tool_loop = request.tool_loop.map(tool_loop_from_recipe).transpose()?;
-    let writer_for_events = writer.clone();
-    let request_id_for_events = String::from(request_id);
-    let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
-        let delivery = delivery_for_runtime_event(&event);
-        let encoded = encode_runtime_event(event);
-        let _ = writer_for_events.send_event(
-            request_id_for_events.as_str(),
-            ServerEvent::RuntimeProgress {
-                delivery,
-                event: encoded,
-            },
-        );
+    let event_sink = request_id.map(|request_id| {
+        let writer_for_events = writer.clone();
+        let request_id_for_events = String::from(request_id);
+        Arc::new(move |event| {
+            let delivery = delivery_for_runtime_event(&event);
+            let encoded = encode_runtime_event(event);
+            let _ = writer_for_events.send_event(
+                request_id_for_events.as_str(),
+                ServerEvent::RuntimeProgress {
+                    delivery,
+                    event: encoded,
+                },
+            );
+        }) as Arc<dyn RuntimeEventSink>
     });
 
-    let result = runtime.continue_plain_text_session_with_events(
-        PlainTextResumeRequest {
-            session_id: request.session_id.clone(),
-            profile: request.profile,
-            prompt: request.prompt,
-            tool_loop,
-        },
-        event_sink,
-    );
+    let resume_request = PlainTextResumeRequest {
+        session_id: request.session_id.clone(),
+        profile: request.profile,
+        prompt: request.prompt,
+        tool_loop,
+    };
+    let result = match event_sink {
+        Some(event_sink) => {
+            runtime.continue_plain_text_session_with_events(resume_request, event_sink)
+        }
+        None => runtime.continue_plain_text_session(resume_request),
+    };
 
     let response = match result {
         Ok(outcome) => turn_response_to_runtime_response(
@@ -558,16 +1302,18 @@ fn run_turn_request(
             let pending_approvals = runtime
                 .pending_tool_approvals(&session_id)
                 .map_err(runtime_error_to_protocol)?;
-            writer
-                .send_event(
-                    request_id,
-                    ServerEvent::PendingApprovalsUpdated {
-                        delivery: EventDeliveryGuarantee::Lossless,
-                        session_id: session_id.clone(),
-                        approvals: pending_approvals.clone(),
-                    },
-                )
-                .map_err(|error| protocol_error("event_write_failed", error.to_string()))?;
+            if let Some(request_id) = request_id {
+                writer
+                    .send_event(
+                        request_id,
+                        ServerEvent::PendingApprovalsUpdated {
+                            delivery: EventDeliveryGuarantee::Lossless,
+                            session_id: session_id.clone(),
+                            approvals: pending_approvals.clone(),
+                        },
+                    )
+                    .map_err(|error| protocol_error("event_write_failed", error.to_string()))?;
+            }
             let session = runtime
                 .session_store()
                 .read_metadata(&session_id)
@@ -591,50 +1337,57 @@ fn run_turn_request(
 fn run_pending_approval_resolution(
     runtime: &ProbeRuntime,
     writer: &SharedJsonlWriter,
-    request_id: &str,
+    request_id: Option<&str>,
     request: probe_protocol::runtime::ResolvePendingApprovalRequest,
 ) -> Result<RuntimeResponse, RuntimeProtocolError> {
     let tool_loop = tool_loop_from_recipe(request.tool_loop)?;
-    let writer_for_events = writer.clone();
-    let request_id_for_events = String::from(request_id);
-    let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
-        let delivery = delivery_for_runtime_event(&event);
-        let encoded = encode_runtime_event(event);
-        let _ = writer_for_events.send_event(
-            request_id_for_events.as_str(),
-            ServerEvent::RuntimeProgress {
-                delivery,
-                event: encoded,
-            },
-        );
+    let event_sink = request_id.map(|request_id| {
+        let writer_for_events = writer.clone();
+        let request_id_for_events = String::from(request_id);
+        Arc::new(move |event| {
+            let delivery = delivery_for_runtime_event(&event);
+            let encoded = encode_runtime_event(event);
+            let _ = writer_for_events.send_event(
+                request_id_for_events.as_str(),
+                ServerEvent::RuntimeProgress {
+                    delivery,
+                    event: encoded,
+                },
+            );
+        }) as Arc<dyn RuntimeEventSink>
     });
 
-    let result = runtime.resolve_pending_tool_approval_with_events(
-        ResolvePendingToolApprovalRequest {
-            session_id: request.session_id.clone(),
-            profile: request.profile,
-            tool_loop,
-            call_id: request.call_id,
-            resolution: request.resolution,
-        },
-        event_sink,
-    );
+    let approval_request = ResolvePendingToolApprovalRequest {
+        session_id: request.session_id.clone(),
+        profile: request.profile,
+        tool_loop,
+        call_id: request.call_id,
+        resolution: request.resolution,
+    };
+    let result = match event_sink {
+        Some(event_sink) => {
+            runtime.resolve_pending_tool_approval_with_events(approval_request, event_sink)
+        }
+        None => runtime.resolve_pending_tool_approval(approval_request),
+    };
 
     match result.map_err(runtime_error_to_protocol)? {
         ResolvePendingToolApprovalOutcome::StillPending {
             session,
             pending_approvals,
         } => {
-            writer
-                .send_event(
-                    request_id,
-                    ServerEvent::PendingApprovalsUpdated {
-                        delivery: EventDeliveryGuarantee::Lossless,
-                        session_id: session.id.clone(),
-                        approvals: pending_approvals.clone(),
-                    },
-                )
-                .map_err(|error| protocol_error("event_write_failed", error.to_string()))?;
+            if let Some(request_id) = request_id {
+                writer
+                    .send_event(
+                        request_id,
+                        ServerEvent::PendingApprovalsUpdated {
+                            delivery: EventDeliveryGuarantee::Lossless,
+                            session_id: session.id.clone(),
+                            approvals: pending_approvals.clone(),
+                        },
+                    )
+                    .map_err(|error| protocol_error("event_write_failed", error.to_string()))?;
+            }
             Ok(RuntimeResponse::ResolvePendingApproval(
                 ResolvePendingApprovalResponse::StillPending {
                     session,

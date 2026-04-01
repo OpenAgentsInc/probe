@@ -1,13 +1,19 @@
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
 use probe_protocol::runtime::{
-    ClientMessage, RequestEnvelope, ResponseBody, RuntimeProgressEvent, RuntimeRequest,
-    RuntimeResponse, ServerEvent, ServerMessage, SessionLookupRequest, StartSessionRequest,
-    TransportKind, TurnRequest,
+    ClientMessage, InspectSessionTurnsResponse, QueueTurnResponse, QueuedTurnStatus,
+    RequestEnvelope, ResponseBody, RuntimeProgressEvent, RuntimeRequest, RuntimeResponse,
+    ServerEvent, ServerMessage, SessionLookupRequest, StartSessionRequest, ToolApprovalRecipe,
+    ToolChoice, ToolDeniedAction, ToolLoopRecipe, ToolSetKind, TransportKind, TurnAuthor,
+    TurnRequest,
 };
-use probe_protocol::session::SessionId;
+use probe_protocol::session::{SessionId, ToolApprovalResolution, TranscriptItemKind};
 use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
 const TEST_MODEL: &str = "tiny-qwen35";
@@ -40,7 +46,7 @@ fn stdio_protocol_can_initialize_start_resume_and_run_a_turn() {
     };
     assert_eq!(response.protocol_version, 1);
     assert_eq!(response.capabilities.transport, TransportKind::StdioJsonl);
-    assert!(!response.capabilities.supports_queued_turns);
+    assert!(response.capabilities.supports_queued_turns);
 
     let start_session = harness.request(
         "req-start-session",
@@ -83,6 +89,7 @@ fn stdio_protocol_can_initialize_start_resume_and_run_a_turn() {
             session_id: session_id.clone(),
             profile,
             prompt: String::from("hello"),
+            author: None,
             tool_loop: None,
         }),
     );
@@ -157,10 +164,328 @@ fn interrupt_turn_is_explicit_when_session_is_idle() {
     harness.shutdown();
 }
 
+#[test]
+fn queue_turns_report_state_and_resume_after_approval_resolution() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let fake_backend = approval_pause_then_follow_up_backend(Duration::from_millis(150));
+    let profile = test_profile(fake_backend.base_url());
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let session_id = start_test_session(&mut harness, &environment, &profile);
+
+    harness.send_request(
+        "req-turn-1",
+        RuntimeRequest::ContinueTurn(TurnRequest {
+            session_id: session_id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("patch hello.txt"),
+            author: Some(operator_author()),
+            tool_loop: Some(approval_pause_tool_loop()),
+        }),
+    );
+    harness.send_request(
+        "req-queue",
+        RuntimeRequest::QueueTurn(TurnRequest {
+            session_id: session_id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("write a short queued summary"),
+            author: Some(operator_author()),
+            tool_loop: Some(approval_pause_tool_loop()),
+        }),
+    );
+
+    let RuntimeResponse::QueueTurn(QueueTurnResponse { turn: queued_turn }) =
+        expect_ok_response(harness.read_until_response("req-queue").1)
+    else {
+        panic!("expected queue_turn response");
+    };
+    assert_eq!(queued_turn.status, QueuedTurnStatus::Queued);
+    assert_eq!(queued_turn.queue_position, Some(1));
+    assert_eq!(queued_turn.author.display_name.as_deref(), Some("operator"));
+
+    let (events, response) = harness.read_until_response("req-turn-1");
+    let RuntimeResponse::ContinueTurn(turn) = expect_ok_response(response) else {
+        panic!("expected continue turn response");
+    };
+    let probe_protocol::runtime::TurnResponse::Paused(paused) = turn else {
+        panic!("expected paused turn response");
+    };
+    assert!(!paused.pending_approvals.is_empty());
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServerEvent::RuntimeProgress {
+            event: RuntimeProgressEvent::ToolPaused { .. },
+            ..
+        }
+    )));
+
+    let inspect = inspect_session_turns(&mut harness, &session_id, "req-inspect-queued");
+    let active_turn = inspect
+        .active_turn
+        .expect("paused turn should remain the active turn");
+    assert_eq!(active_turn.status, QueuedTurnStatus::Running);
+    assert!(active_turn.awaiting_approval);
+    assert_eq!(inspect.queued_turns.len(), 1);
+    assert_eq!(inspect.queued_turns[0].turn_id, queued_turn.turn_id);
+    assert_eq!(inspect.queued_turns[0].queue_position, Some(1));
+
+    harness.send_request(
+        "req-resolve",
+        RuntimeRequest::ResolvePendingApproval(
+            probe_protocol::runtime::ResolvePendingApprovalRequest {
+                session_id: session_id.clone(),
+                profile: profile.clone(),
+                tool_loop: approval_pause_tool_loop(),
+                call_id: paused.call_id.clone(),
+                resolution: ToolApprovalResolution::Approved,
+            },
+        ),
+    );
+    let RuntimeResponse::ResolvePendingApproval(
+        probe_protocol::runtime::ResolvePendingApprovalResponse::Resumed(completed),
+    ) = expect_ok_response(harness.read_until_response("req-resolve").1)
+    else {
+        panic!("expected resumed approval response");
+    };
+    assert_eq!(
+        completed.assistant_text,
+        "Patched hello.txt after approval."
+    );
+
+    let final_turns = wait_for_turns(&mut harness, &session_id, "req-poll-approve", |turns| {
+        turns.active_turn.is_none()
+            && turns.queued_turns.is_empty()
+            && turns.recent_turns.iter().any(|turn| {
+                turn.turn_id == queued_turn.turn_id && turn.status == QueuedTurnStatus::Completed
+            })
+    });
+    assert!(
+        final_turns
+            .recent_turns
+            .iter()
+            .any(|turn| turn.turn_id == active_turn.turn_id
+                && turn.status == QueuedTurnStatus::Completed)
+    );
+    assert_eq!(
+        std::fs::read_to_string(environment.workspace().join("hello.txt"))
+            .expect("read patched file"),
+        "hello probe\n"
+    );
+
+    harness.shutdown();
+    let requests = fake_backend.finish();
+    assert_eq!(requests.len(), 3);
+}
+
+#[test]
+fn interrupting_approval_paused_turn_cancels_it_and_drains_the_queue() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let fake_backend = approval_pause_then_interrupt_backend(Duration::from_millis(150));
+    let profile = test_profile(fake_backend.base_url());
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let session_id = start_test_session(&mut harness, &environment, &profile);
+
+    harness.send_request(
+        "req-turn-1",
+        RuntimeRequest::ContinueTurn(TurnRequest {
+            session_id: session_id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("patch hello.txt"),
+            author: Some(operator_author()),
+            tool_loop: Some(approval_pause_tool_loop()),
+        }),
+    );
+    harness.send_request(
+        "req-queue",
+        RuntimeRequest::QueueTurn(TurnRequest {
+            session_id: session_id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("write a short queued summary"),
+            author: Some(operator_author()),
+            tool_loop: Some(approval_pause_tool_loop()),
+        }),
+    );
+    let RuntimeResponse::QueueTurn(QueueTurnResponse { turn: queued_turn }) =
+        expect_ok_response(harness.read_until_response("req-queue").1)
+    else {
+        panic!("expected queue_turn response");
+    };
+    let RuntimeResponse::ContinueTurn(probe_protocol::runtime::TurnResponse::Paused(_)) =
+        expect_ok_response(harness.read_until_response("req-turn-1").1)
+    else {
+        panic!("expected paused turn response");
+    };
+
+    let before_interrupt = inspect_session_turns(&mut harness, &session_id, "req-inspect-before");
+    let active_turn = before_interrupt
+        .active_turn
+        .expect("paused turn should remain active before interrupt");
+    assert!(active_turn.awaiting_approval);
+
+    let response = harness.request(
+        "req-interrupt-running",
+        RuntimeRequest::InterruptTurn(probe_protocol::runtime::InterruptTurnRequest {
+            session_id: session_id.clone(),
+        }),
+    );
+    let RuntimeResponse::InterruptTurn(interrupt) = expect_ok_response(response) else {
+        panic!("expected interrupt response");
+    };
+    assert!(interrupt.interrupted);
+    assert_eq!(
+        interrupt.turn_id.as_deref(),
+        Some(active_turn.turn_id.as_str())
+    );
+
+    let final_turns = wait_for_turns(&mut harness, &session_id, "req-poll-interrupt", |turns| {
+        turns.active_turn.is_none()
+            && turns.queued_turns.is_empty()
+            && turns.recent_turns.iter().any(|turn| {
+                turn.turn_id == queued_turn.turn_id && turn.status == QueuedTurnStatus::Completed
+            })
+    });
+    assert!(
+        final_turns
+            .recent_turns
+            .iter()
+            .any(|turn| turn.turn_id == active_turn.turn_id
+                && turn.status == QueuedTurnStatus::Cancelled)
+    );
+
+    let pending = harness.request(
+        "req-pending-post-interrupt",
+        RuntimeRequest::ListPendingApprovals(
+            probe_protocol::runtime::ListPendingApprovalsRequest {
+                session_id: Some(session_id.clone()),
+            },
+        ),
+    );
+    let RuntimeResponse::ListPendingApprovals(response) = expect_ok_response(pending) else {
+        panic!("expected pending approvals response");
+    };
+    assert!(response.approvals.is_empty());
+
+    let inspect = harness.request(
+        "req-inspect-transcript",
+        RuntimeRequest::InspectSession(SessionLookupRequest {
+            session_id: session_id.clone(),
+        }),
+    );
+    let RuntimeResponse::InspectSession(snapshot) = expect_ok_response(inspect) else {
+        panic!("expected inspect session response");
+    };
+    assert!(snapshot.transcript.iter().any(|event| {
+        event.turn.items.iter().any(|item| {
+            item.kind == TranscriptItemKind::Note
+                && item.text.contains("interrupted approval-paused turn")
+        })
+    }));
+    assert_eq!(
+        std::fs::read_to_string(environment.workspace().join("hello.txt"))
+            .expect("read unpatched file"),
+        "hello world\n"
+    );
+
+    harness.shutdown();
+    let requests = fake_backend.finish();
+    assert_eq!(requests.len(), 2);
+}
+
+#[test]
+fn queued_turns_can_be_cancelled_before_execution() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let fake_backend = approval_pause_then_interrupt_backend(Duration::from_millis(150));
+    let profile = test_profile(fake_backend.base_url());
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let session_id = start_test_session(&mut harness, &environment, &profile);
+
+    harness.send_request(
+        "req-turn-1",
+        RuntimeRequest::ContinueTurn(TurnRequest {
+            session_id: session_id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("patch hello.txt"),
+            author: Some(operator_author()),
+            tool_loop: Some(approval_pause_tool_loop()),
+        }),
+    );
+    harness.send_request(
+        "req-queue",
+        RuntimeRequest::QueueTurn(TurnRequest {
+            session_id: session_id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("write a short queued summary"),
+            author: Some(operator_author()),
+            tool_loop: Some(approval_pause_tool_loop()),
+        }),
+    );
+    let RuntimeResponse::QueueTurn(QueueTurnResponse { turn: queued_turn }) =
+        expect_ok_response(harness.read_until_response("req-queue").1)
+    else {
+        panic!("expected queue_turn response");
+    };
+    let RuntimeResponse::ContinueTurn(probe_protocol::runtime::TurnResponse::Paused(_)) =
+        expect_ok_response(harness.read_until_response("req-turn-1").1)
+    else {
+        panic!("expected paused turn response");
+    };
+
+    let response = harness.request(
+        "req-cancel-queued",
+        RuntimeRequest::CancelQueuedTurn(probe_protocol::runtime::CancelQueuedTurnRequest {
+            session_id: session_id.clone(),
+            turn_id: queued_turn.turn_id.clone(),
+        }),
+    );
+    let RuntimeResponse::CancelQueuedTurn(cancelled) = expect_ok_response(response) else {
+        panic!("expected cancel queued turn response");
+    };
+    assert!(cancelled.cancelled);
+    assert_eq!(cancelled.turn_id, queued_turn.turn_id);
+
+    let inspect = inspect_session_turns(&mut harness, &session_id, "req-inspect-cancelled");
+    assert!(inspect.queued_turns.is_empty());
+    assert!(inspect.recent_turns.iter().any(|turn| {
+        turn.turn_id == queued_turn.turn_id && turn.status == QueuedTurnStatus::Cancelled
+    }));
+
+    let session = harness.request(
+        "req-session-after-cancel",
+        RuntimeRequest::InspectSession(SessionLookupRequest {
+            session_id: session_id.clone(),
+        }),
+    );
+    let RuntimeResponse::InspectSession(snapshot) = expect_ok_response(session) else {
+        panic!("expected inspect session response");
+    };
+    assert!(snapshot.transcript.iter().any(|event| {
+        event.turn.items.iter().any(|item| {
+            item.kind == TranscriptItemKind::Note && item.text.contains("cancelled queued turn")
+        })
+    }));
+
+    let interrupt = harness.request(
+        "req-interrupt-after-cancel",
+        RuntimeRequest::InterruptTurn(probe_protocol::runtime::InterruptTurnRequest { session_id }),
+    );
+    let RuntimeResponse::InterruptTurn(interrupt) = expect_ok_response(interrupt) else {
+        panic!("expected interrupt response");
+    };
+    assert!(interrupt.interrupted);
+
+    harness.shutdown();
+    let requests = fake_backend.finish();
+    assert_eq!(requests.len(), 1);
+}
+
 struct ProbeServerHarness {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    buffered_events: HashMap<String, Vec<ServerEvent>>,
+    buffered_responses: HashMap<String, ResponseEnvelopeOwned>,
 }
 
 impl ProbeServerHarness {
@@ -178,6 +503,8 @@ impl ProbeServerHarness {
             child,
             stdin,
             stdout,
+            buffered_events: HashMap::new(),
+            buffered_responses: HashMap::new(),
         }
     }
 
@@ -202,22 +529,32 @@ impl ProbeServerHarness {
         &mut self,
         request_id: &str,
     ) -> (Vec<ServerEvent>, ResponseEnvelopeOwned) {
-        let mut events = Vec::new();
+        let mut events = self.buffered_events.remove(request_id).unwrap_or_default();
+        if let Some(response) = self.buffered_responses.remove(request_id) {
+            return (events, response);
+        }
         loop {
             let message = self.read_message();
             match message {
                 ServerMessage::Event(event) => {
-                    assert_eq!(event.request_id, request_id);
-                    events.push(event.event);
+                    if event.request_id == request_id {
+                        events.push(event.event);
+                    } else {
+                        self.buffered_events
+                            .entry(event.request_id)
+                            .or_default()
+                            .push(event.event);
+                    }
                 }
                 ServerMessage::Response(response) => {
-                    assert_eq!(response.request_id, request_id);
-                    return (
-                        events,
-                        ResponseEnvelopeOwned {
-                            body: response.body,
-                        },
-                    );
+                    let response_id = response.request_id;
+                    let envelope = ResponseEnvelopeOwned {
+                        body: response.body,
+                    };
+                    if response_id == request_id {
+                        return (events, envelope);
+                    }
+                    self.buffered_responses.insert(response_id, envelope);
                 }
             }
         }
@@ -253,6 +590,195 @@ fn expect_ok_response(response: ResponseEnvelopeOwned) -> RuntimeResponse {
         ResponseBody::Ok { response } => response,
         ResponseBody::Error { error } => panic!("unexpected protocol error: {error:?}"),
     }
+}
+
+fn start_test_session(
+    harness: &mut ProbeServerHarness,
+    environment: &ProbeTestEnvironment,
+    profile: &BackendProfile,
+) -> SessionId {
+    let response = harness.request(
+        "req-start-session-test",
+        RuntimeRequest::StartSession(StartSessionRequest {
+            title: Some(String::from("queued-turns")),
+            cwd: environment.workspace().to_path_buf(),
+            profile: profile.clone(),
+            system_prompt: Some(String::from("You are concise.")),
+            harness_profile: None,
+        }),
+    );
+    let RuntimeResponse::StartSession(snapshot) = expect_ok_response(response) else {
+        panic!("expected start session response");
+    };
+    snapshot.session.id
+}
+
+fn inspect_session_turns(
+    harness: &mut ProbeServerHarness,
+    session_id: &SessionId,
+    request_id: &str,
+) -> InspectSessionTurnsResponse {
+    let response = harness.request(
+        request_id,
+        RuntimeRequest::InspectSessionTurns(SessionLookupRequest {
+            session_id: session_id.clone(),
+        }),
+    );
+    let RuntimeResponse::InspectSessionTurns(turns) = expect_ok_response(response) else {
+        panic!("expected inspect session turns response");
+    };
+    turns
+}
+
+fn wait_for_turns(
+    harness: &mut ProbeServerHarness,
+    session_id: &SessionId,
+    request_prefix: &str,
+    predicate: impl Fn(&InspectSessionTurnsResponse) -> bool,
+) -> InspectSessionTurnsResponse {
+    let mut last_turns: Option<InspectSessionTurnsResponse> = None;
+    for attempt in 0..50 {
+        let turns = inspect_session_turns(
+            harness,
+            session_id,
+            format!("{request_prefix}-{attempt}").as_str(),
+        );
+        if predicate(&turns) {
+            return turns;
+        }
+        last_turns = Some(turns);
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for queued turn state: {last_turns:?}");
+}
+
+fn approval_pause_tool_loop() -> ToolLoopRecipe {
+    ToolLoopRecipe {
+        tool_set: ToolSetKind::CodingBootstrap,
+        tool_choice: ToolChoice::Required,
+        parallel_tool_calls: false,
+        max_model_round_trips: 4,
+        approval: ToolApprovalRecipe {
+            allow_write_tools: false,
+            allow_network_shell: false,
+            allow_destructive_shell: false,
+            denied_action: ToolDeniedAction::Pause,
+        },
+        oracle: None,
+        long_context: None,
+    }
+}
+
+fn operator_author() -> TurnAuthor {
+    TurnAuthor {
+        client_name: String::from("probe-server-test"),
+        client_version: Some(String::from("0.1.0")),
+        display_name: Some(String::from("operator")),
+    }
+}
+
+fn approval_pause_then_follow_up_backend(delay: Duration) -> FakeOpenAiServer {
+    let counter = Arc::new(Mutex::new(0usize));
+    FakeOpenAiServer::from_handler(move |_request| {
+        let mut counter = counter.lock().expect("backend counter");
+        let response = match *counter {
+            0 => {
+                thread::sleep(delay);
+                FakeHttpResponse::json_ok(serde_json::json!({
+                    "id": "chatcmpl_queue_pause_1",
+                    "model": TEST_MODEL,
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [{
+                                "id": "call_patch_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "apply_patch",
+                                    "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }))
+            }
+            1 => FakeHttpResponse::json_ok(serde_json::json!({
+                "id": "chatcmpl_queue_pause_2",
+                "model": TEST_MODEL,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Patched hello.txt after approval."
+                    },
+                    "finish_reason": "stop"
+                }]
+            })),
+            2 => FakeHttpResponse::json_ok(serde_json::json!({
+                "id": "chatcmpl_queue_followup_3",
+                "model": TEST_MODEL,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Queued follow-up complete."
+                    },
+                    "finish_reason": "stop"
+                }]
+            })),
+            other => panic!("unexpected OpenAI request {other}"),
+        };
+        *counter += 1;
+        response
+    })
+}
+
+fn approval_pause_then_interrupt_backend(delay: Duration) -> FakeOpenAiServer {
+    let counter = Arc::new(Mutex::new(0usize));
+    FakeOpenAiServer::from_handler(move |_request| {
+        let mut counter = counter.lock().expect("backend counter");
+        let response = match *counter {
+            0 => {
+                thread::sleep(delay);
+                FakeHttpResponse::json_ok(serde_json::json!({
+                    "id": "chatcmpl_interrupt_pause_1",
+                    "model": TEST_MODEL,
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [{
+                                "id": "call_patch_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "apply_patch",
+                                    "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }))
+            }
+            1 => FakeHttpResponse::json_ok(serde_json::json!({
+                "id": "chatcmpl_interrupt_followup_2",
+                "model": TEST_MODEL,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Queued follow-up complete."
+                    },
+                    "finish_reason": "stop"
+                }]
+            })),
+            other => panic!("unexpected OpenAI request {other}"),
+        };
+        *counter += 1;
+        response
+    })
 }
 
 fn test_profile(base_url: &str) -> BackendProfile {

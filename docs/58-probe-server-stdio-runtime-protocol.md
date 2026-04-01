@@ -40,7 +40,10 @@ The Phase 1 stdio contract currently ships these typed operations:
 - `inspect_session`
 - `start_turn`
 - `continue_turn`
+- `queue_turn`
+- `inspect_session_turns`
 - `interrupt_turn`
+- `cancel_queued_turn`
 - `list_pending_approvals`
 - `resolve_pending_approval`
 - `shutdown`
@@ -61,12 +64,28 @@ The final response is one of:
 `paused` means Probe hit an approval gate and persisted one or more pending
 approvals. The operator does not need to infer pause state from stderr text.
 
-The first cut is honest about what it does not support yet:
+Queued follow-up work is now explicit.
 
-- queued follow-up turns are not implemented
-- a second turn request for the same active session returns `session_busy`
-- `interrupt_turn` is in the contract, but the current runtime has no
-  cooperative preemption path yet, so active sessions return `unsupported`
+- `queue_turn` accepts a follow-up prompt even when another turn is already
+  running
+- the accepted record persists queued-turn state as `queued`, `running`,
+  `completed`, `failed`, or `cancelled`
+- every queued turn carries per-turn author metadata plus queue position
+- `inspect_session_turns` returns the current active turn, the queued follow-up
+  list, and recent terminal turns for a session
+- `cancel_queued_turn` can remove queued work before it starts and appends an
+  honest note into the transcript
+
+The first cut is still honest about its limits:
+
+- direct `start_turn` and `continue_turn` requests remain single-turn request or
+  response flows, so a second direct turn request still returns `session_busy`
+- queued background turns are queryable through `inspect_session_turns`; they
+  are not yet pushed over a detached subscription channel
+- `interrupt_turn` can cancel an approval-paused active turn, reject its
+  pending approvals, and then let the queue continue
+- `interrupt_turn` still cannot preempt an in-flight model call that is inside
+  the current runtime execution path, so those requests return `unsupported`
 
 ## Event Delivery Classes
 
@@ -124,6 +143,10 @@ execution handlers are not serializable.
 That gives a reattaching client enough state to rebuild the visible session
 without linking against the filesystem session store directly.
 
+Queued-turn lifecycle state intentionally lives beside that snapshot instead of
+inside it. `SessionSnapshot` remains the transcript plus approval view, while
+`inspect_session_turns` is the typed queue and control view.
+
 ## Example
 
 Request:
@@ -151,7 +174,6 @@ This stdio protocol is the canonical Phase 1 local server seam.
 It is intentionally not yet:
 
 - a detached local daemon
-- a queueing runtime
 - a remote Probe worker transport
 - a multi-tenant or browser-facing API
 
