@@ -185,7 +185,7 @@ This folder holds technical planning docs for the Probe runtime.
     prepared baselines land
 - `57-codex-third-inference-mode.md`
   - the third Probe TUI inference lane, backend selector order
-    `Qwen|Codex|Apple FM`, Codex-specific prompt contracts for plain and
+    `Codex|Qwen|Apple FM`, Codex-specific prompt contracts for plain and
     tool-enabled turns, and the reproduction path for lane switching and
     hosted Codex execution
 - `58-probe-server-stdio-runtime-protocol.md`

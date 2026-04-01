@@ -13,7 +13,7 @@ Current shipped surface:
 - `probe chat` for interactive sessions plus resume
 - `probe codex login|status|logout` for ChatGPT/Codex subscription auth
 - `probe tui` / `cargo probe` for the local terminal UI
-- three inference lanes in the TUI: Qwen or Tailnet, Codex, and Apple FM
+- three inference lanes in the TUI: Codex, Qwen or Tailnet, and Apple FM
 - `probe-server` for the first typed local stdio supervision contract
 - a shared `probe-client` layer underneath `exec`, `chat`, and the TUI so
   first-party surfaces now speak one server contract
@@ -201,7 +201,7 @@ The first supported remote-Qwen posture stays narrow and explicit:
 
 The top selector is now a backend switcher, not a view switcher. Probe keeps one
 transcript-first home shell on screen at a time, and `Tab` flips the active
-backend between the current Qwen or Tailnet lane, the Codex subscription lane,
+backend between the Codex subscription lane, the current Qwen or Tailnet lane,
 and the Apple FM lane. When the backend changes, Probe resets the chat surface
 so the next submit starts a fresh session on that backend instead of continuing
 the previous backend lane.

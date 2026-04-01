@@ -333,8 +333,8 @@ impl Default for ChatScreen {
         let mut screen = Self {
             active_tab: ActiveTab::Primary,
             tab_labels: vec![
-                String::from("Qwen"),
                 String::from("Codex"),
+                String::from("Qwen"),
                 String::from("Apple FM"),
             ],
             emphasized_copy: false,

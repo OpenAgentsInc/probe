@@ -22,7 +22,7 @@ That work spans:
 
 The shipped behavior is:
 
-- `probe tui` now cycles `Qwen -> Codex -> Apple FM`
+- `probe tui` now cycles `Codex -> Qwen or Tailnet -> Apple FM`
 - the Codex lane uses the canonical
   `openai-codex-subscription` backend profile
 - the Codex backend overlay shows hosted-backend contract text plus local auth
@@ -72,12 +72,13 @@ harness prompt or to the Codex plain system prompt.
 
 The backend selector is now a three-lane selector:
 
-- `Qwen`
 - `Codex`
+- `Qwen` or `Tailnet`
 - `Apple FM`
 
 If the OpenAI-compatible Qwen lane is pointed at a remote attach target, the
-label remains `Tailnet` as before. Codex keeps the explicit `Codex` label.
+middle label remains `Tailnet` as before. Codex keeps the explicit `Codex`
+label on the left.
 
 Overlay behavior now differs by backend kind:
 

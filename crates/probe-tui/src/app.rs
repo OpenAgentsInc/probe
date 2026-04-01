@@ -31,8 +31,8 @@ use crate::worker::BackgroundWorker;
 
 const TICK_RATE: Duration = Duration::from_millis(33);
 const BACKEND_SELECTOR_ORDER: [BackendKind; 3] = [
-    BackendKind::OpenAiChatCompletions,
     BackendKind::OpenAiCodexSubscription,
+    BackendKind::OpenAiChatCompletions,
     BackendKind::AppleFmBridge,
 ];
 
@@ -1042,6 +1042,21 @@ mod tests {
     }
 
     #[test]
+    fn backend_selector_orders_codex_then_qwen_then_apple_fm() {
+        let app = AppShell::new_for_tests();
+
+        assert_eq!(
+            app.backend_selector_labels(),
+            vec![
+                String::from("Codex"),
+                String::from("Qwen"),
+                String::from("Apple FM"),
+            ]
+        );
+        assert_eq!(app.active_tab(), ActiveTab::Secondary);
+    }
+
+    #[test]
     fn help_modal_takes_focus_and_dismisses_cleanly() {
         let mut app = AppShell::new_for_tests();
         assert_eq!(app.active_screen_id(), ScreenId::Chat);
@@ -1063,10 +1078,10 @@ mod tests {
     #[test]
     fn tab_switches_backend_and_copy_toggle_still_work() {
         let mut app = AppShell::new_for_tests();
-        assert_eq!(app.active_tab(), ActiveTab::Primary);
+        assert_eq!(app.active_tab(), ActiveTab::Secondary);
         assert!(!app.emphasized_copy());
         app.apply_message(AppMessage::ProbeRuntimeSessionReady {
-            session_id: String::from("sess_primary"),
+            session_id: String::from("sess_tailnet"),
             profile_name: String::from("psionic-qwen35-2b-q8-registry"),
             model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
             cwd: String::from("/tmp/probe-workspace"),
@@ -1079,14 +1094,14 @@ mod tests {
             ),
         });
 
-        app.dispatch(UiEvent::NextView);
-        assert_eq!(app.active_tab(), ActiveTab::Secondary);
+        app.dispatch(UiEvent::PreviousView);
+        assert_eq!(app.active_tab(), ActiveTab::Primary);
         assert_eq!(app.runtime_session_id(), None);
         let rendered_secondary = app.render_to_string(120, 32);
         assert!(rendered_secondary.contains("Transcript is empty."));
         assert!(!rendered_secondary.contains("primary lane message"));
         app.apply_message(AppMessage::ProbeRuntimeSessionReady {
-            session_id: String::from("sess_secondary"),
+            session_id: String::from("sess_codex"),
             profile_name: String::from("openai-codex-subscription"),
             model_id: String::from("gpt-5.4"),
             cwd: String::from("/tmp/probe-workspace"),
@@ -1102,9 +1117,9 @@ mod tests {
         app.dispatch(UiEvent::ToggleBody);
         assert!(app.emphasized_copy());
 
-        app.dispatch(UiEvent::PreviousView);
-        assert_eq!(app.active_tab(), ActiveTab::Primary);
-        assert_eq!(app.runtime_session_id(), Some("sess_primary"));
+        app.dispatch(UiEvent::NextView);
+        assert_eq!(app.active_tab(), ActiveTab::Secondary);
+        assert_eq!(app.runtime_session_id(), Some("sess_tailnet"));
         let rendered_primary = app.render_to_string(120, 32);
         assert!(rendered_primary.contains("primary lane message"));
         assert!(!rendered_primary.contains("secondary lane message"));
@@ -1146,15 +1161,15 @@ mod tests {
         };
         let mut app = AppShell::new_with_launch_config(launch_config);
 
-        app.dispatch(UiEvent::NextView);
+        app.dispatch(UiEvent::PreviousView);
 
         let rendered = app.render_to_string(120, 32);
         assert!(rendered.contains("100.108.56.85:8080"));
-        assert_eq!(app.backend_lanes[0].label, "Tailnet");
-        assert_eq!(app.backend_lanes[0].operator_backend.host, "100.108.56.85");
-        assert_eq!(app.backend_lanes[0].operator_backend.port, 8080);
+        assert_eq!(app.backend_lanes[1].label, "Tailnet");
+        assert_eq!(app.backend_lanes[1].operator_backend.host, "100.108.56.85");
+        assert_eq!(app.backend_lanes[1].operator_backend.port, 8080);
         assert_eq!(
-            app.backend_lanes[0].chat_runtime.profile.base_url,
+            app.backend_lanes[1].chat_runtime.profile.base_url,
             "http://100.108.56.85:8080/v1"
         );
         assert_eq!(app.last_status(), "active backend: Tailnet");
@@ -1170,10 +1185,10 @@ mod tests {
         );
         let mut app = AppShell::new_for_tests_with_chat_config(config);
 
-        assert_eq!(app.active_tab(), ActiveTab::Secondary);
-        assert_eq!(app.backend_lanes[1].label, "Codex");
+        assert_eq!(app.active_tab(), ActiveTab::Primary);
+        assert_eq!(app.backend_lanes[0].label, "Codex");
         assert_eq!(
-            app.backend_lanes[1]
+            app.backend_lanes[0]
                 .chat_runtime
                 .harness_profile
                 .as_ref()
@@ -1181,7 +1196,7 @@ mod tests {
             Some("coding_bootstrap_codex")
         );
         assert!(
-            app.backend_lanes[1]
+            app.backend_lanes[0]
                 .chat_runtime
                 .system_prompt
                 .as_deref()
