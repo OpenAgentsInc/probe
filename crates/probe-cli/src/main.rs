@@ -791,9 +791,10 @@ fn run_export(args: ExportArgs) -> Result<(), String> {
     )
     .map_err(|error| error.to_string())?;
     eprintln!(
-        "dataset={} sessions={} output={}",
+        "dataset={} sessions={} cases={} output={}",
         report.kind.as_str(),
         report.sessions_exported,
+        report.cases_exported,
         report.output_path.display()
     );
     Ok(())

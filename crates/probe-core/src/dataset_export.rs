@@ -3,6 +3,7 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
+use sha2::{Digest, Sha256};
 use probe_protocol::session::{
     CacheSignal, SessionId, SessionMetadata, ToolPolicyDecision, TranscriptEvent,
     TranscriptItemKind,
@@ -15,6 +16,7 @@ use crate::session_store::{FilesystemSessionStore, SessionStoreError};
 pub enum DatasetKind {
     Replay,
     Decision,
+    DecisionCases,
 }
 
 impl DatasetKind {
@@ -22,8 +24,9 @@ impl DatasetKind {
         match value {
             "replay" => Ok(Self::Replay),
             "decision" => Ok(Self::Decision),
+            "decision-cases" | "decision_cases" => Ok(Self::DecisionCases),
             other => Err(format!(
-                "unknown dataset kind `{other}`; expected `replay` or `decision`"
+                "unknown dataset kind `{other}`; expected `replay`, `decision`, or `decision-cases`"
             )),
         }
     }
@@ -33,6 +36,7 @@ impl DatasetKind {
         match self {
             Self::Replay => "replay",
             Self::Decision => "decision",
+            Self::DecisionCases => "decision-cases",
         }
     }
 }
@@ -50,6 +54,7 @@ pub struct DatasetExportReport {
     pub kind: DatasetKind,
     pub output_path: PathBuf,
     pub sessions_exported: usize,
+    pub cases_exported: usize,
 }
 
 #[derive(Debug)]
@@ -133,18 +138,187 @@ pub struct DecisionSessionSummary {
     pub final_assistant_text: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionCaseFamily {
+    ToolRoute,
+    PatchReadiness,
+    LongContextEscalation,
+}
+
+impl DecisionCaseFamily {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ToolRoute => "tool_route",
+            Self::PatchReadiness => "patch_readiness",
+            Self::LongContextEscalation => "long_context_escalation",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionCaseSplit {
+    Train,
+    Validation,
+}
+
+impl DecisionCaseSplit {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Train => "train",
+            Self::Validation => "validation",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionCaseTranscriptRef {
+    pub turn_index: u64,
+    pub item_sequence: u32,
+    pub item_kind: TranscriptItemKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRouteDecisionCaseContext {
+    pub files_listed: usize,
+    pub files_searched: usize,
+    pub files_read: usize,
+    pub patch_attempts: usize,
+    pub verification_step_count: usize,
+    pub refused_or_paused_tool_calls: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchReadinessDecisionCaseContext {
+    pub files_listed: usize,
+    pub files_searched: usize,
+    pub files_read: usize,
+    pub patch_attempts: usize,
+    pub verification_step_count: usize,
+    pub refused_or_paused_tool_calls: usize,
+    pub too_many_turns: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongContextDecisionCaseContext {
+    pub prompt_char_count: usize,
+    pub files_listed: usize,
+    pub files_searched: usize,
+    pub files_read: usize,
+    pub too_many_turns: bool,
+    pub oracle_calls: usize,
+    pub long_context_calls: usize,
+    pub requested_task_kind: String,
+    pub requested_evidence_files: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "family", rename_all = "snake_case")]
+pub enum DecisionCaseContext {
+    ToolRoute(ToolRouteDecisionCaseContext),
+    PatchReadiness(PatchReadinessDecisionCaseContext),
+    LongContextEscalation(LongContextDecisionCaseContext),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRouteObservedLabel {
+    pub selected_tool: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchReadinessObservedLabel {
+    pub should_patch: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_tool: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongContextObservedLabel {
+    pub should_escalate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_tool: Option<String>,
+    pub requested_task_kind: String,
+    pub requested_evidence_files: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "family", rename_all = "snake_case")]
+pub enum DecisionCaseObservedLabel {
+    ToolRoute(ToolRouteObservedLabel),
+    PatchReadiness(PatchReadinessObservedLabel),
+    LongContextEscalation(LongContextObservedLabel),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionCaseRecord {
+    pub case_id: String,
+    pub stable_digest: String,
+    pub family: DecisionCaseFamily,
+    pub split: DecisionCaseSplit,
+    pub session_id: String,
+    pub title: String,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_profile: Option<String>,
+    pub source_transcript_path: String,
+    pub turn_index: u64,
+    pub context: DecisionCaseContext,
+    pub observed_label: DecisionCaseObservedLabel,
+    pub transcript_refs: Vec<DecisionCaseTranscriptRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionCaseFamilySplitCounts {
+    pub family: DecisionCaseFamily,
+    pub total_cases: usize,
+    pub train_cases: usize,
+    pub validation_cases: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionCaseSplitManifest {
+    pub schema_version: u16,
+    pub report_id: String,
+    pub output_dir: String,
+    pub total_sessions: usize,
+    pub total_cases: usize,
+    pub train_cases: usize,
+    pub validation_cases: usize,
+    pub families: Vec<DecisionCaseFamilySplitCounts>,
+    pub all_cases_path: String,
+    pub train_cases_path: String,
+    pub validation_cases_path: String,
+}
+
 pub fn export_dataset(
     session_store: &FilesystemSessionStore,
     config: &DatasetExportConfig,
 ) -> Result<DatasetExportReport, DatasetExportError> {
-    if let Some(parent) = config.output_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let file = File::create(&config.output_path)?;
-    let mut writer = BufWriter::new(file);
-
     let sessions = session_store.list_sessions()?;
     let mut sessions_exported = 0_usize;
+    let mut decision_cases = Vec::new();
+
+    if config.kind != DatasetKind::DecisionCases {
+        if let Some(parent) = config.output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let mut writer = if config.kind == DatasetKind::DecisionCases {
+        None
+    } else {
+        let file = File::create(&config.output_path)?;
+        Some(BufWriter::new(file))
+    };
+
     for metadata in sessions {
         let transcript = session_store.read_transcript(&metadata.id)?;
         if !should_export_session(&metadata, transcript.as_slice(), config) {
@@ -171,22 +345,33 @@ pub fn export_dataset(
                     turn_count: transcript.len(),
                     transcript,
                 };
-                serde_json::to_writer(&mut writer, &record)?;
+                serde_json::to_writer(writer.as_mut().expect("writer must exist"), &record)?;
             }
             DatasetKind::Decision => {
                 let record = build_decision_summary(&metadata, transcript.as_slice());
-                serde_json::to_writer(&mut writer, &record)?;
+                serde_json::to_writer(writer.as_mut().expect("writer must exist"), &record)?;
+            }
+            DatasetKind::DecisionCases => {
+                decision_cases.extend(build_decision_cases(&metadata, transcript.as_slice()));
             }
         }
-        writer.write_all(b"\n")?;
+        if let Some(writer) = writer.as_mut() {
+            writer.write_all(b"\n")?;
+        }
         sessions_exported += 1;
     }
-    writer.flush()?;
+    if let Some(writer) = writer.as_mut() {
+        writer.flush()?;
+    }
+    if config.kind == DatasetKind::DecisionCases {
+        write_decision_case_bundle(config.output_path.as_path(), decision_cases.as_slice())?;
+    }
 
     Ok(DatasetExportReport {
         kind: config.kind,
         output_path: config.output_path.clone(),
         sessions_exported,
+        cases_exported: decision_cases.len(),
     })
 }
 
@@ -402,6 +587,342 @@ pub fn build_decision_summary(
         cache_reuse_improved_throughput,
         final_assistant_text,
     }
+}
+
+pub fn build_decision_cases(
+    metadata: &SessionMetadata,
+    transcript: &[TranscriptEvent],
+) -> Vec<DecisionCaseRecord> {
+    let mut cases = Vec::new();
+
+    for (turn_position, event) in transcript.iter().enumerate() {
+        let Some(tool_call) = first_named_tool_call(event) else {
+            continue;
+        };
+        let pre_turn_summary = build_decision_summary(metadata, &transcript[..turn_position]);
+        let transcript_refs = event
+            .turn
+            .items
+            .iter()
+            .map(|item| DecisionCaseTranscriptRef {
+                turn_index: event.turn.index,
+                item_sequence: item.sequence,
+                item_kind: item.kind,
+                item_name: item.name.clone(),
+                tool_call_id: item.tool_call_id.clone(),
+            })
+            .collect::<Vec<_>>();
+        let selected_tool = tool_call
+            .name
+            .clone()
+            .expect("named tool call must carry a tool name");
+
+        cases.push(build_decision_case_record(
+            DecisionCaseFamily::ToolRoute,
+            metadata,
+            event.turn.index,
+            DecisionCaseContext::ToolRoute(ToolRouteDecisionCaseContext {
+                files_listed: pre_turn_summary.files_listed.len(),
+                files_searched: pre_turn_summary.files_searched.len(),
+                files_read: pre_turn_summary.files_read.len(),
+                patch_attempts: pre_turn_summary.patch_attempts,
+                verification_step_count: pre_turn_summary.verification_step_count,
+                refused_or_paused_tool_calls: pre_turn_summary.refused_tool_calls
+                    + pre_turn_summary.paused_tool_calls,
+            }),
+            DecisionCaseObservedLabel::ToolRoute(ToolRouteObservedLabel {
+                selected_tool: selected_tool.clone(),
+            }),
+            transcript_refs.clone(),
+            tool_call.tool_call_id.as_deref(),
+        ));
+
+        cases.push(build_decision_case_record(
+            DecisionCaseFamily::PatchReadiness,
+            metadata,
+            event.turn.index,
+            DecisionCaseContext::PatchReadiness(PatchReadinessDecisionCaseContext {
+                files_listed: pre_turn_summary.files_listed.len(),
+                files_searched: pre_turn_summary.files_searched.len(),
+                files_read: pre_turn_summary.files_read.len(),
+                patch_attempts: pre_turn_summary.patch_attempts,
+                verification_step_count: pre_turn_summary.verification_step_count,
+                refused_or_paused_tool_calls: pre_turn_summary.refused_tool_calls
+                    + pre_turn_summary.paused_tool_calls,
+                too_many_turns: pre_turn_summary.too_many_turns,
+            }),
+            DecisionCaseObservedLabel::PatchReadiness(PatchReadinessObservedLabel {
+                should_patch: selected_tool == "apply_patch",
+                selected_tool: Some(selected_tool.clone()),
+            }),
+            transcript_refs.clone(),
+            tool_call.tool_call_id.as_deref(),
+        ));
+
+        let requested_task_kind = requested_task_kind_from_tool_call(tool_call)
+            .unwrap_or_else(|| String::from("change_impact"));
+        let requested_evidence_files =
+            requested_evidence_files_from_tool_call(tool_call).unwrap_or_else(|| {
+                pre_turn_summary
+                    .repo_analysis_files
+                    .len()
+                    .max(pre_turn_summary.files_read.len())
+                    .max(pre_turn_summary.files_searched.len())
+            });
+        cases.push(build_decision_case_record(
+            DecisionCaseFamily::LongContextEscalation,
+            metadata,
+            event.turn.index,
+            DecisionCaseContext::LongContextEscalation(LongContextDecisionCaseContext {
+                prompt_char_count: sum_user_message_chars(event),
+                files_listed: pre_turn_summary.files_listed.len(),
+                files_searched: pre_turn_summary.files_searched.len(),
+                files_read: pre_turn_summary.files_read.len(),
+                too_many_turns: pre_turn_summary.too_many_turns,
+                oracle_calls: pre_turn_summary.oracle_calls,
+                long_context_calls: pre_turn_summary.long_context_calls,
+                requested_task_kind: requested_task_kind.clone(),
+                requested_evidence_files,
+            }),
+            DecisionCaseObservedLabel::LongContextEscalation(LongContextObservedLabel {
+                should_escalate: selected_tool == "analyze_repository",
+                selected_tool: Some(selected_tool),
+                requested_task_kind,
+                requested_evidence_files,
+            }),
+            transcript_refs,
+            tool_call.tool_call_id.as_deref(),
+        ));
+    }
+
+    cases
+}
+
+fn write_decision_case_bundle(
+    output_dir: &std::path::Path,
+    cases: &[DecisionCaseRecord],
+) -> Result<(), DatasetExportError> {
+    fs::create_dir_all(output_dir)?;
+    let all_cases_path = output_dir.join("decision_cases_all.jsonl");
+    let train_cases_path = output_dir.join("decision_cases_train.jsonl");
+    let validation_cases_path = output_dir.join("decision_cases_val.jsonl");
+    let split_manifest_path = output_dir.join("decision_case_split_manifest.json");
+
+    write_jsonl_records(all_cases_path.as_path(), cases)?;
+    write_jsonl_records(
+        train_cases_path.as_path(),
+        &cases
+            .iter()
+            .filter(|case| case.split == DecisionCaseSplit::Train)
+            .collect::<Vec<_>>(),
+    )?;
+    write_jsonl_records(
+        validation_cases_path.as_path(),
+        &cases
+            .iter()
+            .filter(|case| case.split == DecisionCaseSplit::Validation)
+            .collect::<Vec<_>>(),
+    )?;
+
+    let families = [
+        DecisionCaseFamily::ToolRoute,
+        DecisionCaseFamily::PatchReadiness,
+        DecisionCaseFamily::LongContextEscalation,
+    ]
+    .into_iter()
+    .map(|family| DecisionCaseFamilySplitCounts {
+        family,
+        total_cases: cases.iter().filter(|case| case.family == family).count(),
+        train_cases: cases
+            .iter()
+            .filter(|case| case.family == family && case.split == DecisionCaseSplit::Train)
+            .count(),
+        validation_cases: cases
+            .iter()
+            .filter(|case| case.family == family && case.split == DecisionCaseSplit::Validation)
+            .count(),
+    })
+    .collect::<Vec<_>>();
+
+    let manifest = DecisionCaseSplitManifest {
+        schema_version: 1,
+        report_id: String::from("probe.decision_case_split_manifest.v1"),
+        output_dir: output_dir.display().to_string(),
+        total_sessions: cases
+            .iter()
+            .map(|case| case.session_id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        total_cases: cases.len(),
+        train_cases: cases
+            .iter()
+            .filter(|case| case.split == DecisionCaseSplit::Train)
+            .count(),
+        validation_cases: cases
+            .iter()
+            .filter(|case| case.split == DecisionCaseSplit::Validation)
+            .count(),
+        families,
+        all_cases_path: all_cases_path.display().to_string(),
+        train_cases_path: train_cases_path.display().to_string(),
+        validation_cases_path: validation_cases_path.display().to_string(),
+    };
+    fs::write(
+        split_manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest)?),
+    )?;
+
+    Ok(())
+}
+
+fn write_jsonl_records<T: Serialize>(
+    output_path: &std::path::Path,
+    records: &[T],
+) -> Result<(), DatasetExportError> {
+    let file = File::create(output_path)?;
+    let mut writer = BufWriter::new(file);
+    for record in records {
+        serde_json::to_writer(&mut writer, record)?;
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+fn build_decision_case_record(
+    family: DecisionCaseFamily,
+    metadata: &SessionMetadata,
+    turn_index: u64,
+    context: DecisionCaseContext,
+    observed_label: DecisionCaseObservedLabel,
+    transcript_refs: Vec<DecisionCaseTranscriptRef>,
+    tool_call_id: Option<&str>,
+) -> DecisionCaseRecord {
+    let case_id = format!(
+        "{}:{}:{}:{}",
+        family.as_str(),
+        metadata.id.as_str(),
+        turn_index,
+        tool_call_id.unwrap_or("uncalled")
+    );
+    let digest = decision_case_digest(
+        family,
+        metadata,
+        turn_index,
+        &context,
+        &observed_label,
+        transcript_refs.as_slice(),
+        tool_call_id,
+    );
+    let split = decision_case_split_from_digest(digest.as_str());
+
+    DecisionCaseRecord {
+        case_id,
+        stable_digest: digest,
+        family,
+        split,
+        session_id: metadata.id.as_str().to_string(),
+        title: metadata.title.clone(),
+        cwd: metadata.cwd.display().to_string(),
+        backend_profile: metadata
+            .backend
+            .as_ref()
+            .map(|backend| backend.profile_name.clone()),
+        harness_profile: metadata
+            .harness_profile
+            .as_ref()
+            .map(|profile| format!("{}@{}", profile.name, profile.version)),
+        source_transcript_path: metadata.transcript_path.display().to_string(),
+        turn_index,
+        context,
+        observed_label,
+        transcript_refs,
+    }
+}
+
+fn decision_case_digest(
+    family: DecisionCaseFamily,
+    metadata: &SessionMetadata,
+    turn_index: u64,
+    context: &DecisionCaseContext,
+    observed_label: &DecisionCaseObservedLabel,
+    transcript_refs: &[DecisionCaseTranscriptRef],
+    tool_call_id: Option<&str>,
+) -> String {
+    let payload = serde_json::json!({
+        "family": family,
+        "session_id": metadata.id.as_str(),
+        "turn_index": turn_index,
+        "tool_call_id": tool_call_id,
+        "context": context,
+        "observed_label": observed_label,
+        "transcript_refs": transcript_refs,
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(b"probe_decision_case|");
+    hasher.update(payload.to_string().as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn decision_case_split_from_digest(digest: &str) -> DecisionCaseSplit {
+    let suffix = digest
+        .get(digest.len().saturating_sub(2)..)
+        .and_then(|value| u8::from_str_radix(value, 16).ok())
+        .unwrap_or(0);
+    if suffix < 205 {
+        DecisionCaseSplit::Train
+    } else {
+        DecisionCaseSplit::Validation
+    }
+}
+
+fn first_named_tool_call(
+    event: &TranscriptEvent,
+) -> Option<&probe_protocol::session::TranscriptItem> {
+    event.turn.items.iter().find(|item| {
+        item.kind == TranscriptItemKind::ToolCall && item.name.as_ref().is_some()
+    })
+}
+
+fn sum_user_message_chars(event: &TranscriptEvent) -> usize {
+    let from_user_messages = event
+        .turn
+        .items
+        .iter()
+        .filter(|item| item.kind == TranscriptItemKind::UserMessage)
+        .map(|item| item.text.chars().count())
+        .sum::<usize>();
+    if from_user_messages > 0 {
+        return from_user_messages;
+    }
+
+    first_named_tool_call(event)
+        .and_then(|item| item.arguments.as_ref())
+        .and_then(|arguments| arguments.get("question"))
+        .and_then(serde_json::Value::as_str)
+        .map_or(0, |value| value.chars().count())
+}
+
+fn requested_task_kind_from_tool_call(
+    tool_call: &probe_protocol::session::TranscriptItem,
+) -> Option<String> {
+    tool_call
+        .arguments
+        .as_ref()
+        .and_then(|arguments| arguments.get("task_kind"))
+        .and_then(serde_json::Value::as_str)
+        .map(String::from)
+}
+
+fn requested_evidence_files_from_tool_call(
+    tool_call: &probe_protocol::session::TranscriptItem,
+) -> Option<usize> {
+    tool_call
+        .arguments
+        .as_ref()
+        .and_then(|arguments| arguments.get("evidence_paths"))
+        .and_then(serde_json::Value::as_array)
+        .map(std::vec::Vec::len)
 }
 
 fn tool_result_path(item: &probe_protocol::session::TranscriptItem) -> Option<String> {
@@ -663,5 +1184,78 @@ mod tests {
         assert_eq!(value["oracle_calls"], 0);
         assert_eq!(value["long_context_calls"], 0);
         assert_eq!(value["repo_analysis_files"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn export_decision_case_bundle_writes_train_and_validation_artifacts() {
+        let temp = tempdir().expect("temp dir");
+        let store = FilesystemSessionStore::new(temp.path());
+        let metadata = store
+            .create_session_with(
+                NewSession::new("coding cases", temp.path()).with_harness_profile(Some(
+                    SessionHarnessProfile {
+                        name: String::from("coding_bootstrap_default"),
+                        version: String::from("v1"),
+                    },
+                )),
+            )
+            .expect("create session");
+        store
+            .append_turn(
+                &metadata.id,
+                &[
+                    NewItem::new(TranscriptItemKind::UserMessage, "inspect the src tree"),
+                    NewItem::tool_call(
+                        "list_files",
+                        "call_list",
+                        serde_json::json!({ "path": "src" }),
+                    ),
+                ],
+            )
+            .expect("append turn");
+
+        let output_path = temp.path().join("decision_cases");
+        let report = export_dataset(
+            &store,
+            &DatasetExportConfig {
+                kind: DatasetKind::DecisionCases,
+                output_path: output_path.clone(),
+                session_ids: Vec::new(),
+                include_all_sessions: false,
+            },
+        )
+        .expect("export decision case bundle");
+
+        assert_eq!(report.sessions_exported, 1);
+        assert_eq!(report.cases_exported, 3);
+
+        let all_cases = fs::read_to_string(output_path.join("decision_cases_all.jsonl"))
+            .expect("read decision cases");
+        assert_eq!(all_cases.lines().count(), 3);
+        let first_case: serde_json::Value =
+            serde_json::from_str(all_cases.lines().next().expect("first case line"))
+                .expect("parse case");
+        assert_eq!(first_case["session_id"], metadata.id.as_str());
+        assert_eq!(first_case["source_transcript_path"], serde_json::json!(metadata.transcript_path));
+        assert!(first_case["stable_digest"].as_str().is_some());
+        assert!(
+            matches!(
+                first_case["split"].as_str(),
+                Some("train" | "validation")
+            ),
+            "case split should be train or validation"
+        );
+
+        let split_manifest = fs::read_to_string(output_path.join("decision_case_split_manifest.json"))
+            .expect("read split manifest");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&split_manifest).expect("parse split manifest");
+        assert_eq!(manifest["total_sessions"], 1);
+        assert_eq!(manifest["total_cases"], 3);
+        assert_eq!(
+            manifest["train_cases"].as_u64().unwrap_or(0)
+                + manifest["validation_cases"].as_u64().unwrap_or(0),
+            3
+        );
     }
 }

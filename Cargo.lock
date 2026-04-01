@@ -1526,6 +1526,7 @@ dependencies = [
 name = "probe-core"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "probe-protocol",
  "probe-provider-apple-fm",
  "probe-provider-openai",
@@ -1534,6 +1535,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "wait-timeout",
 ]

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+hex.workspace = true
 probe-protocol.workspace = true
 probe-provider-apple-fm.workspace = true
 probe-provider-openai.workspace = true
@@ -12,6 +13,7 @@ psionic-apple-fm.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 wait-timeout.workspace = true
 
 [dev-dependencies]

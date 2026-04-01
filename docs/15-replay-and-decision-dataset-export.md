@@ -25,6 +25,14 @@ cargo run -p probe-cli -- export \
   --output ~/.probe/reports/probe_decision.jsonl
 ```
 
+and:
+
+```bash
+cargo run -p probe-cli -- export \
+  --dataset decision-cases \
+  --output ~/.probe/reports/probe_decision_cases
+```
+
 Optional scope controls:
 
 - `--session <id>`
@@ -79,6 +87,36 @@ Each JSONL record currently includes fields such as:
 This is the format to use when later decision modules, harness tuning, or GEPA
 jobs need compact per-session receipts instead of full transcript replay.
 
+## Decision Case Bundle
+
+`decision-cases` widens the export surface from one row per session to one row
+per observed decision point.
+
+Probe now derives turn-level cases for:
+
+- `tool_route`
+- `patch_readiness`
+- `long_context_escalation`
+
+Each case records:
+
+- stable `case_id` plus a content digest
+- deterministic train or validation split membership
+- pre-decision typed context
+- observed label or outcome
+- source session id, turn index, and transcript path
+- transcript item refs for later inspection
+
+The export path writes a bundle directory containing:
+
+- `decision_cases_all.jsonl`
+- `decision_cases_train.jsonl`
+- `decision_cases_val.jsonl`
+- `decision_case_split_manifest.json`
+
+That split manifest is the canonical retained-case inventory for later Probe to
+Psionic optimizer jobs.
+
 ## Privacy And Scope Boundary
 
 The export path is intentionally local-first.
@@ -108,6 +146,8 @@ Probe can now produce:
 - replay records for offline trace inspection and reranking
 - decision records for studying tool order, read/search patterns, patching,
   verification, approval behavior, and cache effects
+- decision-case bundles with stable train or validation membership and
+  transcript provenance for module-family evaluation
 
 That means later DSPy/GEPA work can consume stable exported data instead of
 scraping ad hoc logs or trying to infer policy behavior from free-form text.
