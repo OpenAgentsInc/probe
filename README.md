@@ -106,14 +106,15 @@ The first supported remote-Qwen posture stays narrow and explicit:
 - `127.0.0.1` attach is treated as local or SSH-forwarded
 - `100.x.y.z` attach is treated as direct Tailnet attach
 
-Views:
-
-- `Chat`: transcript-first home shell with the live composer
-- `Events`: shell and worker event logs
+The top selector is now a backend switcher, not a view switcher. Probe keeps one
+transcript-first home shell on screen at a time, and `Tab` flips the active
+runtime between the current Qwen or Tailnet lane and the Apple FM lane. When
+the backend changes, Probe resets the chat surface so the next submit starts a
+fresh session on that backend instead of continuing the previous runtime lane.
 
 Keys:
 
-- `Tab`, `Shift+Tab`: switch `Chat` / `Events`
+- `Tab`, `Shift+Tab`: switch active backend
 - `Enter`: submit the composer
 - `Ctrl+J`: insert a newline
 - `Up`, `Down`: recall draft history
@@ -126,13 +127,13 @@ Keys:
 - `Esc`: dismiss modal
 - `Ctrl+C`: quit
 
-The composer is active on `Chat` and disabled while overlays own focus or while
-`Events` is selected. The draft model tracks slash commands, typed mentions
-such as `@skill:rust` or `@app:github`, attachment placeholders, submission
-history, and multiline paste state. When a tool pauses for approval, Probe now
-persists a real pending-approval record in `probe-core`, opens the approval
-overlay with the live tool details, and resumes the paused turn after approve
-or reject instead of leaving the operator in a dead-end pause state.
+The composer is active on the main transcript shell and disabled while overlays
+own focus. The draft model tracks slash commands, typed mentions such as
+`@skill:rust` or `@app:github`, attachment placeholders, submission history,
+and multiline paste state. When a tool pauses for approval, Probe now persists
+a real pending-approval record in `probe-core`, opens the approval overlay with
+the live tool details, and resumes the paused turn after approve or reject
+instead of leaving the operator in a dead-end pause state.
 
 Remote attach examples:
 

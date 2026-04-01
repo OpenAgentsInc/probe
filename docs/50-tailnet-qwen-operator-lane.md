@@ -69,6 +69,12 @@ The first remote Probe lane stays narrow:
 - `probe chat` and `probe exec` now print the prepared backend target summary
 - `probe tui` uses the same prepared backend contract instead of hidden config
   reconstruction
+- the top strip in `probe tui` is a backend selector, not a `Chat` / `Events`
+  view toggle
+- `Tab` and `Shift+Tab` now flip the active runtime between the prepared
+  Qwen or Tailnet lane and the Apple FM lane
+- switching backend resets the visible chat shell so the next submit starts a
+  fresh session on that backend
 - the TUI bottom status bar shows backend kind, target, attach mode, model, and
   live phase
 - `Ctrl+S` opens a backend overlay that shows the operator contract for remote

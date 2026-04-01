@@ -63,7 +63,7 @@ structure.
 
 ## Control Model
 
-- `Tab` / `Shift+Tab`: switch `Chat` / `Events`
+- `Tab` / `Shift+Tab`: switch the active backend lane
 - `Ctrl+S`: open setup overlay
 - `Ctrl+A`: open approval overlay
 - `F1`: open help overlay

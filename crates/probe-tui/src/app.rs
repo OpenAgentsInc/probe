@@ -33,6 +33,13 @@ use crate::worker::BackgroundWorker;
 
 const TICK_RATE: Duration = Duration::from_millis(250);
 
+#[derive(Debug, Clone)]
+struct BackendLaneConfig {
+    label: String,
+    chat_runtime: ProbeRuntimeTurnConfig,
+    operator_backend: ServerOperatorSummary,
+}
+
 #[derive(Debug)]
 pub struct AppShell {
     screens: Vec<ScreenState>,
@@ -40,7 +47,8 @@ pub struct AppShell {
     should_quit: bool,
     bottom_pane: BottomPane,
     worker: BackgroundWorker,
-    chat_runtime: ProbeRuntimeTurnConfig,
+    backend_lanes: [BackendLaneConfig; 2],
+    active_backend_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -74,16 +82,19 @@ impl AppShell {
     }
 
     fn with_launch_config(config: TuiLaunchConfig) -> Self {
+        let backend_lanes = build_backend_lanes(&config);
         let mut app = Self {
             screens: vec![ScreenState::Chat(ChatScreen::default())],
             last_status: String::from("probe tui launched"),
             should_quit: false,
             bottom_pane: BottomPane::new(),
             worker: BackgroundWorker::new(),
-            chat_runtime: config.chat_runtime,
+            backend_lanes,
+            active_backend_index: 0,
         };
-        app.base_screen_mut()
-            .set_operator_backend(config.operator_backend.clone());
+        app.sync_backend_selector();
+        let summary = app.active_operator_backend().clone();
+        app.base_screen_mut().set_operator_backend(summary);
         if config.autostart_apple_fm_setup
             && let Some(request) = app.default_setup_request()
         {
@@ -160,9 +171,8 @@ impl AppShell {
     }
 
     fn default_setup_request(&self) -> Option<BackgroundTaskRequest> {
-        (self.chat_runtime.profile.kind == BackendKind::AppleFmBridge).then(|| {
-            BackgroundTaskRequest::apple_fm_setup(self.chat_runtime.profile.clone())
-        })
+        (self.active_chat_runtime().profile.kind == BackendKind::AppleFmBridge)
+            .then(|| BackgroundTaskRequest::apple_fm_setup(self.active_chat_runtime().profile.clone()))
     }
 
     pub fn should_quit(&self) -> bool {
@@ -214,6 +224,21 @@ impl AppShell {
 
     pub fn dispatch(&mut self, event: UiEvent) {
         self.poll_background_messages();
+        if self.active_screen_id() == ScreenId::Chat {
+            match event {
+                UiEvent::NextView => {
+                    self.switch_backend(self.base_screen().active_tab().next());
+                    self.poll_background_messages();
+                    return;
+                }
+                UiEvent::PreviousView => {
+                    self.switch_backend(self.base_screen().active_tab().previous());
+                    self.poll_background_messages();
+                    return;
+                }
+                _ => {}
+            }
+        }
         match event {
             UiEvent::Quit => {
                 self.base_screen_mut().record_event("quit requested");
@@ -249,7 +274,7 @@ impl AppShell {
                     if let Err(error) = self.submit_background_task(
                         BackgroundTaskRequest::probe_runtime_turn(
                             submitted.text.clone(),
-                            self.chat_runtime.clone(),
+                            self.active_chat_runtime().clone(),
                         ),
                     ) {
                         self.last_status = error;
@@ -339,7 +364,7 @@ impl AppShell {
                                     session_id,
                                     call_id,
                                     resolution,
-                                    self.chat_runtime.clone(),
+                                    self.active_chat_runtime().clone(),
                                 ),
                             ) {
                                 self.last_status = error;
@@ -484,13 +509,6 @@ impl AppShell {
             ScreenId::Chat => {}
         }
 
-        if self.active_tab() != ActiveTab::Chat {
-            return BottomPaneState::Disabled(format!(
-                "Composer only runs on Chat. Tab or Shift+Tab returns from {}.",
-                self.active_tab().title()
-            ));
-        }
-
         if self.base_screen().has_pending_tool_approvals() {
             return BottomPaneState::Disabled(format!(
                 "Resolve {} pending approval request(s) before submitting a new turn.",
@@ -534,6 +552,54 @@ impl AppShell {
                 .record_event("approval overlay released focus");
         }
     }
+
+    fn active_chat_runtime(&self) -> &ProbeRuntimeTurnConfig {
+        &self.backend_lanes[self.active_backend_index].chat_runtime
+    }
+
+    fn active_operator_backend(&self) -> &ServerOperatorSummary {
+        &self.backend_lanes[self.active_backend_index].operator_backend
+    }
+
+    fn backend_selector_labels(&self) -> [String; 2] {
+        [
+            self.backend_lanes[0].label.clone(),
+            self.backend_lanes[1].label.clone(),
+        ]
+    }
+
+    fn sync_backend_selector(&mut self) {
+        let active_tab = if self.active_backend_index == 0 {
+            ActiveTab::Primary
+        } else {
+            ActiveTab::Secondary
+        };
+        let labels = self.backend_selector_labels();
+        self.base_screen_mut().set_backend_selector(labels, active_tab);
+    }
+
+    fn switch_backend(&mut self, active_tab: ActiveTab) {
+        if self.base_screen().has_pending_tool_approvals() {
+            self.last_status = String::from("resolve pending approvals before switching backend");
+            self.base_screen_mut()
+                .record_event("backend switch blocked by pending approvals");
+            return;
+        }
+
+        self.active_backend_index = active_tab.index();
+        let labels = self.backend_selector_labels();
+        let lane = self.backend_lanes[self.active_backend_index].clone();
+        self.base_screen_mut().switch_backend(
+            labels,
+            active_tab,
+            lane.label.as_str(),
+            lane.operator_backend,
+        );
+        self.last_status = format!(
+            "active backend: {} | next submit starts a fresh session",
+            lane.label
+        );
+    }
 }
 
 #[cfg(test)]
@@ -574,6 +640,48 @@ fn operator_summary_from_profile(profile: &BackendProfile) -> ServerOperatorSumm
     config.set_api_kind(profile.kind);
     config.model_id = Some(profile.model.clone());
     config.operator_summary()
+}
+
+fn clone_runtime_with_profile(
+    base: &ProbeRuntimeTurnConfig,
+    profile: BackendProfile,
+) -> ProbeRuntimeTurnConfig {
+    ProbeRuntimeTurnConfig {
+        probe_home: base.probe_home.clone(),
+        cwd: base.cwd.clone(),
+        profile,
+        system_prompt: base.system_prompt.clone(),
+        harness_profile: base.harness_profile.clone(),
+        tool_loop: base.tool_loop.clone(),
+    }
+}
+
+fn backend_selector_label(summary: &ServerOperatorSummary) -> String {
+    match summary.backend_kind {
+        BackendKind::AppleFmBridge => String::from("Apple FM"),
+        BackendKind::OpenAiChatCompletions if summary.is_remote_target() => String::from("Tailnet"),
+        BackendKind::OpenAiChatCompletions => String::from("Qwen"),
+    }
+}
+
+fn build_backend_lanes(config: &TuiLaunchConfig) -> [BackendLaneConfig; 2] {
+    let primary = BackendLaneConfig {
+        label: backend_selector_label(&config.operator_backend),
+        chat_runtime: config.chat_runtime.clone(),
+        operator_backend: config.operator_backend.clone(),
+    };
+    let alternate_profile = match config.operator_backend.backend_kind {
+        BackendKind::AppleFmBridge => psionic_qwen35_2b_q8_registry(),
+        BackendKind::OpenAiChatCompletions => psionic_apple_fm_bridge(),
+    };
+    let alternate_runtime = clone_runtime_with_profile(&config.chat_runtime, alternate_profile);
+    let alternate_summary = operator_summary_from_profile(&alternate_runtime.profile);
+    let alternate = BackendLaneConfig {
+        label: backend_selector_label(&alternate_summary),
+        chat_runtime: alternate_runtime,
+        operator_backend: alternate_summary,
+    };
+    [primary, alternate]
 }
 
 fn parse_profile_host_port(profile: &BackendProfile) -> (String, u16) {
@@ -838,19 +946,22 @@ mod tests {
     }
 
     #[test]
-    fn events_view_switches_and_copy_toggle_still_work() {
+    fn tab_switches_backend_and_copy_toggle_still_work() {
         let mut app = AppShell::new_for_tests();
-        assert_eq!(app.active_tab(), ActiveTab::Chat);
+        assert_eq!(app.active_tab(), ActiveTab::Primary);
         assert!(!app.emphasized_copy());
 
         app.dispatch(UiEvent::NextView);
-        assert_eq!(app.active_tab(), ActiveTab::Events);
+        assert_eq!(app.active_tab(), ActiveTab::Secondary);
+        let rendered = app.render_to_string(120, 32);
+        assert!(rendered.contains("Backend Switched"));
+        assert!(rendered.contains("active_backend: Apple FM"));
 
         app.dispatch(UiEvent::ToggleBody);
         assert!(app.emphasized_copy());
 
         app.dispatch(UiEvent::PreviousView);
-        assert_eq!(app.active_tab(), ActiveTab::Chat);
+        assert_eq!(app.active_tab(), ActiveTab::Primary);
     }
 
     #[test]
@@ -1262,7 +1373,7 @@ mod tests {
         }
 
         assert_eq!(app.task_phase(), TaskPhase::Unavailable);
-        assert_eq!(app.active_tab(), ActiveTab::Chat);
+        assert_eq!(app.active_tab(), ActiveTab::Primary);
         app.dispatch(UiEvent::OpenSetupOverlay);
         assert_eq!(app.active_screen_id(), ScreenId::SetupOverlay);
         assert!(
@@ -1317,7 +1428,7 @@ mod tests {
         }
 
         assert_eq!(app.task_phase(), TaskPhase::Failed);
-        assert_eq!(app.active_tab(), ActiveTab::Chat);
+        assert_eq!(app.active_tab(), ActiveTab::Primary);
         app.dispatch(UiEvent::OpenSetupOverlay);
         assert_eq!(app.active_screen_id(), ScreenId::SetupOverlay);
         let rendered = app.render_to_string(120, 32);

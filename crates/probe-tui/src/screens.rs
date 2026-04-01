@@ -43,29 +43,29 @@ impl ScreenId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTab {
-    Chat,
-    Events,
+    Primary,
+    Secondary,
 }
 
 impl ActiveTab {
-    pub(crate) fn title(self) -> &'static str {
+    pub(crate) const fn index(self) -> usize {
         match self {
-            Self::Chat => "Chat",
-            Self::Events => "Events",
+            Self::Primary => 0,
+            Self::Secondary => 1,
         }
     }
 
-    fn next(self) -> Self {
+    pub(crate) fn next(self) -> Self {
         match self {
-            Self::Chat => Self::Events,
-            Self::Events => Self::Chat,
+            Self::Primary => Self::Secondary,
+            Self::Secondary => Self::Primary,
         }
     }
 
-    fn previous(self) -> Self {
+    pub(crate) fn previous(self) -> Self {
         match self {
-            Self::Chat => Self::Events,
-            Self::Events => Self::Chat,
+            Self::Primary => Self::Secondary,
+            Self::Secondary => Self::Primary,
         }
     }
 }
@@ -299,12 +299,12 @@ impl Default for AppleFmSetupState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatScreen {
     active_tab: ActiveTab,
+    tab_labels: [String; 2],
     emphasized_copy: bool,
     recent_events: VecDeque<String>,
     task_events: VecDeque<String>,
     transcript: RetainedTranscript,
     transcript_scroll_from_bottom: u16,
-    events_scroll: u16,
     runtime: ProbeRuntimeState,
     stream: Option<AssistantStreamState>,
     operator_backend: Option<ServerOperatorSummary>,
@@ -314,13 +314,13 @@ pub struct ChatScreen {
 impl Default for ChatScreen {
     fn default() -> Self {
         let mut screen = Self {
-            active_tab: ActiveTab::Chat,
+            active_tab: ActiveTab::Primary,
+            tab_labels: [String::from("Qwen"), String::from("Apple FM")],
             emphasized_copy: false,
             recent_events: VecDeque::new(),
             task_events: VecDeque::new(),
             transcript: RetainedTranscript::new(),
             transcript_scroll_from_bottom: 0,
-            events_scroll: 0,
             runtime: ProbeRuntimeState::default(),
             stream: None,
             operator_backend: None,
@@ -330,7 +330,7 @@ impl Default for ChatScreen {
         screen.record_event("press Ctrl+R to rerun backend check when supported");
         screen.record_event("press Ctrl+S to inspect backend status");
         screen.record_event("press F1 for help");
-        screen.record_event("press Tab or Shift+Tab to switch views");
+        screen.record_event("press Tab or Shift+Tab to switch backends");
         screen
     }
 }
@@ -338,6 +338,11 @@ impl Default for ChatScreen {
 impl ChatScreen {
     pub fn active_tab(&self) -> ActiveTab {
         self.active_tab
+    }
+
+    pub fn set_backend_selector(&mut self, labels: [String; 2], active_tab: ActiveTab) {
+        self.tab_labels = labels;
+        self.active_tab = active_tab;
     }
 
     pub fn emphasized_copy(&self) -> bool {
@@ -401,6 +406,35 @@ impl ChatScreen {
                 "loopback attach may be local or an SSH-forwarded remote Psionic target",
             );
         }
+    }
+
+    pub fn switch_backend(
+        &mut self,
+        labels: [String; 2],
+        active_tab: ActiveTab,
+        lane_label: &str,
+        summary: ServerOperatorSummary,
+    ) {
+        self.active_tab = active_tab;
+        self.tab_labels = labels;
+        self.emphasized_copy = false;
+        self.transcript = RetainedTranscript::new();
+        self.transcript.push_entry(TranscriptEntry::new(
+            TranscriptRole::Status,
+            "Backend Switched",
+            vec![
+                format!("active_backend: {lane_label}"),
+                String::from("next submit starts a fresh session"),
+            ],
+        ));
+        self.transcript_scroll_from_bottom = 0;
+        self.runtime = ProbeRuntimeState::default();
+        self.stream = None;
+        self.setup = AppleFmSetupState::default();
+        self.set_operator_backend(summary);
+        self.record_event(format!(
+            "switched active backend to {lane_label}; next submit starts a fresh session"
+        ));
     }
 
     pub fn record_event(&mut self, message: impl Into<String>) {
@@ -471,7 +505,6 @@ impl ChatScreen {
             ..AppleFmSetupState::default()
         };
         self.task_events.clear();
-        self.events_scroll = 0;
         self.record_worker_event(format!(
             "queued Apple FM setup against {}",
             backend.profile_name
@@ -1329,16 +1362,10 @@ impl ChatScreen {
     fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
         match event {
             UiEvent::NextView => {
-                self.active_tab = self.active_tab.next();
-                let status = format!("switched to {} view", self.active_tab.title());
-                self.record_event(status.clone());
-                ScreenOutcome::with_status(ScreenAction::None, status)
+                ScreenOutcome::idle()
             }
             UiEvent::PreviousView => {
-                self.active_tab = self.active_tab.previous();
-                let status = format!("switched to {} view", self.active_tab.title());
-                self.record_event(status.clone());
-                ScreenOutcome::with_status(ScreenAction::None, status)
+                ScreenOutcome::idle()
             }
             UiEvent::ToggleBody => {
                 self.emphasized_copy = !self.emphasized_copy;
@@ -1352,31 +1379,19 @@ impl ChatScreen {
                 ScreenOutcome::with_status(ScreenAction::None, status)
             }
             UiEvent::ScrollUp => {
-                match self.active_tab {
-                    ActiveTab::Chat => self.scroll_transcript_up(LINE_SCROLL_STEP),
-                    ActiveTab::Events => self.scroll_events_up(LINE_SCROLL_STEP),
-                }
+                self.scroll_transcript_up(LINE_SCROLL_STEP);
                 ScreenOutcome::idle()
             }
             UiEvent::ScrollDown => {
-                match self.active_tab {
-                    ActiveTab::Chat => self.scroll_transcript_down(LINE_SCROLL_STEP),
-                    ActiveTab::Events => self.scroll_events_down(LINE_SCROLL_STEP),
-                }
+                self.scroll_transcript_down(LINE_SCROLL_STEP);
                 ScreenOutcome::idle()
             }
             UiEvent::PageUp => {
-                match self.active_tab {
-                    ActiveTab::Chat => self.scroll_transcript_up(PAGE_SCROLL_STEP),
-                    ActiveTab::Events => self.scroll_events_up(PAGE_SCROLL_STEP),
-                }
+                self.scroll_transcript_up(PAGE_SCROLL_STEP);
                 ScreenOutcome::idle()
             }
             UiEvent::PageDown => {
-                match self.active_tab {
-                    ActiveTab::Chat => self.scroll_transcript_down(PAGE_SCROLL_STEP),
-                    ActiveTab::Events => self.scroll_events_down(PAGE_SCROLL_STEP),
-                }
+                self.scroll_transcript_down(PAGE_SCROLL_STEP);
                 ScreenOutcome::idle()
             }
             UiEvent::RunBackgroundTask => {
@@ -1433,12 +1448,8 @@ impl ChatScreen {
         let sections = Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
             .spacing(1)
             .split(area);
-        TabStrip::new(self.active_tab).render(frame, sections[0]);
-
-        match self.active_tab {
-            ActiveTab::Chat => self.render_chat_shell(frame, sections[1], stack_depth),
-            ActiveTab::Events => self.render_events(frame, sections[1], stack_depth),
-        }
+        TabStrip::new(self.tab_labels.clone(), self.active_tab.index()).render(frame, sections[0]);
+        self.render_chat_shell(frame, sections[1], stack_depth);
     }
 
     fn render_chat_shell(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
@@ -1523,36 +1534,6 @@ impl ChatScreen {
             lines.push(Line::from(format!("  active_tool: {tool}")));
         }
         Text::from(lines)
-    }
-
-    fn render_events(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
-        let rows = Layout::vertical([Constraint::Length(7), Constraint::Min(0)])
-            .spacing(1)
-            .split(area);
-        InfoPanel::new(
-            "App Shell Notes",
-            Text::from(vec![
-                Line::from("AppShell owns terminal lifecycle, dispatch, and worker polling."),
-                Line::from("Probe selected a retained transcript widget as the first shell model."),
-                Line::from(
-                    "Committed entries stay in app state with one explicit active-turn cell.",
-                ),
-                Line::from(format!("Current stack depth: {stack_depth}")),
-            ]),
-        )
-        .render(frame, rows[0]);
-
-        let columns = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
-            .spacing(1)
-            .split(rows[1]);
-        let ui_body = numbered_event_log(self.recent_events.iter());
-        let worker_body = numbered_event_log(self.task_events.iter());
-        InfoPanel::new("UI Event Log", ui_body)
-            .with_scroll(self.events_scroll)
-            .render(frame, columns[0]);
-        InfoPanel::new("Worker Timeline", worker_body)
-            .with_scroll(self.events_scroll)
-            .render(frame, columns[1]);
     }
 
     fn render_primary_body(&self) -> Text<'static> {
@@ -1837,31 +1818,12 @@ impl ChatScreen {
             self.transcript_scroll_from_bottom.saturating_sub(amount);
     }
 
-    fn scroll_events_up(&mut self, amount: u16) {
-        self.events_scroll = self.events_scroll.saturating_sub(amount);
-    }
-
-    fn scroll_events_down(&mut self, amount: u16) {
-        let max = self.max_events_scroll();
-        self.events_scroll = self.events_scroll.saturating_add(amount).min(max);
-    }
-
     fn max_transcript_scroll_from_bottom(&self) -> u16 {
         self.render_primary_body()
             .lines
             .len()
             .saturating_sub(1)
             .min(u16::MAX as usize) as u16
-    }
-
-    fn max_events_scroll(&self) -> u16 {
-        let max_lines = self
-            .recent_events
-            .len()
-            .max(self.task_events.len())
-            .saturating_sub(1)
-            .min(u16::MAX as usize);
-        max_lines as u16
     }
 
     fn transcript_scroll_y(&self, line_count: usize, panel_height: u16) -> u16 {
@@ -1899,7 +1861,7 @@ impl HelpScreen {
         let content = Paragraph::new(Text::from(vec![
             Line::from("Probe Chat Shell Keys"),
             Line::from(""),
-            Line::from("Tab / Shift+Tab     switch Chat / Events"),
+            Line::from("Tab / Shift+Tab     switch active backend"),
             Line::from("Enter / Ctrl+J      submit / newline"),
             Line::from("Up / Down           draft history recall"),
             Line::from("Mouse wheel / PgUp  scroll active panel"),
@@ -2234,21 +2196,6 @@ fn compact_text_lines(value: &str, max_lines: usize) -> Vec<String> {
         lines.push(String::from("..."));
     }
     lines
-}
-
-fn numbered_event_log<'a>(items: impl Iterator<Item = &'a String>) -> Text<'static> {
-    let lines = items
-        .enumerate()
-        .map(|(index, message)| Line::from(format!("{:>2}. {}", index + 1, message)))
-        .collect::<Vec<_>>();
-    if lines.is_empty() {
-        return Text::from(vec![
-            Line::from("No events yet."),
-            Line::from(""),
-            Line::from("Worker and UI events will accumulate here."),
-        ]);
-    }
-    Text::from(lines)
 }
 
 fn render_backend_kind(value: probe_protocol::backend::BackendKind) -> &'static str {

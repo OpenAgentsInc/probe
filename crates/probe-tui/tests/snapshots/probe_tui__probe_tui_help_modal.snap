@@ -8,7 +8,7 @@ expression: snapshot
            ┌─ Help ─────────────────────────────────────────────────┐
            │ Probe Chat Shell Keys                                  │
            │                                                        │
-           │ Tab / Shift+Tab     switch Chat / Events               │
+           │ Tab / Shift+Tab     switch active backend              │
            │ Enter / Ctrl+J      submit / newline                   │
            │ Up / Down           draft history recall               │
            │ Mouse wheel / PgUp  scroll active panel                │

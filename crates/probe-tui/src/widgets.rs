@@ -4,8 +4,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Text;
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Tabs, Wrap};
 
-use crate::screens::ActiveTab;
-
 fn shell_border() -> Style {
     Style::default().fg(Color::Rgb(0x73, 0xc2, 0xfb))
 }
@@ -26,20 +24,18 @@ fn panel_padding() -> Padding {
 }
 
 pub struct TabStrip {
-    active_tab: ActiveTab,
+    labels: [String; 2],
+    selected: usize,
 }
 
 impl TabStrip {
-    pub const fn new(active_tab: ActiveTab) -> Self {
-        Self { active_tab }
+    pub fn new(labels: [String; 2], selected: usize) -> Self {
+        Self { labels, selected }
     }
 
     pub fn render(self, frame: &mut Frame<'_>, area: Rect) {
-        let tabs = Tabs::new(vec!["Chat", "Events"])
-            .select(match self.active_tab {
-                ActiveTab::Chat => 0,
-                ActiveTab::Events => 1,
-            })
+        let tabs = Tabs::new(self.labels.into_iter().collect::<Vec<_>>())
+            .select(self.selected.min(1))
             .padding(" ", " ")
             .block(
                 Block::default()
