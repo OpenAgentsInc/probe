@@ -39,11 +39,10 @@ without inventing a separate TUI-only tool-history store.
 The worker-side transcript mapper now renders compact operator-oriented tool
 rows:
 
-- tool call rows show the tool name, short call id, and compact argument
-  summary
-- tool result rows show the tool name, short call id, compact result summary,
-  policy, risk, approval state, and any operator details such as exit code,
-  truncation, bytes returned, touched files, or refusal/pause reason
+- tool call rows show a compact command, path, or argument summary
+- tool result rows show the smallest useful result shape for the operator:
+  compact output text, a short file range, a short error, or a terse approval
+  reason
 
 This is much closer to a coding-shell transcript than dumping full pretty JSON
 blocks for every row.

@@ -7,15 +7,11 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use probe_core::backend_profiles::{
-    psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
-};
+use probe_core::backend_profiles::{psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry};
 use probe_core::harness::resolve_harness_profile;
 use probe_core::runtime::{current_working_dir, default_probe_home};
-use probe_core::server_control::{
-    PsionicServerConfig, PsionicServerMode, ServerOperatorSummary,
-};
-use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
+use probe_core::server_control::{PsionicServerConfig, PsionicServerMode, ServerOperatorSummary};
+use probe_core::tools::{ProbeToolChoice, ToolApprovalConfig, ToolLoopConfig};
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -105,9 +101,14 @@ impl AppShell {
 
     fn default_launch_config() -> TuiLaunchConfig {
         let probe_home = default_probe_home().ok();
-        let (profile, summary) = Self::chat_profile_and_summary_from_probe_home(probe_home.as_deref());
+        let (profile, summary) =
+            Self::chat_profile_and_summary_from_probe_home(probe_home.as_deref());
         let chat_runtime = Self::build_chat_runtime_config(probe_home, profile.clone());
-        Self::launch_config_from_parts(chat_runtime, summary, profile.kind == BackendKind::AppleFmBridge)
+        Self::launch_config_from_parts(
+            chat_runtime,
+            summary,
+            profile.kind == BackendKind::AppleFmBridge,
+        )
     }
 
     fn test_launch_config() -> TuiLaunchConfig {
@@ -160,19 +161,24 @@ impl AppShell {
         let harness = resolve_harness_profile(Some("coding_bootstrap"), None, cwd.as_path(), None)
             .ok()
             .flatten();
+        let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Auto, false);
+        tool_loop.approval = ToolApprovalConfig::allow_all();
         ProbeRuntimeTurnConfig {
             probe_home,
             cwd,
             profile,
-            system_prompt: harness.as_ref().map(|resolved| resolved.system_prompt.clone()),
+            system_prompt: harness
+                .as_ref()
+                .map(|resolved| resolved.system_prompt.clone()),
             harness_profile: harness.map(|resolved| resolved.profile),
-            tool_loop: Some(ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Auto, false)),
+            tool_loop: Some(tool_loop),
         }
     }
 
     fn default_setup_request(&self) -> Option<BackgroundTaskRequest> {
-        (self.active_chat_runtime().profile.kind == BackendKind::AppleFmBridge)
-            .then(|| BackgroundTaskRequest::apple_fm_setup(self.active_chat_runtime().profile.clone()))
+        (self.active_chat_runtime().profile.kind == BackendKind::AppleFmBridge).then(|| {
+            BackgroundTaskRequest::apple_fm_setup(self.active_chat_runtime().profile.clone())
+        })
     }
 
     pub fn should_quit(&self) -> bool {
@@ -271,12 +277,12 @@ impl AppShell {
                         "submitted chat turn ({} chars)",
                         submitted.text.chars().count()
                     );
-                    if let Err(error) = self.submit_background_task(
-                        BackgroundTaskRequest::probe_runtime_turn(
+                    if let Err(error) =
+                        self.submit_background_task(BackgroundTaskRequest::probe_runtime_turn(
                             submitted.text.clone(),
                             self.active_chat_runtime().clone(),
-                        ),
-                    ) {
+                        ))
+                    {
                         self.last_status = error;
                     }
                 }
@@ -304,7 +310,8 @@ impl AppShell {
                         }
                     }
                     ScreenAction::OpenSetupOverlay => {
-                        self.base_screen_mut().record_event("backend overlay took focus");
+                        self.base_screen_mut()
+                            .record_event("backend overlay took focus");
                         if self.active_screen_id() != ScreenId::SetupOverlay {
                             self.screens.push(ScreenState::Setup(SetupOverlay::new()));
                         }
@@ -448,8 +455,12 @@ impl AppShell {
             }
         }
 
-        self.bottom_pane
-            .render(frame, sections[1], self.bottom_status_line().as_str(), &pane_state);
+        self.bottom_pane.render(
+            frame,
+            sections[1],
+            self.bottom_status_line().as_str(),
+            &pane_state,
+        );
         if self.active_screen_id() == ScreenId::Chat
             && let Some(cursor) = self.bottom_pane.cursor_position(sections[1], &pane_state)
         {
@@ -575,7 +586,8 @@ impl AppShell {
             ActiveTab::Secondary
         };
         let labels = self.backend_selector_labels();
-        self.base_screen_mut().set_backend_selector(labels, active_tab);
+        self.base_screen_mut()
+            .set_backend_selector(labels, active_tab);
     }
 
     fn switch_backend(&mut self, active_tab: ActiveTab) {
@@ -595,10 +607,7 @@ impl AppShell {
             lane.label.as_str(),
             lane.operator_backend,
         );
-        self.last_status = format!(
-            "active backend: {}",
-            lane.label
-        );
+        self.last_status = format!("active backend: {}", lane.label);
     }
 }
 
@@ -685,7 +694,10 @@ fn build_saved_or_default_lane(
         .and_then(|probe_home| load_saved_backend_config(probe_home, backend_kind))
         .map(|config| {
             let profile = profile_from_server_config(&config);
-            (clone_runtime_with_profile(base, profile), config.operator_summary())
+            (
+                clone_runtime_with_profile(base, profile),
+                config.operator_summary(),
+            )
         })
         .unwrap_or_else(|| {
             let profile = default_profile_for_backend_kind(backend_kind);
@@ -723,16 +735,14 @@ fn parse_profile_host_port(profile: &BackendProfile) -> (String, u16) {
         .strip_prefix("http://")
         .or_else(|| profile.base_url.strip_prefix("https://"))
         .unwrap_or(profile.base_url.as_str());
-    let authority = without_scheme
-        .split('/')
-        .next()
-        .unwrap_or(without_scheme);
+    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
     let (host, port) = authority
         .rsplit_once(':')
         .map(|(host, port)| {
             (
                 host.to_string(),
-                port.parse::<u16>().unwrap_or_else(|_| default_port_for_kind(profile.kind)),
+                port.parse::<u16>()
+                    .unwrap_or_else(|_| default_port_for_kind(profile.kind)),
             )
         })
         .unwrap_or_else(|| (authority.to_string(), default_port_for_kind(profile.kind)));
@@ -822,7 +832,11 @@ fn run_loop(
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -848,9 +862,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use probe_core::backend_profiles::{
-        psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
-    };
+    use probe_core::backend_profiles::{psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry};
     use probe_core::harness::resolve_harness_profile;
     use probe_core::server_control::PsionicServerConfig;
     use probe_core::tools::{ProbeToolChoice, ToolLoopConfig};
@@ -1005,15 +1017,14 @@ mod tests {
         qwen.host = String::from("100.108.56.85");
         qwen.port = 8080;
         qwen.model_id = Some(String::from("qwen3.5-2b-q8_0-registry.gguf"));
-        qwen
-            .save(
-                PsionicServerConfig::backend_config_path(
-                    probe_home.path(),
-                    BackendKind::OpenAiChatCompletions,
-                )
-                .as_path(),
+        qwen.save(
+            PsionicServerConfig::backend_config_path(
+                probe_home.path(),
+                BackendKind::OpenAiChatCompletions,
             )
-            .expect("save qwen snapshot");
+            .as_path(),
+        )
+        .expect("save qwen snapshot");
 
         let mut apple = PsionicServerConfig::default();
         apple.set_api_kind(BackendKind::AppleFmBridge);
@@ -1045,10 +1056,7 @@ mod tests {
             app.backend_lanes[1].chat_runtime.profile.base_url,
             "http://100.108.56.85:8080/v1"
         );
-        assert_eq!(
-            app.last_status(),
-            "active backend: Tailnet"
-        );
+        assert_eq!(app.last_status(), "active backend: Tailnet");
     }
 
     #[test]
@@ -1168,7 +1176,8 @@ mod tests {
         assert!(saw_active_turn);
         let mut rendered = app.render_to_string(120, 32);
         for _ in 0..6 {
-            if rendered.contains("[tool call] read_file") && rendered.contains("[tool result] read_file")
+            if rendered.contains("[tool call] read_file")
+                && rendered.contains("[tool result] read_file")
             {
                 break;
             }
@@ -1241,7 +1250,8 @@ mod tests {
         }
 
         wait_for_app_condition(&mut app, Duration::from_secs(5), |app| {
-            app.render_to_string(120, 32).contains("First turn complete.")
+            app.render_to_string(120, 32)
+                .contains("First turn complete.")
         });
         let session_id = app
             .runtime_session_id()
@@ -1641,9 +1651,19 @@ mod tests {
     fn non_apple_fm_launch_does_not_autostart_local_setup() {
         let app = AppShell::new_for_tests();
         assert_eq!(app.task_phase(), TaskPhase::Idle);
-        assert!(app
-            .recent_events()
-            .iter()
-            .any(|entry| entry.contains("backend target: openai_chat_completions")));
+        let tool_loop = app
+            .active_chat_runtime()
+            .tool_loop
+            .as_ref()
+            .expect("test launch should keep tool loop enabled");
+        assert_eq!(
+            tool_loop.approval,
+            probe_core::tools::ToolApprovalConfig::allow_all()
+        );
+        assert!(
+            app.recent_events()
+                .iter()
+                .any(|entry| entry.contains("backend target: openai_chat_completions"))
+        );
     }
 }

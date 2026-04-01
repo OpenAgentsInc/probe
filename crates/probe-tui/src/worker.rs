@@ -3,18 +3,18 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use probe_core::provider::{
-    complete_plain_text, normalize_openai_assistant_text, PlainTextMessage,
-    PlainTextProviderResponse, ProviderError, ProviderUsageTruth,
+    PlainTextMessage, PlainTextProviderResponse, ProviderError, ProviderUsageTruth,
+    complete_plain_text, normalize_openai_assistant_text,
 };
 use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, ResolvePendingToolApprovalOutcome,
     ResolvePendingToolApprovalRequest, RuntimeError, RuntimeEvent, RuntimeEventSink,
 };
-use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError};
 use probe_protocol::session::{
-    SessionId, SessionMetadata, ToolApprovalResolution, ToolApprovalState, ToolPolicyDecision,
-    ToolRiskClass, TranscriptEvent, TranscriptItem, TranscriptItemKind,
+    SessionId, SessionMetadata, ToolApprovalResolution, ToolPolicyDecision, TranscriptEvent,
+    TranscriptItem, TranscriptItemKind,
 };
+use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError};
 use psionic_apple_fm::AppleFmSystemLanguageModelAvailability;
 use serde_json::Value;
 
@@ -137,12 +137,7 @@ fn run_request(
             resolution,
             config,
         } => run_pending_tool_approval_resolution(
-            session_id,
-            call_id,
-            resolution,
-            config,
-            message_tx,
-            state,
+            session_id, call_id, resolution, config, message_tx, state,
         ),
     }
 }
@@ -183,26 +178,32 @@ fn run_probe_runtime_turn(
         let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
             forward_runtime_event(&event_tx, event);
         });
-        runtime.continue_plain_text_session_with_events(PlainTextResumeRequest {
-            session_id: session.session_id.clone(),
-            profile: config.profile.clone(),
-            prompt,
-            tool_loop: config.tool_loop.clone(),
-        }, event_sink)
+        runtime.continue_plain_text_session_with_events(
+            PlainTextResumeRequest {
+                session_id: session.session_id.clone(),
+                profile: config.profile.clone(),
+                prompt,
+                tool_loop: config.tool_loop.clone(),
+            },
+            event_sink,
+        )
     } else {
         let event_tx = message_tx.clone();
         let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
             forward_runtime_event(&event_tx, event);
         });
-        runtime.exec_plain_text_with_events(PlainTextExecRequest {
-            profile: config.profile.clone(),
-            prompt,
-            title: Some(String::from("Probe TUI Session")),
-            cwd: config.cwd.clone(),
-            system_prompt: config.system_prompt.clone(),
-            harness_profile: config.harness_profile.clone(),
-            tool_loop: config.tool_loop.clone(),
-        }, event_sink)
+        runtime.exec_plain_text_with_events(
+            PlainTextExecRequest {
+                profile: config.profile.clone(),
+                prompt,
+                title: Some(String::from("Probe TUI Session")),
+                cwd: config.cwd.clone(),
+                system_prompt: config.system_prompt.clone(),
+                harness_profile: config.harness_profile.clone(),
+                tool_loop: config.tool_loop.clone(),
+            },
+            event_sink,
+        )
     };
 
     match result {
@@ -237,9 +238,12 @@ fn run_probe_runtime_turn(
             ));
         }
         Err(error) => {
-            let Some(session_id) = runtime_error_session_id(&error)
-                .or_else(|| state.runtime_session.as_ref().map(|session| session.session_id.clone()))
-            else {
+            let Some(session_id) = runtime_error_session_id(&error).or_else(|| {
+                state
+                    .runtime_session
+                    .as_ref()
+                    .map(|session| session.session_id.clone())
+            }) else {
                 let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
                     entry: TranscriptEntry::new(
                         TranscriptRole::Status,
@@ -596,7 +600,8 @@ fn emit_transcript_delta(
 }
 
 fn transcript_entries_from_event(event: &TranscriptEvent) -> Vec<TranscriptEntry> {
-    event.turn
+    event
+        .turn
         .items
         .iter()
         .filter_map(|item| transcript_entry_from_item(event.turn.index, item))
@@ -615,22 +620,28 @@ fn transcript_entry_from_item(turn_index: u64, item: &TranscriptItem) -> Option<
             item.name.as_deref().unwrap_or("unknown_tool"),
             tool_call_lines(turn_index, item),
         )),
-        TranscriptItemKind::ToolResult => Some(match item.tool_execution.as_ref().map(|record| record.policy_decision) {
-            Some(ToolPolicyDecision::Paused) => TranscriptEntry::approval_pending(
-                item.name.as_deref().unwrap_or("unknown_tool"),
-                tool_result_lines(turn_index, item),
-            ),
-            Some(ToolPolicyDecision::Refused) => TranscriptEntry::tool_refused(
-                item.name.as_deref().unwrap_or("unknown_tool"),
-                tool_result_lines(turn_index, item),
-            ),
-            Some(ToolPolicyDecision::AutoAllow) | Some(ToolPolicyDecision::Approved) | None => {
-                TranscriptEntry::tool_result(
+        TranscriptItemKind::ToolResult => Some(
+            match item
+                .tool_execution
+                .as_ref()
+                .map(|record| record.policy_decision)
+            {
+                Some(ToolPolicyDecision::Paused) => TranscriptEntry::approval_pending(
                     item.name.as_deref().unwrap_or("unknown_tool"),
                     tool_result_lines(turn_index, item),
-                )
-            }
-        }),
+                ),
+                Some(ToolPolicyDecision::Refused) => TranscriptEntry::tool_refused(
+                    item.name.as_deref().unwrap_or("unknown_tool"),
+                    tool_result_lines(turn_index, item),
+                ),
+                Some(ToolPolicyDecision::AutoAllow) | Some(ToolPolicyDecision::Approved) | None => {
+                    TranscriptEntry::tool_result(
+                        item.name.as_deref().unwrap_or("unknown_tool"),
+                        tool_result_lines(turn_index, item),
+                    )
+                }
+            },
+        ),
         TranscriptItemKind::Note => Some(TranscriptEntry::new(
             TranscriptRole::Status,
             "Runtime Note",
@@ -640,61 +651,60 @@ fn transcript_entry_from_item(turn_index: u64, item: &TranscriptItem) -> Option<
 }
 
 fn tool_call_lines(turn_index: u64, item: &TranscriptItem) -> Vec<String> {
-    let mut lines = vec![format!(
-        "call: {}",
-        short_call_id(item.tool_call_id.as_deref().unwrap_or("missing"))
-    )];
-    if let Some(arguments) = item.arguments.as_ref() {
-        lines.push(format!("args: {}", compact_argument_summary(arguments)));
-    } else {
-        lines.push(format!("args: {}", preview(item.text.as_str(), 72)));
-    }
-    lines.push(format!("turn: {turn_index}"));
-    lines
+    let _ = turn_index;
+    vec![tool_invocation_subject(item).unwrap_or_else(|| {
+        item.arguments
+            .as_ref()
+            .map(compact_argument_summary)
+            .unwrap_or_else(|| preview(item.text.as_str(), 72))
+    })]
 }
 
 fn tool_result_lines(turn_index: u64, item: &TranscriptItem) -> Vec<String> {
-    let mut lines = vec![
-        format!(
-            "call: {}",
-            short_call_id(item.tool_call_id.as_deref().unwrap_or("missing"))
-        ),
-        format!("result: {}", compact_result_summary(item.text.as_str())),
-        format!("turn: {turn_index}"),
-    ];
+    let _ = turn_index;
+    let subject = tool_invocation_subject(item);
     if let Some(record) = item.tool_execution.as_ref() {
-        lines.push(format!(
-            "policy: {}",
-            render_policy_decision(record.policy_decision)
-        ));
-        lines.push(format!("risk: {}", render_tool_risk_class(record.risk_class)));
-        lines.push(format!("approval: {}", render_approval_state(record.approval_state)));
-        if let Some(command) = record.command.as_ref() {
-            lines.push(format!("command: {command}"));
-        }
-        if let Some(exit_code) = record.exit_code {
-            lines.push(format!("exit_code: {exit_code}"));
-        }
-        if let Some(timed_out) = record.timed_out {
-            lines.push(format!("timed_out: {timed_out}"));
-        }
-        if let Some(truncated) = record.truncated {
-            lines.push(format!("truncated: {truncated}"));
-        }
-        if let Some(bytes_returned) = record.bytes_returned {
-            lines.push(format!("bytes_returned: {bytes_returned}"));
-        }
-        if !record.files_touched.is_empty() {
-            lines.push(format!("files_touched: {}", record.files_touched.join(", ")));
-        }
-        if let Some(reason) = record.reason.as_ref() {
-            lines.push(format!("reason: {reason}"));
+        match record.policy_decision {
+            ToolPolicyDecision::Paused => {
+                let mut lines = subject.into_iter().collect::<Vec<_>>();
+                lines.push(format!(
+                    "needs approval: {}",
+                    compact_policy_reason(record.reason.as_deref(), item.name.as_deref())
+                ));
+                return lines;
+            }
+            ToolPolicyDecision::Refused => {
+                let mut lines = subject.into_iter().collect::<Vec<_>>();
+                lines.push(format!(
+                    "blocked: {}",
+                    compact_policy_reason(record.reason.as_deref(), item.name.as_deref())
+                ));
+                return lines;
+            }
+            ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved => {}
         }
     }
-    lines
+    successful_tool_result_lines(item, subject)
 }
 
 fn compact_argument_summary(arguments: &Value) -> String {
+    if let Some(command) = arguments.get("command").and_then(Value::as_str) {
+        return command.to_string();
+    }
+    if let Some(path) = arguments.get("path").and_then(Value::as_str) {
+        if let Some(pattern) = arguments.get("pattern").and_then(Value::as_str) {
+            return format!("{pattern} in {path}");
+        }
+        if let Some(start_line) = arguments.get("start_line").and_then(Value::as_u64) {
+            if let Some(end_line) = arguments.get("end_line").and_then(Value::as_u64) {
+                return format!("{path}:{start_line}-{end_line}");
+            }
+        }
+        return path.to_string();
+    }
+    if let Some(question) = arguments.get("question").and_then(Value::as_str) {
+        return preview(question, 72);
+    }
     compact_json_preview(arguments, 72)
 }
 
@@ -715,12 +725,17 @@ fn compact_json_preview(value: &Value, max_chars: usize) -> String {
 }
 
 fn tool_result_preview(value: &Value) -> String {
+    if let Some(error) = value.get("error").and_then(Value::as_str) {
+        return preview(error, 72);
+    }
     if let Some(path) = value.get("path").and_then(Value::as_str) {
         let start_line = value.get("start_line").and_then(Value::as_u64);
         let end_line = value.get("end_line").and_then(Value::as_u64);
         let truncated = value.get("truncated").and_then(Value::as_bool);
         return match (start_line, end_line, truncated) {
-            (Some(start), Some(end), Some(true)) => format!("read {path}:{start}-{end} (truncated)"),
+            (Some(start), Some(end), Some(true)) => {
+                format!("read {path}:{start}-{end} (truncated)")
+            }
             (Some(start), Some(end), _) => format!("read {path}:{start}-{end}"),
             _ => format!("path={path}"),
         };
@@ -737,8 +752,124 @@ fn tool_result_preview(value: &Value) -> String {
     compact_json_preview(value, 72)
 }
 
-fn short_call_id(value: &str) -> String {
-    preview(value, 16)
+fn tool_invocation_subject(item: &TranscriptItem) -> Option<String> {
+    item.tool_execution
+        .as_ref()
+        .and_then(|record| record.command.clone())
+        .or_else(|| item.arguments.as_ref().map(compact_argument_summary))
+}
+
+fn successful_tool_result_lines(item: &TranscriptItem, subject: Option<String>) -> Vec<String> {
+    if let Ok(parsed) = serde_json::from_str::<Value>(item.text.as_str())
+        && let Some(lines) = structured_tool_result_lines(&parsed)
+    {
+        return lines;
+    }
+
+    let summary = compact_result_summary(item.text.as_str());
+    let mut lines = subject.into_iter().collect::<Vec<_>>();
+    if lines
+        .last()
+        .map_or(true, |existing| existing.as_str() != summary.as_str())
+    {
+        lines.push(summary);
+    }
+    if lines.is_empty() {
+        lines.push(String::from("completed"));
+    }
+    lines
+}
+
+fn structured_tool_result_lines(value: &Value) -> Option<Vec<String>> {
+    if let Some(path) = value.get("path").and_then(Value::as_str) {
+        let start_line = value.get("start_line").and_then(Value::as_u64);
+        let end_line = value.get("end_line").and_then(Value::as_u64);
+        let truncated = value.get("truncated").and_then(Value::as_bool) == Some(true);
+        let mut lines = vec![match (start_line, end_line) {
+            (Some(start), Some(end)) => format!("{path}:{start}-{end}"),
+            _ => path.to_string(),
+        }];
+        if let Some(content) = value.get("content").and_then(Value::as_str) {
+            lines.extend(compact_text_lines(content, 4, 120));
+            if truncated && content.lines().count() > 4 {
+                lines.push(String::from("..."));
+            }
+        }
+        return Some(lines);
+    }
+    if let Some(command) = value.get("command").and_then(Value::as_str) {
+        let mut lines = vec![command.to_string()];
+        if let Some(stdout) = value.get("stdout").and_then(Value::as_str)
+            && !stdout.trim().is_empty()
+        {
+            lines.extend(compact_text_lines(stdout, 4, 120));
+            return Some(lines);
+        }
+        if let Some(stderr) = value.get("stderr").and_then(Value::as_str)
+            && !stderr.trim().is_empty()
+        {
+            lines.extend(compact_text_lines(stderr, 4, 120));
+            return Some(lines);
+        }
+        return Some(lines);
+    }
+    if let Some(error) = value.get("error").and_then(Value::as_str) {
+        return Some(vec![format!("error: {}", preview(error, 96))]);
+    }
+    if let Some(entries) = value.get("entries").and_then(Value::as_array) {
+        let mut lines = vec![format!("listed {} entries", entries.len())];
+        for entry in entries.iter().take(4).filter_map(Value::as_str) {
+            lines.push(entry.to_string());
+        }
+        return Some(lines);
+    }
+    if let Some(matches) = value.get("matches").and_then(Value::as_array) {
+        let mut lines = vec![format!("found {} matches", matches.len())];
+        for summary in matches.iter().take(3).filter_map(|entry| {
+            let path = entry.get("path").and_then(Value::as_str)?;
+            let line = entry.get("line").and_then(Value::as_u64)?;
+            Some(format!("{path}:{line}"))
+        }) {
+            lines.push(summary);
+        }
+        return Some(lines);
+    }
+    if let Some(answer) = value.get("oracle_answer").and_then(Value::as_str) {
+        return Some(compact_text_lines(answer, 4, 120));
+    }
+    if let Some(analysis) = value.get("analysis").and_then(Value::as_str) {
+        return Some(compact_text_lines(analysis, 4, 120));
+    }
+    None
+}
+
+fn compact_policy_reason(reason: Option<&str>, tool_name: Option<&str>) -> String {
+    let fallback = "approval required";
+    let value = reason.unwrap_or(fallback);
+    if let Some(tool_name) = tool_name {
+        let prefix = format!("tool `{tool_name}` requires ");
+        if let Some(stripped) = value.strip_prefix(prefix.as_str()) {
+            return stripped.to_string();
+        }
+    }
+    if value == "tool execution blocked by local approval policy" {
+        return fallback.to_string();
+    }
+    value.to_string()
+}
+
+fn compact_text_lines(value: &str, max_lines: usize, max_chars: usize) -> Vec<String> {
+    let mut lines = value
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .take(max_lines)
+        .map(|line| preview(line, max_chars))
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        lines.push(preview(value.trim(), max_chars));
+    }
+    lines
 }
 
 fn preview(value: &str, max_chars: usize) -> String {
@@ -764,6 +895,79 @@ fn split_body_lines(value: &str) -> Vec<String> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{tool_call_lines, tool_result_lines};
+    use probe_protocol::session::{
+        ItemId, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
+        TranscriptItem, TranscriptItemKind, TurnId,
+    };
+    use serde_json::{Value, json};
+
+    fn transcript_item(
+        kind: TranscriptItemKind,
+        name: &str,
+        text: &str,
+        arguments: Option<Value>,
+        tool_execution: Option<ToolExecutionRecord>,
+    ) -> TranscriptItem {
+        TranscriptItem {
+            id: ItemId::new("item_1"),
+            turn_id: TurnId(1),
+            sequence: 0,
+            kind,
+            text: text.to_string(),
+            name: Some(name.to_string()),
+            tool_call_id: Some(String::from("call_1")),
+            arguments,
+            tool_execution,
+        }
+    }
+
+    #[test]
+    fn tool_call_lines_render_shell_command_compactly() {
+        let item = transcript_item(
+            TranscriptItemKind::ToolCall,
+            "shell",
+            "",
+            Some(json!({ "command": "whoami" })),
+            None,
+        );
+
+        assert_eq!(tool_call_lines(1, &item), vec![String::from("whoami")]);
+    }
+
+    #[test]
+    fn tool_result_lines_render_refusal_compactly() {
+        let item = transcript_item(
+            TranscriptItemKind::ToolResult,
+            "shell",
+            r#"{"approval_required":true,"error":"tool execution blocked by local approval policy"}"#,
+            Some(json!({ "command": "whoami" })),
+            Some(ToolExecutionRecord {
+                risk_class: ToolRiskClass::Write,
+                policy_decision: ToolPolicyDecision::Refused,
+                approval_state: ToolApprovalState::Refused,
+                command: Some(String::from("whoami")),
+                exit_code: None,
+                timed_out: None,
+                truncated: Some(false),
+                bytes_returned: None,
+                files_touched: Vec::new(),
+                reason: Some(String::from("tool `shell` requires write approval")),
+            }),
+        );
+
+        assert_eq!(
+            tool_result_lines(2, &item),
+            vec![
+                String::from("whoami"),
+                String::from("blocked: write approval")
+            ]
+        );
+    }
+}
+
 fn runtime_error_session_id(error: &RuntimeError) -> Option<SessionId> {
     match error {
         RuntimeError::ProviderRequest { session_id, .. }
@@ -777,34 +981,6 @@ fn runtime_error_session_id(error: &RuntimeError) -> Option<SessionId> {
         | RuntimeError::CurrentDir(_)
         | RuntimeError::SessionStore(_)
         | RuntimeError::MalformedTranscript(_) => None,
-    }
-}
-
-fn render_policy_decision(value: ToolPolicyDecision) -> &'static str {
-    match value {
-        ToolPolicyDecision::AutoAllow => "auto_allow",
-        ToolPolicyDecision::Approved => "approved",
-        ToolPolicyDecision::Refused => "refused",
-        ToolPolicyDecision::Paused => "paused",
-    }
-}
-
-fn render_approval_state(value: ToolApprovalState) -> &'static str {
-    match value {
-        ToolApprovalState::NotRequired => "not_required",
-        ToolApprovalState::Approved => "approved",
-        ToolApprovalState::Refused => "refused",
-        ToolApprovalState::Pending => "pending",
-    }
-}
-
-fn render_tool_risk_class(value: ToolRiskClass) -> &'static str {
-    match value {
-        ToolRiskClass::ReadOnly => "read_only",
-        ToolRiskClass::ShellReadOnly => "shell_read_only",
-        ToolRiskClass::Write => "write",
-        ToolRiskClass::Network => "network",
-        ToolRiskClass::Destructive => "destructive",
     }
 }
 

@@ -91,10 +91,9 @@ pub fn resolve_harness_profile(
                     format!("unknown harness profile for coding_bootstrap: {profile}")
                 })?,
         ),
-        (Some("coding_bootstrap"), None) => Some(resolve_manifest(
-            coding_bootstrap_default_manifest(),
-            cwd,
-        )),
+        (Some("coding_bootstrap"), None) => {
+            Some(resolve_manifest(coding_bootstrap_default_manifest(), cwd))
+        }
         (Some(other), Some(profile)) => {
             return Err(format!(
                 "harness profile `{profile}` is not available for tool set `{other}`"
@@ -160,7 +159,9 @@ fn coding_bootstrap_default_manifest() -> HarnessCandidateManifest {
          \n\
          Operating rules:\n\
          - Treat this session as one coding activity and stay focused on that activity.\n\
+         - Answer directly when the request does not require workspace evidence or tool output.\n\
          - Prefer read_file, list_files, and code_search before using shell.\n\
+         - Do not call tools for identity, general-knowledge, or stylistic questions that you can answer honestly without local evidence.\n\
          - Use apply_patch for deterministic text changes instead of describing edits abstractly.\n\
          - Verify relevant files after editing before claiming success.\n\
          - Keep tool usage bounded and avoid repeating large reads when a narrower read or search would do.\n\
@@ -185,7 +186,9 @@ fn coding_bootstrap_patch_guard_manifest() -> HarnessCandidateManifest {
          \n\
          Operating rules:\n\
          - Treat this session as one coding activity and stay focused on that activity.\n\
+         - Answer directly when the request does not require workspace evidence or tool output.\n\
          - Prefer read_file, list_files, and code_search before using shell.\n\
+         - Do not call tools for identity, general-knowledge, or stylistic questions that you can answer honestly without local evidence.\n\
          - Do not use apply_patch until you have concrete file evidence and can name the edit target precisely.\n\
          - Verify relevant files after editing before claiming success.\n\
          - Keep tool usage bounded and avoid repeating large reads when a narrower read or search would do.\n\
@@ -210,7 +213,9 @@ fn coding_bootstrap_verify_first_manifest() -> HarnessCandidateManifest {
          \n\
          Operating rules:\n\
          - Treat this session as one coding activity and stay focused on that activity.\n\
+         - Answer directly when the request does not require workspace evidence or tool output.\n\
          - Prefer read_file, list_files, and code_search before using shell.\n\
+         - Do not call tools for identity, general-knowledge, or stylistic questions that you can answer honestly without local evidence.\n\
          - Use apply_patch for deterministic text changes instead of describing edits abstractly.\n\
          - After every edit, schedule an explicit verification step before finalizing.\n\
          - Keep tool usage bounded and avoid repeating large reads when a narrower read or search would do.\n\

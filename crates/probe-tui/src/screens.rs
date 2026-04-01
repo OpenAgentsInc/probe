@@ -430,9 +430,7 @@ impl ChatScreen {
         self.stream = None;
         self.setup = AppleFmSetupState::default();
         self.set_operator_backend(summary);
-        self.record_event(format!(
-            "switched active backend to {lane_label}"
-        ));
+        self.record_event(format!("switched active backend to {lane_label}"));
     }
 
     pub fn record_event(&mut self, message: impl Into<String>) {
@@ -904,7 +902,7 @@ impl ChatScreen {
             RuntimeEvent::ToolCallRequested {
                 session_id,
                 round_trip,
-                call_id,
+                call_id: _call_id,
                 tool_name,
                 arguments,
             } => {
@@ -913,16 +911,10 @@ impl ChatScreen {
                 self.runtime.phase = Some(String::from("tool_requested"));
                 self.runtime.round_trip = Some(round_trip);
                 self.runtime.active_tool = Some(tool_name.clone());
-                let mut body = vec![
-                    format!("round_trip: {round_trip}"),
-                    format!("call_id: {call_id}"),
-                    String::from("arguments"),
-                ];
-                body.extend(compact_json_lines(&arguments, 5));
                 self.transcript.set_active_turn(ActiveTurn::new(
                     TranscriptRole::Tool,
                     format!("Tool Requested: {tool_name}"),
-                    body,
+                    vec![runtime_tool_argument_summary(&arguments)],
                 ));
                 self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool call requested: {tool_name}"));
@@ -931,7 +923,7 @@ impl ChatScreen {
             RuntimeEvent::ToolExecutionStarted {
                 session_id,
                 round_trip,
-                call_id,
+                call_id: _call_id,
                 tool_name,
                 risk_class,
             } => {
@@ -943,11 +935,7 @@ impl ChatScreen {
                 self.transcript.set_active_turn(ActiveTurn::new(
                     TranscriptRole::Tool,
                     format!("Running Tool: {tool_name}"),
-                    vec![
-                        format!("round_trip: {round_trip}"),
-                        format!("call_id: {call_id}"),
-                        format!("risk_class: {}", render_runtime_risk_class(risk_class)),
-                    ],
+                    vec![format!("risk: {}", render_runtime_risk_class(risk_class))],
                 ));
                 self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool execution started: {tool_name}"));
@@ -1347,12 +1335,8 @@ impl ChatScreen {
 
     fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
         match event {
-            UiEvent::NextView => {
-                ScreenOutcome::idle()
-            }
-            UiEvent::PreviousView => {
-                ScreenOutcome::idle()
-            }
+            UiEvent::NextView => ScreenOutcome::idle(),
+            UiEvent::PreviousView => ScreenOutcome::idle(),
             UiEvent::ToggleBody => {
                 self.emphasized_copy = !self.emphasized_copy;
                 self.snap_transcript_to_latest();
@@ -2046,7 +2030,8 @@ impl ApprovalOverlay {
 
 fn render_stream_active_turn(stream: &AssistantStreamState) -> ActiveTurn {
     let display_text = normalize_openai_stream_display_text(stream.assistant_text.as_str());
-    let is_waiting = display_text.is_empty() && stream.tool_calls.is_empty() && stream.failure.is_none();
+    let is_waiting =
+        display_text.is_empty() && stream.tool_calls.is_empty() && stream.failure.is_none();
     let mut body = Vec::new();
     if let Some(error) = stream.failure.as_deref() {
         body.push(format!("backend request failed: {error}"));
@@ -2122,27 +2107,33 @@ fn runtime_tool_body_lines(
     round_trip: usize,
     tool: &probe_core::tools::ExecutedToolCall,
 ) -> Vec<String> {
-    let model_text = tool_result_model_text(tool.name.as_str(), &tool.output);
-    let mut lines = vec![
-        format!("round_trip: {round_trip}"),
-        format!("call_id: {}", tool.call_id),
-        format!(
-            "risk_class: {}",
-            render_runtime_risk_class(tool.tool_execution.risk_class)
-        ),
-    ];
-    if let Some(reason) = tool.tool_execution.reason.as_ref() {
-        lines.push(format!("reason: {reason}"));
+    let _ = round_trip;
+    match tool.tool_execution.policy_decision {
+        probe_protocol::session::ToolPolicyDecision::Paused => vec![
+            runtime_tool_subject(tool),
+            format!(
+                "needs approval: {}",
+                compact_runtime_policy_reason(
+                    tool.tool_execution.reason.as_deref(),
+                    tool.name.as_str()
+                )
+            ),
+        ],
+        probe_protocol::session::ToolPolicyDecision::Refused => vec![
+            runtime_tool_subject(tool),
+            format!(
+                "blocked: {}",
+                compact_runtime_policy_reason(
+                    tool.tool_execution.reason.as_deref(),
+                    tool.name.as_str()
+                )
+            ),
+        ],
+        probe_protocol::session::ToolPolicyDecision::AutoAllow
+        | probe_protocol::session::ToolPolicyDecision::Approved => {
+            compact_runtime_tool_output_lines(tool)
+        }
     }
-    if !tool.tool_execution.files_touched.is_empty() {
-        lines.push(format!(
-            "files_touched: {}",
-            tool.tool_execution.files_touched.join(", ")
-        ));
-    }
-    lines.push(String::from("output"));
-    lines.extend(compact_text_lines(model_text.as_str(), 5));
-    lines
 }
 
 fn compact_json_lines(value: &serde_json::Value, max_lines: usize) -> Vec<String> {
@@ -2165,6 +2156,142 @@ fn compact_text_lines(value: &str, max_lines: usize) -> Vec<String> {
         lines.push(String::from("..."));
     }
     lines
+}
+
+fn runtime_tool_subject(tool: &probe_core::tools::ExecutedToolCall) -> String {
+    tool.tool_execution
+        .command
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| runtime_tool_argument_summary(&tool.arguments))
+}
+
+fn runtime_tool_argument_summary(arguments: &serde_json::Value) -> String {
+    if let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str) {
+        return command.to_string();
+    }
+    if let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str) {
+        if let Some(pattern) = arguments.get("pattern").and_then(serde_json::Value::as_str) {
+            return format!("{pattern} in {path}");
+        }
+        if let Some(start_line) = arguments
+            .get("start_line")
+            .and_then(serde_json::Value::as_u64)
+            && let Some(end_line) = arguments
+                .get("end_line")
+                .and_then(serde_json::Value::as_u64)
+        {
+            return format!("{path}:{start_line}-{end_line}");
+        }
+        return path.to_string();
+    }
+    if let Some(question) = arguments
+        .get("question")
+        .and_then(serde_json::Value::as_str)
+    {
+        return preview(question, 72);
+    }
+    preview(
+        serde_json::to_string(arguments)
+            .unwrap_or_else(|_| arguments.to_string())
+            .as_str(),
+        72,
+    )
+}
+
+fn compact_runtime_tool_output_lines(tool: &probe_core::tools::ExecutedToolCall) -> Vec<String> {
+    if let Some(lines) = structured_runtime_tool_output_lines(&tool.output) {
+        return lines;
+    }
+
+    let subject = runtime_tool_subject(tool);
+    let summary = preview(
+        tool_result_model_text(tool.name.as_str(), &tool.output).as_str(),
+        120,
+    );
+    let mut lines = vec![subject];
+    if lines
+        .last()
+        .map_or(true, |existing| existing.as_str() != summary.as_str())
+    {
+        lines.push(summary);
+    }
+    lines
+}
+
+fn structured_runtime_tool_output_lines(value: &serde_json::Value) -> Option<Vec<String>> {
+    if let Some(path) = value.get("path").and_then(serde_json::Value::as_str) {
+        let start_line = value.get("start_line").and_then(serde_json::Value::as_u64);
+        let end_line = value.get("end_line").and_then(serde_json::Value::as_u64);
+        let mut lines = vec![match (start_line, end_line) {
+            (Some(start), Some(end)) => format!("{path}:{start}-{end}"),
+            _ => path.to_string(),
+        }];
+        if let Some(content) = value.get("content").and_then(serde_json::Value::as_str) {
+            lines.extend(compact_text_lines(content, 4));
+        }
+        return Some(lines);
+    }
+    if let Some(command) = value.get("command").and_then(serde_json::Value::as_str) {
+        let mut lines = vec![command.to_string()];
+        if let Some(stdout) = value.get("stdout").and_then(serde_json::Value::as_str)
+            && !stdout.trim().is_empty()
+        {
+            lines.extend(compact_text_lines(stdout, 4));
+            return Some(lines);
+        }
+        if let Some(stderr) = value.get("stderr").and_then(serde_json::Value::as_str)
+            && !stderr.trim().is_empty()
+        {
+            lines.extend(compact_text_lines(stderr, 4));
+            return Some(lines);
+        }
+        return Some(lines);
+    }
+    if let Some(error) = value.get("error").and_then(serde_json::Value::as_str) {
+        return Some(vec![format!("error: {}", preview(error, 96))]);
+    }
+    if let Some(entries) = value.get("entries").and_then(serde_json::Value::as_array) {
+        let mut lines = vec![format!("listed {} entries", entries.len())];
+        for entry in entries.iter().take(4).filter_map(serde_json::Value::as_str) {
+            lines.push(entry.to_string());
+        }
+        return Some(lines);
+    }
+    if let Some(matches) = value.get("matches").and_then(serde_json::Value::as_array) {
+        let mut lines = vec![format!("found {} matches", matches.len())];
+        for summary in matches.iter().take(3).filter_map(|entry| {
+            let path = entry.get("path").and_then(serde_json::Value::as_str)?;
+            let line = entry.get("line").and_then(serde_json::Value::as_u64)?;
+            Some(format!("{path}:{line}"))
+        }) {
+            lines.push(summary);
+        }
+        return Some(lines);
+    }
+    if let Some(answer) = value
+        .get("oracle_answer")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Some(compact_text_lines(answer, 4));
+    }
+    if let Some(analysis) = value.get("analysis").and_then(serde_json::Value::as_str) {
+        return Some(compact_text_lines(analysis, 4));
+    }
+    None
+}
+
+fn compact_runtime_policy_reason(reason: Option<&str>, tool_name: &str) -> String {
+    let fallback = "approval required";
+    let value = reason.unwrap_or(fallback);
+    let prefix = format!("tool `{tool_name}` requires ");
+    if let Some(stripped) = value.strip_prefix(prefix.as_str()) {
+        return stripped.to_string();
+    }
+    if value == "tool execution blocked by local approval policy" {
+        return fallback.to_string();
+    }
+    value.to_string()
 }
 
 fn render_backend_kind(value: probe_protocol::backend::BackendKind) -> &'static str {

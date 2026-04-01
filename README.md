@@ -117,6 +117,10 @@ Each backend lane now keeps its own saved attach config under
 `~/.probe/server/psionic-apple-fm.json`, so switching back does not fabricate a
 fresh localhost target.
 
+The default `cargo probe` chat lane now auto-approves local tools and keeps
+tool transcript rows terse. Tool calls and results render as compact command,
+path, or error summaries instead of debug-shaped JSON blobs.
+
 Keys:
 
 - `Tab`, `Shift+Tab`: switch active backend
