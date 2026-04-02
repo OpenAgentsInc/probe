@@ -8,15 +8,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::ValueEnum;
-use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{
-    self as terminal_event, DisableMouseCapture, EnableMouseCapture, Event as TerminalEvent,
-    KeyCode as TerminalKeyCode, KeyEventKind,
-};
+use crossterm::cursor::MoveTo;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
-    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-    enable_raw_mode, size as terminal_size,
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use wgpui::renderer::Renderer;
 use wgpui::viz::badge::{BadgeTone, tone_color as badge_color};
@@ -40,8 +36,6 @@ const OVERLAY_WIDTH: u32 = 1180;
 const OVERLAY_HEIGHT: u32 = 760;
 const WINDOW_WIDTH: f64 = OVERLAY_WIDTH as f64;
 const WINDOW_HEIGHT: f64 = OVERLAY_HEIGHT as f64;
-const TERMINAL_CELL_WIDTH_PX: u32 = 16;
-const TERMINAL_CELL_HEIGHT_PX: u32 = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum OverlayTarget {
@@ -53,7 +47,7 @@ pub enum OverlayTarget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OverlayPresentation {
     SidecarWindow,
-    TerminalInline(TerminalViewport),
+    TerminalInline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,10 +61,12 @@ enum TerminalImageProtocol {
     ITerm2InlineImage,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct TerminalViewport {
-    cols: u16,
-    rows: u16,
+impl TerminalImageProtocol {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ITerm2InlineImage => "iTerm2 OSC 1337 inline image",
+        }
+    }
 }
 
 pub fn run_overlay_demo(target: OverlayTarget, from_tui_handoff: bool) -> Result<(), String> {
@@ -160,45 +156,50 @@ fn detect_terminal_image_protocol_with_inputs(
 }
 
 fn run_terminal_overlay_demo(protocol: TerminalImageProtocol) -> Result<(), String> {
+    let png_bytes = render_overlay_demo_png(OverlayPresentation::TerminalInline)?;
     let mut stdout = io::stdout();
-    let viewport = terminal_viewport()?;
-    let png_bytes = render_overlay_demo_png(OverlayPresentation::TerminalInline(viewport))?;
+    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))
+        .map_err(|error| format!("failed to prepare terminal overlay surface: {error}"))?;
+    writeln!(stdout, "Probe experimental WGPUI terminal overlay")
+        .map_err(|error| format!("failed to write terminal overlay header: {error}"))?;
+    writeln!(stdout, "Protocol: {}.", protocol.label())
+        .map_err(|error| format!("failed to write terminal overlay protocol line: {error}"))?;
+    writeln!(
+        stdout,
+        "This is a capability-gated inline image proof, not the default TUI renderer."
+    )
+    .map_err(|error| format!("failed to write terminal overlay description: {error}"))?;
+    writeln!(stdout)
+        .map_err(|error| format!("failed to write terminal overlay spacing: {error}"))?;
+    stdout
+        .write_all(terminal_image_escape(protocol, png_bytes.as_slice()).as_bytes())
+        .map_err(|error| format!("failed to write terminal image payload: {error}"))?;
+    writeln!(stdout)
+        .map_err(|error| format!("failed to write terminal overlay spacing: {error}"))?;
+    writeln!(stdout)
+        .map_err(|error| format!("failed to write terminal overlay spacing: {error}"))?;
+    writeln!(stdout, "Press Enter to return.")
+        .map_err(|error| format!("failed to write terminal overlay dismissal copy: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("failed to flush terminal overlay output: {error}"))?;
 
-    enable_raw_mode()
-        .map_err(|error| format!("failed to enable raw mode for terminal overlay: {error}"))?;
-    let run_result = (|| -> Result<(), String> {
-        execute!(stdout, Hide, Clear(ClearType::All), MoveTo(0, 0))
-            .map_err(|error| format!("failed to prepare terminal overlay surface: {error}"))?;
-        stdout
-            .write_all(terminal_image_escape(protocol, viewport, png_bytes.as_slice()).as_bytes())
-            .map_err(|error| format!("failed to write terminal image payload: {error}"))?;
-        stdout
-            .flush()
-            .map_err(|error| format!("failed to flush terminal overlay output: {error}"))?;
-        wait_for_terminal_overlay_dismissal()
-    })();
-    let cleanup_result = cleanup_terminal_overlay_surface(&mut stdout);
-    run_result.and(cleanup_result)
+    let mut dismissal = String::new();
+    io::stdin()
+        .read_line(&mut dismissal)
+        .map_err(|error| format!("failed to read terminal overlay dismissal: {error}"))?;
+    Ok(())
 }
 
-fn terminal_image_escape(
-    protocol: TerminalImageProtocol,
-    viewport: TerminalViewport,
-    png_bytes: &[u8],
-) -> String {
+fn terminal_image_escape(protocol: TerminalImageProtocol, png_bytes: &[u8]) -> String {
     match protocol {
-        TerminalImageProtocol::ITerm2InlineImage => iterm2_inline_image_escape(viewport, png_bytes),
+        TerminalImageProtocol::ITerm2InlineImage => iterm2_inline_image_escape(png_bytes),
     }
 }
 
-fn iterm2_inline_image_escape(viewport: TerminalViewport, png_bytes: &[u8]) -> String {
+fn iterm2_inline_image_escape(png_bytes: &[u8]) -> String {
     let payload = STANDARD.encode(png_bytes);
-    let image_rows = viewport.rows.saturating_sub(1).max(1);
-    format!(
-        "\u{1b}]1337;File=inline=1;width={};height={};preserveAspectRatio=0:{payload}\u{7}",
-        viewport.cols.max(1),
-        image_rows
-    )
+    format!("\u{1b}]1337;File=inline=1;width=100%;preserveAspectRatio=1:{payload}\u{7}")
 }
 
 fn render_overlay_demo_png(presentation: OverlayPresentation) -> Result<Vec<u8>, String> {
@@ -213,14 +214,13 @@ fn render_overlay_demo_png(presentation: OverlayPresentation) -> Result<Vec<u8>,
     ));
     let manifest_path = output_path.with_extension("json");
 
-    let capture_size = overlay_capture_size(presentation);
     let mut scene = Scene::new();
     let mut text_system = TextSystem::new(1.0);
     build_overlay_demo_scene(
         &mut scene,
         &mut text_system,
-        capture_size.width as f32,
-        capture_size.height as f32,
+        OVERLAY_WIDTH as f32,
+        OVERLAY_HEIGHT as f32,
         0.28,
         presentation,
     );
@@ -229,8 +229,8 @@ fn render_overlay_demo_png(presentation: OverlayPresentation) -> Result<Vec<u8>,
         CaptureTarget::AdHoc {
             name: String::from("probe_overlay_demo"),
         },
-        capture_size.width,
-        capture_size.height,
+        OVERLAY_WIDTH,
+        OVERLAY_HEIGHT,
         output_path.clone(),
     );
     request.manifest_path = Some(manifest_path.clone());
@@ -247,58 +247,6 @@ fn render_overlay_demo_png(presentation: OverlayPresentation) -> Result<Vec<u8>,
     let _ = fs::remove_file(&output_path);
     let _ = fs::remove_file(&manifest_path);
     Ok(png_bytes)
-}
-
-fn terminal_viewport() -> Result<TerminalViewport, String> {
-    let (cols, rows) =
-        terminal_size().map_err(|error| format!("failed to read terminal size: {error}"))?;
-    Ok(TerminalViewport {
-        cols: cols.max(40),
-        rows: rows.max(16),
-    })
-}
-
-fn overlay_capture_size(presentation: OverlayPresentation) -> CaptureSize {
-    match presentation {
-        OverlayPresentation::SidecarWindow => CaptureSize {
-            width: OVERLAY_WIDTH,
-            height: OVERLAY_HEIGHT,
-        },
-        OverlayPresentation::TerminalInline(viewport) => CaptureSize {
-            width: u32::from(viewport.cols) * TERMINAL_CELL_WIDTH_PX,
-            height: u32::from(viewport.rows.saturating_sub(1).max(1)) * TERMINAL_CELL_HEIGHT_PX,
-        },
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CaptureSize {
-    width: u32,
-    height: u32,
-}
-
-fn wait_for_terminal_overlay_dismissal() -> Result<(), String> {
-    loop {
-        match terminal_event::read()
-            .map_err(|error| format!("failed to read terminal overlay dismissal event: {error}"))?
-        {
-            TerminalEvent::Key(event) if event.kind == KeyEventKind::Press => match event.code {
-                TerminalKeyCode::Enter | TerminalKeyCode::Esc | TerminalKeyCode::Char('q') => {
-                    return Ok(());
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-}
-
-fn cleanup_terminal_overlay_surface(stdout: &mut io::Stdout) -> Result<(), String> {
-    let cleanup_result = execute!(stdout, Show, Clear(ClearType::All), MoveTo(0, 0))
-        .map_err(|error| format!("failed to clear terminal overlay surface: {error}"));
-    let raw_mode_result = disable_raw_mode()
-        .map_err(|error| format!("failed to disable raw mode after terminal overlay: {error}"));
-    cleanup_result.and(raw_mode_result)
 }
 
 fn suspend_tui_terminal() -> Result<(), String> {
@@ -589,7 +537,6 @@ fn build_overlay_demo_scene(
         .draw_quad(Quad::new(root).with_background(theme::bg::APP));
 
     let phase = (time * 0.16).fract();
-    paint_terminal_overlay_frame(root, phase, presentation, &mut paint);
     let title = paint.text.layout_mono(
         "PROBE EXPERIMENTAL WGPUI OVERLAY",
         Point::new(26.0, 18.0),
@@ -678,10 +625,6 @@ fn build_overlay_demo_scene(
         &overlay_feed_rows(time, presentation),
         &mut paint,
     );
-
-    if matches!(presentation, OverlayPresentation::TerminalInline(_)) {
-        paint_terminal_overlay_footer(root, &mut paint);
-    }
 }
 
 fn overlay_subtitle(presentation: OverlayPresentation) -> &'static str {
@@ -689,8 +632,8 @@ fn overlay_subtitle(presentation: OverlayPresentation) -> &'static str {
         OverlayPresentation::SidecarWindow => {
             "Ctrl+G can fall back to this sidecar from `probe tui`. Esc or close the window to dismiss it."
         }
-        OverlayPresentation::TerminalInline(_) => {
-            "Inline terminal graphics preview driven by offscreen WGPUI capture."
+        OverlayPresentation::TerminalInline => {
+            "Ctrl+G can render this scene back into supported terminals. Press Enter to return to Probe."
         }
     }
 }
@@ -700,8 +643,8 @@ fn chart_body_note(presentation: OverlayPresentation) -> &'static str {
         OverlayPresentation::SidecarWindow => {
             "This is an experimental non-portable visual sidecar, not the default TUI renderer."
         }
-        OverlayPresentation::TerminalInline(_) => {
-            "This image is stretched to the terminal viewport through the host graphics protocol."
+        OverlayPresentation::TerminalInline => {
+            "This is an experimental non-portable inline image lane driven by offscreen WGPUI capture."
         }
     }
 }
@@ -714,10 +657,10 @@ fn overlay_feed_rows(time: f32, presentation: OverlayPresentation) -> [EventFeed
             "This lane is intentionally experimental and should remain capability-gated.",
             "Terminal input stays in Probe while the sidecar owns pointer and window focus.",
         ),
-        OverlayPresentation::TerminalInline(_) => (
-            "The Probe TUI handed the terminal to an inline WGPUI overlay that fills the viewport.",
-            "Pixels come from offscreen WGPUI capture plus the terminal image protocol, not ratatui cells.",
-            "Dismissal returns Probe to the alternate screen and forces a fresh redraw.",
+        OverlayPresentation::TerminalInline => (
+            "The Probe TUI handed the terminal to an inline WGPUI image overlay for review.",
+            "Pixels come from offscreen WGPUI capture plus a terminal image protocol, not ratatui cells.",
+            "Probe returns after dismissal, re-enters the alternate screen, and redraws the TUI.",
         ),
     };
 
@@ -779,7 +722,7 @@ fn paint_overlay_badges(
                 ("SIDECAR", badge_color(BadgeTone::TrackXtrain)),
             ],
         ),
-        OverlayPresentation::TerminalInline(_) => (
+        OverlayPresentation::TerminalInline => (
             [
                 "Mode: experimental inline image",
                 "Host: Probe TUI + iTerm2 image protocol",
@@ -817,51 +760,6 @@ fn paint_overlay_badges(
     }
 }
 
-fn paint_terminal_overlay_frame(
-    bounds: Bounds,
-    phase: f32,
-    presentation: OverlayPresentation,
-    paint: &mut PaintContext,
-) {
-    if !matches!(presentation, OverlayPresentation::TerminalInline(_)) {
-        return;
-    }
-
-    let glow = Bounds::new(
-        bounds.origin.x + 24.0,
-        bounds.origin.y + 24.0,
-        bounds.size.width - 48.0,
-        bounds.size.height - 48.0,
-    );
-    paint.scene.draw_quad(
-        Quad::new(glow)
-            .with_background(viz_theme::series::LOSS.with_alpha(0.04 + phase * 0.02))
-            .with_border(viz_theme::series::LOSS.with_alpha(0.28), 1.0)
-            .with_corner_radius(14.0),
-    );
-}
-
-fn paint_terminal_overlay_footer(bounds: Bounds, paint: &mut PaintContext) {
-    let footer = Bounds::new(
-        bounds.origin.x + 24.0,
-        bounds.max_y() - 64.0,
-        bounds.size.width - 48.0,
-        40.0,
-    );
-    paint.scene.draw_quad(
-        Quad::new(footer)
-            .with_background(theme::bg::ELEVATED.with_alpha(0.18))
-            .with_border(viz_theme::series::LOSS.with_alpha(0.42), 1.0)
-            .with_corner_radius(8.0),
-    );
-    paint.scene.draw_text(paint.text.layout_mono(
-        "ENTER / ESC / Q  return to Probe",
-        Point::new(footer.origin.x + 14.0, footer.origin.y + 12.0),
-        11.0,
-        viz_theme::series::LOSS.with_alpha(0.94),
-    ));
-}
-
 fn draw_badge(bounds: Bounds, label: &str, color: Hsla, paint: &mut PaintContext) {
     paint.scene.draw_quad(
         Quad::new(bounds)
@@ -880,7 +778,7 @@ fn draw_badge(bounds: Bounds, label: &str, color: Hsla, paint: &mut PaintContext
 #[cfg(test)]
 mod tests {
     use super::{
-        TerminalImageProtocol, TerminalViewport, detect_terminal_image_protocol_with_inputs,
+        TerminalImageProtocol, detect_terminal_image_protocol_with_inputs,
         iterm2_inline_image_escape,
     };
 
@@ -914,17 +812,9 @@ mod tests {
 
     #[test]
     fn iterm2_escape_wraps_base64_payload() {
-        let escape = iterm2_inline_image_escape(
-            TerminalViewport {
-                cols: 120,
-                rows: 40,
-            },
-            b"probe",
-        );
+        let escape = iterm2_inline_image_escape(b"probe");
 
         assert!(escape.starts_with("\u{1b}]1337;File=inline=1"));
-        assert!(escape.contains("width=120"));
-        assert!(escape.contains("height=39"));
         assert!(escape.contains("cHJvYmU="));
         assert!(escape.ends_with('\u{7}'));
     }
