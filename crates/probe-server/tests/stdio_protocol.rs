@@ -15,7 +15,8 @@ use probe_protocol::runtime::{
     ToolSetKind, TransportKind, TurnAuthor, TurnRequest,
 };
 use probe_protocol::session::{
-    SessionDeliveryStatus, SessionId, ToolApprovalResolution, TranscriptItemKind,
+    SessionDeliveryStatus, SessionId, SessionMountKind, SessionMountProvenance, SessionMountRef,
+    ToolApprovalResolution, TranscriptItemKind,
 };
 use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
@@ -60,6 +61,7 @@ fn stdio_protocol_can_initialize_start_resume_and_run_a_turn() {
             system_prompt: Some(String::from("You are concise.")),
             harness_profile: None,
             workspace_state: None,
+            mounted_refs: Vec::new(),
         }),
     );
     let RuntimeResponse::StartSession(snapshot) = expect_ok_response(start_session) else {
@@ -238,6 +240,94 @@ fn spawn_child_session_persists_parent_linkage_and_returns_child_status() {
         snapshot.child_sessions[0].purpose.as_deref(),
         Some("Fix the delegated branch")
     );
+
+    harness.shutdown();
+}
+
+#[test]
+fn start_session_persists_typed_mount_refs_in_session_snapshots() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let profile = test_profile("http://127.0.0.1:9/v1");
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let mounted_refs = vec![
+        SessionMountRef {
+            mount_id: String::from("knowledge-docs"),
+            kind: SessionMountKind::KnowledgePack,
+            resource_ref: String::from("forge.pack.docs.repo/probe-background-agent"),
+            label: Some(String::from("Probe background-agent docs")),
+            provenance: SessionMountProvenance {
+                publisher: String::from("openagents"),
+                source_ref: String::from("pack/probe-background-agent@v1"),
+                version: Some(String::from("v1")),
+                content_digest: Some(String::from("sha256:abc123")),
+            },
+        },
+        SessionMountRef {
+            mount_id: String::from("eval-routing"),
+            kind: SessionMountKind::EvalPack,
+            resource_ref: String::from("psionic.eval.judges/forge-routing"),
+            label: None,
+            provenance: SessionMountProvenance {
+                publisher: String::from("psionic"),
+                source_ref: String::from("eval-pack/forge-routing@2026-04-02"),
+                version: Some(String::from("2026-04-02")),
+                content_digest: None,
+            },
+        },
+    ];
+
+    let start_session = harness.request(
+        "req-start-mounted",
+        RuntimeRequest::StartSession(StartSessionRequest {
+            title: Some(String::from("mounted session")),
+            cwd: environment.workspace().to_path_buf(),
+            profile,
+            system_prompt: None,
+            harness_profile: None,
+            workspace_state: None,
+            mounted_refs: mounted_refs.clone(),
+        }),
+    );
+    let RuntimeResponse::StartSession(snapshot) = expect_ok_response(start_session) else {
+        panic!("expected start session response");
+    };
+    assert_eq!(snapshot.session.mounted_refs, mounted_refs);
+
+    harness.shutdown();
+}
+
+#[test]
+fn start_session_explicitly_refuses_unsupported_mount_kinds() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let profile = test_profile("http://127.0.0.1:9/v1");
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let request = RuntimeRequest::StartSession(StartSessionRequest {
+        title: Some(String::from("unsupported mount")),
+        cwd: environment.workspace().to_path_buf(),
+        profile,
+        system_prompt: None,
+        harness_profile: None,
+        workspace_state: None,
+        mounted_refs: vec![SessionMountRef {
+            mount_id: String::from("unknown-pack"),
+            kind: SessionMountKind::Unsupported,
+            resource_ref: String::from("forge.pack.unknown"),
+            label: None,
+            provenance: SessionMountProvenance {
+                publisher: String::from("openagents"),
+                source_ref: String::from("pack/unknown@v1"),
+                version: None,
+                content_digest: None,
+            },
+        }],
+    });
+
+    let response = harness.request("req-unsupported-mount", request);
+    let error = expect_protocol_error(response);
+    assert_eq!(error.code, "unsupported_session_mount_kind");
+    assert!(error.message.contains("unsupported kind"));
 
     harness.shutdown();
 }
@@ -897,6 +987,7 @@ fn start_test_session(
             system_prompt: Some(String::from("You are concise.")),
             harness_profile: None,
             workspace_state: None,
+            mounted_refs: Vec::new(),
         }),
     );
     let RuntimeResponse::StartSession(snapshot) = expect_ok_response(response) else {

@@ -4,7 +4,7 @@ pub mod session;
 
 use std::path::{Path, PathBuf};
 
-pub const PROBE_PROTOCOL_VERSION: u32 = 10;
+pub const PROBE_PROTOCOL_VERSION: u32 = 11;
 pub const PROBE_RUNTIME_NAME: &str = "probe";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,7 +38,7 @@ mod tests {
     fn current_descriptor_is_stable() {
         let descriptor = ProtocolDescriptor::current();
         assert_eq!(descriptor.runtime_name, "probe");
-        assert_eq!(descriptor.version, 10);
+        assert_eq!(descriptor.version, 11);
     }
 
     #[test]

@@ -259,6 +259,35 @@ pub struct SessionBackendTarget {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum SessionMountKind {
+    KnowledgePack,
+    EvalPack,
+    #[serde(other)]
+    Unsupported,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMountProvenance {
+    pub publisher: String,
+    pub source_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMountRef {
+    pub mount_id: String,
+    pub kind: SessionMountKind,
+    pub resource_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub provenance: SessionMountProvenance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionRuntimeOwnerKind {
     ForegroundChild,
     LocalDaemon,
@@ -495,6 +524,8 @@ pub struct SessionMetadata {
     pub runtime_owner: Option<SessionRuntimeOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_state: Option<SessionWorkspaceState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounted_refs: Vec<SessionMountRef>,
     pub transcript_path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_link: Option<SessionParentLink>,

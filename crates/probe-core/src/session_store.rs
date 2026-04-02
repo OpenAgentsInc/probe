@@ -7,9 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use probe_protocol::session::{
     BackendTurnReceipt, ItemId, PendingToolApproval, SessionBackendTarget, SessionChildLink,
-    SessionHarnessProfile, SessionId, SessionIndex, SessionMetadata, SessionParentLink,
-    SessionRuntimeOwner, SessionState, SessionTurn, SessionWorkspaceState, TimestampMs,
-    ToolApprovalResolution, ToolExecutionRecord, TranscriptEvent, TranscriptItem,
+    SessionHarnessProfile, SessionId, SessionIndex, SessionMetadata, SessionMountRef,
+    SessionParentLink, SessionRuntimeOwner, SessionState, SessionTurn, SessionWorkspaceState,
+    TimestampMs, ToolApprovalResolution, ToolExecutionRecord, TranscriptEvent, TranscriptItem,
     TranscriptItemKind, TurnId, TurnObservability,
 };
 use serde::Serialize;
@@ -122,6 +122,7 @@ pub struct NewSession {
     pub backend: Option<SessionBackendTarget>,
     pub runtime_owner: Option<SessionRuntimeOwner>,
     pub workspace_state: Option<SessionWorkspaceState>,
+    pub mounted_refs: Vec<SessionMountRef>,
     pub parent_link: Option<SessionParentLink>,
 }
 
@@ -136,6 +137,7 @@ impl NewSession {
             backend: None,
             runtime_owner: None,
             workspace_state: None,
+            mounted_refs: Vec::new(),
             parent_link: None,
         }
     }
@@ -167,6 +169,12 @@ impl NewSession {
     #[must_use]
     pub fn with_workspace_state(mut self, workspace_state: Option<SessionWorkspaceState>) -> Self {
         self.workspace_state = workspace_state;
+        self
+    }
+
+    #[must_use]
+    pub fn with_mounted_refs(mut self, mounted_refs: Vec<SessionMountRef>) -> Self {
+        self.mounted_refs = mounted_refs;
         self
     }
 
@@ -234,6 +242,7 @@ impl FilesystemSessionStore {
             backend: session.backend,
             runtime_owner: session.runtime_owner,
             workspace_state: session.workspace_state,
+            mounted_refs: session.mounted_refs,
             transcript_path,
             parent_link: session.parent_link,
             child_links: Vec::new(),

@@ -18,7 +18,9 @@ use probe_protocol::runtime::{
     DetachedSessionStatus, SpawnChildSessionRequest, StartSessionRequest, TurnAuthor,
     WatchDetachedSessionRequest,
 };
-use probe_protocol::session::SessionDeliveryStatus;
+use probe_protocol::session::{
+    SessionDeliveryStatus, SessionMountKind, SessionMountProvenance, SessionMountRef,
+};
 use probe_server::detached_watchdog::DetachedTurnWatchdogPolicy;
 use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
@@ -120,6 +122,7 @@ fn detached_session_registry_tracks_background_work_after_client_disconnect() {
             system_prompt: None,
             harness_profile: None,
             workspace_state: None,
+            mounted_refs: Vec::new(),
         })
         .expect("daemon should start session");
     let session_id = session.session.id.clone();
@@ -182,6 +185,7 @@ fn daemon_restart_keeps_approval_paused_sessions_resumable() {
             system_prompt: None,
             harness_profile: None,
             workspace_state: None,
+            mounted_refs: Vec::new(),
         })
         .expect("daemon should start session");
     let session_id = session.session.id.clone();
@@ -242,6 +246,7 @@ fn daemon_emits_parent_child_updates_when_child_sessions_are_spawned() {
             system_prompt: None,
             harness_profile: None,
             workspace_state: None,
+            mounted_refs: Vec::new(),
         })
         .expect("daemon should start parent session");
     let parent_session_id = parent.session.id.clone();
@@ -315,6 +320,7 @@ fn daemon_emits_workspace_state_updates_for_git_bound_sessions() {
             system_prompt: None,
             harness_profile: None,
             workspace_state: None,
+            mounted_refs: Vec::new(),
         })
         .expect("daemon should start git-bound session");
     assert!(session.branch_state.is_some());
@@ -356,6 +362,7 @@ fn daemon_restart_marks_running_turns_as_failed_when_the_process_dies() {
             system_prompt: None,
             harness_profile: None,
             workspace_state: None,
+            mounted_refs: Vec::new(),
         })
         .expect("daemon should start session");
     let session_id = session.session.id.clone();
@@ -421,6 +428,7 @@ fn detached_session_log_replays_recent_events_with_resume_cursor() {
             system_prompt: None,
             harness_profile: None,
             workspace_state: None,
+            mounted_refs: Vec::new(),
         })
         .expect("daemon should start session");
     let session_id = session.session.id.clone();
@@ -506,6 +514,7 @@ fn detached_session_watch_surfaces_approval_pause_updates_without_polling() {
             system_prompt: None,
             harness_profile: None,
             workspace_state: None,
+            mounted_refs: Vec::new(),
         })
         .expect("daemon should start session");
     let session_id = session.session.id.clone();
@@ -600,6 +609,7 @@ fn detached_watchdog_times_out_stalled_turn_and_cancels_follow_up_queue() {
             system_prompt: None,
             harness_profile: None,
             workspace_state: None,
+            mounted_refs: Vec::new(),
         })
         .expect("daemon should start session");
     let session_id = session.session.id.clone();
@@ -695,6 +705,7 @@ fn approval_paused_detached_turns_are_exempt_from_watchdog_timeout() {
             system_prompt: None,
             harness_profile: None,
             workspace_state: None,
+            mounted_refs: Vec::new(),
         })
         .expect("daemon should start session");
     let session_id = session.session.id.clone();
@@ -746,6 +757,47 @@ fn approval_paused_detached_turns_are_exempt_from_watchdog_timeout() {
 
     drop(inspect_client);
     daemon.kill_ungraceful();
+}
+
+#[test]
+fn detached_session_summary_projects_mounted_refs() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let mut daemon = DaemonProcess::start(environment.probe_home());
+    let mut client = daemon_client(environment.probe_home());
+    let snapshot = client
+        .start_session(StartSessionRequest {
+            title: Some(String::from("mounted detached session")),
+            cwd: environment.workspace().to_path_buf(),
+            profile: test_profile("http://127.0.0.1:9/v1"),
+            system_prompt: None,
+            harness_profile: None,
+            workspace_state: None,
+            mounted_refs: vec![SessionMountRef {
+                mount_id: String::from("knowledge-docs"),
+                kind: SessionMountKind::KnowledgePack,
+                resource_ref: String::from("forge.pack.docs.repo/probe-background-agent"),
+                label: Some(String::from("Probe docs")),
+                provenance: SessionMountProvenance {
+                    publisher: String::from("openagents"),
+                    source_ref: String::from("pack/probe-background-agent@v1"),
+                    version: Some(String::from("v1")),
+                    content_digest: None,
+                },
+            }],
+        })
+        .expect("daemon should start mounted session");
+    let detached = client
+        .inspect_detached_session(&snapshot.session.id)
+        .expect("mounted detached session should be inspectable");
+    assert_eq!(detached.summary.status, DetachedSessionStatus::Idle);
+    assert_eq!(
+        detached.summary.mounted_refs,
+        detached.session.session.mounted_refs
+    );
+
+    drop(client);
+    daemon.stop();
 }
 
 struct DaemonProcess {

@@ -6,9 +6,9 @@ use serde_json::Value;
 use crate::backend::BackendProfile;
 use crate::session::{
     PendingToolApproval, SessionBranchState, SessionChildSummary, SessionDeliveryState,
-    SessionHarnessProfile, SessionId, SessionMetadata, SessionRuntimeOwner, SessionTurn,
-    SessionWorkspaceState, TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass,
-    TranscriptEvent, UsageMeasurement,
+    SessionHarnessProfile, SessionId, SessionMetadata, SessionMountRef, SessionRuntimeOwner,
+    SessionTurn, SessionWorkspaceState, TimestampMs, ToolApprovalResolution, ToolExecutionRecord,
+    ToolRiskClass, TranscriptEvent, UsageMeasurement,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +99,7 @@ pub struct RuntimeCapabilities {
     pub supports_hosted_tcp_jsonl: bool,
     pub supports_session_resume: bool,
     pub supports_session_inspect: bool,
+    pub supports_session_mounts: bool,
     pub supports_child_sessions: bool,
     pub supports_pending_approval_resolution: bool,
     pub supports_interrupt_requests: bool,
@@ -126,6 +127,8 @@ pub struct StartSessionRequest {
     pub harness_profile: Option<SessionHarnessProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_state: Option<SessionWorkspaceState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounted_refs: Vec<SessionMountRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,6 +277,8 @@ pub struct DetachedSessionSummary {
     pub runtime_owner: Option<SessionRuntimeOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_state: Option<SessionWorkspaceState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounted_refs: Vec<SessionMountRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_turn_id: Option<String>,
     pub queued_turn_count: usize,
@@ -829,6 +834,7 @@ mod tests {
             supports_hosted_tcp_jsonl: false,
             supports_session_resume: true,
             supports_session_inspect: true,
+            supports_session_mounts: true,
             supports_child_sessions: true,
             supports_pending_approval_resolution: true,
             supports_interrupt_requests: true,

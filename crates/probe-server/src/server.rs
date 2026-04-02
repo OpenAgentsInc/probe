@@ -40,10 +40,10 @@ use probe_protocol::session::{
     SessionAttachTransport, SessionBackendTarget, SessionBranchState, SessionChildClosureSummary,
     SessionChildLink, SessionChildStatus, SessionChildSummary, SessionDeliveryArtifact,
     SessionDeliveryState, SessionDeliveryStatus, SessionExecutionHost, SessionExecutionHostKind,
-    SessionId, SessionInitiator, SessionMetadata, SessionParentLink, SessionPreparedBaselineRef,
-    SessionPreparedBaselineStatus, SessionRuntimeOwner, SessionRuntimeOwnerKind,
-    SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef, SessionWorkspaceState, UsageMeasurement,
-    UsageTruth,
+    SessionId, SessionInitiator, SessionMetadata, SessionMountKind, SessionMountRef,
+    SessionParentLink, SessionPreparedBaselineRef, SessionPreparedBaselineStatus,
+    SessionRuntimeOwner, SessionRuntimeOwnerKind, SessionWorkspaceBootMode,
+    SessionWorkspaceSnapshotRef, SessionWorkspaceState, UsageMeasurement, UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
 use serde::{Deserialize, Serialize};
@@ -1487,6 +1487,7 @@ impl ProbeServerConnection {
                                 ),
                                 supports_session_resume: true,
                                 supports_session_inspect: true,
+                                supports_session_mounts: true,
                                 supports_child_sessions: true,
                                 supports_pending_approval_resolution: true,
                                 supports_interrupt_requests: true,
@@ -1710,12 +1711,14 @@ impl ProbeServerConnection {
             system_prompt,
             harness_profile,
             workspace_state,
+            mounted_refs,
         } = request;
         let workspace_state = resolve_workspace_state(
             self.core.runtime.session_store().root(),
             &self.core.runtime_owner,
             workspace_state,
         );
+        let mounted_refs = validate_session_mounts(mounted_refs)?;
         let session = self
             .core
             .runtime
@@ -1730,7 +1733,8 @@ impl ProbeServerConnection {
                         model: profile.model,
                     })
                     .with_runtime_owner(Some(self.core.runtime_owner.clone()))
-                    .with_workspace_state(workspace_state),
+                    .with_workspace_state(workspace_state)
+                    .with_mounted_refs(mounted_refs),
             )
             .map_err(session_store_error_to_protocol)?;
         self.session_snapshot(&session.id)
@@ -1782,6 +1786,7 @@ impl ProbeServerConnection {
             .as_ref()
             .map(session_initiator_from_turn_author);
         let workspace_state = parent.workspace_state.clone();
+        let mounted_refs = parent.mounted_refs.clone();
         let child = self
             .core
             .runtime
@@ -1797,6 +1802,7 @@ impl ProbeServerConnection {
                     })
                     .with_runtime_owner(Some(self.core.runtime_owner.clone()))
                     .with_workspace_state(workspace_state)
+                    .with_mounted_refs(mounted_refs)
                     .with_parent_link(Some(SessionParentLink {
                         session_id: request.parent_session_id.clone(),
                         turn_id: request.parent_turn_id,
@@ -3146,6 +3152,7 @@ fn detached_session_summary_from_state(
         status,
         runtime_owner: metadata.runtime_owner.clone(),
         workspace_state: metadata.workspace_state.clone(),
+        mounted_refs: metadata.mounted_refs.clone(),
         active_turn_id: active_turn.map(|turn| turn.turn_id.clone()),
         queued_turn_count: view.queued_turns.len(),
         pending_approval_count,
@@ -3234,6 +3241,66 @@ fn resolve_workspace_state(
     workspace_state.provenance_note =
         combine_provenance_note(workspace_state.provenance_note.take(), notes);
     Some(workspace_state)
+}
+
+fn validate_session_mounts(
+    mounted_refs: Vec<SessionMountRef>,
+) -> Result<Vec<SessionMountRef>, RuntimeProtocolError> {
+    let mut seen_mount_ids = HashSet::new();
+    for mount in &mounted_refs {
+        if matches!(mount.kind, SessionMountKind::Unsupported) {
+            return Err(protocol_error(
+                "unsupported_session_mount_kind",
+                format!(
+                    "session mount `{}` uses an unsupported kind; Probe currently accepts only `knowledge_pack` and `eval_pack`",
+                    mount.mount_id
+                ),
+            ));
+        }
+        if mount.mount_id.trim().is_empty() {
+            return Err(protocol_error(
+                "invalid_session_mount",
+                "session mounts must include a non-empty mount_id".to_string(),
+            ));
+        }
+        if !seen_mount_ids.insert(mount.mount_id.clone()) {
+            return Err(protocol_error(
+                "duplicate_session_mount_id",
+                format!(
+                    "session mount id `{}` was provided more than once",
+                    mount.mount_id
+                ),
+            ));
+        }
+        if mount.resource_ref.trim().is_empty() {
+            return Err(protocol_error(
+                "invalid_session_mount",
+                format!(
+                    "session mount `{}` must include a non-empty resource_ref",
+                    mount.mount_id
+                ),
+            ));
+        }
+        if mount.provenance.publisher.trim().is_empty() {
+            return Err(protocol_error(
+                "invalid_session_mount",
+                format!(
+                    "session mount `{}` must include a non-empty provenance.publisher",
+                    mount.mount_id
+                ),
+            ));
+        }
+        if mount.provenance.source_ref.trim().is_empty() {
+            return Err(protocol_error(
+                "invalid_session_mount",
+                format!(
+                    "session mount `{}` must include a non-empty provenance.source_ref",
+                    mount.mount_id
+                ),
+            ));
+        }
+    }
+    Ok(mounted_refs)
 }
 
 fn execution_host_for_owner(runtime_owner: &SessionRuntimeOwner) -> SessionExecutionHost {

@@ -162,6 +162,8 @@ execution handlers are not serializable.
 - current session metadata
 - explicit runtime-owner metadata when Probe knows whether the session is owned
   by a foreground child, local daemon, or hosted control plane
+- typed mounted knowledge-pack and eval-pack refs when the session started with
+  explicit Forge-facing context mounts
 - typed workspace provenance when Probe knows how the session booted, including
   boot mode, prepared baseline status, snapshot refs, execution-host metadata,
   and any explicit fallback note
@@ -175,6 +177,12 @@ execution handlers are not serializable.
 
 That gives a reattaching client enough state to rebuild the visible session
 without linking against the filesystem session store directly.
+
+`start_session` now also accepts `mounted_refs` for typed `knowledge_pack` and
+`eval_pack` context mounts. Those refs are persisted on the session itself and
+also projected through daemon detached-session summaries. Unsupported mount
+kinds are refused explicitly with protocol code
+`unsupported_session_mount_kind`.
 
 Queued-turn lifecycle state intentionally lives beside that snapshot instead of
 inside it. `SessionSnapshot` remains the transcript plus delegated-child,
@@ -204,7 +212,7 @@ and execution-host changes on the same event stream.
 Request:
 
 ```json
-{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":10}}
+{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":11}}
 ```
 
 Event:
@@ -253,3 +261,4 @@ The main detached-only additions on top of this contract are documented in:
 - `62-daemon-owned-detached-session-registry.md`
 - `63-detached-session-watch-and-log-subscriptions.md`
 - `65-detached-watchdog-and-timeout-policy.md`
+- `69-typed-session-mount-contract.md`

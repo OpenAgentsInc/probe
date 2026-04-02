@@ -372,6 +372,7 @@ fn daemon_operator_commands_manage_detached_sessions() {
             system_prompt: None,
             harness_profile: None,
             workspace_state: None,
+            mounted_refs: Vec::new(),
         })
         .expect("daemon should start a session");
     let session_id = session.session.id.clone();

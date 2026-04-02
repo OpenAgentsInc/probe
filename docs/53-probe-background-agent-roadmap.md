@@ -400,6 +400,12 @@ Recently closed work changed the real starting point:
     decisions, and queued-turn control contract are live
 - `#71` through `#74`
   - the hosted Codex auth, transport, and third Probe backend lane are live
+- `#82` through `#85`
+  - child-session lineage, authorship attribution, hosted ownership, and typed
+    branch or delivery posture are live
+- `#87`
+  - typed knowledge-pack and eval-pack mounts are now part of Probe session
+    startup, snapshots, and detached-session summaries
 
 That means the next phases should optimize for daemonization, remote execution,
 delivery, and consumer adoption rather than reopening local client or backend
@@ -427,6 +433,8 @@ registry," or "add detached watch." It is:
 - richer hosted execution and workspace ownership beyond the local daemon
 - real prepared-workspace pools and restore execution above the new manifest
   seam for remote workers
+- publication of retained session summaries and accepted-patch summaries so the
+  new typed mount seam has real Probe-owned artifacts to carry
 
 Probe now also has the first hosted control-plane transport:
 

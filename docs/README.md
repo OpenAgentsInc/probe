@@ -237,3 +237,7 @@ This folder holds technical planning docs for the Probe runtime.
   - hosted session workspace provenance for Phase 3, including boot mode,
     prepared baseline status, snapshot refs, execution-host metadata, and
     explicit fresh-start fallback notes
+- `69-typed-session-mount-contract.md`
+  - typed `knowledge_pack` and `eval_pack` mount refs on session startup,
+    snapshot and detached-summary projection of those refs, and explicit
+    refusal posture for unsupported mount kinds

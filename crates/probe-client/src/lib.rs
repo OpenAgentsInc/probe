@@ -254,6 +254,7 @@ impl ProbeClient {
             system_prompt: request.system_prompt,
             harness_profile: request.harness_profile,
             workspace_state: None,
+            mounted_refs: Vec::new(),
         })?;
         let session_id = session.session.id.clone();
         let turn = self
@@ -1410,6 +1411,7 @@ mod tests {
                     execution_host: None,
                     provenance_note: None,
                 }),
+                mounted_refs: Vec::new(),
             })
             .expect("hosted transport should start a session");
         let owner = snapshot
@@ -1505,6 +1507,7 @@ mod tests {
                     execution_host: None,
                     provenance_note: None,
                 }),
+                mounted_refs: Vec::new(),
             })
             .expect("hosted transport should still start a session when the baseline is missing");
         let workspace_state = snapshot
