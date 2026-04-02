@@ -15,6 +15,9 @@ use probe_core::runtime::{
     default_probe_home,
 };
 use probe_core::session_store::{NewItem, NewSession, SessionStoreError};
+use probe_core::session_summary_artifacts::{
+    SessionSummaryArtifactError, refresh_session_summary_artifacts,
+};
 use probe_core::tools::{
     ExecutedToolCall, ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction as CoreDeniedAction,
     ToolLongContextConfig, ToolLoopConfig, ToolOracleConfig,
@@ -42,8 +45,9 @@ use probe_protocol::session::{
     SessionDeliveryState, SessionDeliveryStatus, SessionExecutionHost, SessionExecutionHostKind,
     SessionId, SessionInitiator, SessionMetadata, SessionMountKind, SessionMountRef,
     SessionParentLink, SessionPreparedBaselineRef, SessionPreparedBaselineStatus,
-    SessionRuntimeOwner, SessionRuntimeOwnerKind, SessionWorkspaceBootMode,
-    SessionWorkspaceSnapshotRef, SessionWorkspaceState, UsageMeasurement, UsageTruth,
+    SessionRuntimeOwner, SessionRuntimeOwnerKind, SessionSummaryArtifact,
+    SessionSummaryArtifactRef, SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef,
+    SessionWorkspaceState, UsageMeasurement, UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
 use serde::{Deserialize, Serialize};
@@ -721,17 +725,31 @@ impl TurnControlPlane {
         let previous = registry
             .read(session_id)
             .map_err(detached_registry_error_to_protocol)?;
-        let summary = detached_session_summary_from_state(
-            &metadata,
-            state,
-            pending_approval_count,
-            previous.as_ref(),
-            now_ms(),
-        );
+        let transcript = self
+            .runtime
+            .session_store()
+            .read_transcript(session_id)
+            .map_err(session_store_error_to_protocol)?;
         let branch_state = session_branch_state(metadata.cwd.as_path());
         let delivery_state = branch_state
             .as_ref()
             .map(|branch_state| session_delivery_state(branch_state, now_ms()));
+        let summary_artifacts = refresh_session_summary_artifacts(
+            self.runtime.session_store(),
+            &metadata,
+            transcript.as_slice(),
+            branch_state.as_ref(),
+            delivery_state.as_ref(),
+        )
+        .map_err(session_summary_artifact_error_to_protocol)?;
+        let summary = detached_session_summary_from_state(
+            &metadata,
+            state,
+            pending_approval_count,
+            summary_artifact_refs(summary_artifacts.as_slice()),
+            previous.as_ref(),
+            now_ms(),
+        );
         let turn_control = state.inspect_view(session_id);
         registry
             .upsert(summary.clone())
@@ -1845,6 +1863,9 @@ impl ProbeServerConnection {
         let snapshot = session_snapshot_from_core(&self.core, session_id)?;
         self.core
             .ensure_detached_session_registered(&snapshot.session)?;
+        self.core
+            .turn_control
+            .sync_detached_session_if_tracked(session_id)?;
         Ok(snapshot)
     }
 
@@ -2782,10 +2803,19 @@ fn session_snapshot_from_core(
     let delivery_state = branch_state
         .as_ref()
         .map(|branch_state| session_delivery_state(branch_state, now_ms()));
+    let summary_artifacts = refresh_session_summary_artifacts(
+        core.runtime.session_store(),
+        &session,
+        transcript.as_slice(),
+        branch_state.as_ref(),
+        delivery_state.as_ref(),
+    )
+    .map_err(session_summary_artifact_error_to_protocol)?;
     Ok(SessionSnapshot {
         session,
         branch_state,
         delivery_state,
+        summary_artifacts,
         child_sessions,
         transcript,
         pending_approvals,
@@ -3083,6 +3113,7 @@ fn detached_session_summary_from_state(
     metadata: &SessionMetadata,
     state: &SessionTurnControlState,
     pending_approval_count: usize,
+    summary_artifact_refs: Vec<SessionSummaryArtifactRef>,
     previous: Option<&DetachedSessionSummary>,
     now_ms: u64,
 ) -> DetachedSessionSummary {
@@ -3153,6 +3184,7 @@ fn detached_session_summary_from_state(
         runtime_owner: metadata.runtime_owner.clone(),
         workspace_state: metadata.workspace_state.clone(),
         mounted_refs: metadata.mounted_refs.clone(),
+        summary_artifact_refs,
         active_turn_id: active_turn.map(|turn| turn.turn_id.clone()),
         queued_turn_count: view.queued_turns.len(),
         pending_approval_count,
@@ -3172,6 +3204,13 @@ fn turn_response_to_runtime_response(response: TurnResponse, mode: TurnMode) -> 
         TurnMode::Start => RuntimeResponse::StartTurn(response),
         TurnMode::Continue => RuntimeResponse::ContinueTurn(response),
     }
+}
+
+fn summary_artifact_refs(artifacts: &[SessionSummaryArtifact]) -> Vec<SessionSummaryArtifactRef> {
+    artifacts
+        .iter()
+        .map(|artifact| artifact.artifact_ref().clone())
+        .collect()
 }
 
 fn resolve_workspace_state(
@@ -3920,6 +3959,17 @@ fn session_store_error_to_protocol(error: SessionStoreError) -> RuntimeProtocolE
         SessionStoreError::Conflict(_) => protocol_error("session_conflict", error.to_string()),
         SessionStoreError::Io(_) | SessionStoreError::Json(_) => {
             protocol_error("session_store_error", error.to_string())
+        }
+    }
+}
+
+fn session_summary_artifact_error_to_protocol(
+    error: SessionSummaryArtifactError,
+) -> RuntimeProtocolError {
+    match error {
+        SessionSummaryArtifactError::SessionStore(error) => session_store_error_to_protocol(error),
+        SessionSummaryArtifactError::Json(error) => {
+            protocol_error("summary_artifact_json_error", error.to_string())
         }
     }
 }

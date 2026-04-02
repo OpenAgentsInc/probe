@@ -507,6 +507,109 @@ pub struct SessionDeliveryState {
     pub artifacts: Vec<SessionDeliveryArtifact>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionSummaryArtifactKind {
+    RetainedSessionSummary,
+    AcceptedPatchSummary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSummaryArtifactRef {
+    pub artifact_id: String,
+    pub kind: SessionSummaryArtifactKind,
+    pub path: PathBuf,
+    pub stable_digest: String,
+    pub updated_at_ms: TimestampMs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSummaryArtifactSource {
+    pub session_id: SessionId,
+    pub transcript_path: PathBuf,
+    pub transcript_sha256: String,
+    pub session_created_at_ms: TimestampMs,
+    pub session_updated_at_ms: TimestampMs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedSessionSummaryArtifact {
+    pub schema_version: String,
+    pub artifact: SessionSummaryArtifactRef,
+    pub session_id: SessionId,
+    pub title: String,
+    pub cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_profile: Option<String>,
+    pub turn_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files_listed: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files_searched: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files_read: Vec<String>,
+    pub patch_attempts: usize,
+    pub successful_patch_attempts: usize,
+    pub failed_patch_attempts: usize,
+    pub verification_step_count: usize,
+    pub verification_caught_problem: bool,
+    pub summary_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_assistant_text: Option<String>,
+    pub source: SessionSummaryArtifactSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptedPatchSummarySourceTurn {
+    pub turn_index: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files_touched: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptedPatchSummaryArtifact {
+    pub schema_version: String,
+    pub artifact: SessionSummaryArtifactRef,
+    pub session_id: SessionId,
+    pub title: String,
+    pub cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patch_turns: Vec<AcceptedPatchSummarySourceTurn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files_touched: Vec<String>,
+    pub summary_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_assistant_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_state: Option<SessionBranchState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_state: Option<SessionDeliveryState>,
+    pub source: SessionSummaryArtifactSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionSummaryArtifact {
+    RetainedSessionSummary(RetainedSessionSummaryArtifact),
+    AcceptedPatchSummary(AcceptedPatchSummaryArtifact),
+}
+
+impl SessionSummaryArtifact {
+    #[must_use]
+    pub fn artifact_ref(&self) -> &SessionSummaryArtifactRef {
+        match self {
+            Self::RetainedSessionSummary(artifact) => &artifact.artifact,
+            Self::AcceptedPatchSummary(artifact) => &artifact.artifact,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMetadata {
     pub id: SessionId,

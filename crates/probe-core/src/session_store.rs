@@ -13,6 +13,7 @@ use probe_protocol::session::{
     TranscriptItemKind, TurnId, TurnObservability,
 };
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -21,6 +22,7 @@ const SESSIONS_DIR: &str = "sessions";
 const METADATA_FILE: &str = "metadata.json";
 const TRANSCRIPT_FILE: &str = "transcript.jsonl";
 const APPROVALS_FILE: &str = "approvals.json";
+const ARTIFACTS_DIR: &str = "artifacts";
 
 #[derive(Debug)]
 pub enum SessionStoreError {
@@ -472,6 +474,49 @@ impl FilesystemSessionStore {
 
     fn session_dir(&self, session_id: &SessionId) -> PathBuf {
         self.root.join(SESSIONS_DIR).join(session_id.as_str())
+    }
+
+    pub(crate) fn session_artifact_path(&self, session_id: &SessionId, file_name: &str) -> PathBuf {
+        self.session_dir(session_id)
+            .join(ARTIFACTS_DIR)
+            .join(file_name)
+    }
+
+    pub(crate) fn write_session_artifact_json<T: Serialize + ?Sized>(
+        &self,
+        session_id: &SessionId,
+        file_name: &str,
+        value: &T,
+    ) -> Result<PathBuf, SessionStoreError> {
+        let path = self.session_artifact_path(session_id, file_name);
+        write_json_pretty_atomic(path.as_path(), value)?;
+        Ok(path)
+    }
+
+    pub(crate) fn read_session_artifact_json<T: DeserializeOwned>(
+        &self,
+        session_id: &SessionId,
+        file_name: &str,
+    ) -> Result<Option<T>, SessionStoreError> {
+        let path = self.session_artifact_path(session_id, file_name);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let file = File::open(path)?;
+        Ok(Some(serde_json::from_reader(file)?))
+    }
+
+    pub(crate) fn remove_session_artifact(
+        &self,
+        session_id: &SessionId,
+        file_name: &str,
+    ) -> Result<(), SessionStoreError> {
+        let path = self.session_artifact_path(session_id, file_name);
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(SessionStoreError::Io(error)),
+        }
     }
 
     fn write_tool_approvals(

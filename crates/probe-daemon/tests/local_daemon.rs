@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use probe_client::{ProbeClient, ProbeClientConfig, ProbeClientTransportConfig};
 use probe_core::runtime::{PlainTextExecRequest, PlainTextResumeRequest};
+use probe_core::session_store::{FilesystemSessionStore, NewItem};
 use probe_core::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig};
 use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
 use probe_protocol::default_local_daemon_socket_path;
@@ -20,6 +21,8 @@ use probe_protocol::runtime::{
 };
 use probe_protocol::session::{
     SessionDeliveryStatus, SessionMountKind, SessionMountProvenance, SessionMountRef,
+    SessionSummaryArtifactKind, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision,
+    ToolRiskClass, TranscriptItemKind,
 };
 use probe_server::detached_watchdog::DetachedTurnWatchdogPolicy;
 use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
@@ -340,6 +343,90 @@ fn daemon_emits_workspace_state_updates_for_git_bound_sessions() {
             delivery_state: Some(_),
         }
     )));
+
+    drop(client);
+    daemon.stop();
+}
+
+#[test]
+fn daemon_projects_persisted_summary_artifact_refs_for_detached_sessions() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    initialize_git_workspace(environment.workspace());
+    let profile = test_profile("http://127.0.0.1:9/v1");
+    let mut daemon = DaemonProcess::start(environment.probe_home());
+    let mut client = daemon_client(environment.probe_home());
+    let session = client
+        .start_session(StartSessionRequest {
+            title: Some(String::from("artifact projection")),
+            cwd: environment.workspace().to_path_buf(),
+            profile,
+            system_prompt: None,
+            harness_profile: None,
+            workspace_state: None,
+            mounted_refs: Vec::new(),
+        })
+        .expect("daemon should start session");
+    let session_id = session.session.id.clone();
+    let store = FilesystemSessionStore::new(environment.probe_home());
+
+    store
+        .append_turn(
+            &session_id,
+            &[NewItem::new(
+                TranscriptItemKind::UserMessage,
+                "make the change",
+            )],
+        )
+        .expect("append user turn");
+    store
+        .append_turn(
+            &session_id,
+            &[NewItem::tool_result(
+                "apply_patch",
+                "call-1",
+                r#"{"ok":true}"#,
+                ToolExecutionRecord {
+                    risk_class: ToolRiskClass::Write,
+                    policy_decision: ToolPolicyDecision::Approved,
+                    approval_state: ToolApprovalState::Approved,
+                    command: None,
+                    exit_code: Some(0),
+                    timed_out: None,
+                    truncated: None,
+                    bytes_returned: None,
+                    files_touched: vec![String::from("src/main.rs")],
+                    reason: None,
+                },
+            )],
+        )
+        .expect("append patch turn");
+    store
+        .append_turn(
+            &session_id,
+            &[NewItem::new(
+                TranscriptItemKind::AssistantMessage,
+                "Patched src/main.rs and kept the session ready to deliver.",
+            )],
+        )
+        .expect("append assistant turn");
+
+    let snapshot = client
+        .inspect_session(&session_id)
+        .expect("inspect session should surface summary artifacts");
+    assert_eq!(snapshot.summary_artifacts.len(), 2);
+
+    let detached = client
+        .inspect_detached_session(&session_id)
+        .expect("detached session should project artifact refs");
+    assert_eq!(detached.summary.summary_artifact_refs.len(), 2);
+    assert!(
+        detached
+            .summary
+            .summary_artifact_refs
+            .iter()
+            .any(|artifact| { artifact.kind == SessionSummaryArtifactKind::AcceptedPatchSummary })
+    );
 
     drop(client);
     daemon.stop();

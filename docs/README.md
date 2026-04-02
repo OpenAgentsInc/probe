@@ -241,3 +241,8 @@ This folder holds technical planning docs for the Probe runtime.
   - typed `knowledge_pack` and `eval_pack` mount refs on session startup,
     snapshot and detached-summary projection of those refs, and explicit
     refusal posture for unsupported mount kinds
+- `70-persisted-session-summary-artifacts.md`
+  - persisted retained-session and accepted-patch summary artifacts under each
+    session directory, typed session-snapshot and detached-session projection
+    of those artifacts, and stable digest or provenance rules for later Forge
+    knowledge-pack publication

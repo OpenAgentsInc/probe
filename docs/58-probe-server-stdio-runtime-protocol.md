@@ -207,12 +207,21 @@ That same event now also carries the typed workspace-provenance payload when it
 is available, so detached consumers can receive boot mode, baseline, snapshot,
 and execution-host changes on the same event stream.
 
+Session snapshots now also project persisted Probe-owned summary artifacts
+instead of making consumers reopen transcript files directly:
+
+- `summary_artifacts`
+  - full retained-session and accepted-patch artifact payloads on
+    `start_session`, `resume_session`, and `inspect_session`
+- `summary_artifact_refs`
+  - detached-session summary refs for daemon-owned list and inspect surfaces
+
 ## Example
 
 Request:
 
 ```json
-{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":11}}
+{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":12}}
 ```
 
 Event:
@@ -262,3 +271,4 @@ The main detached-only additions on top of this contract are documented in:
 - `63-detached-session-watch-and-log-subscriptions.md`
 - `65-detached-watchdog-and-timeout-policy.md`
 - `69-typed-session-mount-contract.md`
+- `70-persisted-session-summary-artifacts.md`

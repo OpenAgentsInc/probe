@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use probe_core::session_store::{FilesystemSessionStore, NewItem};
 use probe_protocol::PROBE_PROTOCOL_VERSION;
 use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
 use probe_protocol::runtime::{
@@ -16,7 +17,8 @@ use probe_protocol::runtime::{
 };
 use probe_protocol::session::{
     SessionDeliveryStatus, SessionId, SessionMountKind, SessionMountProvenance, SessionMountRef,
-    ToolApprovalResolution, TranscriptItemKind,
+    ToolApprovalResolution, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision,
+    ToolRiskClass, TranscriptItemKind,
 };
 use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
@@ -411,6 +413,106 @@ fn inspect_session_exposes_typed_branch_and_delivery_state() {
             .artifacts
             .iter()
             .any(|artifact| artifact.kind == "head_commit")
+    );
+
+    harness.shutdown();
+}
+
+#[test]
+fn inspect_session_exposes_persisted_summary_artifacts() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    initialize_git_workspace(environment.workspace());
+    let profile = test_profile("http://127.0.0.1:9/v1");
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let session_id = start_test_session(&mut harness, &environment, &profile);
+    let store = FilesystemSessionStore::new(environment.probe_home());
+
+    store
+        .append_turn(
+            &session_id,
+            &[NewItem::new(
+                TranscriptItemKind::UserMessage,
+                "fix the session",
+            )],
+        )
+        .expect("append user turn");
+    store
+        .append_turn(
+            &session_id,
+            &[NewItem::tool_result(
+                "apply_patch",
+                "call-1",
+                r#"{"ok":true}"#,
+                ToolExecutionRecord {
+                    risk_class: ToolRiskClass::Write,
+                    policy_decision: ToolPolicyDecision::Approved,
+                    approval_state: ToolApprovalState::Approved,
+                    command: None,
+                    exit_code: Some(0),
+                    timed_out: None,
+                    truncated: None,
+                    bytes_returned: None,
+                    files_touched: vec![String::from("src/main.rs")],
+                    reason: None,
+                },
+            )],
+        )
+        .expect("append patch turn");
+    store
+        .append_turn(
+            &session_id,
+            &[NewItem::new(
+                TranscriptItemKind::AssistantMessage,
+                "Patched src/main.rs and verified the change.",
+            )],
+        )
+        .expect("append assistant turn");
+
+    let inspect = harness.request(
+        "req-inspect-summary-artifacts",
+        RuntimeRequest::InspectSession(SessionLookupRequest {
+            session_id: session_id.clone(),
+        }),
+    );
+    let RuntimeResponse::InspectSession(snapshot) = expect_ok_response(inspect) else {
+        panic!("expected inspect session response");
+    };
+    assert_eq!(snapshot.summary_artifacts.len(), 2);
+
+    let retained = snapshot
+        .summary_artifacts
+        .iter()
+        .find_map(|artifact| match artifact {
+            probe_protocol::session::SessionSummaryArtifact::RetainedSessionSummary(artifact) => {
+                Some(artifact)
+            }
+            probe_protocol::session::SessionSummaryArtifact::AcceptedPatchSummary(_) => None,
+        })
+        .expect("retained summary should be present");
+    assert_eq!(retained.session_id, session_id);
+    assert!(retained.summary_text.contains("Patched src/main.rs"));
+
+    let accepted_patch = snapshot
+        .summary_artifacts
+        .iter()
+        .find_map(|artifact| match artifact {
+            probe_protocol::session::SessionSummaryArtifact::RetainedSessionSummary(_) => None,
+            probe_protocol::session::SessionSummaryArtifact::AcceptedPatchSummary(artifact) => {
+                Some(artifact)
+            }
+        })
+        .expect("accepted patch summary should be present");
+    assert_eq!(
+        accepted_patch
+            .delivery_state
+            .as_ref()
+            .map(|state| state.status),
+        Some(SessionDeliveryStatus::LocalOnly)
+    );
+    assert_eq!(
+        accepted_patch.files_touched,
+        vec![String::from("src/main.rs")]
     );
 
     harness.shutdown();

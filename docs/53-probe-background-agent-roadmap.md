@@ -406,6 +406,10 @@ Recently closed work changed the real starting point:
 - `#87`
   - typed knowledge-pack and eval-pack mounts are now part of Probe session
     startup, snapshots, and detached-session summaries
+- `#88`
+  - retained-session and accepted-patch summary artifacts are now persisted
+    under each Probe session, projected through session snapshots, and
+    referenced from detached-session summaries
 
 That means the next phases should optimize for daemonization, remote execution,
 delivery, and consumer adoption rather than reopening local client or backend
@@ -433,8 +437,8 @@ registry," or "add detached watch." It is:
 - richer hosted execution and workspace ownership beyond the local daemon
 - real prepared-workspace pools and restore execution above the new manifest
   seam for remote workers
-- publication of retained session summaries and accepted-patch summaries so the
-  new typed mount seam has real Probe-owned artifacts to carry
+- higher-level pack catalog and routing work above the now-shipped summary
+  artifact seam
 
 Probe now also has the first hosted control-plane transport:
 
