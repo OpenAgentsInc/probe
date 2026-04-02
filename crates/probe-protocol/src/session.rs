@@ -264,6 +264,49 @@ pub struct SessionHarnessProfile {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionParentLink {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_index: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChildLink {
+    pub session_id: SessionId,
+    pub added_at_ms: TimestampMs,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionChildStatus {
+    Idle,
+    Running,
+    Queued,
+    ApprovalPaused,
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChildSummary {
+    pub session_id: SessionId,
+    pub title: String,
+    pub cwd: PathBuf,
+    pub state: SessionState,
+    pub status: SessionChildStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_turn_index: Option<u64>,
+    pub created_at_ms: TimestampMs,
+    pub updated_at_ms: TimestampMs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMetadata {
     pub id: SessionId,
     pub title: String,
@@ -277,6 +320,10 @@ pub struct SessionMetadata {
     pub next_turn_index: u64,
     pub backend: Option<SessionBackendTarget>,
     pub transcript_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_link: Option<SessionParentLink>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_links: Vec<SessionChildLink>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

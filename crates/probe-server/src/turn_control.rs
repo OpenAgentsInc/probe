@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::{self, File};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -74,8 +74,7 @@ impl SessionTurnControlState {
         session_id: &SessionId,
     ) -> Result<(), SessionStoreError> {
         let path = control_path(runtime, session_id)?;
-        let file = File::create(path)?;
-        serde_json::to_writer_pretty(file, self)?;
+        write_json_pretty_atomic(path.as_path(), self)?;
         Ok(())
     }
 
@@ -336,6 +335,31 @@ fn control_path(
                 session_id.as_str()
             ))
         })
+}
+
+fn write_json_pretty_atomic<T: Serialize>(
+    path: &std::path::Path,
+    value: &T,
+) -> Result<(), SessionStoreError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("turn-control.json");
+    let temp_path = path.with_file_name(format!(
+        "{file_name}.tmp-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    {
+        let mut file = File::create(&temp_path)?;
+        serde_json::to_writer_pretty(&mut file, value)?;
+        std::io::Write::flush(&mut file)?;
+    }
+    fs::rename(temp_path, path)?;
+    Ok(())
 }
 
 fn decorate_queue_position(

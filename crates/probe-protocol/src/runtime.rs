@@ -5,9 +5,9 @@ use serde_json::Value;
 
 use crate::backend::BackendProfile;
 use crate::session::{
-    PendingToolApproval, SessionHarnessProfile, SessionId, SessionMetadata, SessionTurn,
-    TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass, TranscriptEvent,
-    UsageMeasurement,
+    PendingToolApproval, SessionChildSummary, SessionHarnessProfile, SessionId, SessionMetadata,
+    SessionTurn, TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass,
+    TranscriptEvent, UsageMeasurement,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +96,7 @@ pub struct RuntimeCapabilities {
     pub supports_local_daemon_socket: bool,
     pub supports_session_resume: bool,
     pub supports_session_inspect: bool,
+    pub supports_child_sessions: bool,
     pub supports_pending_approval_resolution: bool,
     pub supports_interrupt_requests: bool,
     pub supports_queued_turns: bool,
@@ -125,6 +126,31 @@ pub struct StartSessionRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionLookupRequest {
     pub session_id: SessionId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnChildSessionRequest {
+    pub parent_session_id: SessionId,
+    pub profile: BackendProfile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_profile: Option<SessionHarnessProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_turn_index: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnChildSessionResponse {
+    pub parent_session_id: SessionId,
+    pub child: SessionChildSummary,
+    pub session: SessionSnapshot,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +290,9 @@ pub enum DetachedSessionEventPayload {
         summary: DetachedSessionSummary,
         turn_control: InspectSessionTurnsResponse,
     },
+    ChildSessionUpdated {
+        child: SessionChildSummary,
+    },
     RuntimeProgress {
         delivery: EventDeliveryGuarantee,
         event: RuntimeProgressEvent,
@@ -325,6 +354,8 @@ pub struct InterruptTurnRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     pub session: SessionMetadata,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_sessions: Vec<SessionChildSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transcript: Vec<TranscriptEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -601,6 +632,7 @@ pub enum RuntimeRequest {
     Initialize(InitializeRequest),
     StartSession(StartSessionRequest),
     ResumeSession(SessionLookupRequest),
+    SpawnChildSession(SpawnChildSessionRequest),
     ListSessions,
     ListDetachedSessions,
     ReadDetachedSessionLog(ReadDetachedSessionLogRequest),
@@ -624,6 +656,7 @@ pub enum RuntimeResponse {
     Initialize(InitializeResponse),
     StartSession(SessionSnapshot),
     ResumeSession(SessionSnapshot),
+    SpawnChildSession(SpawnChildSessionResponse),
     ListSessions(ListSessionsResponse),
     ListDetachedSessions(ListDetachedSessionsResponse),
     ReadDetachedSessionLog(ReadDetachedSessionLogResponse),
@@ -770,6 +803,7 @@ mod tests {
             supports_local_daemon_socket: false,
             supports_session_resume: true,
             supports_session_inspect: true,
+            supports_child_sessions: true,
             supports_pending_approval_resolution: true,
             supports_interrupt_requests: true,
             supports_queued_turns: true,

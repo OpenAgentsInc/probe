@@ -22,10 +22,11 @@ use probe_protocol::runtime::{
     ReadDetachedSessionLogResponse, RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody,
     ResponseEnvelope, RuntimeProgressEvent, RuntimeProtocolError, RuntimeRequest, RuntimeResponse,
     RuntimeToolCallDelta, RuntimeUsage, ServerEvent, ServerMessage, SessionLookupRequest,
-    SessionSnapshot, StartSessionRequest, ToolApprovalRecipe, ToolCallResult, ToolChoice,
-    ToolDeniedAction as ProtocolDeniedAction, ToolLongContextRecipe, ToolLoopRecipe,
-    ToolOracleRecipe, ToolSetKind, TurnAuthor, TurnCompleted, TurnPaused, TurnRequest,
-    TurnResponse, WatchDetachedSessionRequest, WatchDetachedSessionResponse,
+    SessionSnapshot, SpawnChildSessionRequest, SpawnChildSessionResponse, StartSessionRequest,
+    ToolApprovalRecipe, ToolCallResult, ToolChoice, ToolDeniedAction as ProtocolDeniedAction,
+    ToolLongContextRecipe, ToolLoopRecipe, ToolOracleRecipe, ToolSetKind, TurnAuthor,
+    TurnCompleted, TurnPaused, TurnRequest, TurnResponse, WatchDetachedSessionRequest,
+    WatchDetachedSessionResponse,
 };
 use probe_protocol::session::{
     PendingToolApproval, SessionId, SessionMetadata, UsageMeasurement, UsageTruth,
@@ -675,6 +676,18 @@ impl ProbeClient {
             RuntimeResponse::StartSession(snapshot) => Ok(snapshot),
             other => Err(ProbeClientError::UnexpectedServerMessage(format!(
                 "expected start_session response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub fn spawn_child_session(
+        &mut self,
+        request: SpawnChildSessionRequest,
+    ) -> Result<SpawnChildSessionResponse, ProbeClientError> {
+        match self.send_request(RuntimeRequest::SpawnChildSession(request), None)? {
+            RuntimeResponse::SpawnChildSession(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected spawn_child_session response, got {other:?}"
             ))),
         }
     }

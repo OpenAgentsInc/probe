@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use probe_protocol::session::{
-    BackendTurnReceipt, ItemId, PendingToolApproval, SessionBackendTarget,
-    SessionHarnessProfile, SessionId, SessionIndex, SessionMetadata, SessionState, SessionTurn,
-    TimestampMs, ToolApprovalResolution, ToolExecutionRecord, TranscriptEvent, TranscriptItem,
-    TranscriptItemKind, TurnId, TurnObservability,
+    BackendTurnReceipt, ItemId, PendingToolApproval, SessionBackendTarget, SessionChildLink,
+    SessionHarnessProfile, SessionId, SessionIndex, SessionMetadata, SessionParentLink,
+    SessionState, SessionTurn, TimestampMs, ToolApprovalResolution, ToolExecutionRecord,
+    TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnId, TurnObservability,
 };
+use serde::Serialize;
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -118,6 +119,7 @@ pub struct NewSession {
     pub system_prompt: Option<String>,
     pub harness_profile: Option<SessionHarnessProfile>,
     pub backend: Option<SessionBackendTarget>,
+    pub parent_link: Option<SessionParentLink>,
 }
 
 impl NewSession {
@@ -129,6 +131,7 @@ impl NewSession {
             system_prompt: None,
             harness_profile: None,
             backend: None,
+            parent_link: None,
         }
     }
 
@@ -147,6 +150,12 @@ impl NewSession {
     #[must_use]
     pub fn with_backend(mut self, backend: SessionBackendTarget) -> Self {
         self.backend = Some(backend);
+        self
+    }
+
+    #[must_use]
+    pub fn with_parent_link(mut self, parent_link: Option<SessionParentLink>) -> Self {
+        self.parent_link = parent_link;
         self
     }
 }
@@ -193,8 +202,7 @@ impl FilesystemSessionStore {
         let transcript_path = session_dir.join(TRANSCRIPT_FILE);
         File::create(&transcript_path)?;
         let approvals_path = session_dir.join(APPROVALS_FILE);
-        let approvals_file = File::create(&approvals_path)?;
-        serde_json::to_writer_pretty(approvals_file, &Vec::<PendingToolApproval>::new())?;
+        write_json_pretty_atomic(&approvals_path, &Vec::<PendingToolApproval>::new())?;
 
         let metadata = SessionMetadata {
             id: session_id,
@@ -208,6 +216,8 @@ impl FilesystemSessionStore {
             next_turn_index: 0,
             backend: session.backend,
             transcript_path,
+            parent_link: session.parent_link,
+            child_links: Vec::new(),
         };
         self.write_metadata(&metadata)?;
         self.upsert_index(metadata.clone())?;
@@ -295,6 +305,33 @@ impl FilesystemSessionStore {
         Ok(serde_json::from_reader(file)?)
     }
 
+    pub fn replace_metadata(
+        &self,
+        metadata: SessionMetadata,
+    ) -> Result<SessionMetadata, SessionStoreError> {
+        self.write_metadata(&metadata)?;
+        self.upsert_index(metadata.clone())?;
+        Ok(metadata)
+    }
+
+    pub fn append_child_link(
+        &self,
+        parent_session_id: &SessionId,
+        child_link: SessionChildLink,
+    ) -> Result<SessionMetadata, SessionStoreError> {
+        let mut metadata = self.read_metadata(parent_session_id)?;
+        if metadata
+            .child_links
+            .iter()
+            .any(|existing| existing.session_id == child_link.session_id)
+        {
+            return Ok(metadata);
+        }
+        metadata.child_links.push(child_link);
+        metadata.updated_at_ms = now_ms();
+        self.replace_metadata(metadata)
+    }
+
     pub fn read_transcript(
         &self,
         session_id: &SessionId,
@@ -369,7 +406,9 @@ impl FilesystemSessionStore {
         resolution: ToolApprovalResolution,
     ) -> Result<PendingToolApproval, SessionStoreError> {
         let mut approvals = self.read_tool_approvals(session_id)?;
-        let Some(index) = approvals.iter().position(|approval| approval.tool_call_id == call_id)
+        let Some(index) = approvals
+            .iter()
+            .position(|approval| approval.tool_call_id == call_id)
         else {
             return Err(SessionStoreError::NotFound(format!(
                 "{}:{}",
@@ -394,8 +433,7 @@ impl FilesystemSessionStore {
     fn ensure_layout(&self) -> Result<(), SessionStoreError> {
         fs::create_dir_all(self.root.join(SESSIONS_DIR))?;
         if !self.index_path().exists() {
-            let file = File::create(self.index_path())?;
-            serde_json::to_writer_pretty(file, &SessionIndex::default())?;
+            write_json_pretty_atomic(self.index_path().as_path(), &SessionIndex::default())?;
         }
         Ok(())
     }
@@ -414,15 +452,13 @@ impl FilesystemSessionStore {
         approvals: &[PendingToolApproval],
     ) -> Result<(), SessionStoreError> {
         let path = self.session_dir(session_id).join(APPROVALS_FILE);
-        let file = File::create(path)?;
-        serde_json::to_writer_pretty(file, approvals)?;
+        write_json_pretty_atomic(path.as_path(), approvals)?;
         Ok(())
     }
 
     fn write_metadata(&self, metadata: &SessionMetadata) -> Result<(), SessionStoreError> {
         let path = self.session_dir(&metadata.id).join(METADATA_FILE);
-        let file = File::create(path)?;
-        serde_json::to_writer_pretty(file, metadata)?;
+        write_json_pretty_atomic(path.as_path(), metadata)?;
         Ok(())
     }
 
@@ -454,10 +490,35 @@ impl FilesystemSessionStore {
         } else {
             index.sessions.push(metadata);
         }
-        let file = File::create(self.index_path())?;
-        serde_json::to_writer_pretty(file, &index)?;
+        write_json_pretty_atomic(self.index_path().as_path(), &index)?;
         Ok(())
     }
+}
+
+fn write_json_pretty_atomic<T: Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+) -> Result<(), SessionStoreError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temp_path = temp_json_path(path);
+    {
+        let mut file = File::create(&temp_path)?;
+        serde_json::to_writer_pretty(&mut file, value)?;
+        file.flush()?;
+    }
+    fs::rename(temp_path, path)?;
+    Ok(())
+}
+
+fn temp_json_path(path: &Path) -> PathBuf {
+    let suffix = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("probe-json");
+    path.with_file_name(format!("{file_name}.tmp-{}-{suffix}", std::process::id()))
 }
 
 fn now_ms() -> TimestampMs {
@@ -809,7 +870,8 @@ mod tests {
         assert_eq!(resolved.resolution, Some(ToolApprovalResolution::Approved));
         assert!(resolved.resolved_at_ms.is_some());
         assert!(
-            store.read_pending_tool_approvals(&metadata.id)
+            store
+                .read_pending_tool_approvals(&metadata.id)
                 .expect("read pending approvals")
                 .is_empty()
         );

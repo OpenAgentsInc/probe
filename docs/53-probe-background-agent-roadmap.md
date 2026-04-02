@@ -836,12 +836,13 @@ Success condition:
 
 Ship:
 
-- session-spawn tools
-- child-session status tools
 - child-session authorship and delivery attribution on top of the already-live
-  per-turn author metadata
+  typed child-session spawn, parent linkage, child summaries in session
+  snapshots, daemon-side child lifecycle events, same-repo default depth or
+  count guardrails, and per-turn author metadata
 - minimal multi-client collaboration semantics
-- same-repo default child-session guardrails plus depth and count limits
+- richer child-session status and closure tools above the now-live runtime
+  linkage
 
 Success condition:
 

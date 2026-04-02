@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use probe_protocol::runtime::{
@@ -170,8 +170,21 @@ impl DetachedSessionRegistry {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let file = File::create(&self.path)?;
-        serde_json::to_writer_pretty(file, state)?;
+        let temp_path = self.path.with_file_name(format!(
+            "{}.tmp-{}-{}",
+            self.path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("detached-sessions.json"),
+            std::process::id(),
+            now_ms(),
+        ));
+        {
+            let mut file = File::create(&temp_path)?;
+            serde_json::to_writer_pretty(&mut file, state)?;
+            file.flush()?;
+        }
+        fs::rename(temp_path, &self.path)?;
         Ok(())
     }
 }
@@ -186,4 +199,11 @@ struct DetachedRegistryState {
 
 fn schema_version() -> u32 {
     DETACHED_REGISTRY_SCHEMA_VERSION
+}
+
+fn now_ms() -> TimestampMs {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_millis() as u64
 }

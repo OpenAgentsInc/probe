@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::io::{self, BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -28,14 +29,15 @@ use probe_protocol::runtime::{
     ReadDetachedSessionLogResponse, RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody,
     ResponseEnvelope, RuntimeCapabilities, RuntimeProgressEvent, RuntimeProtocolError,
     RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage, ServerEvent,
-    ServerMessage, SessionLookupRequest, SessionSnapshot, ShutdownResponse, StartSessionRequest,
-    ToolApprovalRecipe, ToolCallResult, ToolChoice, ToolDeniedAction, ToolLongContextRecipe,
-    ToolLoopRecipe, ToolOracleRecipe, ToolSetKind, TransportKind, TurnCompleted, TurnPaused,
-    TurnRequest, TurnResponse, TurnSubmissionKind, WatchDetachedSessionRequest,
-    WatchDetachedSessionResponse,
+    ServerMessage, SessionLookupRequest, SessionSnapshot, ShutdownResponse,
+    SpawnChildSessionRequest, SpawnChildSessionResponse, StartSessionRequest, ToolApprovalRecipe,
+    ToolCallResult, ToolChoice, ToolDeniedAction, ToolLongContextRecipe, ToolLoopRecipe,
+    ToolOracleRecipe, ToolSetKind, TransportKind, TurnCompleted, TurnPaused, TurnRequest,
+    TurnResponse, TurnSubmissionKind, WatchDetachedSessionRequest, WatchDetachedSessionResponse,
 };
 use probe_protocol::session::{
-    SessionBackendTarget, SessionId, SessionMetadata, UsageMeasurement, UsageTruth,
+    SessionBackendTarget, SessionChildLink, SessionChildStatus, SessionChildSummary, SessionId,
+    SessionMetadata, SessionParentLink, UsageMeasurement, UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
 
@@ -486,7 +488,7 @@ impl ProbeServerCore {
                 )
             })?;
         let turn_control = self.turn_control.inspect_session_turns(session_id)?;
-        let session = session_snapshot_from_runtime(&self.runtime, session_id)?;
+        let session = session_snapshot_from_core(self, session_id)?;
         Ok(InspectDetachedSessionResponse {
             summary,
             session,
@@ -524,6 +526,9 @@ enum ServerOwnershipMode {
     ForegroundStdio,
     DetachedDaemon,
 }
+
+const MAX_CHILD_SESSION_DEPTH: usize = 2;
+const MAX_CHILD_SESSIONS_PER_PARENT: usize = 8;
 
 impl ServerOwnershipMode {
     fn is_daemon(self) -> bool {
@@ -606,12 +611,34 @@ impl TurnControlPlane {
                     session_id,
                     DetachedSessionEventTruth::Authoritative,
                     DetachedSessionEventPayload::SummaryUpdated {
-                        summary,
+                        summary: summary.clone(),
                         turn_control,
                     },
                     now_ms(),
                 )
                 .map_err(detached_event_error_to_protocol)?;
+            if let Some(parent_link) = metadata.parent_link.as_ref() {
+                event_hub
+                    .append(
+                        &parent_link.session_id,
+                        DetachedSessionEventTruth::Authoritative,
+                        DetachedSessionEventPayload::ChildSessionUpdated {
+                            child: SessionChildSummary {
+                                session_id: metadata.id.clone(),
+                                title: metadata.title.clone(),
+                                cwd: metadata.cwd.clone(),
+                                state: metadata.state,
+                                status: session_child_status_from_detached(summary.status),
+                                parent_turn_id: parent_link.turn_id.clone(),
+                                parent_turn_index: parent_link.turn_index,
+                                created_at_ms: metadata.created_at_ms,
+                                updated_at_ms: metadata.updated_at_ms,
+                            },
+                        },
+                        now_ms(),
+                    )
+                    .map_err(detached_event_error_to_protocol)?;
+            }
         }
         Ok(())
     }
@@ -1303,6 +1330,7 @@ impl ProbeServerConnection {
                                 ),
                                 supports_session_resume: true,
                                 supports_session_inspect: true,
+                                supports_child_sessions: true,
                                 supports_pending_approval_resolution: true,
                                 supports_interrupt_requests: true,
                                 supports_queued_turns: true,
@@ -1337,6 +1365,18 @@ impl ProbeServerConnection {
                     Ok(snapshot) => self.writer.send_response_ok(
                         request_id.as_str(),
                         RuntimeResponse::ResumeSession(snapshot),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
+            RuntimeRequest::SpawnChildSession(request) => {
+                match self.spawn_child_session(request) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::SpawnChildSession(response),
                     )?,
                     Err(error) => self
                         .writer
@@ -1524,11 +1564,98 @@ impl ProbeServerConnection {
         self.session_snapshot(&session.id)
     }
 
+    fn spawn_child_session(
+        &self,
+        request: SpawnChildSessionRequest,
+    ) -> Result<SpawnChildSessionResponse, RuntimeProtocolError> {
+        let parent = self
+            .core
+            .runtime
+            .session_store()
+            .read_metadata(&request.parent_session_id)
+            .map_err(session_store_error_to_protocol)?;
+        if parent.child_links.len() >= MAX_CHILD_SESSIONS_PER_PARENT {
+            return Err(protocol_error(
+                "child_session_limit_reached",
+                format!(
+                    "session {} already owns {} child sessions; Probe currently caps direct children at {}",
+                    request.parent_session_id.as_str(),
+                    parent.child_links.len(),
+                    MAX_CHILD_SESSIONS_PER_PARENT,
+                ),
+            ));
+        }
+        let parent_depth = session_depth(&self.core.runtime, &parent)?;
+        if parent_depth >= MAX_CHILD_SESSION_DEPTH {
+            return Err(protocol_error(
+                "child_session_depth_exceeded",
+                format!(
+                    "session {} is already at child-session depth {}; Probe currently caps delegation depth at {}",
+                    request.parent_session_id.as_str(),
+                    parent_depth,
+                    MAX_CHILD_SESSION_DEPTH,
+                ),
+            ));
+        }
+
+        let child_cwd = request.cwd.unwrap_or_else(|| parent.cwd.clone());
+        enforce_same_workspace_boundary(parent.cwd.as_path(), child_cwd.as_path())?;
+        let child_title = normalize_session_title(
+            request
+                .title
+                .or_else(|| Some(format!("{} Child", parent.title))),
+        );
+        let child = self
+            .core
+            .runtime
+            .session_store()
+            .create_session_with(
+                NewSession::new(child_title, child_cwd)
+                    .with_system_prompt(request.system_prompt)
+                    .with_harness_profile(request.harness_profile)
+                    .with_backend(SessionBackendTarget {
+                        profile_name: request.profile.name,
+                        base_url: request.profile.base_url,
+                        model: request.profile.model,
+                    })
+                    .with_parent_link(Some(SessionParentLink {
+                        session_id: request.parent_session_id.clone(),
+                        turn_id: request.parent_turn_id,
+                        turn_index: request.parent_turn_index,
+                    })),
+            )
+            .map_err(session_store_error_to_protocol)?;
+        self.core
+            .runtime
+            .session_store()
+            .append_child_link(
+                &request.parent_session_id,
+                SessionChildLink {
+                    session_id: child.id.clone(),
+                    added_at_ms: child.created_at_ms,
+                },
+            )
+            .map_err(session_store_error_to_protocol)?;
+        let snapshot = self.session_snapshot(&child.id)?;
+        let child = session_child_summary_from_snapshot(&snapshot);
+        let parent_state =
+            SessionTurnControlState::load(&self.core.runtime, &request.parent_session_id)
+                .map_err(session_store_error_to_protocol)?;
+        self.core
+            .turn_control
+            .sync_detached_session_summary(&request.parent_session_id, &parent_state)?;
+        Ok(SpawnChildSessionResponse {
+            parent_session_id: request.parent_session_id,
+            child,
+            session: snapshot,
+        })
+    }
+
     fn session_snapshot(
         &self,
         session_id: &SessionId,
     ) -> Result<SessionSnapshot, RuntimeProtocolError> {
-        let snapshot = session_snapshot_from_runtime(&self.core.runtime, session_id)?;
+        let snapshot = session_snapshot_from_core(&self.core, session_id)?;
         self.core
             .ensure_detached_session_registered(&snapshot.session)?;
         Ok(snapshot)
@@ -2415,26 +2542,159 @@ fn run_pending_approval_resolution(
     }
 }
 
-fn session_snapshot_from_runtime(
-    runtime: &ProbeRuntime,
+fn session_snapshot_from_core(
+    core: &ProbeServerCore,
     session_id: &SessionId,
 ) -> Result<SessionSnapshot, RuntimeProtocolError> {
-    let session = runtime
+    let session = core
+        .runtime
         .session_store()
         .read_metadata(session_id)
         .map_err(session_store_error_to_protocol)?;
-    let transcript = runtime
+    let child_sessions = session
+        .child_links
+        .iter()
+        .filter_map(
+            |link| match session_child_summary_from_runtime(core, &link.session_id) {
+                Ok(summary) => Some(summary),
+                Err(error) if error.code == "session_not_found" => None,
+                Err(_error) => Some(SessionChildSummary {
+                    session_id: link.session_id.clone(),
+                    title: String::from("[missing child session]"),
+                    cwd: session.cwd.clone(),
+                    state: probe_protocol::session::SessionState::Archived,
+                    status: SessionChildStatus::Failed,
+                    parent_turn_id: None,
+                    parent_turn_index: None,
+                    created_at_ms: session.created_at_ms,
+                    updated_at_ms: session.updated_at_ms,
+                }),
+            },
+        )
+        .collect();
+    let transcript = core
+        .runtime
         .session_store()
         .read_transcript(session_id)
         .map_err(session_store_error_to_protocol)?;
-    let pending_approvals = runtime
+    let pending_approvals = core
+        .runtime
         .pending_tool_approvals(session_id)
         .map_err(runtime_error_to_protocol)?;
     Ok(SessionSnapshot {
         session,
+        child_sessions,
         transcript,
         pending_approvals,
     })
+}
+
+fn session_child_summary_from_runtime(
+    core: &ProbeServerCore,
+    session_id: &SessionId,
+) -> Result<SessionChildSummary, RuntimeProtocolError> {
+    let session = core
+        .runtime
+        .session_store()
+        .read_metadata(session_id)
+        .map_err(session_store_error_to_protocol)?;
+    let status = if let Some(registry) = core.detached_registry.as_ref() {
+        registry
+            .read(session_id)
+            .map_err(detached_registry_error_to_protocol)?
+            .map(|summary| session_child_status_from_detached(summary.status))
+            .unwrap_or_else(|| {
+                session_child_status_from_state(core, session_id)
+                    .unwrap_or(SessionChildStatus::Idle)
+            })
+    } else {
+        session_child_status_from_state(core, session_id)?
+    };
+    Ok(SessionChildSummary {
+        session_id: session.id.clone(),
+        title: session.title.clone(),
+        cwd: session.cwd.clone(),
+        state: session.state,
+        status,
+        parent_turn_id: session
+            .parent_link
+            .as_ref()
+            .and_then(|link| link.turn_id.clone()),
+        parent_turn_index: session
+            .parent_link
+            .as_ref()
+            .and_then(|link| link.turn_index),
+        created_at_ms: session.created_at_ms,
+        updated_at_ms: session.updated_at_ms,
+    })
+}
+
+fn session_child_summary_from_snapshot(snapshot: &SessionSnapshot) -> SessionChildSummary {
+    SessionChildSummary {
+        session_id: snapshot.session.id.clone(),
+        title: snapshot.session.title.clone(),
+        cwd: snapshot.session.cwd.clone(),
+        state: snapshot.session.state,
+        status: SessionChildStatus::Idle,
+        parent_turn_id: snapshot
+            .session
+            .parent_link
+            .as_ref()
+            .and_then(|link| link.turn_id.clone()),
+        parent_turn_index: snapshot
+            .session
+            .parent_link
+            .as_ref()
+            .and_then(|link| link.turn_index),
+        created_at_ms: snapshot.session.created_at_ms,
+        updated_at_ms: snapshot.session.updated_at_ms,
+    }
+}
+
+fn session_child_status_from_state(
+    core: &ProbeServerCore,
+    session_id: &SessionId,
+) -> Result<SessionChildStatus, RuntimeProtocolError> {
+    let state = SessionTurnControlState::load(&core.runtime, session_id)
+        .map_err(session_store_error_to_protocol)?;
+    let view = state.inspect_view(session_id);
+    if let Some(active_turn) = view.active_turn.as_ref() {
+        return Ok(if active_turn.awaiting_approval {
+            SessionChildStatus::ApprovalPaused
+        } else {
+            SessionChildStatus::Running
+        });
+    }
+    if !view.queued_turns.is_empty() {
+        return Ok(SessionChildStatus::Queued);
+    }
+    Ok(preferred_terminal_turn(view.recent_turns.as_slice())
+        .map(|turn| session_child_status_from_terminal(turn.status))
+        .unwrap_or(SessionChildStatus::Idle))
+}
+
+fn session_child_status_from_terminal(status: QueuedTurnStatus) -> SessionChildStatus {
+    match status {
+        QueuedTurnStatus::Queued => SessionChildStatus::Queued,
+        QueuedTurnStatus::Running => SessionChildStatus::Running,
+        QueuedTurnStatus::Completed => SessionChildStatus::Completed,
+        QueuedTurnStatus::Failed => SessionChildStatus::Failed,
+        QueuedTurnStatus::Cancelled => SessionChildStatus::Cancelled,
+        QueuedTurnStatus::TimedOut => SessionChildStatus::TimedOut,
+    }
+}
+
+fn session_child_status_from_detached(status: DetachedSessionStatus) -> SessionChildStatus {
+    match status {
+        DetachedSessionStatus::Idle => SessionChildStatus::Idle,
+        DetachedSessionStatus::Running => SessionChildStatus::Running,
+        DetachedSessionStatus::Queued => SessionChildStatus::Queued,
+        DetachedSessionStatus::ApprovalPaused => SessionChildStatus::ApprovalPaused,
+        DetachedSessionStatus::Completed => SessionChildStatus::Completed,
+        DetachedSessionStatus::Failed => SessionChildStatus::Failed,
+        DetachedSessionStatus::Cancelled => SessionChildStatus::Cancelled,
+        DetachedSessionStatus::TimedOut => SessionChildStatus::TimedOut,
+    }
 }
 
 fn detached_session_summary_from_state(
@@ -2808,6 +3068,103 @@ fn normalize_session_title(title: Option<String>) -> String {
         String::from("Probe Session")
     } else {
         String::from(trimmed)
+    }
+}
+
+fn session_depth(
+    runtime: &ProbeRuntime,
+    session: &SessionMetadata,
+) -> Result<usize, RuntimeProtocolError> {
+    let mut depth = 0usize;
+    let mut seen = HashSet::new();
+    let mut cursor = session.parent_link.clone();
+    while let Some(parent_link) = cursor {
+        if !seen.insert(String::from(parent_link.session_id.as_str())) {
+            return Err(protocol_error(
+                "child_session_cycle",
+                format!(
+                    "session {} has a cyclic parent link chain",
+                    session.id.as_str()
+                ),
+            ));
+        }
+        depth += 1;
+        cursor = runtime
+            .session_store()
+            .read_metadata(&parent_link.session_id)
+            .map_err(session_store_error_to_protocol)?
+            .parent_link;
+    }
+    Ok(depth)
+}
+
+fn enforce_same_workspace_boundary(
+    parent_cwd: &Path,
+    child_cwd: &Path,
+) -> Result<(), RuntimeProtocolError> {
+    let parent_repo_root = resolve_git_repo_root(parent_cwd);
+    let child_repo_root = resolve_git_repo_root(child_cwd);
+    match (parent_repo_root, child_repo_root) {
+        (Some(parent_repo_root), Some(child_repo_root)) if parent_repo_root == child_repo_root => {
+            Ok(())
+        }
+        (Some(parent_repo_root), Some(child_repo_root)) => Err(protocol_error(
+            "child_repo_mismatch",
+            format!(
+                "child session cwd {} resolves to repo {}, but parent session cwd {} resolves to repo {}; Probe only supports same-repo child sessions right now",
+                child_cwd.display(),
+                child_repo_root.display(),
+                parent_cwd.display(),
+                parent_repo_root.display(),
+            ),
+        )),
+        (Some(parent_repo_root), None) => Err(protocol_error(
+            "child_repo_mismatch",
+            format!(
+                "child session cwd {} is not inside the parent repo {}; Probe only supports same-repo child sessions right now",
+                child_cwd.display(),
+                parent_repo_root.display(),
+            ),
+        )),
+        (None, Some(child_repo_root)) => Err(protocol_error(
+            "child_repo_mismatch",
+            format!(
+                "parent session cwd {} is not inside a git repo, but child session cwd {} resolves to repo {}; Probe currently requires a shared repo boundary",
+                parent_cwd.display(),
+                child_cwd.display(),
+                child_repo_root.display(),
+            ),
+        )),
+        (None, None) if same_path(parent_cwd, child_cwd) => Ok(()),
+        (None, None) => Err(protocol_error(
+            "child_workspace_mismatch",
+            format!(
+                "parent session cwd {} and child session cwd {} do not share a git repo, so Probe only allows an exact cwd match for child sessions right now",
+                parent_cwd.display(),
+                child_cwd.display(),
+            ),
+        )),
+    }
+}
+
+fn resolve_git_repo_root(path: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!root.is_empty()).then(|| PathBuf::from(root))
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
     }
 }
 

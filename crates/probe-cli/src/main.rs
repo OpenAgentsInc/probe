@@ -2622,6 +2622,14 @@ fn render_detached_event_line(record: &DetachedSessionEventRecord) -> String {
             render_detached_truth(record.truth),
             render_runtime_progress_kind(event),
         ),
+        DetachedSessionEventPayload::ChildSessionUpdated { child } => format!(
+            "cursor={} truth={} kind=child_session_updated child={} status={} turn={}",
+            record.cursor,
+            render_detached_truth(record.truth),
+            child.session_id.as_str(),
+            render_child_status(child.status),
+            child.parent_turn_id.as_deref().unwrap_or("none"),
+        ),
         DetachedSessionEventPayload::PendingApprovalsUpdated { approvals } => format!(
             "cursor={} truth={} kind=pending_approvals_updated approvals={}",
             record.cursor,
@@ -2635,6 +2643,19 @@ fn render_detached_event_line(record: &DetachedSessionEventRecord) -> String {
             code,
             message,
         ),
+    }
+}
+
+fn render_child_status(status: probe_protocol::session::SessionChildStatus) -> &'static str {
+    match status {
+        probe_protocol::session::SessionChildStatus::Idle => "idle",
+        probe_protocol::session::SessionChildStatus::Running => "running",
+        probe_protocol::session::SessionChildStatus::Queued => "queued",
+        probe_protocol::session::SessionChildStatus::ApprovalPaused => "approval_paused",
+        probe_protocol::session::SessionChildStatus::Completed => "completed",
+        probe_protocol::session::SessionChildStatus::Failed => "failed",
+        probe_protocol::session::SessionChildStatus::Cancelled => "cancelled",
+        probe_protocol::session::SessionChildStatus::TimedOut => "timed_out",
     }
 }
 

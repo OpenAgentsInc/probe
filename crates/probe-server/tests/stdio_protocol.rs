@@ -10,9 +10,9 @@ use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, Serv
 use probe_protocol::runtime::{
     ClientMessage, InspectSessionTurnsResponse, QueueTurnResponse, QueuedTurnStatus,
     RequestEnvelope, ResponseBody, RuntimeProgressEvent, RuntimeRequest, RuntimeResponse,
-    ServerEvent, ServerMessage, SessionLookupRequest, StartSessionRequest, ToolApprovalRecipe,
-    ToolChoice, ToolDeniedAction, ToolLoopRecipe, ToolSetKind, TransportKind, TurnAuthor,
-    TurnRequest,
+    ServerEvent, ServerMessage, SessionLookupRequest, SpawnChildSessionRequest,
+    StartSessionRequest, ToolApprovalRecipe, ToolChoice, ToolDeniedAction, ToolLoopRecipe,
+    ToolSetKind, TransportKind, TurnAuthor, TurnRequest,
 };
 use probe_protocol::session::{SessionId, ToolApprovalResolution, TranscriptItemKind};
 use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
@@ -145,6 +145,102 @@ fn stdio_protocol_can_initialize_start_resume_and_run_a_turn() {
     let requests = fake_backend.finish();
     assert_eq!(requests.len(), 1);
     assert!(requests[0].contains("hello"));
+}
+
+#[test]
+fn spawn_child_session_persists_parent_linkage_and_returns_child_status() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let profile = test_profile("http://127.0.0.1:9/v1");
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let parent_session_id = start_test_session(&mut harness, &environment, &profile);
+
+    let response = harness.request(
+        "req-spawn-child",
+        RuntimeRequest::SpawnChildSession(SpawnChildSessionRequest {
+            parent_session_id: parent_session_id.clone(),
+            profile: profile.clone(),
+            title: Some(String::from("delegate fixup")),
+            cwd: None,
+            system_prompt: Some(String::from("Work in the same repo.")),
+            harness_profile: None,
+            parent_turn_id: Some(String::from("turn-4")),
+            parent_turn_index: Some(4),
+        }),
+    );
+    let RuntimeResponse::SpawnChildSession(response) = expect_ok_response(response) else {
+        panic!("expected spawn child response");
+    };
+    assert_eq!(response.parent_session_id, parent_session_id);
+    assert_eq!(
+        response.child.status,
+        probe_protocol::session::SessionChildStatus::Idle
+    );
+    assert_eq!(response.child.parent_turn_id.as_deref(), Some("turn-4"));
+    assert_eq!(response.child.parent_turn_index, Some(4));
+    assert_eq!(
+        response
+            .session
+            .session
+            .parent_link
+            .as_ref()
+            .map(|link| link.session_id.clone()),
+        Some(parent_session_id.clone())
+    );
+    assert_eq!(
+        response.session.session.cwd,
+        environment.workspace().to_path_buf()
+    );
+
+    let inspect_parent = harness.request(
+        "req-inspect-parent",
+        RuntimeRequest::InspectSession(SessionLookupRequest {
+            session_id: parent_session_id.clone(),
+        }),
+    );
+    let RuntimeResponse::InspectSession(snapshot) = expect_ok_response(inspect_parent) else {
+        panic!("expected inspect parent response");
+    };
+    assert_eq!(snapshot.child_sessions.len(), 1);
+    assert_eq!(
+        snapshot.child_sessions[0].session_id,
+        response.session.session.id
+    );
+    assert_eq!(
+        snapshot.child_sessions[0].parent_turn_id.as_deref(),
+        Some("turn-4")
+    );
+
+    harness.shutdown();
+}
+
+#[test]
+fn spawn_child_session_rejects_mismatched_workspace_boundaries() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let profile = test_profile("http://127.0.0.1:9/v1");
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let parent_session_id = start_test_session(&mut harness, &environment, &profile);
+    let other_cwd = environment.temp_root().join("other-workspace");
+    std::fs::create_dir_all(&other_cwd).expect("create other workspace");
+
+    let response = harness.request(
+        "req-spawn-child-invalid",
+        RuntimeRequest::SpawnChildSession(SpawnChildSessionRequest {
+            parent_session_id: parent_session_id.clone(),
+            profile,
+            title: Some(String::from("bad delegate")),
+            cwd: Some(other_cwd),
+            system_prompt: None,
+            harness_profile: None,
+            parent_turn_id: None,
+            parent_turn_index: None,
+        }),
+    );
+    let error = expect_protocol_error(response);
+    assert_eq!(error.code, "child_workspace_mismatch");
+
+    harness.shutdown();
 }
 
 #[test]
@@ -590,6 +686,15 @@ fn expect_ok_response(response: ResponseEnvelopeOwned) -> RuntimeResponse {
     match response.body {
         ResponseBody::Ok { response } => response,
         ResponseBody::Error { error } => panic!("unexpected protocol error: {error:?}"),
+    }
+}
+
+fn expect_protocol_error(
+    response: ResponseEnvelopeOwned,
+) -> probe_protocol::runtime::RuntimeProtocolError {
+    match response.body {
+        ResponseBody::Error { error } => error,
+        ResponseBody::Ok { response } => panic!("unexpected ok response: {response:?}"),
     }
 }
 

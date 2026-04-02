@@ -15,7 +15,8 @@ use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, Serv
 use probe_protocol::default_local_daemon_socket_path;
 use probe_protocol::runtime::{
     DetachedSessionEventPayload, DetachedSessionEventTruth, DetachedSessionRecoveryState,
-    DetachedSessionStatus, StartSessionRequest, WatchDetachedSessionRequest,
+    DetachedSessionStatus, SpawnChildSessionRequest, StartSessionRequest,
+    WatchDetachedSessionRequest,
 };
 use probe_server::detached_watchdog::DetachedTurnWatchdogPolicy;
 use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
@@ -221,6 +222,59 @@ fn daemon_restart_keeps_approval_paused_sessions_resumable() {
 
     drop(reattached);
     restarted.kill_ungraceful();
+}
+
+#[test]
+fn daemon_emits_parent_child_updates_when_child_sessions_are_spawned() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let profile = test_profile("http://127.0.0.1:9/v1");
+    let mut daemon = DaemonProcess::start(environment.probe_home());
+    let mut client = daemon_client(environment.probe_home());
+    let parent = client
+        .start_session(StartSessionRequest {
+            title: Some(String::from("delegation parent")),
+            cwd: environment.workspace().to_path_buf(),
+            profile: profile.clone(),
+            system_prompt: None,
+            harness_profile: None,
+        })
+        .expect("daemon should start parent session");
+    let parent_session_id = parent.session.id.clone();
+
+    let child_response = client
+        .spawn_child_session(SpawnChildSessionRequest {
+            parent_session_id: parent_session_id.clone(),
+            profile,
+            title: Some(String::from("delegated child")),
+            cwd: None,
+            system_prompt: Some(String::from("Stay in the same repo.")),
+            harness_profile: None,
+            parent_turn_id: Some(String::from("turn-12")),
+            parent_turn_index: Some(12),
+        })
+        .expect("daemon should spawn child session");
+
+    let parent_snapshot = client
+        .inspect_session(&parent_session_id)
+        .expect("parent session should remain inspectable");
+    assert_eq!(parent_snapshot.child_sessions.len(), 1);
+    assert_eq!(
+        parent_snapshot.child_sessions[0].session_id,
+        child_response.session.session.id
+    );
+
+    let log = client
+        .read_detached_session_log(&parent_session_id, None, 20)
+        .expect("parent detached event log should be readable");
+    assert!(log.events.iter().any(|record| matches!(
+        record.payload,
+        DetachedSessionEventPayload::ChildSessionUpdated { ref child }
+            if child.session_id == child_response.session.session.id
+    )));
+
+    drop(client);
+    daemon.stop();
 }
 
 #[test]

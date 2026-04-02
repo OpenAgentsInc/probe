@@ -156,6 +156,7 @@ execution handlers are not serializable.
 `resume_session` and `inspect_session` return a `SessionSnapshot` with:
 
 - current session metadata
+- typed child-session summaries when the session has delegated children
 - full stored transcript
 - currently pending approvals
 
@@ -163,15 +164,22 @@ That gives a reattaching client enough state to rebuild the visible session
 without linking against the filesystem session store directly.
 
 Queued-turn lifecycle state intentionally lives beside that snapshot instead of
-inside it. `SessionSnapshot` remains the transcript plus approval view, while
-`inspect_session_turns` is the typed queue and control view.
+inside it. `SessionSnapshot` remains the transcript plus delegated-child,
+transcript, and approval view, while `inspect_session_turns` is the typed queue
+and control view.
+
+`spawn_child_session` is now part of the same contract. It lets a client create
+a child session with an explicit parent link, conservative same-repo guardrails,
+and bounded delegation depth or count. Detached daemon transports also emit
+`child_session_updated` events back onto the parent session log when the child
+is created or its detached status changes.
 
 ## Example
 
 Request:
 
 ```json
-{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":5}}
+{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":6}}
 ```
 
 Event:
