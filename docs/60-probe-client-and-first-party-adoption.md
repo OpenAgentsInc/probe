@@ -4,7 +4,7 @@
 
 Its job is narrow:
 
-- own the local server transport seam
+- own the Probe server transport seam
 - run the startup handshake
 - send typed runtime requests
 - drain typed streamed events until the matching final response arrives
@@ -20,6 +20,7 @@ instead of letting `probe exec`, `probe chat`, and the TUI each wire
 
 - local child-process spawn for `probe-server`
 - local daemon-socket attach for `probe-daemon`
+- hosted TCP attach for remote Probe control planes
 - shared local-daemon autostart when the socket is missing
 - explicit fallback to the hidden `probe-cli __internal-probe-server` mode when
   a standalone sibling `probe-server` binary is not present
@@ -36,11 +37,13 @@ Transport selection is now explicit:
 
 - `SpawnStdio`
 - `LocalDaemon`
+- `HostedTcp`
 
 The shutdown contract differs by transport:
 
 - spawned child transports still shut down with the client
 - daemon transports only close the client connection on drop
+- hosted TCP transports also only close the client connection on drop
 
 ## Why The API Adapts Back Into Core Value Types
 
@@ -118,8 +121,9 @@ That fallback does not create a second protocol. It only changes how the same
 `probe-server::server::run_stdio_server` entrypoint is launched.
 
 The new daemon path keeps that same rule. `probe-client` now chooses between a
-spawned stdio child and the local daemon socket, but it still speaks the same
-typed request, event, and response contract either way.
+spawned stdio child, the local daemon socket, and the hosted TCP transport, but
+it still speaks the same typed request, event, and response contract either
+way.
 
 The same crate now owns the daemon autostart helper for first-party clients:
 
@@ -138,6 +142,15 @@ The shared client also now exposes the first daemon-owned session helpers:
 That keeps later `probe ps` and attach work on the same shared client seam
 instead of growing a second daemon-only control client. The shipped operator
 CLI in `64-daemon-operator-cli.md` now sits on that same shared seam.
+
+Hosted TCP is intentionally narrower today:
+
+- no auto-start helper
+- no auth layer in `probe-client`
+- no browser-facing HTTP adapter
+
+It is only the first remote Rust-to-Rust attach lane above the same Probe
+runtime contract.
 
 ## New Shared Control Calls
 
@@ -158,6 +171,7 @@ The migration is covered at two levels:
 
 - `crates/probe-client/src/lib.rs`
   - a real client test against a real `probe-server` child
+  - a real hosted TCP transport test against a real `probe-server` listener
 - `crates/probe-cli/tests/binary_e2e.rs`
   - process-level `chat` and `tui` coverage now running through the shared
     client and server seam, including detached daemon reattach for both

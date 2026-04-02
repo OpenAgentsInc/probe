@@ -1,6 +1,7 @@
 use std::env;
 use std::fmt::{Display, Formatter};
 use std::io::{BufRead, BufReader, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -65,6 +66,7 @@ impl ProbeClientConfig {
 pub enum ProbeClientTransportConfig {
     SpawnStdio,
     LocalDaemon { socket_path: Option<PathBuf> },
+    HostedTcp { address: String },
 }
 
 #[derive(Debug)]
@@ -72,6 +74,7 @@ pub enum ProbeClientError {
     CurrentExecutable(std::io::Error),
     Spawn(std::io::Error),
     ConnectDaemon(std::io::Error),
+    ConnectHosted(std::io::Error),
     MissingChildStdin,
     MissingChildStdout,
     Io(std::io::Error),
@@ -106,6 +109,9 @@ impl Display for ProbeClientError {
             Self::Spawn(error) => write!(f, "failed to spawn Probe helper process: {error}"),
             Self::ConnectDaemon(error) => {
                 write!(f, "failed to connect to probe-daemon: {error}")
+            }
+            Self::ConnectHosted(error) => {
+                write!(f, "failed to connect to hosted Probe transport: {error}")
             }
             Self::MissingChildStdin => write!(f, "probe-server child did not expose stdin"),
             Self::MissingChildStdout => write!(f, "probe-server child did not expose stdout"),
@@ -775,6 +781,9 @@ fn build_transport(config: &ProbeClientConfig) -> Result<ClientTransport, ProbeC
         ProbeClientTransportConfig::LocalDaemon { socket_path } => {
             connect_local_daemon_transport(config, socket_path.as_ref())
         }
+        ProbeClientTransportConfig::HostedTcp { address } => {
+            connect_hosted_tcp_transport(address.as_str())
+        }
     }
 }
 
@@ -835,6 +844,19 @@ fn connect_local_daemon_transport(
     Err(ProbeClientError::ConnectDaemon(std::io::Error::other(
         "local daemon transport is only implemented on unix platforms",
     )))
+}
+
+fn connect_hosted_tcp_transport(address: &str) -> Result<ClientTransport, ProbeClientError> {
+    let stream = TcpStream::connect(address).map_err(ProbeClientError::ConnectHosted)?;
+    let writer = stream
+        .try_clone()
+        .map_err(ProbeClientError::ConnectHosted)?;
+    Ok(ClientTransport {
+        child: None,
+        writer: Box::new(writer),
+        reader: Box::new(BufReader::new(stream)),
+        shutdown_on_drop: false,
+    })
 }
 
 fn build_server_command(config: &ProbeClientConfig) -> Result<Command, ProbeClientError> {
@@ -1255,13 +1277,19 @@ fn default_session_title(prompt: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
+    use std::process::{Child, Command, Stdio};
     use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use probe_core::runtime::{PlainTextExecRequest, RuntimeEvent};
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
+    use probe_protocol::runtime::StartSessionRequest;
+    use probe_protocol::session::{SessionAttachTransport, SessionRuntimeOwnerKind};
     use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
-    use super::{ProbeClient, ProbeClientConfig};
+    use super::{ProbeClient, ProbeClientConfig, ProbeClientTransportConfig};
 
     const TEST_MODEL: &str = "tiny-qwen35";
 
@@ -1315,6 +1343,56 @@ mod tests {
         assert!(requests[0].contains("hello"));
     }
 
+    #[test]
+    fn client_can_connect_to_hosted_tcp_transport_and_inspect_runtime_owner() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let address = reserve_loopback_addr();
+        let attach_target = format!("tcp://{address}");
+        let mut server = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+
+        let mut config = ProbeClientConfig::new(environment.probe_home(), "probe-client-test");
+        config.transport = ProbeClientTransportConfig::HostedTcp {
+            address: address.clone(),
+        };
+        let mut client = wait_for_hosted_client(config);
+        let sessions = client
+            .list_sessions()
+            .expect("hosted client should list sessions");
+        assert!(
+            sessions.is_empty(),
+            "fresh hosted transport should start empty"
+        );
+
+        let snapshot = client
+            .start_session(StartSessionRequest {
+                title: Some(String::from("hosted tcp session")),
+                cwd: environment.workspace().to_path_buf(),
+                profile: test_profile("http://127.0.0.1:9/v1"),
+                system_prompt: None,
+                harness_profile: None,
+            })
+            .expect("hosted transport should start a session");
+        let owner = snapshot
+            .session
+            .runtime_owner
+            .expect("hosted session should persist a runtime owner");
+        assert_eq!(owner.kind, SessionRuntimeOwnerKind::HostedControlPlane);
+        assert_eq!(owner.owner_id, "probe-hosted-test");
+        assert_eq!(owner.attach_transport, SessionAttachTransport::TcpJsonl);
+        assert_eq!(owner.attach_target.as_deref(), Some(attach_target.as_str()));
+
+        client
+            .shutdown()
+            .expect("idle hosted server should accept shutdown");
+        server.wait();
+    }
+
     fn workspace_binary(name: &str) -> std::path::PathBuf {
         let current_exe = std::env::current_exe().expect("test binary path should resolve");
         let base_dir = current_exe
@@ -1334,6 +1412,69 @@ mod tests {
             candidate.display()
         );
         candidate
+    }
+
+    fn reserve_loopback_addr() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback port should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback listener should expose an address");
+        drop(listener);
+        address.to_string()
+    }
+
+    fn wait_for_hosted_client(config: ProbeClientConfig) -> ProbeClient {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match ProbeClient::connect(config.clone()) {
+                Ok(client) => return client,
+                Err(super::ProbeClientError::ConnectHosted(_)) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => panic!("hosted transport should accept connections: {error}"),
+            }
+        }
+    }
+
+    struct HostedProbeServer {
+        child: Child,
+    }
+
+    impl HostedProbeServer {
+        fn start(
+            probe_home: &std::path::Path,
+            address: &str,
+            owner_id: &str,
+            attach_target: &str,
+        ) -> Self {
+            let child = Command::new(workspace_binary("probe-server"))
+                .arg("--probe-home")
+                .arg(probe_home)
+                .arg("--listen-tcp")
+                .arg(address)
+                .arg("--hosted-owner-id")
+                .arg(owner_id)
+                .arg("--hosted-attach-target")
+                .arg(attach_target)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("hosted probe-server should spawn");
+            Self { child }
+        }
+
+        fn wait(&mut self) {
+            let status = self.child.wait().expect("hosted probe-server should exit");
+            assert!(status.success(), "hosted probe-server should exit cleanly");
+        }
+    }
+
+    impl Drop for HostedProbeServer {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 
     fn test_profile(base_url: &str) -> BackendProfile {

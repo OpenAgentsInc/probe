@@ -17,6 +17,10 @@ Phase 2 now reuses this same typed contract over the local `probe-daemon`
 socket transport. The message shapes stay the same; only the transport and the
 reported runtime capabilities change.
 
+Phase 3 now also reuses this contract over a hosted TCP JSONL transport. That
+adds a remote-facing control-plane lane without inventing a second request or
+response schema.
+
 ## Message Framing
 
 Each frame is one JSON object per line.
@@ -156,6 +160,8 @@ execution handlers are not serializable.
 `resume_session` and `inspect_session` return a `SessionSnapshot` with:
 
 - current session metadata
+- explicit runtime-owner metadata when Probe knows whether the session is owned
+  by a foreground child, local daemon, or hosted control plane
 - typed branch posture when the cwd is inside a git repo
 - typed forge-agnostic delivery posture derived from that branch state
 - typed child-session summaries when the session has delegated children,
@@ -191,7 +197,7 @@ shell output.
 Request:
 
 ```json
-{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":8}}
+{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":9}}
 ```
 
 Event:
@@ -212,12 +218,24 @@ This stdio protocol is the canonical Phase 1 local server seam.
 
 It is intentionally not yet:
 
-- a remote Probe worker transport
 - a multi-tenant or browser-facing API
 
 Detached local daemon transport now exists in Phase 2, but it is still the same
-runtime protocol rather than a second API surface. Remote-worker and
-browser-facing layers still do not exist.
+runtime protocol rather than a second API surface.
+
+Hosted TCP transport now exists as the narrow first remote control-plane lane in
+Phase 3. It gives Probe:
+
+- a TCP JSONL request or response path for remote Rust consumers
+- explicit hosted runtime-owner identity in session and detached-session state
+- the same queue, inspect, attach, and shutdown semantics as local transports
+
+It still does not claim:
+
+- remote worker scheduling
+- browser-facing HTTP or SSE APIs
+- multi-tenant auth or policy surfaces
+- prepared baseline or snapshot manifests for hosted workers
 
 The main detached-only additions on top of this contract are documented in:
 

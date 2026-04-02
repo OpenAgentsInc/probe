@@ -229,3 +229,7 @@ This folder holds technical planning docs for the Probe runtime.
   - Phase 2 first-party client adoption of the daemon seam, including
     daemon-backed `probe chat`, explicit `probe tui --resume`, and shared
     daemon autostart ownership in `probe-client`
+- `67-hosted-tcp-transport-and-runtime-ownership.md`
+  - the first hosted Probe control-plane lane for Phase 3, including
+    `probe-server --listen-tcp`, shared-client hosted TCP attach, and explicit
+    runtime-owner metadata for foreground, daemon, and hosted sessions

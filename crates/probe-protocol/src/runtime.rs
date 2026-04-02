@@ -6,8 +6,9 @@ use serde_json::Value;
 use crate::backend::BackendProfile;
 use crate::session::{
     PendingToolApproval, SessionBranchState, SessionChildSummary, SessionDeliveryState,
-    SessionHarnessProfile, SessionId, SessionMetadata, SessionTurn, TimestampMs,
-    ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass, TranscriptEvent, UsageMeasurement,
+    SessionHarnessProfile, SessionId, SessionMetadata, SessionRuntimeOwner, SessionTurn,
+    TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass, TranscriptEvent,
+    UsageMeasurement,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,6 +16,7 @@ use crate::session::{
 pub enum TransportKind {
     StdioJsonl,
     UnixSocketJsonl,
+    TcpJsonl,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +96,7 @@ pub struct RuntimeCapabilities {
     pub transport: TransportKind,
     pub supports_stdio_child_process: bool,
     pub supports_local_daemon_socket: bool,
+    pub supports_hosted_tcp_jsonl: bool,
     pub supports_session_resume: bool,
     pub supports_session_inspect: bool,
     pub supports_child_sessions: bool,
@@ -265,6 +268,8 @@ pub struct DetachedSessionSummary {
     pub title: String,
     pub cwd: PathBuf,
     pub status: DetachedSessionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_owner: Option<SessionRuntimeOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_turn_id: Option<String>,
     pub queued_turn_count: usize,
@@ -815,6 +820,7 @@ mod tests {
             transport: TransportKind::StdioJsonl,
             supports_stdio_child_process: true,
             supports_local_daemon_socket: false,
+            supports_hosted_tcp_jsonl: false,
             supports_session_resume: true,
             supports_session_inspect: true,
             supports_child_sessions: true,

@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::io::{self, BufRead, BufWriter, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -36,10 +37,10 @@ use probe_protocol::runtime::{
     TurnResponse, TurnSubmissionKind, WatchDetachedSessionRequest, WatchDetachedSessionResponse,
 };
 use probe_protocol::session::{
-    SessionBackendTarget, SessionBranchState, SessionChildClosureSummary, SessionChildLink,
-    SessionChildStatus, SessionChildSummary, SessionDeliveryArtifact, SessionDeliveryState,
-    SessionDeliveryStatus, SessionId, SessionInitiator, SessionMetadata, SessionParentLink,
-    UsageMeasurement, UsageTruth,
+    SessionAttachTransport, SessionBackendTarget, SessionBranchState, SessionChildClosureSummary,
+    SessionChildLink, SessionChildStatus, SessionChildSummary, SessionDeliveryArtifact,
+    SessionDeliveryState, SessionDeliveryStatus, SessionId, SessionInitiator, SessionMetadata,
+    SessionParentLink, SessionRuntimeOwner, SessionRuntimeOwnerKind, UsageMeasurement, UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
 
@@ -150,6 +151,65 @@ pub fn run_stdio_server(probe_home: Option<PathBuf>) -> Result<(), ServerError> 
     );
     let stdin = io::stdin();
     let _ = server.run(stdin.lock())?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostedApiServerConfig {
+    pub owner_id: String,
+    pub display_name: Option<String>,
+    pub attach_target: Option<String>,
+}
+
+impl HostedApiServerConfig {
+    #[must_use]
+    pub fn new(owner_id: impl Into<String>) -> Self {
+        Self {
+            owner_id: owner_id.into(),
+            display_name: None,
+            attach_target: None,
+        }
+    }
+}
+
+pub fn run_hosted_tcp_server(
+    probe_home: Option<PathBuf>,
+    bind_addr: String,
+    config: HostedApiServerConfig,
+) -> Result<(), ServerError> {
+    let home = resolve_probe_home(probe_home, "probe-server hosted tcp")?;
+    let listener = TcpListener::bind(bind_addr.as_str())?;
+    let resolved_addr = listener.local_addr()?.to_string();
+    let core = ProbeServerCore::hosted(
+        ProbeRuntime::new(home),
+        HostedApiServerConfig {
+            attach_target: Some(
+                config
+                    .attach_target
+                    .unwrap_or_else(|| format!("tcp://{resolved_addr}")),
+            ),
+            ..config
+        },
+        DetachedTurnWatchdogPolicy::default(),
+    );
+    core.reconcile_detached_sessions()
+        .map_err(runtime_protocol_error_to_io)?;
+    spawn_detached_watchdog(core.clone(), DetachedTurnWatchdogPolicy::default())
+        .map_err(|error| ServerError::Io(io::Error::other(error.to_string())))?;
+
+    loop {
+        let (stream, _) = listener.accept()?;
+        let server = ProbeServerConnection::new(
+            core.clone(),
+            SharedJsonlWriter::new(Box::new(BufWriter::new(stream.try_clone()?))),
+            TransportKind::TcpJsonl,
+        );
+        match server.run(io::BufReader::new(stream))? {
+            ConnectionRunOutcome::ClientDisconnected => {}
+            ConnectionRunOutcome::ServerShutdown => break,
+        }
+    }
+
     Ok(())
 }
 
@@ -293,6 +353,7 @@ pub struct ProbeServerCore {
     turn_control: Arc<TurnControlPlane>,
     detached_registry: Option<Arc<DetachedSessionRegistry>>,
     detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
+    runtime_owner: SessionRuntimeOwner,
 }
 
 struct ProbeServerConnection {
@@ -342,14 +403,48 @@ impl ProbeServerCore {
         Self::with_mode(
             runtime,
             ServerOwnershipMode::ForegroundStdio,
+            SessionRuntimeOwner {
+                kind: SessionRuntimeOwnerKind::ForegroundChild,
+                owner_id: String::from("probe-server-foreground"),
+                attach_transport: SessionAttachTransport::StdioJsonl,
+                display_name: Some(String::from("probe-server")),
+                attach_target: None,
+            },
             DetachedTurnWatchdogPolicy::default(),
         )
     }
 
     fn daemon(runtime: ProbeRuntime, watchdog_policy: DetachedTurnWatchdogPolicy) -> Self {
+        let socket_path = default_local_daemon_socket_path(runtime.session_store().root());
         Self::with_mode(
             runtime,
             ServerOwnershipMode::DetachedDaemon,
+            SessionRuntimeOwner {
+                kind: SessionRuntimeOwnerKind::LocalDaemon,
+                owner_id: socket_path.display().to_string(),
+                attach_transport: SessionAttachTransport::UnixSocketJsonl,
+                display_name: Some(String::from("probe-daemon")),
+                attach_target: Some(socket_path.display().to_string()),
+            },
+            watchdog_policy,
+        )
+    }
+
+    fn hosted(
+        runtime: ProbeRuntime,
+        config: HostedApiServerConfig,
+        watchdog_policy: DetachedTurnWatchdogPolicy,
+    ) -> Self {
+        Self::with_mode(
+            runtime,
+            ServerOwnershipMode::HostedControlPlane,
+            SessionRuntimeOwner {
+                kind: SessionRuntimeOwnerKind::HostedControlPlane,
+                owner_id: config.owner_id,
+                attach_transport: SessionAttachTransport::TcpJsonl,
+                display_name: config.display_name,
+                attach_target: config.attach_target,
+            },
             watchdog_policy,
         )
     }
@@ -357,13 +452,14 @@ impl ProbeServerCore {
     fn with_mode(
         runtime: ProbeRuntime,
         mode: ServerOwnershipMode,
+        runtime_owner: SessionRuntimeOwner,
         watchdog_policy: DetachedTurnWatchdogPolicy,
     ) -> Self {
         let detached_registry = mode
-            .is_daemon()
+            .is_detached_owner()
             .then(|| Arc::new(DetachedSessionRegistry::new(runtime.session_store().root())));
         let detached_event_hub = mode
-            .is_daemon()
+            .is_detached_owner()
             .then(|| Arc::new(DetachedSessionEventHub::new(runtime.session_store().root())));
         Self {
             turn_control: Arc::new(TurnControlPlane::new(
@@ -375,6 +471,7 @@ impl ProbeServerCore {
             runtime,
             detached_registry,
             detached_event_hub,
+            runtime_owner,
         }
     }
 
@@ -527,14 +624,15 @@ impl ProbeServerCore {
 enum ServerOwnershipMode {
     ForegroundStdio,
     DetachedDaemon,
+    HostedControlPlane,
 }
 
 const MAX_CHILD_SESSION_DEPTH: usize = 2;
 const MAX_CHILD_SESSIONS_PER_PARENT: usize = 8;
 
 impl ServerOwnershipMode {
-    fn is_daemon(self) -> bool {
-        matches!(self, Self::DetachedDaemon)
+    fn is_detached_owner(self) -> bool {
+        matches!(self, Self::DetachedDaemon | Self::HostedControlPlane)
     }
 }
 
@@ -1355,6 +1453,10 @@ impl ProbeServerConnection {
                                     self.transport,
                                     TransportKind::UnixSocketJsonl
                                 ),
+                                supports_hosted_tcp_jsonl: matches!(
+                                    self.transport,
+                                    TransportKind::TcpJsonl
+                                ),
                                 supports_session_resume: true,
                                 supports_session_inspect: true,
                                 supports_child_sessions: true,
@@ -1585,7 +1687,8 @@ impl ProbeServerConnection {
                         profile_name: request.profile.name,
                         base_url: request.profile.base_url,
                         model: request.profile.model,
-                    }),
+                    })
+                    .with_runtime_owner(Some(self.core.runtime_owner.clone())),
             )
             .map_err(session_store_error_to_protocol)?;
         self.session_snapshot(&session.id)
@@ -1649,6 +1752,7 @@ impl ProbeServerConnection {
                         base_url: request.profile.base_url,
                         model: request.profile.model,
                     })
+                    .with_runtime_owner(Some(self.core.runtime_owner.clone()))
                     .with_parent_link(Some(SessionParentLink {
                         session_id: request.parent_session_id.clone(),
                         turn_id: request.parent_turn_id,
@@ -2996,6 +3100,7 @@ fn detached_session_summary_from_state(
         title: metadata.title.clone(),
         cwd: metadata.cwd.clone(),
         status,
+        runtime_owner: metadata.runtime_owner.clone(),
         active_turn_id: active_turn.map(|turn| turn.turn_id.clone()),
         queued_turn_count: view.queued_turns.len(),
         pending_approval_count,

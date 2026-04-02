@@ -257,6 +257,33 @@ pub struct SessionBackendTarget {
     pub model: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRuntimeOwnerKind {
+    ForegroundChild,
+    LocalDaemon,
+    HostedControlPlane,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAttachTransport {
+    StdioJsonl,
+    UnixSocketJsonl,
+    TcpJsonl,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRuntimeOwner {
+    pub kind: SessionRuntimeOwnerKind,
+    pub owner_id: String,
+    pub attach_transport: SessionAttachTransport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_target: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionHarnessProfile {
     pub name: String,
@@ -399,6 +426,8 @@ pub struct SessionMetadata {
     pub state: SessionState,
     pub next_turn_index: u64,
     pub backend: Option<SessionBackendTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_owner: Option<SessionRuntimeOwner>,
     pub transcript_path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_link: Option<SessionParentLink>,

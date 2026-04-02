@@ -424,7 +424,18 @@ The remaining gap is no longer "add a daemon transport," "add a detached
 registry," or "add detached watch." It is:
 
 - downstream consumer adoption above the shipped Probe daemon seam
-- richer remote execution and workspace ownership beyond the local daemon
+- richer hosted execution and workspace ownership beyond the local daemon
+- prepared baseline and execution-host manifests for remote workers
+
+Probe now also has the first hosted control-plane transport:
+
+- `probe-server --listen-tcp ...`
+- a hosted TCP JSONL lane on the same runtime protocol
+- explicit runtime-owner metadata in stored session and detached-session state
+
+That is intentionally only the remote control-plane seam. It does not yet mean
+Probe has hosted worker manifests, prepared baseline restore, or multi-tenant
+auth.
 
 ## 2. Remote inference is not remote execution
 
