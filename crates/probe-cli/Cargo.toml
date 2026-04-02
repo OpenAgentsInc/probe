@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+base64.workspace = true
 clap.workspace = true
+crossterm.workspace = true
 pollster = "0.4"
 probe-client.workspace = true
 probe-core.workspace = true

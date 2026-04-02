@@ -4,6 +4,10 @@ This document captures the first honest Probe proof of concept for mixing a
 WGPUI visual lane into the existing terminal-first runtime without pretending
 that the `ratatui` shell itself became a pixel renderer.
 
+The later in-terminal follow-up now lives in
+`76-experimental-terminal-inline-overlay.md`. The sidecar path documented here
+remains available as the explicit fallback and `--target sidecar` path.
+
 ## Decision
 
 Probe now ships an experimental overlay lane with two entrypoints:

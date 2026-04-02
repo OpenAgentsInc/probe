@@ -1,7 +1,19 @@
 use std::borrow::Cow;
+use std::env;
+use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use clap::ValueEnum;
+use crossterm::cursor::MoveTo;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::execute;
+use crossterm::terminal::{
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use wgpui::renderer::Renderer;
 use wgpui::viz::badge::{BadgeTone, tone_color as badge_color};
 use wgpui::viz::chart::{HistoryChartSeries, paint_history_chart_body};
@@ -10,18 +22,278 @@ use wgpui::viz::panel;
 use wgpui::viz::provenance::{ProvenanceTone, tone_color as provenance_color};
 use wgpui::viz::theme as viz_theme;
 use wgpui::viz::topology::{TopologyNodeState, node_state_color};
-use wgpui::{Bounds, Hsla, PaintContext, Point, Quad, Scene, Size, TextSystem, theme};
+use wgpui::{
+    Bounds, CaptureRequest, CaptureTarget, Hsla, PaintContext, Point, Quad, Scene, Size,
+    TextSystem, capture_scene, theme,
+};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-const WINDOW_WIDTH: f64 = 1180.0;
-const WINDOW_HEIGHT: f64 = 760.0;
+const OVERLAY_WIDTH: u32 = 1180;
+const OVERLAY_HEIGHT: u32 = 760;
+const WINDOW_WIDTH: f64 = OVERLAY_WIDTH as f64;
+const WINDOW_HEIGHT: f64 = OVERLAY_HEIGHT as f64;
 
-pub fn run_overlay_demo() -> Result<(), String> {
-    ensure_overlay_support()?;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum OverlayTarget {
+    Auto,
+    Terminal,
+    Sidecar,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverlayPresentation {
+    SidecarWindow,
+    TerminalInline,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResolvedOverlayTarget {
+    Sidecar,
+    Terminal(TerminalImageProtocol),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalImageProtocol {
+    ITerm2InlineImage,
+}
+
+impl TerminalImageProtocol {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ITerm2InlineImage => "iTerm2 OSC 1337 inline image",
+        }
+    }
+}
+
+pub fn run_overlay_demo(target: OverlayTarget, from_tui_handoff: bool) -> Result<(), String> {
+    if from_tui_handoff {
+        return run_overlay_demo_with_tui_handoff(target);
+    }
+    run_overlay_demo_inner(target, false)
+}
+
+fn run_overlay_demo_with_tui_handoff(target: OverlayTarget) -> Result<(), String> {
+    suspend_tui_terminal()?;
+    let run_result = run_overlay_demo_inner(target, true);
+    let restore_result = restore_tui_terminal();
+    run_result.and(restore_result)
+}
+
+fn run_overlay_demo_inner(
+    target: OverlayTarget,
+    show_sidecar_fallback_notice: bool,
+) -> Result<(), String> {
+    match resolve_overlay_target(target)? {
+        ResolvedOverlayTarget::Sidecar => {
+            if show_sidecar_fallback_notice {
+                print_sidecar_fallback_notice()?;
+            }
+            run_sidecar_overlay_demo()
+        }
+        ResolvedOverlayTarget::Terminal(protocol) => run_terminal_overlay_demo(protocol),
+    }
+}
+
+fn resolve_overlay_target(target: OverlayTarget) -> Result<ResolvedOverlayTarget, String> {
+    let terminal_protocol = detect_terminal_image_protocol();
+    match target {
+        OverlayTarget::Auto => {
+            if let Some(protocol) = terminal_protocol {
+                Ok(ResolvedOverlayTarget::Terminal(protocol))
+            } else {
+                ensure_sidecar_support()?;
+                Ok(ResolvedOverlayTarget::Sidecar)
+            }
+        }
+        OverlayTarget::Terminal => terminal_protocol
+            .map(ResolvedOverlayTarget::Terminal)
+            .ok_or_else(unsupported_terminal_overlay_message),
+        OverlayTarget::Sidecar => {
+            ensure_sidecar_support()?;
+            Ok(ResolvedOverlayTarget::Sidecar)
+        }
+    }
+}
+
+fn unsupported_terminal_overlay_message() -> String {
+    String::from(
+        "experimental in-terminal overlay currently requires an interactive iTerm2 session with stdin/stdout attached directly to the terminal",
+    )
+}
+
+fn detect_terminal_image_protocol() -> Option<TerminalImageProtocol> {
+    detect_terminal_image_protocol_with_inputs(
+        env::var("TERM_PROGRAM").ok().as_deref(),
+        env::var("LC_TERMINAL").ok().as_deref(),
+        io::stdin().is_terminal(),
+        io::stdout().is_terminal(),
+        env::var_os("TMUX").is_some(),
+        env::var_os("ZELLIJ").is_some(),
+    )
+}
+
+fn detect_terminal_image_protocol_with_inputs(
+    term_program: Option<&str>,
+    lc_terminal: Option<&str>,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+    in_tmux: bool,
+    in_zellij: bool,
+) -> Option<TerminalImageProtocol> {
+    if !stdin_is_terminal || !stdout_is_terminal || in_tmux || in_zellij {
+        return None;
+    }
+
+    if term_program == Some("iTerm.app") || lc_terminal == Some("iTerm2") {
+        return Some(TerminalImageProtocol::ITerm2InlineImage);
+    }
+
+    None
+}
+
+fn run_terminal_overlay_demo(protocol: TerminalImageProtocol) -> Result<(), String> {
+    let png_bytes = render_overlay_demo_png(OverlayPresentation::TerminalInline)?;
+    let mut stdout = io::stdout();
+    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))
+        .map_err(|error| format!("failed to prepare terminal overlay surface: {error}"))?;
+    writeln!(stdout, "Probe experimental WGPUI terminal overlay")
+        .map_err(|error| format!("failed to write terminal overlay header: {error}"))?;
+    writeln!(stdout, "Protocol: {}.", protocol.label())
+        .map_err(|error| format!("failed to write terminal overlay protocol line: {error}"))?;
+    writeln!(
+        stdout,
+        "This is a capability-gated inline image proof, not the default TUI renderer."
+    )
+    .map_err(|error| format!("failed to write terminal overlay description: {error}"))?;
+    writeln!(stdout)
+        .map_err(|error| format!("failed to write terminal overlay spacing: {error}"))?;
+    stdout
+        .write_all(terminal_image_escape(protocol, png_bytes.as_slice()).as_bytes())
+        .map_err(|error| format!("failed to write terminal image payload: {error}"))?;
+    writeln!(stdout)
+        .map_err(|error| format!("failed to write terminal overlay spacing: {error}"))?;
+    writeln!(stdout)
+        .map_err(|error| format!("failed to write terminal overlay spacing: {error}"))?;
+    writeln!(stdout, "Press Enter to return.")
+        .map_err(|error| format!("failed to write terminal overlay dismissal copy: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("failed to flush terminal overlay output: {error}"))?;
+
+    let mut dismissal = String::new();
+    io::stdin()
+        .read_line(&mut dismissal)
+        .map_err(|error| format!("failed to read terminal overlay dismissal: {error}"))?;
+    Ok(())
+}
+
+fn terminal_image_escape(protocol: TerminalImageProtocol, png_bytes: &[u8]) -> String {
+    match protocol {
+        TerminalImageProtocol::ITerm2InlineImage => iterm2_inline_image_escape(png_bytes),
+    }
+}
+
+fn iterm2_inline_image_escape(png_bytes: &[u8]) -> String {
+    let payload = STANDARD.encode(png_bytes);
+    format!("\u{1b}]1337;File=inline=1;width=100%;preserveAspectRatio=1:{payload}\u{7}")
+}
+
+fn render_overlay_demo_png(presentation: OverlayPresentation) -> Result<Vec<u8>, String> {
+    let capture_nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let output_path = env::temp_dir().join(format!(
+        "probe_overlay_demo_{}_{}.png",
+        std::process::id(),
+        capture_nonce
+    ));
+    let manifest_path = output_path.with_extension("json");
+
+    let mut scene = Scene::new();
+    let mut text_system = TextSystem::new(1.0);
+    build_overlay_demo_scene(
+        &mut scene,
+        &mut text_system,
+        OVERLAY_WIDTH as f32,
+        OVERLAY_HEIGHT as f32,
+        0.28,
+        presentation,
+    );
+
+    let mut request = CaptureRequest::new(
+        CaptureTarget::AdHoc {
+            name: String::from("probe_overlay_demo"),
+        },
+        OVERLAY_WIDTH,
+        OVERLAY_HEIGHT,
+        output_path.clone(),
+    );
+    request.manifest_path = Some(manifest_path.clone());
+
+    capture_scene(&request, &scene, Some(&text_system)).map_err(|error| {
+        format!("failed to render the experimental WGPUI overlay offscreen: {error}")
+    })?;
+    let png_bytes = fs::read(&output_path).map_err(|error| {
+        format!(
+            "failed to read rendered overlay PNG `{}`: {error}",
+            output_path.display()
+        )
+    })?;
+    let _ = fs::remove_file(&output_path);
+    let _ = fs::remove_file(&manifest_path);
+    Ok(png_bytes)
+}
+
+fn suspend_tui_terminal() -> Result<(), String> {
+    let mut stdout = io::stdout();
+    disable_raw_mode()
+        .map_err(|error| format!("failed to disable raw mode for overlay handoff: {error}"))?;
+    execute!(stdout, LeaveAlternateScreen, DisableMouseCapture)
+        .map_err(|error| format!("failed to leave the Probe TUI alternate screen: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("failed to flush overlay handoff output: {error}"))?;
+    Ok(())
+}
+
+fn restore_tui_terminal() -> Result<(), String> {
+    let mut stdout = io::stdout();
+    enable_raw_mode()
+        .map_err(|error| format!("failed to re-enable raw mode after overlay handoff: {error}"))?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .map_err(|error| format!("failed to restore the Probe TUI alternate screen: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("failed to flush overlay restore output: {error}"))?;
+    Ok(())
+}
+
+fn print_sidecar_fallback_notice() -> Result<(), String> {
+    let mut stdout = io::stdout();
+    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))
+        .map_err(|error| format!("failed to prepare sidecar fallback notice: {error}"))?;
+    writeln!(stdout, "Probe experimental WGPUI overlay")
+        .map_err(|error| format!("failed to write sidecar fallback header: {error}"))?;
+    writeln!(
+        stdout,
+        "No supported in-terminal graphics protocol was detected, so Probe is falling back to the sidecar window."
+    )
+    .map_err(|error| format!("failed to write sidecar fallback detail: {error}"))?;
+    writeln!(stdout, "Close the sidecar window to return to the TUI.")
+        .map_err(|error| format!("failed to write sidecar fallback dismissal copy: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("failed to flush sidecar fallback notice: {error}"))?;
+    Ok(())
+}
+
+fn run_sidecar_overlay_demo() -> Result<(), String> {
+    ensure_sidecar_support()?;
     let event_loop = EventLoop::new()
         .map_err(|error| format!("failed to create overlay event loop: {error}"))?;
     let mut app = OverlayDemoApp::default();
@@ -30,14 +302,14 @@ pub fn run_overlay_demo() -> Result<(), String> {
         .map_err(|error| format!("overlay event loop failed: {error}"))
 }
 
-pub fn ensure_overlay_support() -> Result<(), String> {
+fn ensure_sidecar_support() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         let has_display =
-            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
+            env::var_os("DISPLAY").is_some() || env::var_os("WAYLAND_DISPLAY").is_some();
         if !has_display {
             return Err(String::from(
-                "experimental overlay requires a desktop session with DISPLAY or WAYLAND_DISPLAY",
+                "experimental sidecar overlay requires a desktop session with DISPLAY or WAYLAND_DISPLAY",
             ));
         }
     }
@@ -45,7 +317,7 @@ pub fn ensure_overlay_support() -> Result<(), String> {
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         return Err(String::from(
-            "experimental overlay is only supported on macOS, Linux, or Windows desktop builds",
+            "experimental sidecar overlay is only supported on macOS, Linux, or Windows desktop builds",
         ));
     }
 
@@ -190,7 +462,14 @@ fn render_overlay_frame(state: &mut OverlayRenderState, event_loop: &ActiveEvent
     let elapsed = state.started_at.elapsed().as_secs_f32();
 
     let mut scene = Scene::new();
-    build_overlay_demo_scene(&mut scene, &mut state.text_system, width, height, elapsed);
+    build_overlay_demo_scene(
+        &mut scene,
+        &mut state.text_system,
+        width,
+        height,
+        elapsed,
+        OverlayPresentation::SidecarWindow,
+    );
 
     let output = match state.surface.get_current_texture() {
         Ok(output) => output,
@@ -249,6 +528,7 @@ fn build_overlay_demo_scene(
     width: f32,
     height: f32,
     time: f32,
+    presentation: OverlayPresentation,
 ) {
     let mut paint = PaintContext::new(scene, text_system, 1.0);
     let root = Bounds::new(0.0, 0.0, width, height);
@@ -265,7 +545,7 @@ fn build_overlay_demo_scene(
     );
     paint.scene.draw_text(title);
     let subtitle = paint.text.layout(
-        "Ctrl+G launches this sidecar from `probe tui`. Esc or close the window to dismiss it.",
+        overlay_subtitle(presentation),
         Point::new(26.0, 38.0),
         11.0,
         theme::text::SECONDARY,
@@ -289,7 +569,7 @@ fn build_overlay_demo_scene(
     panel::paint_shell(left, viz_theme::track::PGOLF, &mut paint);
     panel::paint_title(left, "OVERLAY STATUS", viz_theme::track::PGOLF, &mut paint);
     panel::paint_texture(left, viz_theme::track::PGOLF, phase, &mut paint);
-    paint_overlay_badges(left, &mut paint);
+    paint_overlay_badges(left, presentation, &mut paint);
 
     panel::paint_shell(chart, viz_theme::series::LOSS, &mut paint);
     panel::paint_title(
@@ -329,7 +609,7 @@ fn build_overlay_demo_scene(
         viz_theme::series::LOSS,
         phase,
         Some("probe.overlay.demo // synthetic cadence and tool-load telemetry"),
-        Some("This is an experimental non-portable visual sidecar, not the default TUI renderer."),
+        Some(chart_body_note(presentation)),
         "No overlay history available.",
         &chart_series,
         &mut paint,
@@ -342,33 +622,62 @@ fn build_overlay_demo_scene(
         viz_theme::series::EVENTS,
         phase,
         "No overlay events recorded.",
-        &overlay_feed_rows(time),
+        &overlay_feed_rows(time, presentation),
         &mut paint,
     );
 }
 
-fn overlay_feed_rows(time: f32) -> [EventFeedRow<'static>; 4] {
+fn overlay_subtitle(presentation: OverlayPresentation) -> &'static str {
+    match presentation {
+        OverlayPresentation::SidecarWindow => {
+            "Ctrl+G can fall back to this sidecar from `probe tui`. Esc or close the window to dismiss it."
+        }
+        OverlayPresentation::TerminalInline => {
+            "Ctrl+G can render this scene back into supported terminals. Press Enter to return to Probe."
+        }
+    }
+}
+
+fn chart_body_note(presentation: OverlayPresentation) -> &'static str {
+    match presentation {
+        OverlayPresentation::SidecarWindow => {
+            "This is an experimental non-portable visual sidecar, not the default TUI renderer."
+        }
+        OverlayPresentation::TerminalInline => {
+            "This is an experimental non-portable inline image lane driven by offscreen WGPUI capture."
+        }
+    }
+}
+
+fn overlay_feed_rows(time: f32, presentation: OverlayPresentation) -> [EventFeedRow<'static>; 4] {
     let pulse = ((time * 1.4).sin() + 1.0) * 0.5;
+    let (launch_detail, renderer_detail, focus_detail) = match presentation {
+        OverlayPresentation::SidecarWindow => (
+            "The Probe TUI launched a WGPUI sidecar without surrendering terminal ownership.",
+            "This lane is intentionally experimental and should remain capability-gated.",
+            "Terminal input stays in Probe while the sidecar owns pointer and window focus.",
+        ),
+        OverlayPresentation::TerminalInline => (
+            "The Probe TUI handed the terminal to an inline WGPUI image overlay for review.",
+            "Pixels come from offscreen WGPUI capture plus a terminal image protocol, not ratatui cells.",
+            "Probe returns after dismissal, re-enters the alternate screen, and redraws the TUI.",
+        ),
+    };
+
     [
         EventFeedRow {
             label: Cow::Borrowed("overlay_hotkey"),
-            detail: Cow::Borrowed(
-                "The Probe TUI launched a WGPUI sidecar without surrendering terminal ownership.",
-            ),
+            detail: Cow::Borrowed(launch_detail),
             color: badge_color(BadgeTone::Live),
         },
         EventFeedRow {
             label: Cow::Borrowed("renderer_mode"),
-            detail: Cow::Borrowed(
-                "This lane is intentionally experimental and should remain capability-gated.",
-            ),
+            detail: Cow::Borrowed(renderer_detail),
             color: provenance_color(ProvenanceTone::Evidence),
         },
         EventFeedRow {
             label: Cow::Borrowed("focus_model"),
-            detail: Cow::Borrowed(
-                "Terminal input stays in Probe while the sidecar owns pointer and window focus.",
-            ),
+            detail: Cow::Borrowed(focus_detail),
             color: node_state_color(TopologyNodeState::Warning),
         },
         EventFeedRow {
@@ -393,13 +702,42 @@ fn build_series(base: f32, time: f32, amplitude: f32, drift: f32, frequency: f32
         .collect()
 }
 
-fn paint_overlay_badges(bounds: Bounds, paint: &mut PaintContext) {
-    let lines = [
-        "Mode: experimental sidecar",
-        "Host: Probe TUI + separate WGPUI window",
-        "Dismiss: Esc or window close",
-        "Purpose: richer visual telemetry proof, not terminal replacement",
-    ];
+fn paint_overlay_badges(
+    bounds: Bounds,
+    presentation: OverlayPresentation,
+    paint: &mut PaintContext,
+) {
+    let (lines, badges) = match presentation {
+        OverlayPresentation::SidecarWindow => (
+            [
+                "Mode: experimental sidecar",
+                "Host: Probe TUI + separate WGPUI window",
+                "Dismiss: Esc or window close",
+                "Purpose: richer visual telemetry proof, not terminal replacement",
+            ],
+            [
+                ("EXPERIMENTAL", badge_color(BadgeTone::Warning)),
+                ("TUI", badge_color(BadgeTone::TrackPgolf)),
+                ("WGPUI", badge_color(BadgeTone::TrackHomegolf)),
+                ("SIDECAR", badge_color(BadgeTone::TrackXtrain)),
+            ],
+        ),
+        OverlayPresentation::TerminalInline => (
+            [
+                "Mode: experimental inline image",
+                "Host: Probe TUI + iTerm2 image protocol",
+                "Dismiss: Enter to return",
+                "Purpose: richer visual telemetry proof inside the terminal",
+            ],
+            [
+                ("EXPERIMENTAL", badge_color(BadgeTone::Warning)),
+                ("TUI", badge_color(BadgeTone::TrackPgolf)),
+                ("WGPUI", badge_color(BadgeTone::TrackHomegolf)),
+                ("INLINE", badge_color(BadgeTone::TrackXtrain)),
+            ],
+        ),
+    };
+
     let mut y = bounds.origin.y + 38.0;
     for line in lines {
         paint.scene.draw_text(paint.text.layout(
@@ -411,12 +749,6 @@ fn paint_overlay_badges(bounds: Bounds, paint: &mut PaintContext) {
         y += 18.0;
     }
 
-    let badges = [
-        ("EXPERIMENTAL", badge_color(BadgeTone::Warning)),
-        ("TUI", badge_color(BadgeTone::TrackPgolf)),
-        ("WGPUI", badge_color(BadgeTone::TrackHomegolf)),
-        ("SIDECAR", badge_color(BadgeTone::TrackXtrain)),
-    ];
     let mut x = bounds.origin.x + 16.0;
     let badge_y = bounds.origin.y + 138.0;
     for (label, color) in badges {
@@ -441,4 +773,49 @@ fn draw_badge(bounds: Bounds, label: &str, color: Hsla, paint: &mut PaintContext
         10.0,
         color.with_alpha(0.94),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        TerminalImageProtocol, detect_terminal_image_protocol_with_inputs,
+        iterm2_inline_image_escape,
+    };
+
+    #[test]
+    fn iterm2_detection_requires_direct_interactive_session() {
+        let protocol = detect_terminal_image_protocol_with_inputs(
+            Some("iTerm.app"),
+            Some("iTerm2"),
+            true,
+            true,
+            false,
+            false,
+        );
+
+        assert_eq!(protocol, Some(TerminalImageProtocol::ITerm2InlineImage));
+    }
+
+    #[test]
+    fn iterm2_detection_refuses_tmux_passthrough_in_first_cut() {
+        let protocol = detect_terminal_image_protocol_with_inputs(
+            Some("iTerm.app"),
+            Some("iTerm2"),
+            true,
+            true,
+            true,
+            false,
+        );
+
+        assert_eq!(protocol, None);
+    }
+
+    #[test]
+    fn iterm2_escape_wraps_base64_payload() {
+        let escape = iterm2_inline_image_escape(b"probe");
+
+        assert!(escape.starts_with("\u{1b}]1337;File=inline=1"));
+        assert!(escape.contains("cHJvYmU="));
+        assert!(escape.ends_with('\u{7}'));
+    }
 }

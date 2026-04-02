@@ -1171,9 +1171,17 @@ fn collect_code_search_matches_without_ripgrep(
 
     if path.is_dir() {
         let mut entries = fs::read_dir(path)
-            .map_err(|error| ToolInvocationError::ExecutionFailed(format!("failed to read search directory: {error}")))?
+            .map_err(|error| {
+                ToolInvocationError::ExecutionFailed(format!(
+                    "failed to read search directory: {error}"
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| ToolInvocationError::ExecutionFailed(format!("failed to read search directory: {error}")))?;
+            .map_err(|error| {
+                ToolInvocationError::ExecutionFailed(format!(
+                    "failed to read search directory: {error}"
+                ))
+            })?;
         entries.sort_by_key(|entry| entry.path());
         for entry in entries {
             collect_code_search_matches_without_ripgrep(
@@ -1899,8 +1907,27 @@ fn looks_like_natural_language_shell_misuse(command: &str) -> bool {
     let has_shell_punctuation = trimmed.chars().any(|ch| {
         matches!(
             ch,
-            '/' | '\\' | '.' | '-' | '_' | '=' | ':' | '$' | '~' | '*' | '|' | '&' | ';' | '<'
-                | '>' | '(' | ')' | '[' | ']' | '{' | '}' | '@'
+            '/' | '\\'
+                | '.'
+                | '-'
+                | '_'
+                | '='
+                | ':'
+                | '$'
+                | '~'
+                | '*'
+                | '|'
+                | '&'
+                | ';'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '@'
         )
     });
 
@@ -1914,8 +1941,7 @@ fn looks_like_natural_language_shell_misuse(command: &str) -> bool {
 fn is_common_shell_command(token: &str) -> bool {
     matches!(
         token,
-        "ls"
-            | "cat"
+        "ls" | "cat"
             | "pwd"
             | "cd"
             | "git"
@@ -2478,7 +2504,10 @@ fn render_shell_model_text(output: &serde_json::Value) -> String {
         .get("stderr_truncated")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    let mut lines = vec![format!("timed_out: {timed_out}"), format!("exit_code: {exit_code}")];
+    let mut lines = vec![
+        format!("timed_out: {timed_out}"),
+        format!("exit_code: {exit_code}"),
+    ];
     if !stdout.is_empty() {
         lines.push(format!("stdout_truncated: {stdout_truncated}"));
         lines.push(String::from("output:"));
@@ -2502,8 +2531,10 @@ fn simple_glob_matches(glob: &str, candidate: &str) -> bool {
             return candidate.is_empty();
         }
         match glob[0] {
-            b'*' => inner(&glob[1..], candidate)
-                || (!candidate.is_empty() && inner(glob, &candidate[1..])),
+            b'*' => {
+                inner(&glob[1..], candidate)
+                    || (!candidate.is_empty() && inner(glob, &candidate[1..]))
+            }
             b'?' => !candidate.is_empty() && inner(&glob[1..], &candidate[1..]),
             byte => {
                 !candidate.is_empty() && byte == candidate[0] && inner(&glob[1..], &candidate[1..])
@@ -2800,20 +2831,11 @@ mod tests {
         .expect("write file");
         let context = ToolExecutionContext::new(tempdir.path());
 
-        let result = code_search_without_ripgrep(
-            &context,
-            tempdir.path(),
-            "beta",
-            ".",
-            None,
-            5,
-            false,
-        )
-        .expect("fallback code search should succeed");
+        let result =
+            code_search_without_ripgrep(&context, tempdir.path(), "beta", ".", None, 5, false)
+                .expect("fallback code search should succeed");
 
-        let matches = result.output["matches"]
-            .as_array()
-            .expect("matches array");
+        let matches = result.output["matches"].as_array().expect("matches array");
         assert_eq!(result.output["search_backend"], "rust_fallback");
         assert!(!matches.is_empty());
         assert_eq!(matches[0]["path"], "lib.rs");
@@ -2875,7 +2897,10 @@ mod tests {
             &ToolApprovalConfig::allow_all(),
         );
 
-        assert_eq!(results[0].tool_execution.policy_decision, ToolPolicyDecision::Approved);
+        assert_eq!(
+            results[0].tool_execution.policy_decision,
+            ToolPolicyDecision::Approved
+        );
         assert_eq!(
             results[0].output["error"],
             "shell requires a literal shell command, not a natural-language request"
