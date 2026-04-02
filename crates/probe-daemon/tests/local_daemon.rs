@@ -18,6 +18,7 @@ use probe_protocol::runtime::{
     DetachedSessionStatus, SpawnChildSessionRequest, StartSessionRequest,
     WatchDetachedSessionRequest,
 };
+use probe_protocol::session::SessionDeliveryStatus;
 use probe_server::detached_watchdog::DetachedTurnWatchdogPolicy;
 use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
@@ -271,6 +272,44 @@ fn daemon_emits_parent_child_updates_when_child_sessions_are_spawned() {
         record.payload,
         DetachedSessionEventPayload::ChildSessionUpdated { ref child }
             if child.session_id == child_response.session.session.id
+    )));
+
+    drop(client);
+    daemon.stop();
+}
+
+#[test]
+fn daemon_emits_workspace_state_updates_for_git_bound_sessions() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    initialize_git_workspace(environment.workspace());
+    let profile = test_profile("http://127.0.0.1:9/v1");
+    let mut daemon = DaemonProcess::start(environment.probe_home());
+    let mut client = daemon_client(environment.probe_home());
+    let session = client
+        .start_session(StartSessionRequest {
+            title: Some(String::from("git-bound session")),
+            cwd: environment.workspace().to_path_buf(),
+            profile,
+            system_prompt: None,
+            harness_profile: None,
+        })
+        .expect("daemon should start git-bound session");
+    assert!(session.branch_state.is_some());
+    assert_eq!(
+        session.delivery_state.as_ref().map(|state| state.status),
+        Some(SessionDeliveryStatus::LocalOnly)
+    );
+
+    let log = client
+        .read_detached_session_log(&session.session.id, None, 20)
+        .expect("git-bound session log should be readable");
+    assert!(log.events.iter().any(|record| matches!(
+        record.payload,
+        DetachedSessionEventPayload::WorkspaceStateUpdated {
+            branch_state: Some(_),
+            delivery_state: Some(_),
+        }
     )));
 
     drop(client);
@@ -816,6 +855,24 @@ fn test_profile(base_url: &str) -> BackendProfile {
         attach_mode: ServerAttachMode::AttachToExisting,
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
     }
+}
+
+fn initialize_git_workspace(path: &Path) {
+    run_git(path, &["init", "-b", "main"]);
+    run_git(path, &["config", "user.email", "probe-tests@example.com"]);
+    run_git(path, &["config", "user.name", "Probe Tests"]);
+    run_git(path, &["add", "."]);
+    run_git(path, &["commit", "-m", "initial"]);
+}
+
+fn run_git(path: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .status()
+        .expect("git command should run");
+    assert!(status.success(), "git command failed: {args:?}");
 }
 
 fn delayed_completion_backend(delay: Duration, assistant_text: &str) -> FakeOpenAiServer {

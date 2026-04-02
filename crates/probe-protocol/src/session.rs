@@ -307,6 +307,53 @@ pub struct SessionChildSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionBranchState {
+    pub repo_root: PathBuf,
+    pub head_ref: String,
+    pub head_commit: String,
+    pub detached_head: bool,
+    pub working_tree_dirty: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead_by: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind_by: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionDeliveryStatus {
+    NeedsCommit,
+    LocalOnly,
+    NeedsPush,
+    Synced,
+    Diverged,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDeliveryArtifact {
+    pub kind: String,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDeliveryState {
+    pub status: SessionDeliveryStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_tracking_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compare_ref: Option<String>,
+    pub updated_at_ms: TimestampMs,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<SessionDeliveryArtifact>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMetadata {
     pub id: SessionId,
     pub title: String,

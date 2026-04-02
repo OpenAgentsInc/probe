@@ -5,9 +5,9 @@ use serde_json::Value;
 
 use crate::backend::BackendProfile;
 use crate::session::{
-    PendingToolApproval, SessionChildSummary, SessionHarnessProfile, SessionId, SessionMetadata,
-    SessionTurn, TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass,
-    TranscriptEvent, UsageMeasurement,
+    PendingToolApproval, SessionBranchState, SessionChildSummary, SessionDeliveryState,
+    SessionHarnessProfile, SessionId, SessionMetadata, SessionTurn, TimestampMs,
+    ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass, TranscriptEvent, UsageMeasurement,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +293,12 @@ pub enum DetachedSessionEventPayload {
     ChildSessionUpdated {
         child: SessionChildSummary,
     },
+    WorkspaceStateUpdated {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch_state: Option<SessionBranchState>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery_state: Option<SessionDeliveryState>,
+    },
     RuntimeProgress {
         delivery: EventDeliveryGuarantee,
         event: RuntimeProgressEvent,
@@ -354,6 +360,10 @@ pub struct InterruptTurnRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     pub session: SessionMetadata,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_state: Option<SessionBranchState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_state: Option<SessionDeliveryState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_sessions: Vec<SessionChildSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

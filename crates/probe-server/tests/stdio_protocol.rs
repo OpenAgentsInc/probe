@@ -14,7 +14,9 @@ use probe_protocol::runtime::{
     StartSessionRequest, ToolApprovalRecipe, ToolChoice, ToolDeniedAction, ToolLoopRecipe,
     ToolSetKind, TransportKind, TurnAuthor, TurnRequest,
 };
-use probe_protocol::session::{SessionId, ToolApprovalResolution, TranscriptItemKind};
+use probe_protocol::session::{
+    SessionDeliveryStatus, SessionId, ToolApprovalResolution, TranscriptItemKind,
+};
 use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
 const TEST_MODEL: &str = "tiny-qwen35";
@@ -239,6 +241,59 @@ fn spawn_child_session_rejects_mismatched_workspace_boundaries() {
     );
     let error = expect_protocol_error(response);
     assert_eq!(error.code, "child_workspace_mismatch");
+
+    harness.shutdown();
+}
+
+#[test]
+fn inspect_session_exposes_typed_branch_and_delivery_state() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    initialize_git_workspace(environment.workspace());
+    let profile = test_profile("http://127.0.0.1:9/v1");
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let session_id = start_test_session(&mut harness, &environment, &profile);
+
+    let inspect = harness.request(
+        "req-inspect-branch-state",
+        RuntimeRequest::InspectSession(SessionLookupRequest {
+            session_id: session_id.clone(),
+        }),
+    );
+    let RuntimeResponse::InspectSession(snapshot) = expect_ok_response(inspect) else {
+        panic!("expected inspect session response");
+    };
+    let branch_state = snapshot
+        .branch_state
+        .expect("branch state should be present");
+    assert_eq!(
+        branch_state
+            .repo_root
+            .canonicalize()
+            .expect("repo root should canonicalize"),
+        environment
+            .workspace()
+            .canonicalize()
+            .expect("workspace should canonicalize")
+    );
+    assert!(!branch_state.head_ref.is_empty());
+    assert!(!branch_state.head_commit.is_empty());
+    assert!(!branch_state.working_tree_dirty);
+
+    let delivery_state = snapshot
+        .delivery_state
+        .expect("delivery state should be present");
+    assert_eq!(delivery_state.status, SessionDeliveryStatus::LocalOnly);
+    assert_eq!(
+        delivery_state.branch_name.as_deref(),
+        Some(branch_state.head_ref.as_str())
+    );
+    assert!(
+        delivery_state
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "head_commit")
+    );
 
     harness.shutdown();
 }
@@ -899,4 +954,22 @@ fn test_profile(base_url: &str) -> BackendProfile {
         attach_mode: ServerAttachMode::AttachToExisting,
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
     }
+}
+
+fn initialize_git_workspace(path: &std::path::Path) {
+    run_git(path, &["init", "-b", "main"]);
+    run_git(path, &["config", "user.email", "probe-tests@example.com"]);
+    run_git(path, &["config", "user.name", "Probe Tests"]);
+    run_git(path, &["add", "."]);
+    run_git(path, &["commit", "-m", "initial"]);
+}
+
+fn run_git(path: &std::path::Path, args: &[&str]) {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .status()
+        .expect("git command should run");
+    assert!(status.success(), "git command failed: {args:?}");
 }

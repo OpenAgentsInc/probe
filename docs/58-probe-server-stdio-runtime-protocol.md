@@ -156,6 +156,8 @@ execution handlers are not serializable.
 `resume_session` and `inspect_session` return a `SessionSnapshot` with:
 
 - current session metadata
+- typed branch posture when the cwd is inside a git repo
+- typed forge-agnostic delivery posture derived from that branch state
 - typed child-session summaries when the session has delegated children
 - full stored transcript
 - currently pending approvals
@@ -174,12 +176,18 @@ and bounded delegation depth or count. Detached daemon transports also emit
 `child_session_updated` events back onto the parent session log when the child
 is created or its detached status changes.
 
+Detached daemon transports now also emit `workspace_state_updated` when Probe
+can resolve git-owned branch and delivery posture for the session workspace.
+That keeps branch name, upstream tracking, divergence, and compare posture on
+the typed server seam instead of making clients scrape `git status` or ad hoc
+shell output.
+
 ## Example
 
 Request:
 
 ```json
-{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":6}}
+{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":7}}
 ```
 
 Event:

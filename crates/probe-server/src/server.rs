@@ -36,8 +36,9 @@ use probe_protocol::runtime::{
     TurnResponse, TurnSubmissionKind, WatchDetachedSessionRequest, WatchDetachedSessionResponse,
 };
 use probe_protocol::session::{
-    SessionBackendTarget, SessionChildLink, SessionChildStatus, SessionChildSummary, SessionId,
-    SessionMetadata, SessionParentLink, UsageMeasurement, UsageTruth,
+    SessionBackendTarget, SessionBranchState, SessionChildLink, SessionChildStatus,
+    SessionChildSummary, SessionDeliveryArtifact, SessionDeliveryState, SessionDeliveryStatus,
+    SessionId, SessionMetadata, SessionParentLink, UsageMeasurement, UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
 
@@ -601,6 +602,10 @@ impl TurnControlPlane {
             previous.as_ref(),
             now_ms(),
         );
+        let branch_state = session_branch_state(metadata.cwd.as_path());
+        let delivery_state = branch_state
+            .as_ref()
+            .map(|branch_state| session_delivery_state(branch_state, now_ms()));
         let turn_control = state.inspect_view(session_id);
         registry
             .upsert(summary.clone())
@@ -617,6 +622,19 @@ impl TurnControlPlane {
                     now_ms(),
                 )
                 .map_err(detached_event_error_to_protocol)?;
+            if branch_state.is_some() || delivery_state.is_some() {
+                event_hub
+                    .append(
+                        session_id,
+                        DetachedSessionEventTruth::Authoritative,
+                        DetachedSessionEventPayload::WorkspaceStateUpdated {
+                            branch_state: branch_state.clone(),
+                            delivery_state: delivery_state.clone(),
+                        },
+                        now_ms(),
+                    )
+                    .map_err(detached_event_error_to_protocol)?;
+            }
             if let Some(parent_link) = metadata.parent_link.as_ref() {
                 event_hub
                     .append(
@@ -2581,8 +2599,14 @@ fn session_snapshot_from_core(
         .runtime
         .pending_tool_approvals(session_id)
         .map_err(runtime_error_to_protocol)?;
+    let branch_state = session_branch_state(session.cwd.as_path());
+    let delivery_state = branch_state
+        .as_ref()
+        .map(|branch_state| session_delivery_state(branch_state, now_ms()));
     Ok(SessionSnapshot {
         session,
+        branch_state,
+        delivery_state,
         child_sessions,
         transcript,
         pending_approvals,
@@ -2695,6 +2719,119 @@ fn session_child_status_from_detached(status: DetachedSessionStatus) -> SessionC
         DetachedSessionStatus::Cancelled => SessionChildStatus::Cancelled,
         DetachedSessionStatus::TimedOut => SessionChildStatus::TimedOut,
     }
+}
+
+fn session_branch_state(cwd: &Path) -> Option<SessionBranchState> {
+    let repo_root = resolve_git_repo_root(cwd)?;
+    let head_commit = run_git_string(cwd, &["rev-parse", "HEAD"])?;
+    let head_ref = run_git_string(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .or_else(|| run_git_string(cwd, &["rev-parse", "--short", "HEAD"]))?;
+    let detached_head =
+        run_git_string(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]).is_none();
+    let working_tree_dirty = run_git_string(cwd, &["status", "--porcelain"])
+        .is_some_and(|output| !output.trim().is_empty());
+    let upstream_ref = run_git_string(
+        cwd,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
+    let (ahead_by, behind_by) = upstream_ref
+        .as_ref()
+        .and_then(|_| {
+            run_git_string(
+                cwd,
+                &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+            )
+        })
+        .and_then(|counts| parse_ahead_behind(counts.as_str()))
+        .unwrap_or((None, None));
+    Some(SessionBranchState {
+        repo_root,
+        head_ref,
+        head_commit,
+        detached_head,
+        working_tree_dirty,
+        upstream_ref,
+        ahead_by,
+        behind_by,
+    })
+}
+
+fn session_delivery_state(branch_state: &SessionBranchState, now_ms: u64) -> SessionDeliveryState {
+    let status = if branch_state.working_tree_dirty {
+        SessionDeliveryStatus::NeedsCommit
+    } else if branch_state.behind_by.unwrap_or(0) > 0 {
+        SessionDeliveryStatus::Diverged
+    } else if branch_state.ahead_by.unwrap_or(0) > 0 {
+        SessionDeliveryStatus::NeedsPush
+    } else if branch_state.upstream_ref.is_some() {
+        SessionDeliveryStatus::Synced
+    } else {
+        SessionDeliveryStatus::LocalOnly
+    };
+    let branch_name = (!branch_state.detached_head).then(|| branch_state.head_ref.clone());
+    let compare_ref = branch_state.upstream_ref.as_ref().and_then(|upstream_ref| {
+        branch_name
+            .as_ref()
+            .map(|branch_name| format!("{upstream_ref}...{branch_name}"))
+    });
+    let mut artifacts = vec![SessionDeliveryArtifact {
+        kind: String::from("head_commit"),
+        value: branch_state.head_commit.clone(),
+        label: Some(String::from("Head commit")),
+    }];
+    artifacts.push(SessionDeliveryArtifact {
+        kind: String::from("head_ref"),
+        value: branch_state.head_ref.clone(),
+        label: Some(String::from("Head ref")),
+    });
+    if let Some(upstream_ref) = branch_state.upstream_ref.as_ref() {
+        artifacts.push(SessionDeliveryArtifact {
+            kind: String::from("upstream_ref"),
+            value: upstream_ref.clone(),
+            label: Some(String::from("Upstream ref")),
+        });
+    }
+    if let Some(compare_ref) = compare_ref.as_ref() {
+        artifacts.push(SessionDeliveryArtifact {
+            kind: String::from("compare_ref"),
+            value: compare_ref.clone(),
+            label: Some(String::from("Compare ref")),
+        });
+    }
+    SessionDeliveryState {
+        status,
+        branch_name,
+        remote_tracking_ref: branch_state.upstream_ref.clone(),
+        compare_ref,
+        updated_at_ms: now_ms,
+        artifacts,
+    }
+}
+
+fn run_git_string(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn parse_ahead_behind(counts: &str) -> Option<(Option<u64>, Option<u64>)> {
+    let mut parts = counts.split_whitespace();
+    let ahead_by = parts.next()?.parse::<u64>().ok();
+    let behind_by = parts.next()?.parse::<u64>().ok();
+    Some((ahead_by, behind_by))
 }
 
 fn detached_session_summary_from_state(

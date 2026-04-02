@@ -488,7 +488,11 @@ The remaining gap is around operating that supervision safely:
 
 A background agent should not stop at "files changed."
 
-Probe needs a typed branch-and-delivery lane that can:
+Probe now has typed branch and forge-agnostic delivery posture in session
+snapshots plus daemon `workspace_state_updated` events.
+
+The remaining gap is turning that posture into real delivery closure. Probe
+still needs a branch-and-delivery lane that can:
 
 - create or reuse a session branch
 - attribute commits to the user

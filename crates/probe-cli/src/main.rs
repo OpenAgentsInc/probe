@@ -2630,6 +2630,26 @@ fn render_detached_event_line(record: &DetachedSessionEventRecord) -> String {
             render_child_status(child.status),
             child.parent_turn_id.as_deref().unwrap_or("none"),
         ),
+        DetachedSessionEventPayload::WorkspaceStateUpdated {
+            branch_state,
+            delivery_state,
+        } => format!(
+            "cursor={} truth={} kind=workspace_state_updated branch={} upstream={} delivery={}",
+            record.cursor,
+            render_detached_truth(record.truth),
+            branch_state
+                .as_ref()
+                .map(|state| state.head_ref.as_str())
+                .unwrap_or("none"),
+            branch_state
+                .as_ref()
+                .and_then(|state| state.upstream_ref.as_deref())
+                .unwrap_or("none"),
+            delivery_state
+                .as_ref()
+                .map(|state| render_delivery_status(state.status))
+                .unwrap_or("none"),
+        ),
         DetachedSessionEventPayload::PendingApprovalsUpdated { approvals } => format!(
             "cursor={} truth={} kind=pending_approvals_updated approvals={}",
             record.cursor,
@@ -2656,6 +2676,16 @@ fn render_child_status(status: probe_protocol::session::SessionChildStatus) -> &
         probe_protocol::session::SessionChildStatus::Failed => "failed",
         probe_protocol::session::SessionChildStatus::Cancelled => "cancelled",
         probe_protocol::session::SessionChildStatus::TimedOut => "timed_out",
+    }
+}
+
+fn render_delivery_status(status: probe_protocol::session::SessionDeliveryStatus) -> &'static str {
+    match status {
+        probe_protocol::session::SessionDeliveryStatus::NeedsCommit => "needs_commit",
+        probe_protocol::session::SessionDeliveryStatus::LocalOnly => "local_only",
+        probe_protocol::session::SessionDeliveryStatus::NeedsPush => "needs_push",
+        probe_protocol::session::SessionDeliveryStatus::Synced => "synced",
+        probe_protocol::session::SessionDeliveryStatus::Diverged => "diverged",
     }
 }
 
