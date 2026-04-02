@@ -279,7 +279,9 @@ Probe also now ships an explicit experimental graphics lane. `Ctrl+G` in the
 TUI and `probe overlay demo` now prefer an in-terminal WGPUI image overlay when
 Probe detects a supported terminal graphics protocol. The first shipped
 terminal mode targets interactive iTerm2 sessions via the OSC 1337 inline image
-protocol. Unsupported terminals fall back to the separate desktop sidecar
+protocol. That inline lane now keeps the active Probe alt-screen alive, shows a
+loading surface immediately, and refreshes multiple WGPUI frames in place until
+dismissal. Unsupported terminals fall back to the separate desktop sidecar
 window, and `probe overlay demo --target sidecar` still forces that path.
 
 Keys:
@@ -289,7 +291,7 @@ Keys:
 - `Enter`: submit the composer
 - `Ctrl+J`: insert a newline
 - `Up`, `Down`: recall draft history
-- `Ctrl+G`: launch the experimental WGPUI sidecar
+- `Ctrl+G`: launch the experimental WGPUI overlay
 - `Ctrl+O`: add an attachment placeholder to the draft
 - `Ctrl+R`: rerun backend check when supported
 - `Ctrl+S`: open backend overlay

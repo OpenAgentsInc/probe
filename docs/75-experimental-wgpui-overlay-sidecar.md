@@ -15,10 +15,13 @@ Probe now ships an experimental overlay lane with two entrypoints:
 - `Ctrl+G` from `probe tui`
 - `probe overlay demo`
 
-The implementation launches a separate desktop WGPUI window that renders a
-synthetic telemetry view with status panels, a history chart, and an event
-feed. The TUI keeps terminal ownership and keeps running while the sidecar
-window owns desktop focus and pointer input.
+The sidecar described here is now the explicit fallback and forced
+`--target sidecar` path. On supported terminals, those entrypoints prefer the
+new inline-terminal lane documented in
+`76-experimental-terminal-inline-overlay.md`. When the sidecar path is used, it
+launches a separate desktop WGPUI window that renders a synthetic telemetry
+view with status panels, a history chart, and an event feed while the TUI keeps
+terminal ownership in the background.
 
 ## Why A Sidecar
 
