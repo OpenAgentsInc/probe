@@ -168,6 +168,8 @@ fn spawn_child_session_persists_parent_linkage_and_returns_child_status() {
             harness_profile: None,
             parent_turn_id: Some(String::from("turn-4")),
             parent_turn_index: Some(4),
+            author: Some(operator_author()),
+            purpose: Some(String::from("Fix the delegated branch")),
         }),
     );
     let RuntimeResponse::SpawnChildSession(response) = expect_ok_response(response) else {
@@ -177,6 +179,18 @@ fn spawn_child_session_persists_parent_linkage_and_returns_child_status() {
     assert_eq!(
         response.child.status,
         probe_protocol::session::SessionChildStatus::Idle
+    );
+    assert_eq!(
+        response
+            .child
+            .initiator
+            .as_ref()
+            .and_then(|initiator| initiator.display_name.as_deref()),
+        Some("operator")
+    );
+    assert_eq!(
+        response.child.purpose.as_deref(),
+        Some("Fix the delegated branch")
     );
     assert_eq!(response.child.parent_turn_id.as_deref(), Some("turn-4"));
     assert_eq!(response.child.parent_turn_index, Some(4));
@@ -212,6 +226,17 @@ fn spawn_child_session_persists_parent_linkage_and_returns_child_status() {
         snapshot.child_sessions[0].parent_turn_id.as_deref(),
         Some("turn-4")
     );
+    assert_eq!(
+        snapshot.child_sessions[0]
+            .initiator
+            .as_ref()
+            .and_then(|initiator| initiator.display_name.as_deref()),
+        Some("operator")
+    );
+    assert_eq!(
+        snapshot.child_sessions[0].purpose.as_deref(),
+        Some("Fix the delegated branch")
+    );
 
     harness.shutdown();
 }
@@ -237,6 +262,8 @@ fn spawn_child_session_rejects_mismatched_workspace_boundaries() {
             harness_profile: None,
             parent_turn_id: None,
             parent_turn_index: None,
+            author: None,
+            purpose: None,
         }),
     );
     let error = expect_protocol_error(response);
@@ -296,6 +323,108 @@ fn inspect_session_exposes_typed_branch_and_delivery_state() {
     );
 
     harness.shutdown();
+}
+
+#[test]
+fn parent_inspection_exposes_child_initiator_and_terminal_closure() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    initialize_git_workspace(environment.workspace());
+    let fake_backend = FakeOpenAiServer::from_responses(vec![FakeHttpResponse::text_event_stream(
+        200,
+        concat!(
+            "data: {\"id\":\"chatcmpl_child_done\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"child\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_child_done\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" complete\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_child_done\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n"
+        ),
+    )]);
+    let profile = test_profile(fake_backend.base_url());
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let parent_session_id = start_test_session(&mut harness, &environment, &profile);
+
+    let spawn = harness.request(
+        "req-spawn-child-closure",
+        RuntimeRequest::SpawnChildSession(SpawnChildSessionRequest {
+            parent_session_id: parent_session_id.clone(),
+            profile: profile.clone(),
+            title: Some(String::from("delegate closer")),
+            cwd: None,
+            system_prompt: None,
+            harness_profile: None,
+            parent_turn_id: Some(String::from("turn-7")),
+            parent_turn_index: Some(7),
+            author: Some(operator_author()),
+            purpose: Some(String::from("Finish the delegated fix")),
+        }),
+    );
+    let RuntimeResponse::SpawnChildSession(spawned) = expect_ok_response(spawn) else {
+        panic!("expected spawn child response");
+    };
+
+    harness.send_request(
+        "req-child-turn",
+        RuntimeRequest::ContinueTurn(TurnRequest {
+            session_id: spawned.session.session.id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("say child complete"),
+            author: Some(operator_author()),
+            tool_loop: None,
+        }),
+    );
+    let RuntimeResponse::ContinueTurn(turn) =
+        expect_ok_response(harness.read_until_response("req-child-turn").1)
+    else {
+        panic!("expected child turn response");
+    };
+    let probe_protocol::runtime::TurnResponse::Completed(completed) = turn else {
+        panic!("expected completed child turn response");
+    };
+    assert_eq!(completed.assistant_text, "child complete");
+
+    let inspect_parent = harness.request(
+        "req-inspect-parent-closure",
+        RuntimeRequest::InspectSession(SessionLookupRequest {
+            session_id: parent_session_id.clone(),
+        }),
+    );
+    let RuntimeResponse::InspectSession(snapshot) = expect_ok_response(inspect_parent) else {
+        panic!("expected inspect parent response");
+    };
+    let child = snapshot
+        .child_sessions
+        .iter()
+        .find(|child| child.session_id == spawned.session.session.id)
+        .expect("child summary should be visible on the parent");
+    assert_eq!(
+        child
+            .initiator
+            .as_ref()
+            .and_then(|initiator| initiator.display_name.as_deref()),
+        Some("operator")
+    );
+    assert_eq!(child.purpose.as_deref(), Some("Finish the delegated fix"));
+    assert_eq!(
+        child.closure.as_ref().map(|closure| closure.status),
+        Some(probe_protocol::session::SessionChildStatus::Completed)
+    );
+    assert_eq!(
+        child
+            .closure
+            .as_ref()
+            .and_then(|closure| closure.delivery_status),
+        Some(SessionDeliveryStatus::LocalOnly)
+    );
+    assert!(
+        child
+            .closure
+            .as_ref()
+            .and_then(|closure| closure.branch_name.as_deref())
+            .is_some()
+    );
+
+    harness.shutdown();
+    let requests = fake_backend.finish();
+    assert_eq!(requests.len(), 1);
 }
 
 #[test]

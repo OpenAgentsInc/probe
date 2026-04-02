@@ -270,6 +270,10 @@ pub struct SessionParentLink {
     pub turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiator: Option<SessionInitiator>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,10 +303,39 @@ pub struct SessionChildSummary {
     pub state: SessionState,
     pub status: SessionChildStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiator: Option<SessionInitiator>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_turn_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure: Option<SessionChildClosureSummary>,
     pub created_at_ms: TimestampMs,
+    pub updated_at_ms: TimestampMs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInitiator {
+    pub client_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChildClosureSummary {
+    pub status: SessionChildStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_status: Option<SessionDeliveryStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compare_ref: Option<String>,
     pub updated_at_ms: TimestampMs,
 }
 

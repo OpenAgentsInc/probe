@@ -36,9 +36,10 @@ use probe_protocol::runtime::{
     TurnResponse, TurnSubmissionKind, WatchDetachedSessionRequest, WatchDetachedSessionResponse,
 };
 use probe_protocol::session::{
-    SessionBackendTarget, SessionBranchState, SessionChildLink, SessionChildStatus,
-    SessionChildSummary, SessionDeliveryArtifact, SessionDeliveryState, SessionDeliveryStatus,
-    SessionId, SessionMetadata, SessionParentLink, UsageMeasurement, UsageTruth,
+    SessionBackendTarget, SessionBranchState, SessionChildClosureSummary, SessionChildLink,
+    SessionChildStatus, SessionChildSummary, SessionDeliveryArtifact, SessionDeliveryState,
+    SessionDeliveryStatus, SessionId, SessionInitiator, SessionMetadata, SessionParentLink,
+    UsageMeasurement, UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
 
@@ -647,8 +648,16 @@ impl TurnControlPlane {
                                 cwd: metadata.cwd.clone(),
                                 state: metadata.state,
                                 status: session_child_status_from_detached(summary.status),
+                                initiator: parent_link.initiator.clone(),
+                                purpose: parent_link.purpose.clone(),
                                 parent_turn_id: parent_link.turn_id.clone(),
                                 parent_turn_index: parent_link.turn_index,
+                                closure: session_child_closure(
+                                    session_child_status_from_detached(summary.status),
+                                    branch_state.as_ref(),
+                                    delivery_state.as_ref(),
+                                    metadata.updated_at_ms,
+                                ),
                                 created_at_ms: metadata.created_at_ms,
                                 updated_at_ms: metadata.updated_at_ms,
                             },
@@ -1623,6 +1632,10 @@ impl ProbeServerConnection {
                 .title
                 .or_else(|| Some(format!("{} Child", parent.title))),
         );
+        let initiator = request
+            .author
+            .as_ref()
+            .map(session_initiator_from_turn_author);
         let child = self
             .core
             .runtime
@@ -1640,6 +1653,8 @@ impl ProbeServerConnection {
                         session_id: request.parent_session_id.clone(),
                         turn_id: request.parent_turn_id,
                         turn_index: request.parent_turn_index,
+                        initiator,
+                        purpose: request.purpose,
                     })),
             )
             .map_err(session_store_error_to_protocol)?;
@@ -2582,8 +2597,18 @@ fn session_snapshot_from_core(
                     cwd: session.cwd.clone(),
                     state: probe_protocol::session::SessionState::Archived,
                     status: SessionChildStatus::Failed,
+                    initiator: None,
+                    purpose: None,
                     parent_turn_id: None,
                     parent_turn_index: None,
+                    closure: Some(SessionChildClosureSummary {
+                        status: SessionChildStatus::Failed,
+                        delivery_status: None,
+                        branch_name: None,
+                        head_commit: None,
+                        compare_ref: None,
+                        updated_at_ms: session.updated_at_ms,
+                    }),
                     created_at_ms: session.created_at_ms,
                     updated_at_ms: session.updated_at_ms,
                 }),
@@ -2634,12 +2659,24 @@ fn session_child_summary_from_runtime(
     } else {
         session_child_status_from_state(core, session_id)?
     };
+    let branch_state = session_branch_state(session.cwd.as_path());
+    let delivery_state = branch_state
+        .as_ref()
+        .map(|branch_state| session_delivery_state(branch_state, now_ms()));
     Ok(SessionChildSummary {
         session_id: session.id.clone(),
         title: session.title.clone(),
         cwd: session.cwd.clone(),
         state: session.state,
         status,
+        initiator: session
+            .parent_link
+            .as_ref()
+            .and_then(|link| link.initiator.clone()),
+        purpose: session
+            .parent_link
+            .as_ref()
+            .and_then(|link| link.purpose.clone()),
         parent_turn_id: session
             .parent_link
             .as_ref()
@@ -2648,6 +2685,12 @@ fn session_child_summary_from_runtime(
             .parent_link
             .as_ref()
             .and_then(|link| link.turn_index),
+        closure: session_child_closure(
+            status,
+            branch_state.as_ref(),
+            delivery_state.as_ref(),
+            session.updated_at_ms,
+        ),
         created_at_ms: session.created_at_ms,
         updated_at_ms: session.updated_at_ms,
     })
@@ -2660,6 +2703,16 @@ fn session_child_summary_from_snapshot(snapshot: &SessionSnapshot) -> SessionChi
         cwd: snapshot.session.cwd.clone(),
         state: snapshot.session.state,
         status: SessionChildStatus::Idle,
+        initiator: snapshot
+            .session
+            .parent_link
+            .as_ref()
+            .and_then(|link| link.initiator.clone()),
+        purpose: snapshot
+            .session
+            .parent_link
+            .as_ref()
+            .and_then(|link| link.purpose.clone()),
         parent_turn_id: snapshot
             .session
             .parent_link
@@ -2670,6 +2723,7 @@ fn session_child_summary_from_snapshot(snapshot: &SessionSnapshot) -> SessionChi
             .parent_link
             .as_ref()
             .and_then(|link| link.turn_index),
+        closure: None,
         created_at_ms: snapshot.session.created_at_ms,
         updated_at_ms: snapshot.session.updated_at_ms,
     }
@@ -2718,6 +2772,43 @@ fn session_child_status_from_detached(status: DetachedSessionStatus) -> SessionC
         DetachedSessionStatus::Failed => SessionChildStatus::Failed,
         DetachedSessionStatus::Cancelled => SessionChildStatus::Cancelled,
         DetachedSessionStatus::TimedOut => SessionChildStatus::TimedOut,
+    }
+}
+
+fn session_child_closure(
+    status: SessionChildStatus,
+    branch_state: Option<&SessionBranchState>,
+    delivery_state: Option<&SessionDeliveryState>,
+    updated_at_ms: u64,
+) -> Option<SessionChildClosureSummary> {
+    match status {
+        SessionChildStatus::Completed
+        | SessionChildStatus::Failed
+        | SessionChildStatus::Cancelled
+        | SessionChildStatus::TimedOut => Some(SessionChildClosureSummary {
+            status,
+            delivery_status: delivery_state.map(|state| state.status),
+            branch_name: delivery_state
+                .and_then(|state| state.branch_name.clone())
+                .or_else(|| branch_state.map(|state| state.head_ref.clone())),
+            head_commit: branch_state.map(|state| state.head_commit.clone()),
+            compare_ref: delivery_state.and_then(|state| state.compare_ref.clone()),
+            updated_at_ms,
+        }),
+        SessionChildStatus::Idle
+        | SessionChildStatus::Running
+        | SessionChildStatus::Queued
+        | SessionChildStatus::ApprovalPaused => None,
+    }
+}
+
+fn session_initiator_from_turn_author(
+    author: &probe_protocol::runtime::TurnAuthor,
+) -> SessionInitiator {
+    SessionInitiator {
+        client_name: author.client_name.clone(),
+        client_version: author.client_version.clone(),
+        display_name: author.display_name.clone(),
     }
 }
 

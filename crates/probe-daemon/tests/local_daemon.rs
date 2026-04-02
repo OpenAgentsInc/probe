@@ -15,7 +15,7 @@ use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, Serv
 use probe_protocol::default_local_daemon_socket_path;
 use probe_protocol::runtime::{
     DetachedSessionEventPayload, DetachedSessionEventTruth, DetachedSessionRecoveryState,
-    DetachedSessionStatus, SpawnChildSessionRequest, StartSessionRequest,
+    DetachedSessionStatus, SpawnChildSessionRequest, StartSessionRequest, TurnAuthor,
     WatchDetachedSessionRequest,
 };
 use probe_protocol::session::SessionDeliveryStatus;
@@ -253,6 +253,8 @@ fn daemon_emits_parent_child_updates_when_child_sessions_are_spawned() {
             harness_profile: None,
             parent_turn_id: Some(String::from("turn-12")),
             parent_turn_index: Some(12),
+            author: Some(operator_author()),
+            purpose: Some(String::from("Handle the delegated lane")),
         })
         .expect("daemon should spawn child session");
 
@@ -264,6 +266,17 @@ fn daemon_emits_parent_child_updates_when_child_sessions_are_spawned() {
         parent_snapshot.child_sessions[0].session_id,
         child_response.session.session.id
     );
+    assert_eq!(
+        parent_snapshot.child_sessions[0]
+            .initiator
+            .as_ref()
+            .and_then(|initiator| initiator.display_name.as_deref()),
+        Some("operator")
+    );
+    assert_eq!(
+        parent_snapshot.child_sessions[0].purpose.as_deref(),
+        Some("Handle the delegated lane")
+    );
 
     let log = client
         .read_detached_session_log(&parent_session_id, None, 20)
@@ -272,6 +285,11 @@ fn daemon_emits_parent_child_updates_when_child_sessions_are_spawned() {
         record.payload,
         DetachedSessionEventPayload::ChildSessionUpdated { ref child }
             if child.session_id == child_response.session.session.id
+                && child
+                    .initiator
+                    .as_ref()
+                    .and_then(|initiator| initiator.display_name.as_deref())
+                    == Some("operator")
     )));
 
     drop(client);
@@ -841,6 +859,14 @@ fn wait_for_detached_status(
         thread::sleep(Duration::from_millis(25));
     }
     panic!("timed out waiting for detached status {expected:?}: {last_summary:?}");
+}
+
+fn operator_author() -> TurnAuthor {
+    TurnAuthor {
+        client_name: String::from("probe-daemon-test"),
+        client_version: Some(String::from("0.1.0")),
+        display_name: Some(String::from("operator")),
+    }
 }
 
 fn test_profile(base_url: &str) -> BackendProfile {

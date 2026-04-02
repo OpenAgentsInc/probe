@@ -158,7 +158,9 @@ execution handlers are not serializable.
 - current session metadata
 - typed branch posture when the cwd is inside a git repo
 - typed forge-agnostic delivery posture derived from that branch state
-- typed child-session summaries when the session has delegated children
+- typed child-session summaries when the session has delegated children,
+  including initiator identity, delegation purpose, and terminal closure
+  summaries when the child finishes
 - full stored transcript
 - currently pending approvals
 
@@ -174,7 +176,9 @@ and control view.
 a child session with an explicit parent link, conservative same-repo guardrails,
 and bounded delegation depth or count. Detached daemon transports also emit
 `child_session_updated` events back onto the parent session log when the child
-is created or its detached status changes.
+is created or its detached status changes, and those child summaries now carry
+runtime-owned initiator, purpose, and terminal closure fields instead of
+forcing hosts to infer delegated ownership from transcript prose.
 
 Detached daemon transports now also emit `workspace_state_updated` when Probe
 can resolve git-owned branch and delivery posture for the session workspace.
@@ -187,7 +191,7 @@ shell output.
 Request:
 
 ```json
-{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":7}}
+{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":8}}
 ```
 
 Event:
