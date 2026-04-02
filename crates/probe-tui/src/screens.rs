@@ -2432,6 +2432,18 @@ fn render_remote_contract_lines(summary: &ServerOperatorSummary) -> Vec<&'static
             "tool execution, approvals, transcripts, and the TUI remain local to Probe",
         ],
         probe_protocol::backend::BackendKind::OpenAiChatCompletions
+            if matches!(
+                summary.control_plane,
+                Some(probe_protocol::backend::BackendControlPlaneKind::PsionicInferenceMesh)
+            ) =>
+        {
+            vec![
+                "Probe discovers routed inventory from Psionic mesh management state before attach",
+                "mesh startup, warmup, and route execution remain owned by Psionic",
+                "tool execution, approvals, transcripts, and the TUI remain local to Probe",
+            ]
+        }
+        probe_protocol::backend::BackendKind::OpenAiChatCompletions
         | probe_protocol::backend::BackendKind::AppleFmBridge => vec![
             "only model inference is delegated to the backend target",
             "tool execution, approvals, transcripts, and the TUI remain local to Probe",

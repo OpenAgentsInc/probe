@@ -8,8 +8,8 @@ use probe_protocol::default_local_daemon_socket_path;
 use probe_protocol::runtime::{DetachedSessionStatus, StartSessionRequest};
 use probe_test_support::{
     FakeHttpResponse, ProbeTestEnvironment, configure_snapshot_root,
-    normalize_chat_stderr_for_snapshot, normalized_tui_smoke_report_snapshot, probe_cli_command,
-    write_openai_attach_server_config,
+    normalize_chat_stderr_for_snapshot, normalize_test_paths, normalized_tui_smoke_report_snapshot,
+    probe_cli_command, write_openai_attach_server_config,
 };
 use serde_json::{Value, json};
 use std::io::Write;
@@ -153,6 +153,7 @@ fn tui_process_can_resume_detached_daemon_session() {
         .probe_home()
         .join("reports/tui_resume_attach_only.json");
     let server = probe_test_support::FakeOpenAiServer::from_json_responses(vec![
+        models_response(),
         json!({
             "id": "chatcmpl_probe_tui_tool_resume_1",
             "model": TEST_MODEL,
@@ -189,6 +190,7 @@ fn tui_process_can_resume_detached_daemon_session() {
                 "total_tokens": 30
             }
         }),
+        models_response(),
     ]);
     write_openai_attach_server_config(&environment, &server, TEST_MODEL);
 
@@ -259,7 +261,11 @@ fn tui_process_can_resume_detached_daemon_session() {
         .expect("tui test daemon should stop cleanly");
 
     let requests = server.finish();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 4);
+    assert!(requests[0].contains("GET /v1/models HTTP/1.1"));
+    assert!(requests[1].contains("read_file"));
+    assert!(requests[2].contains("Probe acceptance fixture"));
+    assert!(requests[3].contains("GET /v1/models HTTP/1.1"));
 }
 
 #[test]
@@ -269,6 +275,7 @@ fn tui_process_smoke_drives_a_real_background_turn() {
     environment.seed_coding_workspace();
     let report_path = environment.probe_home().join("reports/tui_smoke.json");
     let server = probe_test_support::FakeOpenAiServer::from_json_responses(vec![
+        models_response(),
         json!({
             "id": "chatcmpl_probe_tui_tool_1",
             "model": TEST_MODEL,
@@ -329,9 +336,10 @@ fn tui_process_smoke_drives_a_real_background_turn() {
     assert_json_snapshot!("tui_smoke_report", report);
 
     let requests = server.finish();
-    assert_eq!(requests.len(), 2);
-    assert!(requests[0].contains("read_file"));
-    assert!(requests[1].contains("Probe acceptance fixture"));
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].contains("GET /v1/models HTTP/1.1"));
+    assert!(requests[1].contains("read_file"));
+    assert!(requests[2].contains("Probe acceptance fixture"));
 }
 
 #[test]
@@ -659,6 +667,8 @@ fn test_profile(base_url: &str) -> BackendProfile {
         timeout_secs: 30,
         attach_mode: ServerAttachMode::AttachToExisting,
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        control_plane: None,
+        psionic_mesh: None,
     }
 }
 
@@ -667,16 +677,20 @@ fn normalize_daemon_cli_snapshot(
     environment: &ProbeTestEnvironment,
     session_id: &str,
 ) -> String {
-    let normalized = value
-        .replace(
-            environment.probe_home().to_str().expect("probe home utf-8"),
-            "<PROBE_HOME>",
-        )
-        .replace(
-            environment.workspace().to_str().expect("workspace utf-8"),
-            "<WORKSPACE>",
-        )
-        .replace(session_id, "<SESSION_ID>");
+    let normalized = normalize_test_paths(
+        value
+            .replace(
+                environment.probe_home().to_str().expect("probe home utf-8"),
+                "<PROBE_HOME>",
+            )
+            .replace(
+                environment.workspace().to_str().expect("workspace utf-8"),
+                "<WORKSPACE>",
+            )
+            .replace(session_id, "<SESSION_ID>")
+            .as_str(),
+        environment,
+    );
     let normalized = normalize_key_value_field(normalized.as_str(), "requested_at_ms", "<TS>");
     let normalized = normalize_key_value_field(normalized.as_str(), "started_at_ms", "<TS>");
     let normalized = normalize_key_value_field(normalized.as_str(), "last_progress_at_ms", "<TS>");

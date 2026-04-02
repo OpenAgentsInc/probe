@@ -14,7 +14,8 @@ Current shipped surface:
 - `probe codex login|status|logout` for ChatGPT/Codex subscription auth
 - `probe tui` / `cargo probe` for the local terminal UI plus explicit
   detached-session reattach with `--resume`
-- three inference lanes in the TUI: Codex, Qwen or Tailnet, and Apple FM
+- three inference lanes in the TUI: Codex, Psionic OpenAI-compatible
+  attach targets including Mesh, Qwen or Tailnet, and Apple FM
 - `probe-server` for the first typed local stdio supervision contract
 - `probe-daemon` for the first long-lived local Unix-socket supervision path
 - `probe daemon run|stop` plus `probe ps|attach|logs|stop` for local detached
@@ -28,11 +29,18 @@ Current shipped surface:
 
 ## Backends
 
-Probe currently ships three backend families:
+Probe currently ships four backend profiles across three backend families:
 
 - `psionic-qwen35-2b-q8-registry`
   - base URL: `http://127.0.0.1:8080/v1`
   - model: `qwen3.5-2b-q8_0-registry.gguf`
+- `psionic-inference-mesh`
+  - attach target: Psionic OpenAI-compatible server plus
+    `/psionic/management/status`
+  - default base URL: `http://127.0.0.1:8080/v1`
+  - selected model: resolved from live mesh management state
+  - stored metadata: routed model inventory, local mesh role or posture, and
+    proxied fallback truth
 - `openai-codex-subscription`
   - base URL: `https://chatgpt.com/backend-api/codex`
   - request endpoint: `https://chatgpt.com/backend-api/codex/responses`
@@ -48,6 +56,11 @@ Apple FM is attach-only. Probe checks `GET /health` before use and stays honest
 about unavailable or non-admitted machines.
 Codex is also attach-only, but its attach target is the hosted ChatGPT Codex
 endpoint rather than a local Psionic server.
+The mesh profile is attach-only as well. Probe discovers live routed inventory
+from `GET /psionic/management/status`, picks the effective model from that
+inventory, prints the mesh role or fallback posture in operator output, and
+stores the same typed snapshot in session metadata without pretending it owns
+mesh startup or warmup.
 Tool-enabled Codex turns default to the Probe-owned
 `coding_bootstrap_codex@v1` prompt contract, while plain Codex turns use a
 small Codex-specific system prompt instead of the generic local-Qwen path.
@@ -76,6 +89,15 @@ Start an interactive Codex-backed session:
 
 ```bash
 cargo run -p probe-cli -- chat --profile openai-codex-subscription
+```
+
+Start an interactive Psionic mesh-backed session:
+
+```bash
+cargo run -p probe-cli -- chat \
+  --profile psionic-inference-mesh \
+  --server-host 100.88.7.9 \
+  --server-port 8080
 ```
 
 Run the local stdio server contract directly:

@@ -3,12 +3,12 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
-use sha2::{Digest, Sha256};
 use probe_protocol::session::{
     CacheSignal, SessionId, SessionMetadata, ToolPolicyDecision, TranscriptEvent,
     TranscriptItemKind,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::session_store::{FilesystemSessionStore, SessionStoreError};
 
@@ -661,8 +661,8 @@ pub fn build_decision_cases(
 
         let requested_task_kind = requested_task_kind_from_tool_call(tool_call)
             .unwrap_or_else(|| String::from("change_impact"));
-        let requested_evidence_files =
-            requested_evidence_files_from_tool_call(tool_call).unwrap_or_else(|| {
+        let requested_evidence_files = requested_evidence_files_from_tool_call(tool_call)
+            .unwrap_or_else(|| {
                 pre_turn_summary
                     .repo_analysis_files
                     .len()
@@ -879,9 +879,11 @@ fn decision_case_split_from_digest(digest: &str) -> DecisionCaseSplit {
 fn first_named_tool_call(
     event: &TranscriptEvent,
 ) -> Option<&probe_protocol::session::TranscriptItem> {
-    event.turn.items.iter().find(|item| {
-        item.kind == TranscriptItemKind::ToolCall && item.name.as_ref().is_some()
-    })
+    event
+        .turn
+        .items
+        .iter()
+        .find(|item| item.kind == TranscriptItemKind::ToolCall && item.name.as_ref().is_some())
 }
 
 fn sum_user_message_chars(event: &TranscriptEvent) -> usize {
@@ -1236,18 +1238,19 @@ mod tests {
             serde_json::from_str(all_cases.lines().next().expect("first case line"))
                 .expect("parse case");
         assert_eq!(first_case["session_id"], metadata.id.as_str());
-        assert_eq!(first_case["source_transcript_path"], serde_json::json!(metadata.transcript_path));
+        assert_eq!(
+            first_case["source_transcript_path"],
+            serde_json::json!(metadata.transcript_path)
+        );
         assert!(first_case["stable_digest"].as_str().is_some());
         assert!(
-            matches!(
-                first_case["split"].as_str(),
-                Some("train" | "validation")
-            ),
+            matches!(first_case["split"].as_str(), Some("train" | "validation")),
             "case split should be train or validation"
         );
 
-        let split_manifest = fs::read_to_string(output_path.join("decision_case_split_manifest.json"))
-            .expect("read split manifest");
+        let split_manifest =
+            fs::read_to_string(output_path.join("decision_case_split_manifest.json"))
+                .expect("read split manifest");
         let manifest: serde_json::Value =
             serde_json::from_str(&split_manifest).expect("parse split manifest");
         assert_eq!(manifest["total_sessions"], 1);

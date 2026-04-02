@@ -1,6 +1,6 @@
 ---
 source: crates/probe-cli/tests/binary_e2e.rs
-assertion_line: 191
+assertion_line: 335
 expression: report
 ---
 {

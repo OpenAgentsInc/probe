@@ -622,7 +622,10 @@ impl ProbeServerCore {
         let Some(registry) = self.detached_registry.as_ref() else {
             return Ok(());
         };
-        for summary in registry.list().map_err(detached_registry_error_to_protocol)? {
+        for summary in registry
+            .list()
+            .map_err(detached_registry_error_to_protocol)?
+        {
             self.finalize_hosted_cleanup_for_session(&summary.session_id, trigger)?;
         }
         Ok(())
@@ -1970,11 +1973,7 @@ impl ProbeServerConnection {
                 NewSession::new(normalize_session_title(title), cwd)
                     .with_system_prompt(system_prompt)
                     .with_harness_profile(harness_profile)
-                    .with_backend(SessionBackendTarget {
-                        profile_name: profile.name,
-                        base_url: profile.base_url,
-                        model: profile.model,
-                    })
+                    .with_backend(SessionBackendTarget::from_profile(&profile))
                     .with_runtime_owner(Some(self.core.runtime_owner.clone()))
                     .with_workspace_state(workspace_state)
                     .with_mounted_refs(mounted_refs),
@@ -2038,11 +2037,7 @@ impl ProbeServerConnection {
                 NewSession::new(child_title, child_cwd)
                     .with_system_prompt(request.system_prompt)
                     .with_harness_profile(request.harness_profile)
-                    .with_backend(SessionBackendTarget {
-                        profile_name: request.profile.name,
-                        base_url: request.profile.base_url,
-                        model: request.profile.model,
-                    })
+                    .with_backend(SessionBackendTarget::from_profile(&request.profile))
                     .with_runtime_owner(Some(self.core.runtime_owner.clone()))
                     .with_workspace_state(workspace_state)
                     .with_mounted_refs(mounted_refs)
@@ -5399,6 +5394,8 @@ mod tests {
             timeout_secs: 30,
             attach_mode: ServerAttachMode::AttachToExisting,
             prefix_cache_mode: PrefixCacheMode::BackendDefault,
+            control_plane: None,
+            psionic_mesh: None,
         };
         let loop_recipe = ToolLoopRecipe {
             tool_set: ToolSetKind::CodingBootstrap,

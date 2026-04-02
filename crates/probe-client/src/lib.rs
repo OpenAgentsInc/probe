@@ -989,7 +989,8 @@ fn reserve_local_tcp_port(host: &str, requested: Option<u16>) -> Result<u16, Pro
     if let Some(port) = requested {
         return Ok(port);
     }
-    let listener = TcpListener::bind(format!("{host}:0")).map_err(ProbeClientError::ConnectHosted)?;
+    let listener =
+        TcpListener::bind(format!("{host}:0")).map_err(ProbeClientError::ConnectHosted)?;
     let port = listener
         .local_addr()
         .map_err(ProbeClientError::ConnectHosted)?
@@ -998,10 +999,7 @@ fn reserve_local_tcp_port(host: &str, requested: Option<u16>) -> Result<u16, Pro
     Ok(port)
 }
 
-fn wait_for_hosted_tunnel(
-    address: &str,
-    child: &mut Child,
-) -> Result<TcpStream, ProbeClientError> {
+fn wait_for_hosted_tunnel(address: &str, child: &mut Child) -> Result<TcpStream, ProbeClientError> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut last_error = None;
     while Instant::now() < deadline {
@@ -1009,11 +1007,7 @@ fn wait_for_hosted_tunnel(
             Ok(stream) => return Ok(stream),
             Err(error) => {
                 last_error = Some(error);
-                if child
-                    .try_wait()
-                    .map_err(ProbeClientError::Spawn)?
-                    .is_some()
-                {
+                if child.try_wait().map_err(ProbeClientError::Spawn)?.is_some() {
                     break;
                 }
                 thread::sleep(Duration::from_millis(50));
@@ -2191,8 +2185,11 @@ mod tests {
             .join("workspaces")
             .join("restart-reap");
         fs::create_dir_all(&managed_workspace).expect("create managed hosted workspace");
-        fs::write(managed_workspace.join("README.md"), "# restart cleanup proof\n")
-            .expect("seed managed workspace");
+        fs::write(
+            managed_workspace.join("README.md"),
+            "# restart cleanup proof\n",
+        )
+        .expect("seed managed workspace");
         let fake_backend = delayed_completion_backend(Duration::from_millis(25), "completed");
         let profile = test_profile(fake_backend.base_url());
         let address = reserve_loopback_addr();
@@ -2231,8 +2228,11 @@ mod tests {
             .expect("hosted queue turn should be accepted");
         drop(client);
 
-        let completed =
-            wait_for_detached_status(config.clone(), &session_id, DetachedSessionStatus::Completed);
+        let completed = wait_for_detached_status(
+            config.clone(),
+            &session_id,
+            DetachedSessionStatus::Completed,
+        );
         assert_eq!(completed.status, DetachedSessionStatus::Completed);
         assert!(
             managed_workspace.exists(),
@@ -2948,6 +2948,8 @@ PY
             timeout_secs: 30,
             attach_mode: ServerAttachMode::AttachToExisting,
             prefix_cache_mode: PrefixCacheMode::BackendDefault,
+            control_plane: None,
+            psionic_mesh: None,
         }
     }
 }

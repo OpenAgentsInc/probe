@@ -8,6 +8,8 @@ That means:
 
 - loading a local server config
 - attaching to an already-running local server
+- discovering routed inventory from a Psionic mesh control plane when the
+  selected backend profile targets that lane
 - optionally launching `psionic-openai-server` as a supervised child process
 - distinguishing the current Psionic OpenAI-compatible lane from the Apple FM bridge attach lane
 
@@ -28,6 +30,7 @@ The config records:
 
 - mode
 - api kind
+- optional control-plane kind
 - host
 - port
 - backend
@@ -65,11 +68,27 @@ In this mode, Probe:
 Current readiness rules:
 
 - `open_ai_chat_completions`
-  - waits for `GET <base_url>/models`
+  - direct attach waits for `GET <base_url>/models`
+  - the `psionic-inference-mesh` profile instead reads
+    `GET <management_base_url>/psionic/management/status`
+  - resolves the effective model from the live routed inventory
+  - preserves targetable models, local mesh role, local posture, and proxied
+    fallback truth in typed session metadata
 - `apple_fm_bridge`
   - checks `GET <base_url>/health`
   - refuses early if the bridge reports the model unavailable and preserves the
     typed unavailability reason in the operator error
+
+Current mesh attach output includes:
+
+- `mesh_control_plane`
+  - management base URL, topology digest, and default routed model
+- `mesh_posture`
+  - local worker identity, served-mesh role, posture, reasons, execution mode,
+    and fallback posture
+- `mesh_model`
+  - one line per currently targetable warm model with endpoint and capability
+    truth
 
 ## Launch Mode
 
@@ -86,16 +105,19 @@ In `launch` mode, Probe:
 Current boundary:
 
 - managed launch is only implemented for the OpenAI-compatible Psionic lane
+- the mesh-backed OpenAI profile is attach-only
 - Apple FM is attach-only for now
 - that is intentional because the Apple FM bridge does not share the same
   `psionic-openai-server` launch contract
+- that is also intentional because Probe must not claim ownership of Psionic
+  mesh bootstrap, join, warmup, or rebalance semantics
 
 ## Current Boundary
 
 The launcher is intentionally narrow:
 
 - one child-process supervision path
-- one health-check rule
+- one direct attach readiness rule plus one mesh-management discovery rule
 - no embedded serving logic
 - no attempt to replace Psionic startup semantics
 

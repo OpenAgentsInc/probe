@@ -9,7 +9,8 @@ use crossterm::terminal::{
 };
 use probe_core::backend_profiles::{
     next_reasoning_level_for_backend, openai_codex_subscription,
-    persisted_reasoning_level_for_backend, psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
+    persisted_reasoning_level_for_backend, psionic_apple_fm_bridge, psionic_inference_mesh,
+    psionic_qwen35_2b_q8_registry,
 };
 use probe_core::harness::resolve_prompt_contract;
 use probe_core::runtime::{current_working_dir, default_probe_home};
@@ -727,6 +728,14 @@ fn load_saved_backend_config(probe_home: &Path, kind: BackendKind) -> Option<Psi
 
 fn profile_from_server_config(config: &PsionicServerConfig) -> BackendProfile {
     let mut profile = match config.api_kind {
+        BackendKind::OpenAiChatCompletions
+            if matches!(
+                config.control_plane,
+                Some(probe_protocol::backend::BackendControlPlaneKind::PsionicInferenceMesh)
+            ) =>
+        {
+            psionic_inference_mesh()
+        }
         BackendKind::OpenAiChatCompletions => psionic_qwen35_2b_q8_registry(),
         BackendKind::OpenAiCodexSubscription => openai_codex_subscription(),
         BackendKind::AppleFmBridge => psionic_apple_fm_bridge(),
@@ -781,6 +790,14 @@ fn backend_selector_label(summary: &ServerOperatorSummary) -> String {
     match summary.backend_kind {
         BackendKind::AppleFmBridge => String::from("Apple FM"),
         BackendKind::OpenAiCodexSubscription => String::from("Codex"),
+        BackendKind::OpenAiChatCompletions
+            if matches!(
+                summary.control_plane,
+                Some(probe_protocol::backend::BackendControlPlaneKind::PsionicInferenceMesh)
+            ) =>
+        {
+            String::from("Mesh")
+        }
         BackendKind::OpenAiChatCompletions if summary.is_remote_target() => String::from("Tailnet"),
         BackendKind::OpenAiChatCompletions => String::from("Qwen"),
     }

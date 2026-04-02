@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use probe_core::session_store::{FilesystemSessionStore, NewItem};
 use probe_protocol::PROBE_PROTOCOL_VERSION;
-use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
+use probe_protocol::backend::{
+    BackendControlPlaneKind, BackendKind, BackendProfile, PrefixCacheMode, PsionicMeshAttachInfo,
+    PsionicMeshTargetableModel, ServerAttachMode,
+};
 use probe_protocol::runtime::{
     ClientMessage, InspectSessionTurnsResponse, QueueTurnResponse, QueuedTurnStatus,
     RequestEnvelope, ResponseBody, RuntimeProgressEvent, RuntimeRequest, RuntimeResponse,
@@ -297,6 +300,79 @@ fn start_session_persists_typed_mount_refs_in_session_snapshots() {
     assert_eq!(snapshot.session.mounted_refs, mounted_refs);
 
     harness.shutdown();
+}
+
+#[test]
+fn start_session_preserves_psionic_mesh_backend_metadata() {
+    let environment = ProbeTestEnvironment::new();
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let profile = BackendProfile {
+        name: String::from("psionic-inference-mesh"),
+        kind: BackendKind::OpenAiChatCompletions,
+        base_url: String::from("http://127.0.0.1:8080/v1"),
+        model: String::from("gemma4:e4b"),
+        reasoning_level: None,
+        api_key_env: String::from("PROBE_OPENAI_API_KEY"),
+        timeout_secs: 30,
+        attach_mode: ServerAttachMode::AttachToExisting,
+        prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        control_plane: Some(BackendControlPlaneKind::PsionicInferenceMesh),
+        psionic_mesh: Some(PsionicMeshAttachInfo {
+            management_base_url: String::from("http://127.0.0.1:8080"),
+            topology_digest: String::from("mesh-topology-v1"),
+            default_model: String::from("gemma4:e4b"),
+            targetable_models: vec![PsionicMeshTargetableModel {
+                model: String::from("gemma4:e4b"),
+                family: String::from("gemma4"),
+                supported_endpoints: vec![
+                    String::from("/v1/chat/completions"),
+                    String::from("/v1/responses"),
+                ],
+                structured_outputs: false,
+                tool_calling: true,
+                response_state: true,
+            }],
+            local_worker_id: Some(String::from("openai_compat")),
+            served_mesh_role: Some(String::from("thin_client")),
+            served_mesh_posture: Some(String::from("ready")),
+            served_mesh_reasons: vec![String::from("remote_only")],
+            execution_mode: Some(String::from("proxy")),
+            execution_engine: Some(String::from("psionic")),
+            fallback_posture: Some(String::from("thin_client_remote_only")),
+        }),
+    };
+
+    let response = harness.request(
+        "req-start-mesh-session",
+        RuntimeRequest::StartSession(StartSessionRequest {
+            title: Some(String::from("mesh session")),
+            cwd: environment.workspace().to_path_buf(),
+            profile,
+            system_prompt: None,
+            harness_profile: None,
+            workspace_state: None,
+            mounted_refs: Vec::new(),
+        }),
+    );
+    let RuntimeResponse::StartSession(snapshot) = expect_ok_response(response) else {
+        panic!("expected start session response");
+    };
+    let backend = snapshot.session.backend.expect("backend metadata");
+    assert_eq!(
+        backend.control_plane,
+        Some(BackendControlPlaneKind::PsionicInferenceMesh)
+    );
+    let mesh = backend.psionic_mesh.expect("mesh metadata");
+    assert_eq!(mesh.management_base_url, "http://127.0.0.1:8080");
+    assert_eq!(mesh.topology_digest, "mesh-topology-v1");
+    assert_eq!(mesh.default_model, "gemma4:e4b");
+    assert_eq!(mesh.served_mesh_role.as_deref(), Some("thin_client"));
+    assert_eq!(
+        mesh.fallback_posture.as_deref(),
+        Some("thin_client_remote_only")
+    );
+    assert_eq!(mesh.targetable_models.len(), 1);
+    assert_eq!(mesh.targetable_models[0].model, "gemma4:e4b");
 }
 
 #[test]
@@ -1285,6 +1361,8 @@ fn test_profile(base_url: &str) -> BackendProfile {
         timeout_secs: 30,
         attach_mode: ServerAttachMode::AttachToExisting,
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        control_plane: None,
+        psionic_mesh: None,
     }
 }
 

@@ -12,13 +12,13 @@ use probe_decisions::{
 };
 use psionic_optimize::{
     OptimizationBatchEvaluationReceipt, OptimizationCandidateManifest as PsionicCandidateManifest,
-    OptimizationCandidateProposal, OptimizationCandidateProposer, OptimizationCaseEvaluationReceipt,
-    OptimizationCaseManifest as PsionicCaseManifest, OptimizationCaseSplit as PsionicCaseSplit,
-    OptimizationComponentDiff, OptimizationComponentFeedback, OptimizationEngine,
-    OptimizationEvaluator, OptimizationEvaluationCache, OptimizationFrontierMode,
-    OptimizationFrontierSnapshot, OptimizationProposerReceipt, OptimizationRunReceipt, OptimizationRunSpec,
-    OptimizationSearchState, OptimizationSequentialMinibatchSampler,
-    OptimizationSharedFeedback,
+    OptimizationCandidateProposal, OptimizationCandidateProposer,
+    OptimizationCaseEvaluationReceipt, OptimizationCaseManifest as PsionicCaseManifest,
+    OptimizationCaseSplit as PsionicCaseSplit, OptimizationComponentDiff,
+    OptimizationComponentFeedback, OptimizationEngine, OptimizationEvaluationCache,
+    OptimizationEvaluator, OptimizationFrontierMode, OptimizationFrontierSnapshot,
+    OptimizationProposerReceipt, OptimizationRunReceipt, OptimizationRunSpec,
+    OptimizationSearchState, OptimizationSequentialMinibatchSampler, OptimizationSharedFeedback,
 };
 use serde::{Deserialize, Serialize};
 
@@ -698,7 +698,10 @@ pub fn optimize_harness_profiles(
     );
     let mut run_spec = OptimizationRunSpec::new(
         run_id.clone(),
-        format!("probe.harness_profiles.{}", baseline_input.manifest.tool_set),
+        format!(
+            "probe.harness_profiles.{}",
+            baseline_input.manifest.tool_set
+        ),
     )
     .with_dataset_refs(vec![dataset_ref.clone()])
     .with_frontier_mode(OptimizationFrontierMode::Scalar)
@@ -738,7 +741,8 @@ pub fn optimize_harness_profiles(
         .map(|input| {
             (
                 input.manifest.candidate_id.clone(),
-                input.cases
+                input
+                    .cases
                     .iter()
                     .cloned()
                     .map(|case| (case.case_id.clone(), case))
@@ -907,7 +911,8 @@ pub fn optimize_skill_packs(
             .map(|input| {
                 (
                     input.manifest.candidate_id.clone(),
-                    input.cases
+                    input
+                        .cases
                         .iter()
                         .cloned()
                         .map(|case| (case.case_id.clone(), case))
@@ -1153,18 +1158,16 @@ fn probe_decision_manifest_to_psionic(
         String::from(DECISION_MODULE_COMPONENT_ID),
         serde_json::to_string(manifest).map_err(|error| error.to_string())?,
     )]);
-    Ok(
-        PsionicCandidateManifest::new(
-            manifest.candidate_id.clone(),
-            format!("probe.decision_modules.{}", manifest.family.as_str()),
-            run_id.to_string(),
-            components,
-        )
-        .with_provenance_refs(vec![format!(
-            "probe_decision_manifest_digest:{}",
-            manifest.manifest_digest
-        )]),
+    Ok(PsionicCandidateManifest::new(
+        manifest.candidate_id.clone(),
+        format!("probe.decision_modules.{}", manifest.family.as_str()),
+        run_id.to_string(),
+        components,
     )
+    .with_provenance_refs(vec![format!(
+        "probe_decision_manifest_digest:{}",
+        manifest.manifest_digest
+    )]))
 }
 
 fn probe_case_to_psionic_case(case: &DecisionCaseRecord) -> Result<PsionicCaseManifest, String> {
@@ -1193,18 +1196,16 @@ fn probe_case_to_psionic_case(case: &DecisionCaseRecord) -> Result<PsionicCaseMa
         )
     }));
 
-    Ok(
-        PsionicCaseManifest::new(
-            case.case_id.clone(),
-            match case.split {
-                DecisionCaseSplit::Train => PsionicCaseSplit::Train,
-                DecisionCaseSplit::Validation => PsionicCaseSplit::Validation,
-            },
-        )
-        .with_label(label.unwrap_or_default())
-        .with_metadata(metadata)
-        .with_evidence_refs(evidence_refs),
+    Ok(PsionicCaseManifest::new(
+        case.case_id.clone(),
+        match case.split {
+            DecisionCaseSplit::Train => PsionicCaseSplit::Train,
+            DecisionCaseSplit::Validation => PsionicCaseSplit::Validation,
+        },
     )
+    .with_label(label.unwrap_or_default())
+    .with_metadata(metadata)
+    .with_evidence_refs(evidence_refs))
 }
 
 fn harness_manifest_to_psionic(
@@ -1215,24 +1216,27 @@ fn harness_manifest_to_psionic(
         String::from(HARNESS_COMPONENT_ID),
         serde_json::to_string(manifest).map_err(|error| error.to_string())?,
     )]);
-    Ok(
-        PsionicCandidateManifest::new(
-            manifest.candidate_id.clone(),
-            format!("probe.harness_profiles.{}", manifest.tool_set),
-            run_id.to_string(),
-            components,
-        )
-        .with_provenance_refs(vec![format!(
-            "probe_harness_manifest_digest:{}",
-            manifest.manifest_digest
-        )]),
+    Ok(PsionicCandidateManifest::new(
+        manifest.candidate_id.clone(),
+        format!("probe.harness_profiles.{}", manifest.tool_set),
+        run_id.to_string(),
+        components,
     )
+    .with_provenance_refs(vec![format!(
+        "probe_harness_manifest_digest:{}",
+        manifest.manifest_digest
+    )]))
 }
 
-fn harness_case_to_psionic_case(case: &HarnessEvaluationCase) -> Result<PsionicCaseManifest, String> {
+fn harness_case_to_psionic_case(
+    case: &HarnessEvaluationCase,
+) -> Result<PsionicCaseManifest, String> {
     let metadata = BTreeMap::from([
         (String::from("case_name"), case.case_name.clone()),
-        (String::from("attempt_index"), case.attempt_index.to_string()),
+        (
+            String::from("attempt_index"),
+            case.attempt_index.to_string(),
+        ),
         (String::from("passed"), case.passed.to_string()),
         (
             String::from("failure_category"),
@@ -1243,22 +1247,23 @@ fn harness_case_to_psionic_case(case: &HarnessEvaluationCase) -> Result<PsionicC
             serde_json::to_string(&case.tool_names).map_err(|error| error.to_string())?,
         ),
     ]);
-    let mut evidence_refs = vec![format!("case:{}:attempt:{}", case.case_name, case.attempt_index)];
+    let mut evidence_refs = vec![format!(
+        "case:{}:attempt:{}",
+        case.case_name, case.attempt_index
+    )];
     if let Some(transcript_path) = &case.transcript_path {
         evidence_refs.push(format!("transcript_path:{transcript_path}"));
     }
-    Ok(
-        PsionicCaseManifest::new(
-            case.case_id.clone(),
-            match case.split {
-                DecisionCaseSplit::Train => PsionicCaseSplit::Train,
-                DecisionCaseSplit::Validation => PsionicCaseSplit::Validation,
-            },
-        )
-        .with_label(if case.passed { "pass" } else { "fail" })
-        .with_metadata(metadata)
-        .with_evidence_refs(evidence_refs),
+    Ok(PsionicCaseManifest::new(
+        case.case_id.clone(),
+        match case.split {
+            DecisionCaseSplit::Train => PsionicCaseSplit::Train,
+            DecisionCaseSplit::Validation => PsionicCaseSplit::Validation,
+        },
     )
+    .with_label(if case.passed { "pass" } else { "fail" })
+    .with_metadata(metadata)
+    .with_evidence_refs(evidence_refs))
 }
 
 fn build_skill_pack_candidates_from_ledger(
@@ -1393,40 +1398,36 @@ fn skill_pack_manifest_to_psionic(
         String::from(SKILL_PACK_COMPONENT_ID),
         serde_json::to_string(manifest).map_err(|error| error.to_string())?,
     )]);
-    Ok(
-        PsionicCandidateManifest::new(
-            manifest.candidate_id.clone(),
-            String::from("probe.skill_packs.retained_coding"),
-            run_id.to_string(),
-            components,
-        )
-        .with_provenance_refs(vec![format!(
-            "probe_skill_pack_manifest_digest:{}",
-            manifest.manifest_digest
-        )]),
+    Ok(PsionicCandidateManifest::new(
+        manifest.candidate_id.clone(),
+        String::from("probe.skill_packs.retained_coding"),
+        run_id.to_string(),
+        components,
     )
+    .with_provenance_refs(vec![format!(
+        "probe_skill_pack_manifest_digest:{}",
+        manifest.manifest_digest
+    )]))
 }
 
 fn skill_pack_task_to_psionic_case(task: &SkillPackTask) -> Result<PsionicCaseManifest, String> {
-    Ok(
-        PsionicCaseManifest::new(
-            task.task_id.clone(),
-            match task.split {
-                DecisionCaseSplit::Train => PsionicCaseSplit::Train,
-                DecisionCaseSplit::Validation => PsionicCaseSplit::Validation,
-            },
-        )
-        .with_label(task.case_family.clone())
-        .with_metadata(BTreeMap::from([
-            (String::from("source_kind"), task.source_kind.clone()),
-            (String::from("source_ref"), task.source_ref.clone()),
-            (String::from("case_family"), task.case_family.clone()),
-        ]))
-        .with_evidence_refs(vec![format!(
-            "skill_pack_task:{}:{}",
-            task.source_kind, task.source_ref
-        )]),
+    Ok(PsionicCaseManifest::new(
+        task.task_id.clone(),
+        match task.split {
+            DecisionCaseSplit::Train => PsionicCaseSplit::Train,
+            DecisionCaseSplit::Validation => PsionicCaseSplit::Validation,
+        },
     )
+    .with_label(task.case_family.clone())
+    .with_metadata(BTreeMap::from([
+        (String::from("source_kind"), task.source_kind.clone()),
+        (String::from("source_ref"), task.source_ref.clone()),
+        (String::from("case_family"), task.case_family.clone()),
+    ]))
+    .with_evidence_refs(vec![format!(
+        "skill_pack_task:{}:{}",
+        task.source_kind, task.source_ref
+    )]))
 }
 
 fn observed_label_string(label: &DecisionCaseObservedLabel) -> String {
@@ -1454,18 +1455,27 @@ fn normalize_case_splits(
     validation_cases: &mut Vec<PsionicCaseManifest>,
 ) -> Result<(), String> {
     if train_cases.is_empty() && validation_cases.is_empty() {
-        return Err(String::from("optimizer run requires at least one retained case"));
+        return Err(String::from(
+            "optimizer run requires at least one retained case",
+        ));
     }
-    if train_cases.is_empty() && let Some(case) = validation_cases.first().cloned() {
+    if train_cases.is_empty()
+        && let Some(case) = validation_cases.first().cloned()
+    {
         train_cases.push(case);
     }
-    if validation_cases.is_empty() && let Some(case) = train_cases.last().cloned() {
+    if validation_cases.is_empty()
+        && let Some(case) = train_cases.last().cloned()
+    {
         validation_cases.push(case);
     }
     Ok(())
 }
 
-fn cases_for_family(cases: &[DecisionCaseRecord], family: DecisionModuleFamily) -> Vec<DecisionCaseRecord> {
+fn cases_for_family(
+    cases: &[DecisionCaseRecord],
+    family: DecisionModuleFamily,
+) -> Vec<DecisionCaseRecord> {
     cases
         .iter()
         .filter(|case| matches_family(case, family))
@@ -1475,7 +1485,10 @@ fn cases_for_family(cases: &[DecisionCaseRecord], family: DecisionModuleFamily) 
 
 fn matches_family(case: &DecisionCaseRecord, family: DecisionModuleFamily) -> bool {
     match (case.family, family) {
-        (probe_core::dataset_export::DecisionCaseFamily::ToolRoute, DecisionModuleFamily::ToolRoute)
+        (
+            probe_core::dataset_export::DecisionCaseFamily::ToolRoute,
+            DecisionModuleFamily::ToolRoute,
+        )
         | (
             probe_core::dataset_export::DecisionCaseFamily::PatchReadiness,
             DecisionModuleFamily::PatchReadiness,
@@ -1654,7 +1667,10 @@ impl OptimizationEvaluator for HarnessPsionicEvaluator {
                 .with_details(vec![
                     format!("case_name={}", harness_case.case_name),
                     format!("attempt_index={}", harness_case.attempt_index),
-                    format!("harness_manifest_digest={}", harness_manifest.manifest_digest),
+                    format!(
+                        "harness_manifest_digest={}",
+                        harness_manifest.manifest_digest
+                    ),
                 ]),
                 BTreeMap::from([(
                     String::from(HARNESS_COMPONENT_ID),
@@ -1670,7 +1686,10 @@ impl OptimizationEvaluator for HarnessPsionicEvaluator {
                         ),
                         format!(
                             "backend_failure_family={}",
-                            harness_case.backend_failure_family.clone().unwrap_or_default()
+                            harness_case
+                                .backend_failure_family
+                                .clone()
+                                .unwrap_or_default()
                         ),
                     ]),
                 )]),
@@ -1721,11 +1740,7 @@ impl OptimizationEvaluator for SkillPackPsionicEvaluator {
                 .get("source_kind")
                 .cloned()
                 .unwrap_or_else(|| String::from("decision_case"));
-            let source_ref = case
-                .metadata
-                .get("source_ref")
-                .cloned()
-                .unwrap_or_default();
+            let source_ref = case.metadata.get("source_ref").cloned().unwrap_or_default();
             let (scalar_score, details) = if source_kind == "decision_case" {
                 let decision_case = self
                     .decision_cases
@@ -1909,10 +1924,7 @@ fn skill_pack_manifest_from_psionic(
     serde_json::from_str(body).map_err(|error| error.to_string())
 }
 
-fn selected_decision_manifest_id(
-    manifest: &SkillPackManifest,
-    family: &str,
-) -> String {
+fn selected_decision_manifest_id(manifest: &SkillPackManifest, family: &str) -> String {
     match family {
         "tool_route" => manifest.tool_route_candidate_id.clone(),
         "patch_readiness" => manifest.patch_readiness_candidate_id.clone(),
@@ -2213,7 +2225,10 @@ mod tests {
         let serialized = serde_json::to_string(&bundle).expect("serialize harness bundle");
         let roundtrip: HarnessOptimizationBundle =
             serde_json::from_str(&serialized).expect("deserialize harness bundle");
-        assert_eq!(roundtrip.retained_candidate_id, bundle.retained_candidate_id);
+        assert_eq!(
+            roundtrip.retained_candidate_id,
+            bundle.retained_candidate_id
+        );
     }
 
     #[test]
@@ -2450,6 +2465,9 @@ mod tests {
         let serialized = serde_json::to_string(&bundle).expect("serialize skill-pack bundle");
         let roundtrip: SkillPackOptimizationBundle =
             serde_json::from_str(&serialized).expect("deserialize skill-pack bundle");
-        assert_eq!(roundtrip.retained_candidate_id, bundle.retained_candidate_id);
+        assert_eq!(
+            roundtrip.retained_candidate_id,
+            bundle.retained_candidate_id
+        );
     }
 }

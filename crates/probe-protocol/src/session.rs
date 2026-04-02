@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::backend::{BackendControlPlaneKind, BackendProfile, PsionicMeshAttachInfo};
+
 pub type TimestampMs = u64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -255,6 +257,23 @@ pub struct SessionBackendTarget {
     pub profile_name: String,
     pub base_url: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane: Option<BackendControlPlaneKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub psionic_mesh: Option<PsionicMeshAttachInfo>,
+}
+
+impl SessionBackendTarget {
+    #[must_use]
+    pub fn from_profile(profile: &BackendProfile) -> Self {
+        Self {
+            profile_name: profile.name.clone(),
+            base_url: profile.base_url.clone(),
+            model: profile.model.clone(),
+            control_plane: profile.control_plane,
+            psionic_mesh: profile.psionic_mesh.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

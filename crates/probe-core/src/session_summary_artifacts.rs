@@ -516,6 +516,8 @@ mod tests {
                         profile_name: String::from("test-profile"),
                         base_url: String::from("http://127.0.0.1:9/v1"),
                         model: String::from("tiny"),
+                        control_plane: None,
+                        psionic_mesh: None,
                     })
                     .with_harness_profile(Some(SessionHarnessProfile {
                         name: String::from("coding_bootstrap_default"),

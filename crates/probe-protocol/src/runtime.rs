@@ -827,6 +827,8 @@ mod tests {
                     timeout_secs: 30,
                     attach_mode: crate::backend::ServerAttachMode::AttachToExisting,
                     prefix_cache_mode: crate::backend::PrefixCacheMode::BackendDefault,
+                    control_plane: None,
+                    psionic_mesh: None,
                 },
                 prompt: String::from("hello"),
                 author: Some(TurnAuthor {

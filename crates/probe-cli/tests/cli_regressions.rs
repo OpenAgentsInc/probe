@@ -132,6 +132,7 @@ fn codex_status_uses_saved_reasoning_level_override() {
         model_id: Some(String::from("gpt-5.4")),
         reasoning_budget: None,
         reasoning_level: Some(String::from("xhigh")),
+        control_plane: None,
     }
     .save(config_path.as_path())
     .expect("save codex config");
