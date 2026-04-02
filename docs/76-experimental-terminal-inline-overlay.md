@@ -1,9 +1,9 @@
 # Experimental Terminal Inline Overlay
 
 This document captures the second Probe proof of concept for WGPUI visuals:
-render the overlay scene offscreen, then send the resulting PNG back into the
-terminal through a terminal graphics protocol instead of opening a separate
-window.
+render the overlay scene offscreen, then send the resulting animated image back
+into the terminal through a terminal graphics protocol instead of opening a
+separate window.
 
 ## Decision
 
@@ -27,6 +27,8 @@ The first shipped terminal mode targets:
 - no tmux or zellij passthrough in this first cut
 
 Probe currently uses iTerm2's OSC 1337 inline-image protocol for this lane.
+iTerm2 also supports animated GIF playback, which the current Probe path now
+uses to avoid destructive per-frame terminal swaps.
 
 ## Architecture
 
@@ -37,9 +39,9 @@ The flow is:
 
 1. build the same WGPUI demo scene used by the sidecar proof
 2. immediately clear the current terminal surface and paint a minimal loading state
-3. render the first WGPUI frame offscreen to a PNG through `wgpui::capture_scene`
-4. emit that frame back to the terminal with an inline-image escape sequence
-5. keep recapturing and replacing inline frames on a short timer until dismiss
+3. render a short sequence of WGPUI frames offscreen through `wgpui::capture_scene`
+4. encode those frames into one looping animated GIF payload
+5. emit that single animated asset back to the terminal with an inline-image escape sequence
 6. clear the terminal surface and force a fresh TUI redraw
 
 So the terminal proof stays honest:
