@@ -253,3 +253,6 @@ This folder holds technical planning docs for the Probe runtime.
   - concrete proof cases for hosted git checkout truth, detached hosted
     inspection, and managed-workspace cleanup completion above the hosted
     receipt contract
+- `73-hosted-restart-orphan-and-takeover-drills.md`
+  - hosted detached-session drill coverage for restart failure,
+    approval-paused takeover, and orphaned registry cleanup on startup

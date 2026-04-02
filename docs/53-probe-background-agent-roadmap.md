@@ -453,6 +453,8 @@ Probe now also has the first hosted control-plane transport:
   detached-session state
 - local proof coverage for hosted git checkout, detached hosted inspection,
   and managed-workspace cleanup completion above that receipt seam
+- hosted detached-session drill coverage for restart failure,
+  approval-paused takeover, and startup orphan cleanup
 
 That is intentionally only the remote control-plane seam. It does not yet mean
 Probe has hosted worker scheduling, real prepared baseline restore execution,

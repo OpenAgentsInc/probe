@@ -1286,9 +1286,11 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use probe_core::runtime::{PlainTextExecRequest, RuntimeEvent};
+    use probe_core::runtime::{PlainTextExecRequest, PlainTextResumeRequest, RuntimeEvent};
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
-    use probe_protocol::runtime::StartSessionRequest;
+    use probe_protocol::runtime::{
+        DetachedSessionRecoveryState, DetachedSessionStatus, StartSessionRequest,
+    };
     use probe_protocol::session::{
         SessionAttachTransport, SessionExecutionHostKind, SessionHostedAuthKind,
         SessionHostedCheckoutKind, SessionHostedCleanupStatus, SessionPreparedBaselineRef,
@@ -1706,6 +1708,219 @@ mod tests {
     }
 
     #[test]
+    fn hosted_restart_keeps_approval_paused_sessions_resumable() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let fake_backend = approval_pause_backend(Duration::from_millis(50));
+        let profile = test_profile(fake_backend.base_url());
+        let address = reserve_loopback_addr();
+        let attach_target = format!("tcp://{address}");
+        let mut server = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+        let mut config = ProbeClientConfig::new(environment.probe_home(), "probe-client-test");
+        config.transport = ProbeClientTransportConfig::HostedTcp {
+            address: address.clone(),
+        };
+        let mut client = wait_for_hosted_client(config.clone());
+        let session = client
+            .start_session(StartSessionRequest {
+                title: Some(String::from("hosted approval pause")),
+                cwd: environment.workspace().to_path_buf(),
+                profile: profile.clone(),
+                system_prompt: None,
+                harness_profile: None,
+                workspace_state: None,
+                mounted_refs: Vec::new(),
+            })
+            .expect("hosted session should start");
+        let session_id = session.session.id.clone();
+
+        let error = client
+            .continue_plain_text_session(PlainTextResumeRequest {
+                session_id: session_id.clone(),
+                profile: profile.clone(),
+                prompt: String::from("patch hello.txt"),
+                tool_loop: Some(approval_pause_tool_loop()),
+            })
+            .expect_err("approval pause should surface through hosted probe-client");
+        assert!(matches!(
+            error,
+            super::ProbeClientError::ToolApprovalPending { .. }
+        ));
+
+        drop(client);
+        server.kill_ungraceful();
+        let mut restarted = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+        let mut reattached = wait_for_hosted_client(config);
+        let inspected = reattached
+            .inspect_detached_session(&session_id)
+            .expect("approval-paused hosted session should remain inspectable after restart");
+        assert_eq!(inspected.summary.status, DetachedSessionStatus::ApprovalPaused);
+        assert_eq!(
+            inspected.summary.recovery_state,
+            DetachedSessionRecoveryState::ApprovalPausedResumable
+        );
+        assert_eq!(inspected.summary.pending_approval_count, 1);
+        assert!(inspected.turn_control.active_turn.is_some());
+
+        drop(reattached);
+        restarted.kill_ungraceful();
+        let _ = fake_backend.finish();
+    }
+
+    #[test]
+    fn hosted_restart_marks_running_turns_failed_when_process_dies() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let fake_backend =
+            delayed_completion_backend(Duration::from_millis(500), "this should never complete");
+        let profile = test_profile(fake_backend.base_url());
+        let address = reserve_loopback_addr();
+        let attach_target = format!("tcp://{address}");
+        let mut server = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+        let mut config = ProbeClientConfig::new(environment.probe_home(), "probe-client-test");
+        config.transport = ProbeClientTransportConfig::HostedTcp {
+            address: address.clone(),
+        };
+        let mut client = wait_for_hosted_client(config.clone());
+        let session = client
+            .start_session(StartSessionRequest {
+                title: Some(String::from("hosted restart failure")),
+                cwd: environment.workspace().to_path_buf(),
+                profile: profile.clone(),
+                system_prompt: None,
+                harness_profile: None,
+                workspace_state: None,
+                mounted_refs: Vec::new(),
+            })
+            .expect("hosted session should start");
+        let session_id = session.session.id.clone();
+
+        client
+            .queue_plain_text_session_turn(PlainTextResumeRequest {
+                session_id: session_id.clone(),
+                profile: profile.clone(),
+                prompt: String::from("run through a hosted restart"),
+                tool_loop: None,
+            })
+            .expect("queue turn should be accepted");
+        drop(client);
+
+        let running = wait_for_detached_status(config.clone(), &session_id, DetachedSessionStatus::Running);
+        assert!(running.active_turn_id.is_some());
+
+        server.kill_ungraceful();
+        let mut restarted = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+        let mut reattached = wait_for_hosted_client(config);
+        let inspected = reattached
+            .inspect_detached_session(&session_id)
+            .expect("restarted hosted server should report failed running turn");
+        assert_eq!(inspected.summary.status, DetachedSessionStatus::Failed);
+        assert_eq!(
+            inspected.summary.recovery_state,
+            DetachedSessionRecoveryState::RunningTurnFailedOnRestart
+        );
+        assert!(inspected
+            .summary
+            .recovery_note
+            .as_deref()
+            .is_some_and(|note| note.contains("restarted before this running turn completed")));
+        assert!(inspected
+            .turn_control
+            .recent_turns
+            .first()
+            .and_then(|turn| turn.failure_message.as_deref())
+            .is_some_and(|message| message.contains("restarted before this running turn completed")));
+
+        reattached
+            .shutdown()
+            .expect("restarted hosted server should accept shutdown");
+        restarted.wait();
+        let _ = fake_backend.finish();
+    }
+
+    #[test]
+    fn hosted_startup_reaps_orphaned_detached_registry_entries_without_session_metadata() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let address = reserve_loopback_addr();
+        let attach_target = format!("tcp://{address}");
+        let mut server = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+        let mut config = ProbeClientConfig::new(environment.probe_home(), "probe-client-test");
+        config.transport = ProbeClientTransportConfig::HostedTcp {
+            address: address.clone(),
+        };
+        let mut client = wait_for_hosted_client(config.clone());
+        let snapshot = client
+            .start_session(StartSessionRequest {
+                title: Some(String::from("hosted orphan cleanup")),
+                cwd: environment.workspace().to_path_buf(),
+                profile: test_profile("http://127.0.0.1:9/v1"),
+                system_prompt: None,
+                harness_profile: None,
+                workspace_state: None,
+                mounted_refs: Vec::new(),
+            })
+            .expect("hosted session should start");
+        let session_dir = snapshot
+            .session
+            .transcript_path
+            .parent()
+            .expect("session transcript should live inside a session dir")
+            .to_path_buf();
+
+        client
+            .shutdown()
+            .expect("hosted server should accept shutdown");
+        server.wait();
+
+        fs::remove_dir_all(&session_dir)
+            .expect("remove session metadata to simulate orphaned registry");
+
+        let mut restarted = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+        let mut reattached = wait_for_hosted_client(config);
+        let detached = reattached
+            .list_detached_sessions()
+            .expect("restarted hosted server should list detached sessions");
+        assert!(
+            detached.is_empty(),
+            "startup reconciliation should drop orphaned detached registry entries"
+        );
+
+        drop(reattached);
+        restarted.kill_ungraceful();
+    }
+
+    #[test]
     fn hosted_session_falls_back_to_fresh_when_prepared_baseline_is_missing() {
         let environment = ProbeTestEnvironment::new();
         environment.seed_coding_workspace();
@@ -1846,6 +2061,69 @@ mod tests {
         assert!(status.success(), "git commit should succeed");
     }
 
+    fn delayed_completion_backend(delay: Duration, assistant_text: &str) -> FakeOpenAiServer {
+        let assistant_text = String::from(assistant_text);
+        FakeOpenAiServer::from_handler(move |_request| {
+            thread::sleep(delay);
+            FakeHttpResponse::json_ok(serde_json::json!({
+                "id": "chatcmpl_hosted_complete",
+                "model": TEST_MODEL,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": assistant_text.clone()
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 3,
+                    "total_tokens": 6
+                }
+            }))
+        })
+    }
+
+    fn approval_pause_backend(delay: Duration) -> FakeOpenAiServer {
+        FakeOpenAiServer::from_handler(move |_request| {
+            thread::sleep(delay);
+            FakeHttpResponse::json_ok(serde_json::json!({
+                "id": "chatcmpl_hosted_pause",
+                "model": TEST_MODEL,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call_patch_1",
+                            "type": "function",
+                            "function": {
+                                "name": "apply_patch",
+                                "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }))
+        })
+    }
+
+    fn approval_pause_tool_loop() -> probe_core::tools::ToolLoopConfig {
+        let mut tool_loop = probe_core::tools::ToolLoopConfig::coding_bootstrap(
+            probe_core::tools::ProbeToolChoice::Required,
+            false,
+        );
+        tool_loop.approval = probe_core::tools::ToolApprovalConfig {
+            allow_write_tools: false,
+            allow_network_shell: false,
+            allow_destructive_shell: false,
+            denied_action: probe_core::tools::ToolDeniedAction::Pause,
+        };
+        tool_loop
+    }
+
     fn wait_for_hosted_client(config: ProbeClientConfig) -> ProbeClient {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1857,6 +2135,27 @@ mod tests {
                 Err(error) => panic!("hosted transport should accept connections: {error}"),
             }
         }
+    }
+
+    fn wait_for_detached_status(
+        config: ProbeClientConfig,
+        session_id: &super::SessionId,
+        expected: DetachedSessionStatus,
+    ) -> super::DetachedSessionSummary {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut last_summary = None;
+        while Instant::now() < deadline {
+            let mut client = wait_for_hosted_client(config.clone());
+            let response = client
+                .inspect_detached_session(session_id)
+                .expect("hosted detached session should be inspectable");
+            last_summary = Some(response.summary.clone());
+            if response.summary.status == expected {
+                return response.summary;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        panic!("timed out waiting for detached status {expected:?}: {last_summary:?}");
     }
 
     struct HostedProbeServer {
@@ -1890,6 +2189,11 @@ mod tests {
         fn wait(&mut self) {
             let status = self.child.wait().expect("hosted probe-server should exit");
             assert!(status.success(), "hosted probe-server should exit cleanly");
+        }
+
+        fn kill_ungraceful(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
     }
 
