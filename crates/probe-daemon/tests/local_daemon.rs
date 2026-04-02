@@ -1015,6 +1015,7 @@ fn operator_author() -> TurnAuthor {
         client_name: String::from("probe-daemon-test"),
         client_version: Some(String::from("0.1.0")),
         display_name: Some(String::from("operator")),
+        participant_id: Some(String::from("operator")),
     }
 }
 

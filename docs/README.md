@@ -266,3 +266,8 @@ This folder holds technical planning docs for the Probe runtime.
     prepared `openagents` baseline checkout, a local IAP tunnel for the hosted
     OpenAgents harness, and the first verified April 2, 2026 live hosted
     session on that lane
+- `78-hosted-session-participants-and-controller-lease.md`
+  - hosted participant roster and controller-lease truth for internal shared
+    sessions, including typed attach and controller actions, hosted control
+    conflict enforcement, and retained claim, handoff, release, or takeover
+    history in hosted receipts

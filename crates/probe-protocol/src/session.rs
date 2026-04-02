@@ -430,6 +430,16 @@ pub enum SessionHostedLifecycleEvent {
         summary: String,
         recorded_at_ms: TimestampMs,
     },
+    ControllerLeaseChanged {
+        action: SessionControllerAction,
+        actor_participant_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_participant_id: Option<String>,
+        session_owner_id: String,
+        execution_host_id: String,
+        summary: String,
+        recorded_at_ms: TimestampMs,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -579,6 +589,35 @@ pub struct SessionInitiator {
     pub client_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub participant_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionParticipant {
+    pub participant_id: String,
+    pub client_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub attached_at_ms: TimestampMs,
+    pub last_seen_at_ms: TimestampMs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionControllerLease {
+    pub participant_id: String,
+    pub acquired_at_ms: TimestampMs,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionControllerAction {
+    Claim,
+    Release,
+    Handoff,
+    Takeover,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -766,6 +805,10 @@ pub struct SessionMetadata {
     pub hosted_receipts: Option<SessionHostedReceipts>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mounted_refs: Vec<SessionMountRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<SessionParticipant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_lease: Option<SessionControllerLease>,
     pub transcript_path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_link: Option<SessionParentLink>,

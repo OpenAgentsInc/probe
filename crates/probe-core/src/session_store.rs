@@ -246,6 +246,8 @@ impl FilesystemSessionStore {
             workspace_state: session.workspace_state,
             hosted_receipts: None,
             mounted_refs: session.mounted_refs,
+            participants: Vec::new(),
+            controller_lease: None,
             transcript_path,
             parent_link: session.parent_link,
             child_links: Vec::new(),

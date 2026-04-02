@@ -628,6 +628,7 @@ fn interrupt_turn_is_explicit_when_session_is_idle() {
         "req-interrupt",
         RuntimeRequest::InterruptTurn(probe_protocol::runtime::InterruptTurnRequest {
             session_id: SessionId::new("sess-idle"),
+            author: Some(operator_author()),
         }),
     );
     let RuntimeResponse::InterruptTurn(interrupt) = expect_ok_response(response) else {
@@ -712,6 +713,7 @@ fn queue_turns_report_state_and_resume_after_approval_resolution() {
                 tool_loop: approval_pause_tool_loop(),
                 call_id: paused.call_id.clone(),
                 resolution: ToolApprovalResolution::Approved,
+                author: Some(operator_author()),
             },
         ),
     );
@@ -801,6 +803,7 @@ fn interrupting_approval_paused_turn_cancels_it_and_drains_the_queue() {
         "req-interrupt-running",
         RuntimeRequest::InterruptTurn(probe_protocol::runtime::InterruptTurnRequest {
             session_id: session_id.clone(),
+            author: Some(operator_author()),
         }),
     );
     let RuntimeResponse::InterruptTurn(interrupt) = expect_ok_response(response) else {
@@ -911,6 +914,7 @@ fn queued_turns_can_be_cancelled_before_execution() {
         RuntimeRequest::CancelQueuedTurn(probe_protocol::runtime::CancelQueuedTurnRequest {
             session_id: session_id.clone(),
             turn_id: queued_turn.turn_id.clone(),
+            author: Some(operator_author()),
         }),
     );
     let RuntimeResponse::CancelQueuedTurn(cancelled) = expect_ok_response(response) else {
@@ -942,7 +946,10 @@ fn queued_turns_can_be_cancelled_before_execution() {
 
     let interrupt = harness.request(
         "req-interrupt-after-cancel",
-        RuntimeRequest::InterruptTurn(probe_protocol::runtime::InterruptTurnRequest { session_id }),
+        RuntimeRequest::InterruptTurn(probe_protocol::runtime::InterruptTurnRequest {
+            session_id,
+            author: Some(operator_author()),
+        }),
     );
     let RuntimeResponse::InterruptTurn(interrupt) = expect_ok_response(interrupt) else {
         panic!("expected interrupt response");
@@ -1159,6 +1166,7 @@ fn operator_author() -> TurnAuthor {
         client_name: String::from("probe-server-test"),
         client_version: Some(String::from("0.1.0")),
         display_name: Some(String::from("operator")),
+        participant_id: Some(String::from("operator")),
     }
 }
 

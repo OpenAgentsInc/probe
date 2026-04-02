@@ -306,6 +306,7 @@ pub(crate) fn default_turn_author() -> TurnAuthor {
         client_name: String::from("unknown"),
         client_version: None,
         display_name: None,
+        participant_id: None,
     }
 }
 

@@ -132,6 +132,8 @@ impl DetachedSessionRegistry {
                 .as_ref()
                 .map(|value| value.summary_artifact_refs.clone())
                 .unwrap_or_default(),
+            participants: metadata.participants.clone(),
+            controller_lease: metadata.controller_lease.clone(),
             active_turn_id: existing
                 .as_ref()
                 .and_then(|value| value.active_turn_id.clone()),

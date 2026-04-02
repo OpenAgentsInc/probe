@@ -84,6 +84,7 @@ mod tests {
                 client_name: String::from("probe-test"),
                 client_version: None,
                 display_name: None,
+                participant_id: None,
             },
             requested_at_ms: 100,
             started_at_ms: Some(120),

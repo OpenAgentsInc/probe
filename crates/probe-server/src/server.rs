@@ -24,7 +24,8 @@ use probe_core::tools::{
 };
 use probe_protocol::default_local_daemon_socket_path;
 use probe_protocol::runtime::{
-    CancelQueuedTurnRequest, CancelQueuedTurnResponse, ClientMessage, DetachedSessionEventPayload,
+    AttachSessionParticipantRequest, AttachSessionParticipantResponse, CancelQueuedTurnRequest,
+    CancelQueuedTurnResponse, ClientMessage, DetachedSessionEventPayload,
     DetachedSessionEventTruth, DetachedSessionRecoveryState, DetachedSessionStatus,
     DetachedSessionSummary, EventDeliveryGuarantee, EventEnvelope, InitializeResponse,
     InspectDetachedSessionResponse, InspectSessionTurnsResponse, InterruptTurnResponse,
@@ -36,18 +37,20 @@ use probe_protocol::runtime::{
     ServerMessage, SessionLookupRequest, SessionSnapshot, ShutdownResponse,
     SpawnChildSessionRequest, SpawnChildSessionResponse, StartSessionRequest, ToolApprovalRecipe,
     ToolCallResult, ToolChoice, ToolDeniedAction, ToolLongContextRecipe, ToolLoopRecipe,
-    ToolOracleRecipe, ToolSetKind, TransportKind, TurnCompleted, TurnPaused, TurnRequest,
-    TurnResponse, TurnSubmissionKind, WatchDetachedSessionRequest, WatchDetachedSessionResponse,
+    ToolOracleRecipe, ToolSetKind, TransportKind, TurnAuthor, TurnCompleted, TurnPaused,
+    TurnRequest, TurnResponse, TurnSubmissionKind, UpdateSessionControllerRequest,
+    UpdateSessionControllerResponse, WatchDetachedSessionRequest, WatchDetachedSessionResponse,
 };
 use probe_protocol::session::{
     SessionAttachTransport, SessionBackendTarget, SessionBranchState, SessionChildClosureSummary,
-    SessionChildLink, SessionChildStatus, SessionChildSummary, SessionDeliveryArtifact,
-    SessionDeliveryState, SessionDeliveryStatus, SessionExecutionHost, SessionExecutionHostKind,
-    SessionHostedAuthKind, SessionHostedAuthReceipt, SessionHostedCheckoutKind,
-    SessionHostedCheckoutReceipt, SessionHostedCleanupReceipt, SessionHostedCleanupStatus,
-    SessionHostedCostReceipt, SessionHostedLifecycleEvent, SessionHostedReceipts,
-    SessionHostedWorkerReceipt, SessionId, SessionInitiator, SessionMetadata, SessionMountKind,
-    SessionMountRef, SessionParentLink, SessionPreparedBaselineRef, SessionPreparedBaselineStatus,
+    SessionChildLink, SessionChildStatus, SessionChildSummary, SessionControllerAction,
+    SessionControllerLease, SessionDeliveryArtifact, SessionDeliveryState, SessionDeliveryStatus,
+    SessionExecutionHost, SessionExecutionHostKind, SessionHostedAuthKind,
+    SessionHostedAuthReceipt, SessionHostedCheckoutKind, SessionHostedCheckoutReceipt,
+    SessionHostedCleanupReceipt, SessionHostedCleanupStatus, SessionHostedCostReceipt,
+    SessionHostedLifecycleEvent, SessionHostedReceipts, SessionHostedWorkerReceipt, SessionId,
+    SessionInitiator, SessionMetadata, SessionMountKind, SessionMountRef, SessionParentLink,
+    SessionParticipant, SessionPreparedBaselineRef, SessionPreparedBaselineStatus,
     SessionRuntimeOwner, SessionRuntimeOwnerKind, SessionSummaryArtifact,
     SessionSummaryArtifactRef, SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef,
     SessionWorkspaceState, TranscriptEvent, UsageMeasurement, UsageTruth,
@@ -665,6 +668,55 @@ impl ProbeServerCore {
             summary,
             session,
             turn_control,
+        })
+    }
+
+    fn attach_session_participant(
+        &self,
+        request: AttachSessionParticipantRequest,
+    ) -> Result<AttachSessionParticipantResponse, RuntimeProtocolError> {
+        self.ensure_detached_session_registered_by_id(&request.session_id)?;
+        let mut metadata = load_session_metadata_for_collaboration(self, &request.session_id)?;
+        let now = now_ms();
+        upsert_session_participant(&mut metadata, &request.participant, now, true)?;
+        let history_event = if request.claim_controller {
+            apply_session_controller_action(
+                &mut metadata,
+                &request.participant,
+                SessionControllerAction::Claim,
+                None,
+                now,
+            )?
+        } else {
+            None
+        };
+        let metadata = persist_session_collaboration_metadata(self, metadata, history_event)?;
+        Ok(AttachSessionParticipantResponse {
+            session_id: request.session_id,
+            participants: metadata.participants,
+            controller_lease: metadata.controller_lease,
+        })
+    }
+
+    fn update_session_controller(
+        &self,
+        request: UpdateSessionControllerRequest,
+    ) -> Result<UpdateSessionControllerResponse, RuntimeProtocolError> {
+        self.ensure_detached_session_registered_by_id(&request.session_id)?;
+        let mut metadata = load_session_metadata_for_collaboration(self, &request.session_id)?;
+        let now = now_ms();
+        let history_event = apply_session_controller_action(
+            &mut metadata,
+            &request.actor,
+            request.action,
+            request.target_participant_id.clone(),
+            now,
+        )?;
+        let metadata = persist_session_collaboration_metadata(self, metadata, history_event)?;
+        Ok(UpdateSessionControllerResponse {
+            session_id: request.session_id,
+            participants: metadata.participants,
+            controller_lease: metadata.controller_lease,
         })
     }
 
@@ -1687,6 +1739,30 @@ impl ProbeServerConnection {
                 }
                 Ok(RequestHandlingOutcome::Continue)
             }
+            RuntimeRequest::AttachSessionParticipant(request) => {
+                match self.core.attach_session_participant(request) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::AttachSessionParticipant(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
+            RuntimeRequest::UpdateSessionController(request) => {
+                match self.core.update_session_controller(request) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::UpdateSessionController(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
             RuntimeRequest::WatchDetachedSession(request) => {
                 self.watch_detached_session(request_id, request)?;
                 Ok(RequestHandlingOutcome::Continue)
@@ -1724,7 +1800,7 @@ impl ProbeServerConnection {
                 Ok(RequestHandlingOutcome::Continue)
             }
             RuntimeRequest::InterruptTurn(request) => {
-                match self.interrupt_turn(request.session_id) {
+                match self.interrupt_turn(request) {
                     Ok(response) => self.writer.send_response_ok(
                         request_id.as_str(),
                         RuntimeResponse::InterruptTurn(response),
@@ -1978,6 +2054,7 @@ impl ProbeServerConnection {
     fn queue_turn(&self, request: TurnRequest) -> Result<QueueTurnResponse, RuntimeProtocolError> {
         self.core
             .ensure_detached_session_registered_by_id(&request.session_id)?;
+        self.prepare_turn_authority(&request.session_id, request.author.as_ref(), "queue turn")?;
         let reservation = self.core.turn_control.reserve_queue_turn(&request)?;
         if reservation.should_start {
             spawn_turn_worker(
@@ -2002,18 +2079,34 @@ impl ProbeServerConnection {
 
     fn interrupt_turn(
         &self,
-        session_id: SessionId,
+        request: probe_protocol::runtime::InterruptTurnRequest,
     ) -> Result<InterruptTurnResponse, RuntimeProtocolError> {
-        self.core
-            .ensure_detached_session_registered_by_id(&session_id)?;
-        let outcome = self.core.turn_control.interrupt_turn(session_id.clone())?;
+        let session_exists = self
+            .core
+            .runtime
+            .session_store()
+            .read_metadata(&request.session_id)
+            .is_ok();
+        if session_exists {
+            self.prepare_turn_authority(
+                &request.session_id,
+                request.author.as_ref(),
+                "interrupt turn",
+            )?;
+            self.core
+                .ensure_detached_session_registered_by_id(&request.session_id)?;
+        }
+        let outcome = self
+            .core
+            .turn_control
+            .interrupt_turn(request.session_id.clone())?;
         if outcome.should_start_next {
             spawn_next_queued_turn_if_ready(
                 Arc::clone(&self.core.turn_control),
                 self.core.runtime.clone(),
                 self.writer.clone(),
                 self.core.detached_event_hub.clone(),
-                session_id,
+                request.session_id,
             );
         }
         Ok(outcome.response)
@@ -2025,6 +2118,11 @@ impl ProbeServerConnection {
     ) -> Result<CancelQueuedTurnResponse, RuntimeProtocolError> {
         self.core
             .ensure_detached_session_registered_by_id(&request.session_id)?;
+        self.prepare_turn_authority(
+            &request.session_id,
+            request.author.as_ref(),
+            "cancel queued turn",
+        )?;
         self.core.turn_control.cancel_queued_turn(request)
     }
 
@@ -2130,6 +2228,13 @@ impl ProbeServerConnection {
         request: TurnRequest,
         mode: TurnMode,
     ) -> Result<(), ServerError> {
+        if let Err(error) =
+            self.prepare_turn_authority(&request.session_id, request.author.as_ref(), "submit turn")
+        {
+            self.writer
+                .send_response_error(request_id.as_str(), error)?;
+            return Ok(());
+        }
         if let Err(error) = self
             .core
             .ensure_detached_session_registered_by_id(&request.session_id)
@@ -2178,6 +2283,15 @@ impl ProbeServerConnection {
         request_id: String,
         request: probe_protocol::runtime::ResolvePendingApprovalRequest,
     ) -> Result<(), ServerError> {
+        if let Err(error) = self.prepare_turn_authority(
+            &request.session_id,
+            request.author.as_ref(),
+            "resolve pending approval",
+        ) {
+            self.writer
+                .send_response_error(request_id.as_str(), error)?;
+            return Ok(());
+        }
         if let Err(error) = self
             .core
             .ensure_detached_session_registered_by_id(&request.session_id)
@@ -2225,6 +2339,20 @@ impl ProbeServerConnection {
 
     fn active_turn_count(&self) -> usize {
         self.core.turn_control.unfinished_turn_count().unwrap_or(1)
+    }
+
+    fn prepare_turn_authority(
+        &self,
+        session_id: &SessionId,
+        author: Option<&TurnAuthor>,
+        action_label: &str,
+    ) -> Result<(), RuntimeProtocolError> {
+        self.core
+            .ensure_detached_session_registered_by_id(session_id)?;
+        let metadata =
+            prepare_session_authority_for_action(&self.core, session_id, author, action_label)?;
+        let _ = metadata;
+        Ok(())
     }
 }
 
@@ -3074,7 +3202,406 @@ fn session_initiator_from_turn_author(
         client_name: author.client_name.clone(),
         client_version: author.client_version.clone(),
         display_name: author.display_name.clone(),
+        participant_id: author.participant_id.clone(),
     }
+}
+
+fn load_session_metadata_for_collaboration(
+    core: &ProbeServerCore,
+    session_id: &SessionId,
+) -> Result<SessionMetadata, RuntimeProtocolError> {
+    let metadata = core
+        .runtime
+        .session_store()
+        .read_metadata(session_id)
+        .map_err(session_store_error_to_protocol)?;
+    let transcript = core
+        .runtime
+        .session_store()
+        .read_transcript(session_id)
+        .map_err(session_store_error_to_protocol)?;
+    sync_hosted_session_metadata_from_store(
+        core.runtime.session_store(),
+        core.hosted_receipt_config.as_ref(),
+        metadata,
+        transcript.as_slice(),
+        now_ms(),
+    )
+}
+
+fn persist_session_collaboration_metadata(
+    core: &ProbeServerCore,
+    mut metadata: SessionMetadata,
+    history_event: Option<SessionHostedLifecycleEvent>,
+) -> Result<SessionMetadata, RuntimeProtocolError> {
+    if let (Some(receipts), Some(event)) = (metadata.hosted_receipts.as_mut(), history_event) {
+        push_hosted_history_event(&mut receipts.history, event);
+    }
+    let metadata = core
+        .runtime
+        .session_store()
+        .replace_metadata(metadata)
+        .map_err(session_store_error_to_protocol)?;
+    core.turn_control
+        .sync_detached_session_if_tracked(&metadata.id)?;
+    Ok(metadata)
+}
+
+fn prepare_session_authority_for_action(
+    core: &ProbeServerCore,
+    session_id: &SessionId,
+    author: Option<&TurnAuthor>,
+    action_label: &str,
+) -> Result<SessionMetadata, RuntimeProtocolError> {
+    let mut metadata = load_session_metadata_for_collaboration(core, session_id)?;
+    let now = now_ms();
+    let shared_mode = !metadata.participants.is_empty() || metadata.controller_lease.is_some();
+    if let Some(author) = author {
+        upsert_session_participant(&mut metadata, author, now, false)?;
+    } else if is_hosted_shared_mode(&metadata) {
+        return Err(participant_required_error(session_id, action_label));
+    }
+
+    let mut history_event = None;
+    if is_hosted_session(&metadata) {
+        if let Some(controller) = metadata.controller_lease.clone() {
+            let Some(actor_id) = author.and_then(normalized_participant_id) else {
+                return Err(participant_required_error(session_id, action_label));
+            };
+            if actor_id != controller.participant_id {
+                return Err(controller_conflict_error(
+                    &metadata,
+                    controller.participant_id.as_str(),
+                    action_label,
+                ));
+            }
+        } else if let Some(author) = author {
+            if normalized_participant_id(author).is_some() {
+                history_event = apply_session_controller_action(
+                    &mut metadata,
+                    author,
+                    SessionControllerAction::Claim,
+                    None,
+                    now,
+                )?;
+            }
+        } else if shared_mode {
+            return Err(participant_required_error(session_id, action_label));
+        }
+    }
+
+    if author.is_none() && history_event.is_none() {
+        return Ok(metadata);
+    }
+    persist_session_collaboration_metadata(core, metadata, history_event)
+}
+
+fn normalized_participant_id(author: &TurnAuthor) -> Option<String> {
+    author
+        .participant_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from)
+}
+
+fn is_hosted_session(metadata: &SessionMetadata) -> bool {
+    metadata
+        .runtime_owner
+        .as_ref()
+        .is_some_and(|owner| owner.kind == SessionRuntimeOwnerKind::HostedControlPlane)
+}
+
+fn is_hosted_shared_mode(metadata: &SessionMetadata) -> bool {
+    is_hosted_session(metadata)
+        && (!metadata.participants.is_empty() || metadata.controller_lease.is_some())
+}
+
+fn participant_required_error(session_id: &SessionId, action_label: &str) -> RuntimeProtocolError {
+    protocol_error(
+        "participant_id_required",
+        format!(
+            "cannot {action_label} for hosted session {} without a participant_id once shared session control is active",
+            session_id.as_str()
+        ),
+    )
+}
+
+fn controller_conflict_error(
+    metadata: &SessionMetadata,
+    controller_participant_id: &str,
+    action_label: &str,
+) -> RuntimeProtocolError {
+    protocol_error(
+        "session_controller_conflict",
+        format!(
+            "cannot {action_label} because hosted session {} is currently controlled by {}; hand off or take over control first",
+            metadata.id.as_str(),
+            session_participant_label(metadata, controller_participant_id),
+        ),
+    )
+}
+
+fn upsert_session_participant(
+    metadata: &mut SessionMetadata,
+    author: &TurnAuthor,
+    recorded_at_ms: u64,
+    require_participant_id: bool,
+) -> Result<Option<String>, RuntimeProtocolError> {
+    let Some(participant_id) = normalized_participant_id(author) else {
+        return if require_participant_id {
+            Err(protocol_error(
+                "participant_id_required",
+                "hosted shared-session actions require a non-empty participant_id",
+            ))
+        } else {
+            Ok(None)
+        };
+    };
+
+    if let Some(existing) = metadata
+        .participants
+        .iter_mut()
+        .find(|participant| participant.participant_id == participant_id)
+    {
+        existing.client_name = author.client_name.clone();
+        existing.client_version = author
+            .client_version
+            .clone()
+            .or_else(|| existing.client_version.clone());
+        existing.display_name = author
+            .display_name
+            .clone()
+            .or_else(|| existing.display_name.clone());
+        existing.last_seen_at_ms = recorded_at_ms;
+    } else {
+        metadata.participants.push(SessionParticipant {
+            participant_id: participant_id.clone(),
+            client_name: author.client_name.clone(),
+            client_version: author.client_version.clone(),
+            display_name: author.display_name.clone(),
+            attached_at_ms: recorded_at_ms,
+            last_seen_at_ms: recorded_at_ms,
+        });
+    }
+    Ok(Some(participant_id))
+}
+
+fn apply_session_controller_action(
+    metadata: &mut SessionMetadata,
+    actor: &TurnAuthor,
+    action: SessionControllerAction,
+    target_participant_id: Option<String>,
+    recorded_at_ms: u64,
+) -> Result<Option<SessionHostedLifecycleEvent>, RuntimeProtocolError> {
+    let actor_participant_id = upsert_session_participant(metadata, actor, recorded_at_ms, true)?
+        .expect("required participant id should be present");
+    let current_controller = metadata.controller_lease.clone();
+    let history_event = match action {
+        SessionControllerAction::Claim => {
+            if let Some(controller) = current_controller {
+                if controller.participant_id == actor_participant_id {
+                    return Ok(None);
+                }
+                return Err(controller_conflict_error(
+                    metadata,
+                    controller.participant_id.as_str(),
+                    "claim control",
+                ));
+            }
+            metadata.controller_lease = Some(SessionControllerLease {
+                participant_id: actor_participant_id.clone(),
+                acquired_at_ms: recorded_at_ms,
+            });
+            hosted_controller_history_event(
+                metadata,
+                action,
+                actor_participant_id,
+                None,
+                recorded_at_ms,
+            )
+        }
+        SessionControllerAction::Release => {
+            let Some(controller) = current_controller else {
+                return Ok(None);
+            };
+            if controller.participant_id != actor_participant_id {
+                return Err(controller_conflict_error(
+                    metadata,
+                    controller.participant_id.as_str(),
+                    "release control",
+                ));
+            }
+            metadata.controller_lease = None;
+            hosted_controller_history_event(
+                metadata,
+                action,
+                actor_participant_id,
+                None,
+                recorded_at_ms,
+            )
+        }
+        SessionControllerAction::Handoff => {
+            let Some(controller) = current_controller else {
+                return Err(protocol_error(
+                    "session_controller_missing",
+                    format!(
+                        "cannot hand off control for hosted session {} because no active controller lease exists",
+                        metadata.id.as_str()
+                    ),
+                ));
+            };
+            if controller.participant_id != actor_participant_id {
+                return Err(controller_conflict_error(
+                    metadata,
+                    controller.participant_id.as_str(),
+                    "hand off control",
+                ));
+            }
+            let Some(target_participant_id) = target_participant_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(String::from)
+            else {
+                return Err(protocol_error(
+                    "target_participant_required",
+                    "handoff requires a non-empty target_participant_id",
+                ));
+            };
+            if target_participant_id == actor_participant_id {
+                return Ok(None);
+            }
+            if !metadata
+                .participants
+                .iter()
+                .any(|participant| participant.participant_id == target_participant_id)
+            {
+                return Err(protocol_error(
+                    "participant_not_attached",
+                    format!(
+                        "cannot hand off hosted session {} to participant {} because that participant is not attached",
+                        metadata.id.as_str(),
+                        target_participant_id
+                    ),
+                ));
+            }
+            metadata.controller_lease = Some(SessionControllerLease {
+                participant_id: target_participant_id.clone(),
+                acquired_at_ms: recorded_at_ms,
+            });
+            hosted_controller_history_event(
+                metadata,
+                action,
+                actor_participant_id,
+                Some(target_participant_id),
+                recorded_at_ms,
+            )
+        }
+        SessionControllerAction::Takeover => {
+            if let Some(controller) = current_controller {
+                if controller.participant_id == actor_participant_id {
+                    return Ok(None);
+                }
+                metadata.controller_lease = Some(SessionControllerLease {
+                    participant_id: actor_participant_id.clone(),
+                    acquired_at_ms: recorded_at_ms,
+                });
+                hosted_controller_history_event(
+                    metadata,
+                    action,
+                    actor_participant_id,
+                    Some(controller.participant_id),
+                    recorded_at_ms,
+                )
+            } else {
+                metadata.controller_lease = Some(SessionControllerLease {
+                    participant_id: actor_participant_id.clone(),
+                    acquired_at_ms: recorded_at_ms,
+                });
+                hosted_controller_history_event(
+                    metadata,
+                    SessionControllerAction::Claim,
+                    actor_participant_id,
+                    None,
+                    recorded_at_ms,
+                )
+            }
+        }
+    };
+    Ok(history_event)
+}
+
+fn hosted_controller_history_event(
+    metadata: &SessionMetadata,
+    action: SessionControllerAction,
+    actor_participant_id: String,
+    target_participant_id: Option<String>,
+    recorded_at_ms: u64,
+) -> Option<SessionHostedLifecycleEvent> {
+    let runtime_owner = metadata.runtime_owner.as_ref()?;
+    if runtime_owner.kind != SessionRuntimeOwnerKind::HostedControlPlane {
+        return None;
+    }
+    let execution_host_id = metadata
+        .hosted_receipts
+        .as_ref()
+        .and_then(|receipts| receipts.worker.as_ref())
+        .map(|worker| worker.execution_host_id.clone())
+        .or_else(|| {
+            metadata
+                .workspace_state
+                .as_ref()
+                .and_then(|state| state.execution_host.as_ref())
+                .map(|host| host.host_id.clone())
+        })
+        .unwrap_or_else(|| runtime_owner.owner_id.clone());
+    let actor_label = session_participant_label(metadata, actor_participant_id.as_str());
+    let summary = match (action, target_participant_id.as_deref()) {
+        (SessionControllerAction::Claim, _) => {
+            format!("participant {actor_label} claimed hosted session control")
+        }
+        (SessionControllerAction::Release, _) => {
+            format!("participant {actor_label} released hosted session control")
+        }
+        (SessionControllerAction::Handoff, Some(target)) => format!(
+            "participant {actor_label} handed hosted session control to {}",
+            session_participant_label(metadata, target)
+        ),
+        (SessionControllerAction::Takeover, Some(previous)) => format!(
+            "participant {actor_label} took over hosted session control from {}",
+            session_participant_label(metadata, previous)
+        ),
+        (SessionControllerAction::Takeover, None) => {
+            format!("participant {actor_label} took over hosted session control")
+        }
+        (SessionControllerAction::Handoff, None) => {
+            format!("participant {actor_label} handed off hosted session control")
+        }
+    };
+    Some(SessionHostedLifecycleEvent::ControllerLeaseChanged {
+        action,
+        actor_participant_id,
+        target_participant_id,
+        session_owner_id: runtime_owner.owner_id.clone(),
+        execution_host_id,
+        summary,
+        recorded_at_ms,
+    })
+}
+
+fn session_participant_label(metadata: &SessionMetadata, participant_id: &str) -> String {
+    metadata
+        .participants
+        .iter()
+        .find(|participant| participant.participant_id == participant_id)
+        .and_then(|participant| {
+            participant
+                .display_name
+                .as_ref()
+                .map(|display_name| format!("{display_name} ({participant_id})"))
+        })
+        .unwrap_or_else(|| String::from(participant_id))
 }
 
 fn session_branch_state(cwd: &Path) -> Option<SessionBranchState> {
@@ -3271,6 +3798,8 @@ fn detached_session_summary_from_state(
         hosted_receipts: metadata.hosted_receipts.clone(),
         mounted_refs: metadata.mounted_refs.clone(),
         summary_artifact_refs,
+        participants: metadata.participants.clone(),
+        controller_lease: metadata.controller_lease.clone(),
         active_turn_id: active_turn.map(|turn| turn.turn_id.clone()),
         queued_turn_count: view.queued_turns.len(),
         pending_approval_count,

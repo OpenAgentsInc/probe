@@ -16,21 +16,23 @@ use probe_core::runtime::{
 };
 use probe_core::tools::{ExecutedToolCall, ProbeToolChoice, ToolDeniedAction, ToolLoopConfig};
 use probe_protocol::runtime::{
-    CancelQueuedTurnRequest, CancelQueuedTurnResponse, ClientMessage, DetachedSessionEventRecord,
-    DetachedSessionSummary, EventEnvelope, InitializeRequest, InspectDetachedSessionResponse,
-    InspectSessionTurnsResponse, InterruptTurnResponse, ListDetachedSessionsResponse,
-    ListSessionsResponse, QueueTurnResponse, ReadDetachedSessionLogRequest,
-    ReadDetachedSessionLogResponse, RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody,
-    ResponseEnvelope, RuntimeProgressEvent, RuntimeProtocolError, RuntimeRequest, RuntimeResponse,
-    RuntimeToolCallDelta, RuntimeUsage, ServerEvent, ServerMessage, SessionLookupRequest,
-    SessionSnapshot, SpawnChildSessionRequest, SpawnChildSessionResponse, StartSessionRequest,
-    ToolApprovalRecipe, ToolCallResult, ToolChoice, ToolDeniedAction as ProtocolDeniedAction,
-    ToolLongContextRecipe, ToolLoopRecipe, ToolOracleRecipe, ToolSetKind, TurnAuthor,
-    TurnCompleted, TurnPaused, TurnRequest, TurnResponse, WatchDetachedSessionRequest,
-    WatchDetachedSessionResponse,
+    AttachSessionParticipantRequest, AttachSessionParticipantResponse, CancelQueuedTurnRequest,
+    CancelQueuedTurnResponse, ClientMessage, DetachedSessionEventRecord, DetachedSessionSummary,
+    EventEnvelope, InitializeRequest, InspectDetachedSessionResponse, InspectSessionTurnsResponse,
+    InterruptTurnResponse, ListDetachedSessionsResponse, ListSessionsResponse, QueueTurnResponse,
+    ReadDetachedSessionLogRequest, ReadDetachedSessionLogResponse, RequestEnvelope,
+    ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope, RuntimeProgressEvent,
+    RuntimeProtocolError, RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage,
+    ServerEvent, ServerMessage, SessionLookupRequest, SessionSnapshot, SpawnChildSessionRequest,
+    SpawnChildSessionResponse, StartSessionRequest, ToolApprovalRecipe, ToolCallResult, ToolChoice,
+    ToolDeniedAction as ProtocolDeniedAction, ToolLongContextRecipe, ToolLoopRecipe,
+    ToolOracleRecipe, ToolSetKind, TurnAuthor, TurnCompleted, TurnPaused, TurnRequest,
+    TurnResponse, UpdateSessionControllerRequest, UpdateSessionControllerResponse,
+    WatchDetachedSessionRequest, WatchDetachedSessionResponse,
 };
 use probe_protocol::session::{
-    PendingToolApproval, SessionId, SessionMetadata, UsageMeasurement, UsageTruth,
+    PendingToolApproval, SessionControllerAction, SessionId, SessionMetadata, UsageMeasurement,
+    UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, default_local_daemon_socket_path};
 
@@ -45,6 +47,8 @@ pub struct ProbeClientConfig {
     pub probe_home: PathBuf,
     pub client_name: String,
     pub client_version: Option<String>,
+    pub display_name: Option<String>,
+    pub participant_id: Option<String>,
     pub server_binary: Option<PathBuf>,
     pub transport: ProbeClientTransportConfig,
 }
@@ -56,6 +60,8 @@ impl ProbeClientConfig {
             probe_home: probe_home.into(),
             client_name: client_name.into(),
             client_version: None,
+            display_name: None,
+            participant_id: None,
             server_binary: None,
             transport: ProbeClientTransportConfig::SpawnStdio,
         }
@@ -176,6 +182,8 @@ pub struct ProbeClient {
     next_request_id: u64,
     client_name: String,
     client_version: Option<String>,
+    display_name: Option<String>,
+    participant_id: Option<String>,
 }
 
 impl ProbeClient {
@@ -190,6 +198,8 @@ impl ProbeClient {
             next_request_id: 0,
             client_name: config.client_name.clone(),
             client_version: config.client_version.clone(),
+            display_name: config.display_name.clone(),
+            participant_id: config.participant_id.clone(),
         };
         match client.send_request(
             RuntimeRequest::Initialize(InitializeRequest {
@@ -395,6 +405,7 @@ impl ProbeClient {
                         tool_loop: tool_loop_recipe_from_config(&request.tool_loop)?,
                         call_id: request.call_id,
                         resolution: request.resolution,
+                        author: Some(self.turn_author()),
                     },
                 ),
                 event_sink,
@@ -622,6 +633,7 @@ impl ProbeClient {
         match self.send_request(
             RuntimeRequest::InterruptTurn(probe_protocol::runtime::InterruptTurnRequest {
                 session_id: session_id.clone(),
+                author: Some(self.turn_author()),
             }),
             None,
         )? {
@@ -641,6 +653,7 @@ impl ProbeClient {
             RuntimeRequest::CancelQueuedTurn(CancelQueuedTurnRequest {
                 session_id: session_id.clone(),
                 turn_id: turn_id.into(),
+                author: Some(self.turn_author()),
             }),
             None,
         )? {
@@ -672,7 +685,50 @@ impl ProbeClient {
         TurnAuthor {
             client_name: self.client_name.clone(),
             client_version: self.client_version.clone(),
-            display_name: None,
+            display_name: self.display_name.clone(),
+            participant_id: self.participant_id.clone(),
+        }
+    }
+
+    pub fn attach_session_participant(
+        &mut self,
+        session_id: &SessionId,
+        claim_controller: bool,
+    ) -> Result<AttachSessionParticipantResponse, ProbeClientError> {
+        match self.send_request(
+            RuntimeRequest::AttachSessionParticipant(AttachSessionParticipantRequest {
+                session_id: session_id.clone(),
+                participant: self.turn_author(),
+                claim_controller,
+            }),
+            None,
+        )? {
+            RuntimeResponse::AttachSessionParticipant(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected attach_session_participant response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub fn update_session_controller(
+        &mut self,
+        session_id: &SessionId,
+        action: SessionControllerAction,
+        target_participant_id: Option<String>,
+    ) -> Result<UpdateSessionControllerResponse, ProbeClientError> {
+        match self.send_request(
+            RuntimeRequest::UpdateSessionController(UpdateSessionControllerRequest {
+                session_id: session_id.clone(),
+                actor: self.turn_author(),
+                action,
+                target_participant_id,
+            }),
+            None,
+        )? {
+            RuntimeResponse::UpdateSessionController(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected update_session_controller response, got {other:?}"
+            ))),
         }
     }
 
@@ -1292,10 +1348,11 @@ mod tests {
         DetachedSessionRecoveryState, DetachedSessionStatus, StartSessionRequest,
     };
     use probe_protocol::session::{
-        SessionAttachTransport, SessionExecutionHostKind, SessionHostedAuthKind,
-        SessionHostedCheckoutKind, SessionHostedCleanupStatus, SessionHostedLifecycleEvent,
-        SessionPreparedBaselineRef, SessionPreparedBaselineStatus, SessionRuntimeOwnerKind,
-        SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef, SessionWorkspaceState,
+        SessionAttachTransport, SessionControllerAction, SessionExecutionHostKind,
+        SessionHostedAuthKind, SessionHostedCheckoutKind, SessionHostedCleanupStatus,
+        SessionHostedLifecycleEvent, SessionPreparedBaselineRef, SessionPreparedBaselineStatus,
+        SessionRuntimeOwnerKind, SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef,
+        SessionWorkspaceState,
     };
     use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
@@ -1652,6 +1709,184 @@ mod tests {
         server.wait();
         let requests = fake_backend.finish();
         assert_eq!(requests.len(), 1);
+    }
+
+    #[test]
+    fn hosted_session_tracks_participants_controller_handoff_and_conflicts() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let address = reserve_loopback_addr();
+        let attach_target = format!("tcp://{address}");
+        let mut server = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+
+        let mut starter = wait_for_hosted_client(hosted_client_config(
+            environment.probe_home(),
+            address.as_str(),
+            "teammate-a",
+            "Teammate A",
+        ));
+        let session = starter
+            .start_session(StartSessionRequest {
+                title: Some(String::from("shared hosted session")),
+                cwd: environment.workspace().to_path_buf(),
+                profile: test_profile("http://127.0.0.1:9/v1"),
+                system_prompt: None,
+                harness_profile: None,
+                workspace_state: None,
+                mounted_refs: Vec::new(),
+            })
+            .expect("hosted shared session should start");
+        let session_id = session.session.id.clone();
+        let attached = starter
+            .attach_session_participant(&session_id, true)
+            .expect("first participant should attach and claim control");
+        assert_eq!(attached.participants.len(), 1);
+        assert_eq!(
+            attached
+                .controller_lease
+                .as_ref()
+                .map(|lease| lease.participant_id.as_str()),
+            Some("teammate-a")
+        );
+        drop(starter);
+
+        let mut teammate_b = wait_for_hosted_client(hosted_client_config(
+            environment.probe_home(),
+            address.as_str(),
+            "teammate-b",
+            "Teammate B",
+        ));
+        let attached = teammate_b
+            .attach_session_participant(&session_id, false)
+            .expect("second participant should attach without claiming control");
+        assert_eq!(attached.participants.len(), 2);
+        assert_eq!(
+            attached
+                .controller_lease
+                .as_ref()
+                .map(|lease| lease.participant_id.as_str()),
+            Some("teammate-a")
+        );
+        drop(teammate_b);
+
+        let mut starter = wait_for_hosted_client(hosted_client_config(
+            environment.probe_home(),
+            address.as_str(),
+            "teammate-a",
+            "Teammate A",
+        ));
+        starter
+            .update_session_controller(
+                &session_id,
+                SessionControllerAction::Handoff,
+                Some(String::from("teammate-b")),
+            )
+            .expect("controller handoff should succeed");
+        drop(starter);
+
+        let mut teammate_b = wait_for_hosted_client(hosted_client_config(
+            environment.probe_home(),
+            address.as_str(),
+            "teammate-b",
+            "Teammate B",
+        ));
+        let inspected = teammate_b
+            .inspect_detached_session(&session_id)
+            .expect("hosted shared session should be inspectable");
+        assert_eq!(inspected.summary.participants.len(), 2);
+        assert_eq!(
+            inspected
+                .summary
+                .controller_lease
+                .as_ref()
+                .map(|lease| lease.participant_id.as_str()),
+            Some("teammate-b")
+        );
+        assert!(
+            inspected
+                .summary
+                .hosted_receipts
+                .as_ref()
+                .expect("shared session should keep hosted receipts")
+                .history
+                .iter()
+                .any(|event| matches!(
+                    event,
+                    SessionHostedLifecycleEvent::ControllerLeaseChanged {
+                        action: SessionControllerAction::Handoff,
+                        actor_participant_id,
+                        target_participant_id,
+                        ..
+                    } if actor_participant_id == "teammate-a"
+                        && target_participant_id.as_deref() == Some("teammate-b")
+                ))
+        );
+        drop(teammate_b);
+
+        let mut starter = wait_for_hosted_client(hosted_client_config(
+            environment.probe_home(),
+            address.as_str(),
+            "teammate-a",
+            "Teammate A",
+        ));
+
+        let error = starter
+            .queue_plain_text_session_turn(PlainTextResumeRequest {
+                session_id: session_id.clone(),
+                profile: test_profile("http://127.0.0.1:9/v1"),
+                prompt: String::from("this should be rejected"),
+                tool_loop: None,
+            })
+            .expect_err("non-controller should not queue a hosted turn");
+        assert!(matches!(
+            error,
+            super::ProbeClientError::SessionScopedProtocol { ref source, .. }
+                if source.code == "session_controller_conflict"
+        ));
+
+        starter
+            .update_session_controller(&session_id, SessionControllerAction::Takeover, None)
+            .expect("takeover should succeed");
+        let inspected = starter
+            .inspect_detached_session(&session_id)
+            .expect("taken-over hosted session should remain inspectable");
+        assert_eq!(
+            inspected
+                .summary
+                .controller_lease
+                .as_ref()
+                .map(|lease| lease.participant_id.as_str()),
+            Some("teammate-a")
+        );
+        assert!(
+            inspected
+                .summary
+                .hosted_receipts
+                .as_ref()
+                .expect("taken-over shared session should keep hosted receipts")
+                .history
+                .iter()
+                .any(|event| matches!(
+                    event,
+                    SessionHostedLifecycleEvent::ControllerLeaseChanged {
+                        action: SessionControllerAction::Takeover,
+                        actor_participant_id,
+                        target_participant_id,
+                        ..
+                    } if actor_participant_id == "teammate-a"
+                        && target_participant_id.as_deref() == Some("teammate-b")
+                ))
+        );
+
+        starter
+            .shutdown()
+            .expect("idle hosted server should accept shutdown");
+        server.wait();
     }
 
     #[test]
@@ -2209,6 +2444,21 @@ mod tests {
                 Err(error) => panic!("hosted transport should accept connections: {error}"),
             }
         }
+    }
+
+    fn hosted_client_config(
+        probe_home: &std::path::Path,
+        address: &str,
+        participant_id: &str,
+        display_name: &str,
+    ) -> ProbeClientConfig {
+        let mut config = ProbeClientConfig::new(probe_home.to_path_buf(), "probe-client-test");
+        config.transport = ProbeClientTransportConfig::HostedTcp {
+            address: String::from(address),
+        };
+        config.display_name = Some(String::from(display_name));
+        config.participant_id = Some(String::from(participant_id));
+        config
     }
 
     fn wait_for_detached_status(

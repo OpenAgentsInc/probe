@@ -5,11 +5,12 @@ use serde_json::Value;
 
 use crate::backend::BackendProfile;
 use crate::session::{
-    PendingToolApproval, SessionBranchState, SessionChildSummary, SessionDeliveryState,
-    SessionHarnessProfile, SessionHostedReceipts, SessionId, SessionMetadata, SessionMountRef,
-    SessionRuntimeOwner, SessionSummaryArtifact, SessionSummaryArtifactRef, SessionTurn,
-    SessionWorkspaceState, TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass,
-    TranscriptEvent, UsageMeasurement,
+    PendingToolApproval, SessionBranchState, SessionChildSummary, SessionControllerAction,
+    SessionControllerLease, SessionDeliveryState, SessionHarnessProfile, SessionHostedReceipts,
+    SessionId, SessionMetadata, SessionMountRef, SessionParticipant, SessionRuntimeOwner,
+    SessionSummaryArtifact, SessionSummaryArtifactRef, SessionTurn, SessionWorkspaceState,
+    TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass, TranscriptEvent,
+    UsageMeasurement,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +185,8 @@ pub struct TurnAuthor {
     pub client_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub participant_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +287,10 @@ pub struct DetachedSessionSummary {
     pub mounted_refs: Vec<SessionMountRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub summary_artifact_refs: Vec<SessionSummaryArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<SessionParticipant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_lease: Option<SessionControllerLease>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_turn_id: Option<String>,
     pub queued_turn_count: usize,
@@ -350,6 +357,8 @@ pub struct DetachedSessionEventRecord {
 pub struct CancelQueuedTurnRequest {
     pub session_id: SessionId,
     pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<TurnAuthor>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,6 +378,8 @@ pub struct ResolvePendingApprovalRequest {
     pub tool_loop: ToolLoopRecipe,
     pub call_id: String,
     pub resolution: ToolApprovalResolution,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<TurnAuthor>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -380,6 +391,43 @@ pub struct ListPendingApprovalsRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InterruptTurnRequest {
     pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<TurnAuthor>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachSessionParticipantRequest {
+    pub session_id: SessionId,
+    pub participant: TurnAuthor,
+    #[serde(default)]
+    pub claim_controller: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachSessionParticipantResponse {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<SessionParticipant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_lease: Option<SessionControllerLease>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateSessionControllerRequest {
+    pub session_id: SessionId,
+    pub actor: TurnAuthor,
+    pub action: SessionControllerAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_participant_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateSessionControllerResponse {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<SessionParticipant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_lease: Option<SessionControllerLease>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -675,6 +723,8 @@ pub enum RuntimeRequest {
     ReadDetachedSessionLog(ReadDetachedSessionLogRequest),
     InspectSession(SessionLookupRequest),
     InspectDetachedSession(SessionLookupRequest),
+    AttachSessionParticipant(AttachSessionParticipantRequest),
+    UpdateSessionController(UpdateSessionControllerRequest),
     WatchDetachedSession(WatchDetachedSessionRequest),
     StartTurn(TurnRequest),
     ContinueTurn(TurnRequest),
@@ -699,6 +749,8 @@ pub enum RuntimeResponse {
     ReadDetachedSessionLog(ReadDetachedSessionLogResponse),
     InspectSession(SessionSnapshot),
     InspectDetachedSession(InspectDetachedSessionResponse),
+    AttachSessionParticipant(AttachSessionParticipantResponse),
+    UpdateSessionController(UpdateSessionControllerResponse),
     WatchDetachedSession(WatchDetachedSessionResponse),
     StartTurn(TurnResponse),
     ContinueTurn(TurnResponse),
@@ -781,6 +833,7 @@ mod tests {
                     client_name: String::from("probe-cli"),
                     client_version: Some(String::from("0.1.0")),
                     display_name: Some(String::from("operator")),
+                    participant_id: Some(String::from("operator")),
                 }),
                 tool_loop: None,
             }),
