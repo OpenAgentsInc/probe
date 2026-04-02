@@ -36,7 +36,8 @@ Keep it simple:
   remote Codex-backed turns can go quiet for longer without being wedged
 - one managed `openagents` checkout under
   `PROBE_HOME/hosted/workspaces/<baseline-id>/openagents`
-- one local IAP tunnel from the operator machine into that listener
+- one internal IAP attach path that each teammate can open independently into
+  that listener
 
 This follows the same boring posture already used elsewhere in the workspace:
 
@@ -62,7 +63,8 @@ The new scripts live under `scripts/deploy/forge-hosted/`.
    - writes the prepared-baseline manifest that Probe uses for honest startup
      projection
 4. `04-open-tunnel.sh`
-   - opens the local IAP tunnel used by hosted TCP clients
+   - opens a manual local IAP tunnel when the operator wants the old explicit
+     tunnel path
 
 ## Default environment
 
@@ -86,8 +88,12 @@ worker or baseline.
 1. `scripts/deploy/forge-hosted/01-provision-baseline.sh`
 2. `scripts/deploy/forge-hosted/02-configure-and-start.sh`
 3. `scripts/deploy/forge-hosted/03-prepare-openagents-workspace.sh`
-4. In another terminal, run `scripts/deploy/forge-hosted/04-open-tunnel.sh`
-5. Run the hosted OpenAgents harness against `127.0.0.1:17777`
+4. Either:
+   - run `scripts/deploy/forge-hosted/04-open-tunnel.sh` and point clients at
+     `127.0.0.1:17777`, or
+   - use Probe's internal GCP IAP attach transport so each teammate opens
+     their own tunnel directly from `probe-client` or the Probe CLI
+5. Run the hosted OpenAgents harness against the chosen attach path
 
 That harness is where the full Forge proof happens:
 
@@ -148,7 +154,7 @@ This deploy lane is still intentionally narrow:
 
 - one worker, not a fleet
 - operator-run provisioning, not an API control plane
-- local IAP tunnel, not a public hosted endpoint
+- internal IAP attach, not a public hosted endpoint
 - prepared baseline manifests are explicit files, not image registries or
   snapshot orchestration
 - cleanup and restart drills still depend on direct operator invocation

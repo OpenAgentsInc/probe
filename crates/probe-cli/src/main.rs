@@ -14,8 +14,9 @@ use acceptance::{
 };
 use clap::{Parser, Subcommand};
 use probe_client::{
-    INTERNAL_DAEMON_SUBCOMMAND, INTERNAL_SERVER_SUBCOMMAND, ProbeClient, ProbeClientConfig,
-    ProbeClientError, ProbeClientTransportConfig, is_missing_local_daemon_error,
+    HostedGcpIapTransportConfig, INTERNAL_DAEMON_SUBCOMMAND, INTERNAL_SERVER_SUBCOMMAND,
+    ProbeClient, ProbeClientConfig, ProbeClientError, ProbeClientTransportConfig,
+    is_missing_local_daemon_error,
 };
 use probe_core::backend_profiles::{
     PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE,
@@ -147,6 +148,8 @@ struct DaemonControlArgs {
 struct PsArgs {
     #[arg(long)]
     probe_home: Option<PathBuf>,
+    #[command(flatten)]
+    hosted: HostedConnectArgs,
 }
 
 #[derive(clap::Args, Debug)]
@@ -154,6 +157,8 @@ struct AttachArgs {
     session_id: String,
     #[arg(long)]
     probe_home: Option<PathBuf>,
+    #[command(flatten)]
+    hosted: HostedConnectArgs,
     #[arg(long, default_value_t = 12)]
     transcript_limit: usize,
     #[arg(long, default_value_t = 8)]
@@ -165,6 +170,8 @@ struct LogsArgs {
     session_id: String,
     #[arg(long)]
     probe_home: Option<PathBuf>,
+    #[command(flatten)]
+    hosted: HostedConnectArgs,
     #[arg(long, default_value_t = 20)]
     limit: usize,
     #[arg(long, default_value_t = false)]
@@ -176,6 +183,28 @@ struct StopArgs {
     session_id: String,
     #[arg(long)]
     probe_home: Option<PathBuf>,
+    #[command(flatten)]
+    hosted: HostedConnectArgs,
+}
+
+#[derive(clap::Args, Debug, Clone, Default)]
+struct HostedConnectArgs {
+    #[arg(long)]
+    hosted_address: Option<String>,
+    #[arg(long)]
+    hosted_gcp_project: Option<String>,
+    #[arg(long)]
+    hosted_gcp_zone: Option<String>,
+    #[arg(long)]
+    hosted_gcp_instance: Option<String>,
+    #[arg(long, default_value_t = 7777)]
+    hosted_gcp_remote_port: u16,
+    #[arg(long, default_value = "127.0.0.1")]
+    hosted_local_host: String,
+    #[arg(long)]
+    hosted_local_port: Option<u16>,
+    #[arg(long, hide = true)]
+    hosted_gcloud_binary: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1084,7 +1113,7 @@ fn run_daemon(args: DaemonArgs) -> Result<(), String> {
 
 fn run_ps(args: PsArgs) -> Result<(), String> {
     let probe_home = resolve_probe_home_path(args.probe_home)?;
-    let mut client = resolve_daemon_client(probe_home, "ps", true)?;
+    let mut client = resolve_operator_client(probe_home, "ps", &args.hosted, true)?;
     let mut sessions = client
         .list_detached_sessions()
         .map_err(|error| error.to_string())?;
@@ -1098,7 +1127,7 @@ fn run_ps(args: PsArgs) -> Result<(), String> {
 
 fn run_attach(args: AttachArgs) -> Result<(), String> {
     let probe_home = resolve_probe_home_path(args.probe_home)?;
-    let mut client = resolve_daemon_client(probe_home, "attach", true)?;
+    let mut client = resolve_operator_client(probe_home, "attach", &args.hosted, true)?;
     let response = client
         .inspect_detached_session(&SessionId::new(args.session_id))
         .map_err(|error| error.to_string())?;
@@ -1160,7 +1189,7 @@ fn run_attach(args: AttachArgs) -> Result<(), String> {
 fn run_logs(args: LogsArgs) -> Result<(), String> {
     let probe_home = resolve_probe_home_path(args.probe_home)?;
     let session_id = SessionId::new(args.session_id);
-    let mut client = resolve_daemon_client(probe_home, "logs", true)?;
+    let mut client = resolve_operator_client(probe_home, "logs", &args.hosted, true)?;
     let replay = client
         .read_detached_session_log(&session_id, None, args.limit)
         .map_err(|error| error.to_string())?;
@@ -1200,7 +1229,7 @@ fn run_logs(args: LogsArgs) -> Result<(), String> {
 fn run_stop(args: StopArgs) -> Result<(), String> {
     let probe_home = resolve_probe_home_path(args.probe_home)?;
     let session_id = SessionId::new(args.session_id);
-    let mut client = resolve_daemon_client(probe_home, "stop-session", true)?;
+    let mut client = resolve_operator_client(probe_home, "stop-session", &args.hosted, true)?;
     let inspected = client
         .inspect_detached_session(&session_id)
         .map_err(|error| error.to_string())?;
@@ -1254,11 +1283,66 @@ fn resolve_probe_home_path(probe_home: Option<PathBuf>) -> Result<PathBuf, Strin
         .unwrap_or_else(|| default_probe_home().map_err(|error| error.to_string()))
 }
 
-fn daemon_client_config(probe_home: PathBuf, surface: &str) -> ProbeClientConfig {
+fn local_daemon_client_config(probe_home: PathBuf, surface: &str) -> ProbeClientConfig {
     let mut config = ProbeClientConfig::new(probe_home, format!("probe-cli-{surface}"));
     config.client_version = Some(String::from(env!("CARGO_PKG_VERSION")));
     config.transport = ProbeClientTransportConfig::LocalDaemon { socket_path: None };
     config
+}
+
+impl HostedConnectArgs {
+    fn uses_hosted_transport(&self) -> bool {
+        self.hosted_address.is_some()
+            || self.hosted_gcp_project.is_some()
+            || self.hosted_gcp_zone.is_some()
+            || self.hosted_gcp_instance.is_some()
+    }
+}
+
+fn operator_client_config(
+    probe_home: PathBuf,
+    surface: &str,
+    hosted: &HostedConnectArgs,
+) -> Result<ProbeClientConfig, String> {
+    let mut config = ProbeClientConfig::new(probe_home, format!("probe-cli-{surface}"));
+    config.client_version = Some(String::from(env!("CARGO_PKG_VERSION")));
+    if let Some(address) = hosted.hosted_address.as_ref() {
+        if hosted.hosted_gcp_project.is_some()
+            || hosted.hosted_gcp_zone.is_some()
+            || hosted.hosted_gcp_instance.is_some()
+        {
+            return Err(String::from(
+                "cannot combine --hosted-address with --hosted-gcp-* flags",
+            ));
+        }
+        config.transport = ProbeClientTransportConfig::HostedTcp {
+            address: address.clone(),
+        };
+        return Ok(config);
+    }
+    if hosted.uses_hosted_transport() {
+        let project = hosted
+            .hosted_gcp_project
+            .clone()
+            .ok_or_else(|| String::from("--hosted-gcp-project is required"))?;
+        let zone = hosted
+            .hosted_gcp_zone
+            .clone()
+            .ok_or_else(|| String::from("--hosted-gcp-zone is required"))?;
+        let instance = hosted
+            .hosted_gcp_instance
+            .clone()
+            .ok_or_else(|| String::from("--hosted-gcp-instance is required"))?;
+        let mut iap = HostedGcpIapTransportConfig::new(project, zone, instance);
+        iap.remote_port = hosted.hosted_gcp_remote_port;
+        iap.local_host = hosted.hosted_local_host.clone();
+        iap.local_port = hosted.hosted_local_port;
+        iap.gcloud_binary = hosted.hosted_gcloud_binary.clone();
+        config.transport = ProbeClientTransportConfig::HostedGcpIap(iap);
+        return Ok(config);
+    }
+    config.transport = ProbeClientTransportConfig::LocalDaemon { socket_path: None };
+    Ok(config)
 }
 
 fn watchdog_policy_from_args(
@@ -1280,7 +1364,26 @@ fn watchdog_policy_from_args(
 }
 
 fn try_daemon_client(probe_home: PathBuf, surface: &str) -> Result<ProbeClient, ProbeClientError> {
-    ProbeClient::connect(daemon_client_config(probe_home, surface))
+    ProbeClient::connect(local_daemon_client_config(probe_home, surface))
+}
+
+fn resolve_operator_client(
+    probe_home: PathBuf,
+    surface: &str,
+    hosted: &HostedConnectArgs,
+    autostart: bool,
+) -> Result<ProbeClient, String> {
+    let config = operator_client_config(probe_home, surface, hosted)?;
+    if matches!(
+        config.transport,
+        ProbeClientTransportConfig::LocalDaemon { .. }
+    ) && autostart
+    {
+        ProbeClient::connect_or_autostart_local_daemon(config, Duration::from_secs(3))
+            .map_err(|error| error.to_string())
+    } else {
+        ProbeClient::connect(config).map_err(|error| error.to_string())
+    }
 }
 
 fn resolve_daemon_client(
@@ -1288,13 +1391,7 @@ fn resolve_daemon_client(
     surface: &str,
     autostart: bool,
 ) -> Result<ProbeClient, String> {
-    let config = daemon_client_config(probe_home, surface);
-    if autostart {
-        ProbeClient::connect_or_autostart_local_daemon(config, Duration::from_secs(3))
-            .map_err(|error| error.to_string())
-    } else {
-        ProbeClient::connect(config).map_err(|error| error.to_string())
-    }
+    resolve_operator_client(probe_home, surface, &HostedConnectArgs::default(), autostart)
 }
 
 fn missing_local_daemon(error: &ProbeClientError) -> bool {
@@ -2465,8 +2562,29 @@ fn render_backend_kind(value: BackendKind) -> &'static str {
 fn render_detached_summary_line(
     summary: &probe_protocol::runtime::DetachedSessionSummary,
 ) -> String {
+    let owner = summary
+        .runtime_owner
+        .as_ref()
+        .map(|owner| format!(" owner={:?}:{}", owner.kind, owner.owner_id))
+        .unwrap_or_default();
+    let attach = summary
+        .runtime_owner
+        .as_ref()
+        .and_then(|owner| owner.attach_target.as_ref())
+        .map(|target| format!(" attach={target}"))
+        .unwrap_or_default();
+    let controller = summary
+        .controller_lease
+        .as_ref()
+        .map(|lease| format!(" controller={}", lease.participant_id))
+        .unwrap_or_default();
+    let participants = if summary.participants.is_empty() {
+        String::new()
+    } else {
+        format!(" participants={}", summary.participants.len())
+    };
     format!(
-        "session={} status={} recovery={} queued={} approvals={} active_turn={} title={:?} cwd={:?}",
+        "session={} status={} recovery={} queued={} approvals={} active_turn={} title={:?} cwd={:?}{}{}{}{}",
         summary.session_id.as_str(),
         render_detached_status(summary.status),
         render_detached_recovery_state(summary.recovery_state),
@@ -2475,6 +2593,10 @@ fn render_detached_summary_line(
         summary.active_turn_id.as_deref().unwrap_or("none"),
         summary.title,
         summary.cwd,
+        owner,
+        attach,
+        participants,
+        controller,
     )
 }
 
@@ -2973,14 +3095,20 @@ mod tests {
     use tempfile::tempdir;
 
     use probe_core::backend_profiles::psionic_apple_fm_bridge;
+    use probe_protocol::runtime::{
+        DetachedSessionRecoveryState, DetachedSessionStatus, DetachedSessionSummary,
+    };
     use probe_protocol::session::{
-        BackendTurnReceipt, CacheSignal, SessionTurn, TranscriptItem, TurnId, TurnObservability,
-        UsageMeasurement, UsageTruth,
+        BackendTurnReceipt, CacheSignal, SessionAttachTransport, SessionControllerLease,
+        SessionRuntimeOwner, SessionRuntimeOwnerKind, SessionTurn, TranscriptItem, TurnId,
+        TurnObservability, UsageMeasurement, UsageTruth,
     };
 
     use super::{
-        BackendKind, PsionicServerConfig, ServerArgs, ToolApprovalConfig, build_tui_runtime_config,
-        render_turn_backend_receipt, render_turn_observability, resolve_server_config,
+        BackendKind, HostedConnectArgs, ProbeClientTransportConfig, PsionicServerConfig,
+        ServerArgs, ToolApprovalConfig, build_tui_runtime_config, operator_client_config,
+        render_detached_summary_line, render_turn_backend_receipt, render_turn_observability,
+        resolve_server_config,
     };
 
     #[test]
@@ -3117,5 +3245,87 @@ mod tests {
             .tool_loop
             .expect("tui config should include tool loop");
         assert_eq!(tool_loop.approval, ToolApprovalConfig::allow_all());
+    }
+
+    #[test]
+    fn operator_client_config_builds_hosted_gcp_iap_transport() {
+        let config = operator_client_config(
+            PathBuf::from("/tmp/probe"),
+            "ps",
+            &HostedConnectArgs {
+                hosted_address: None,
+                hosted_gcp_project: Some(String::from("openagentsgemini")),
+                hosted_gcp_zone: Some(String::from("us-central1-a")),
+                hosted_gcp_instance: Some(String::from("probe-hosted-forge-1")),
+                hosted_gcp_remote_port: 7777,
+                hosted_local_host: String::from("127.0.0.1"),
+                hosted_local_port: Some(17777),
+                hosted_gcloud_binary: Some(PathBuf::from("/tmp/fake-gcloud")),
+            },
+        )
+        .expect("hosted gcp operator config should resolve");
+
+        match config.transport {
+            ProbeClientTransportConfig::HostedGcpIap(iap) => {
+                assert_eq!(iap.project, "openagentsgemini");
+                assert_eq!(iap.zone, "us-central1-a");
+                assert_eq!(iap.instance, "probe-hosted-forge-1");
+                assert_eq!(iap.remote_port, 7777);
+                assert_eq!(iap.local_host, "127.0.0.1");
+                assert_eq!(iap.local_port, Some(17777));
+                assert_eq!(
+                    iap.gcloud_binary,
+                    Some(PathBuf::from("/tmp/fake-gcloud"))
+                );
+            }
+            other => panic!("expected hosted gcp iap transport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_detached_summary_line_includes_owner_attach_and_controller() {
+        let line = render_detached_summary_line(&DetachedSessionSummary {
+            session_id: probe_protocol::session::SessionId::new("sess_test"),
+            title: String::from("shared hosted session"),
+            cwd: PathBuf::from("/tmp/shared"),
+            status: DetachedSessionStatus::Running,
+            runtime_owner: Some(SessionRuntimeOwner {
+                kind: SessionRuntimeOwnerKind::HostedControlPlane,
+                owner_id: String::from("probe-hosted-test"),
+                display_name: Some(String::from("Hosted Probe")),
+                attach_transport: SessionAttachTransport::TcpJsonl,
+                attach_target: Some(String::from("tcp://127.0.0.1:17777")),
+            }),
+            workspace_state: None,
+            hosted_receipts: None,
+            mounted_refs: Vec::new(),
+            summary_artifact_refs: Vec::new(),
+            participants: vec![probe_protocol::session::SessionParticipant {
+                participant_id: String::from("teammate-a"),
+                client_name: String::from("autopilot-desktop"),
+                client_version: Some(String::from("0.1.0")),
+                display_name: Some(String::from("Teammate A")),
+                attached_at_ms: 1,
+                last_seen_at_ms: 2,
+            }],
+            controller_lease: Some(SessionControllerLease {
+                participant_id: String::from("teammate-a"),
+                acquired_at_ms: 2,
+            }),
+            active_turn_id: Some(String::from("turn_1")),
+            queued_turn_count: 1,
+            pending_approval_count: 0,
+            last_terminal_turn_id: None,
+            last_terminal_status: None,
+            registered_at_ms: 1,
+            updated_at_ms: 2,
+            recovery_state: DetachedSessionRecoveryState::Clean,
+            recovery_note: None,
+        });
+
+        assert!(line.contains("owner=HostedControlPlane:probe-hosted-test"));
+        assert!(line.contains("attach=tcp://127.0.0.1:17777"));
+        assert!(line.contains("participants=1"));
+        assert!(line.contains("controller=teammate-a"));
     }
 }

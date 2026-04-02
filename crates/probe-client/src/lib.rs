@@ -1,7 +1,7 @@
 use std::env;
 use std::fmt::{Display, Formatter};
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -69,10 +69,41 @@ impl ProbeClientConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostedGcpIapTransportConfig {
+    pub project: String,
+    pub zone: String,
+    pub instance: String,
+    pub remote_port: u16,
+    pub local_host: String,
+    pub local_port: Option<u16>,
+    pub gcloud_binary: Option<PathBuf>,
+}
+
+impl HostedGcpIapTransportConfig {
+    #[must_use]
+    pub fn new(
+        project: impl Into<String>,
+        zone: impl Into<String>,
+        instance: impl Into<String>,
+    ) -> Self {
+        Self {
+            project: project.into(),
+            zone: zone.into(),
+            instance: instance.into(),
+            remote_port: 7777,
+            local_host: String::from("127.0.0.1"),
+            local_port: None,
+            gcloud_binary: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProbeClientTransportConfig {
     SpawnStdio,
     LocalDaemon { socket_path: Option<PathBuf> },
     HostedTcp { address: String },
+    HostedGcpIap(HostedGcpIapTransportConfig),
 }
 
 #[derive(Debug)]
@@ -842,6 +873,7 @@ fn build_transport(config: &ProbeClientConfig) -> Result<ClientTransport, ProbeC
         ProbeClientTransportConfig::HostedTcp { address } => {
             connect_hosted_tcp_transport(address.as_str())
         }
+        ProbeClientTransportConfig::HostedGcpIap(iap) => connect_hosted_gcp_iap_transport(iap),
     }
 }
 
@@ -915,6 +947,89 @@ fn connect_hosted_tcp_transport(address: &str) -> Result<ClientTransport, ProbeC
         reader: Box::new(BufReader::new(stream)),
         shutdown_on_drop: false,
     })
+}
+
+fn connect_hosted_gcp_iap_transport(
+    config: &HostedGcpIapTransportConfig,
+) -> Result<ClientTransport, ProbeClientError> {
+    let local_port = reserve_local_tcp_port(config.local_host.as_str(), config.local_port)?;
+    let local_address = format!("{}:{local_port}", config.local_host);
+    let gcloud_binary = config
+        .gcloud_binary
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("gcloud"));
+    let mut command = Command::new(gcloud_binary);
+    command
+        .arg("compute")
+        .arg("start-iap-tunnel")
+        .arg(config.instance.as_str())
+        .arg(config.remote_port.to_string())
+        .arg(format!("--local-host-port={local_address}"))
+        .arg(format!("--project={}", config.project))
+        .arg(format!("--zone={}", config.zone))
+        .arg("--verbosity=error")
+        .arg("--quiet")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().map_err(ProbeClientError::Spawn)?;
+    let stream = wait_for_hosted_tunnel(local_address.as_str(), &mut child)?;
+    let writer = stream
+        .try_clone()
+        .map_err(ProbeClientError::ConnectHosted)?;
+    Ok(ClientTransport {
+        child: Some(child),
+        writer: Box::new(writer),
+        reader: Box::new(BufReader::new(stream)),
+        shutdown_on_drop: false,
+    })
+}
+
+fn reserve_local_tcp_port(host: &str, requested: Option<u16>) -> Result<u16, ProbeClientError> {
+    if let Some(port) = requested {
+        return Ok(port);
+    }
+    let listener = TcpListener::bind(format!("{host}:0")).map_err(ProbeClientError::ConnectHosted)?;
+    let port = listener
+        .local_addr()
+        .map_err(ProbeClientError::ConnectHosted)?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
+fn wait_for_hosted_tunnel(
+    address: &str,
+    child: &mut Child,
+) -> Result<TcpStream, ProbeClientError> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last_error = None;
+    while Instant::now() < deadline {
+        match TcpStream::connect(address) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => {
+                last_error = Some(error);
+                if child
+                    .try_wait()
+                    .map_err(ProbeClientError::Spawn)?
+                    .is_some()
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(ProbeClientError::ConnectHosted(std::io::Error::other(
+        format!(
+            "timed out waiting for hosted GCP IAP tunnel to expose {address}: {}",
+            last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| String::from("no connection details"))
+        ),
+    )))
 }
 
 fn build_server_command(config: &ProbeClientConfig) -> Result<Command, ProbeClientError> {
@@ -1337,6 +1452,8 @@ fn default_session_title(prompt: &str) -> String {
 mod tests {
     use std::fs;
     use std::net::TcpListener;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::process::{Child, Command, Stdio};
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -1356,7 +1473,9 @@ mod tests {
     };
     use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
-    use super::{ProbeClient, ProbeClientConfig, ProbeClientTransportConfig};
+    use super::{
+        HostedGcpIapTransportConfig, ProbeClient, ProbeClientConfig, ProbeClientTransportConfig,
+    };
 
     const TEST_MODEL: &str = "tiny-qwen35";
 
@@ -1559,6 +1678,96 @@ mod tests {
         client
             .shutdown()
             .expect("idle hosted server should accept shutdown");
+        server.wait();
+    }
+
+    #[test]
+    fn hosted_gcp_iap_transport_can_discover_and_attach_to_existing_hosted_sessions() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let address = reserve_loopback_addr();
+        let attach_target = format!("tcp://{address}");
+        let mut server = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+
+        let mut starter_config =
+            ProbeClientConfig::new(environment.probe_home(), "probe-client-starter");
+        starter_config.transport = ProbeClientTransportConfig::HostedTcp {
+            address: address.clone(),
+        };
+        let mut starter = wait_for_hosted_client(starter_config);
+        let snapshot = starter
+            .start_session(StartSessionRequest {
+                title: Some(String::from("discoverable hosted session")),
+                cwd: environment.workspace().to_path_buf(),
+                profile: test_profile("http://127.0.0.1:9/v1"),
+                system_prompt: None,
+                harness_profile: None,
+                workspace_state: None,
+                mounted_refs: Vec::new(),
+            })
+            .expect("hosted session should start");
+        let session_id = snapshot.session.id.clone();
+        drop(starter);
+
+        let (fake_gcloud, log_path) = write_fake_gcloud_tunnel_script(&environment);
+        let remote_port = address
+            .rsplit_once(':')
+            .expect("hosted address should include a port")
+            .1
+            .parse::<u16>()
+            .expect("hosted address port should parse");
+        let mut config = ProbeClientConfig::new(environment.probe_home(), "probe-client-test");
+        let mut iap = HostedGcpIapTransportConfig::new(
+            "openagentsgemini",
+            "us-central1-a",
+            "probe-hosted-forge-1",
+        );
+        iap.remote_port = remote_port;
+        iap.local_port = Some(17789);
+        iap.gcloud_binary = Some(fake_gcloud);
+        config.transport = ProbeClientTransportConfig::HostedGcpIap(iap);
+
+        let mut teammate = ProbeClient::connect(config)
+            .expect("hosted gcp iap transport should connect through the fake tunnel");
+        let detached = teammate
+            .list_detached_sessions()
+            .expect("gcp iap hosted client should discover detached sessions");
+        assert!(detached.iter().any(|summary| {
+            summary.session_id == session_id
+                && summary
+                    .runtime_owner
+                    .as_ref()
+                    .and_then(|owner| owner.attach_target.as_deref())
+                    == Some(attach_target.as_str())
+        }));
+
+        let inspected = teammate
+            .inspect_detached_session(&session_id)
+            .expect("gcp iap hosted client should inspect the discovered session");
+        assert_eq!(inspected.summary.session_id, session_id);
+
+        let logged = fs::read_to_string(&log_path).expect("fake gcloud command log should exist");
+        assert!(logged.contains("compute start-iap-tunnel probe-hosted-forge-1"));
+        assert!(logged.contains("--project=openagentsgemini"));
+        assert!(logged.contains("--zone=us-central1-a"));
+        assert!(logged.contains("--local-host-port=127.0.0.1:17789"));
+
+        drop(teammate);
+
+        let mut closer_config =
+            ProbeClientConfig::new(environment.probe_home(), "probe-client-closer");
+        closer_config.transport = ProbeClientTransportConfig::HostedTcp {
+            address: address.clone(),
+        };
+        let mut closer = wait_for_hosted_client(closer_config);
+        closer
+            .shutdown()
+            .expect("idle hosted server should accept shutdown directly");
         server.wait();
     }
 
@@ -2441,6 +2650,87 @@ mod tests {
             .expect("loopback listener should expose an address");
         drop(listener);
         address.to_string()
+    }
+
+    fn write_fake_gcloud_tunnel_script(
+        environment: &ProbeTestEnvironment,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let script_path = environment.probe_home().join("fake-gcloud.sh");
+        let log_path = environment.probe_home().join("fake-gcloud.log");
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" > "{log_path}"
+instance="${{3:-}}"
+remote_port="${{4:-}}"
+local_spec=""
+for arg in "$@"; do
+  case "$arg" in
+    --local-host-port=*)
+      local_spec="${{arg#*=}}"
+      ;;
+  esac
+done
+[ -n "$instance" ] || exit 1
+[ -n "$remote_port" ] || exit 1
+[ -n "$local_spec" ] || exit 1
+local_port="${{local_spec##*:}}"
+exec python3 - "$local_port" "$remote_port" <<'PY'
+import select
+import socket
+import sys
+
+local_port = int(sys.argv[1])
+remote_port = int(sys.argv[2])
+
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(("127.0.0.1", local_port))
+listener.listen(1)
+
+client, _ = listener.accept()
+upstream = socket.create_connection(("127.0.0.1", remote_port))
+sockets = [client, upstream]
+
+while sockets:
+    readable, _, exceptional = select.select(sockets, [], sockets, 0.5)
+    for sock in exceptional:
+        if sock in sockets:
+            sockets.remove(sock)
+    for sock in readable:
+        data = sock.recv(65536)
+        if not data:
+            if sock in sockets:
+                sockets.remove(sock)
+            peer = upstream if sock is client else client
+            try:
+                peer.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            continue
+        peer = upstream if sock is client else client
+        peer.sendall(data)
+
+for stream in (client, upstream, listener):
+    try:
+        stream.close()
+    except OSError:
+        pass
+PY
+"#,
+            log_path = log_path.display()
+        );
+        fs::write(&script_path, script).expect("write fake gcloud script");
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&script_path)
+                .expect("fake gcloud script metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions)
+                .expect("fake gcloud script should be executable");
+        }
+        (script_path, log_path)
     }
 
     fn init_git_workspace(workspace: &std::path::Path) {

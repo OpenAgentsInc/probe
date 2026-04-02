@@ -275,3 +275,7 @@ This folder holds technical planning docs for the Probe runtime.
   - typed hosted restart reconciliation, managed-workspace cleanup closure,
     orphaned workspace reap events, and retained restart plus cleanup history
     for the internal shared-session MVP
+- `80-hosted-internal-attach-and-session-discovery.md`
+  - internal GCP IAP attach for hosted Probe sessions, reuse of the detached
+    registry as the runtime-owned discovery surface, and CLI hosted attach
+    flags for team session inspection

@@ -67,7 +67,8 @@ This still does not add:
 
 - a fleet-wide worker event stream
 - cloud-provider-native cleanup receipts
-- a shared hosted session directory or multi-operator attach surface
+- an app-owned shared hosted session directory above Probe runtime ids
 
-Those remain follow-on internal Forge MVP tasks above this runtime-owned
+The raw hosted attach and discovery surface landed later in `#105`; what
+remains is the higher-level shared-session layer above this runtime-owned
 restart and cleanup truth.

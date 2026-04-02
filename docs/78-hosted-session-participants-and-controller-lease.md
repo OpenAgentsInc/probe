@@ -72,9 +72,10 @@ The new hosted collaboration test proves:
 
 This does not yet solve:
 
-- a team-reachable hosted attach surface
-- hosted session discovery for other operators
+- the app-owned shared session directory and collaboration UX above Probe's raw
+  hosted session ids
 - typed restart, orphan-cleanup, or cleanup-closure history
 
-Those are follow-on hosted internal-MVP issues above the controller lease
+The raw Probe attach and discovery surface landed later in `#105`; the
+remaining gap is higher-level collaboration state above the controller lease
 seam.
