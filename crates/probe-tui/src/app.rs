@@ -50,7 +50,6 @@ pub struct AppShell {
     screens: Vec<ScreenState>,
     last_status: String,
     should_quit: bool,
-    needs_terminal_reset: bool,
     bottom_pane: BottomPane,
     worker: BackgroundWorker,
     backend_lanes: [BackendLaneConfig; 3],
@@ -100,7 +99,6 @@ impl AppShell {
             screens: vec![ScreenState::Chat(chat_lanes[active_backend_index].clone())],
             last_status: String::from("probe tui launched"),
             should_quit: false,
-            needs_terminal_reset: false,
             bottom_pane: BottomPane::new(),
             worker: BackgroundWorker::new(),
             backend_lanes,
@@ -438,14 +436,14 @@ impl AppShell {
         self.worker.submit(request)
     }
 
-    fn launch_experimental_overlay(&mut self) -> Result<String, String> {
+    fn launch_experimental_overlay(&self) -> Result<String, String> {
         let executable = std::env::current_exe().map_err(|error| {
             format!("failed to resolve the Probe executable for overlay launch: {error}")
         })?;
         let mut child = Command::new(&executable)
-            .args(["overlay", "demo", "--target", "auto", "--from-tui-handoff"])
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
+            .args(["overlay", "demo"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| {
@@ -455,11 +453,11 @@ impl AppShell {
                 )
             })?;
 
-        let status = child.wait().map_err(|error| {
-            format!("failed to wait for the experimental overlay process: {error}")
-        })?;
-        self.needs_terminal_reset = true;
-        if !status.success() {
+        std::thread::sleep(Duration::from_millis(160));
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("failed to poll the experimental overlay process: {error}"))?
+        {
             let mut detail = String::new();
             if let Some(mut stderr) = child.stderr.take() {
                 let _ = stderr.read_to_string(&mut detail);
@@ -470,16 +468,12 @@ impl AppShell {
             } else {
                 detail.to_string()
             };
-            return Err(format!("experimental WGPUI overlay failed: {suffix}"));
+            return Err(format!(
+                "experimental WGPUI overlay failed before startup: {suffix}"
+            ));
         }
 
-        Ok(String::from("displayed experimental WGPUI overlay"))
-    }
-
-    pub fn take_terminal_reset_request(&mut self) -> bool {
-        let needs_terminal_reset = self.needs_terminal_reset;
-        self.needs_terminal_reset = false;
-        needs_terminal_reset
+        Ok(String::from("launched experimental WGPUI overlay sidecar"))
     }
 
     pub fn poll_background_messages(&mut self) -> usize {
@@ -999,9 +993,6 @@ fn run_loop(
             }
         } else {
             app.dispatch(UiEvent::Tick);
-        }
-        if app.take_terminal_reset_request() {
-            terminal.clear()?;
         }
     }
 

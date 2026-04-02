@@ -14,7 +14,7 @@ use acceptance::{
     run_acceptance_matrix, run_self_test_harness,
 };
 use clap::{Parser, Subcommand};
-use overlay::{OverlayTarget, run_overlay_demo};
+use overlay::run_overlay_demo;
 use probe_client::{
     INTERNAL_DAEMON_SUBCOMMAND, INTERNAL_SERVER_SUBCOMMAND, ProbeClient, ProbeClientConfig,
     ProbeClientError, ProbeClientTransportConfig, is_missing_local_daemon_error,
@@ -197,16 +197,8 @@ enum CodexCommands {
 
 #[derive(Subcommand, Debug)]
 enum OverlayCommands {
-    #[command(about = "Launch the experimental WGPUI overlay demo")]
-    Demo(OverlayDemoArgs),
-}
-
-#[derive(clap::Args, Debug)]
-struct OverlayDemoArgs {
-    #[arg(long, value_enum, default_value_t = OverlayTarget::Auto)]
-    target: OverlayTarget,
-    #[arg(long, hide = true, default_value_t = false)]
-    from_tui_handoff: bool,
+    #[command(about = "Launch the experimental WGPUI overlay demo window")]
+    Demo,
 }
 
 #[derive(clap::Args, Debug)]
@@ -566,7 +558,7 @@ fn run() -> Result<(), String> {
 
 fn run_overlay(args: OverlayArgs) -> Result<(), String> {
     match args.command {
-        OverlayCommands::Demo(args) => run_overlay_demo(args.target, args.from_tui_handoff),
+        OverlayCommands::Demo => run_overlay_demo(),
     }
 }
 

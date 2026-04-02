@@ -102,9 +102,8 @@ fn overlay_help_is_available() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Launch the experimental WGPUI overlay demo",
-        ))
-        .stdout(predicate::str::contains("--target <TARGET>"));
+            "Launch the experimental WGPUI overlay demo window",
+        ));
 }
 
 #[test]

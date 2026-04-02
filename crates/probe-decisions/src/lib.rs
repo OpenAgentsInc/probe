@@ -4,7 +4,9 @@ use probe_core::dataset_export::{
     LongContextObservedLabel, PatchReadinessDecisionCaseContext, PatchReadinessObservedLabel,
     ToolRouteDecisionCaseContext, ToolRouteObservedLabel,
 };
-use probe_core::long_context::{LongContextEscalationContext, LongContextEscalationDecision};
+use probe_core::long_context::{
+    LongContextEscalationContext, LongContextEscalationDecision,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -449,7 +451,9 @@ impl HeuristicToolRouteModule {
                         String::from("apply_patch"),
                         String::from("shell"),
                     ],
-                    reason: String::from("the session has not established workspace structure yet"),
+                    reason: String::from(
+                        "the session has not established workspace structure yet",
+                    ),
                 },
             }),
         )
@@ -539,7 +543,9 @@ impl AggressiveToolRouteModule {
                         String::from("list_files"),
                         String::from("shell"),
                     ],
-                    reason: String::from("the aggressive route prefers direct file inspection"),
+                    reason: String::from(
+                        "the aggressive route prefers direct file inspection",
+                    ),
                 },
             }),
         )
@@ -1209,8 +1215,7 @@ pub fn evaluate_candidate_manifest(
                 let Some(label) = tool_route_label_from_case(case) else {
                     return false;
                 };
-                manifest_tool_route_decision(manifest, &context).selected_tool
-                    == label.selected_tool
+                manifest_tool_route_decision(manifest, &context).selected_tool == label.selected_tool
             })
             .count(),
         DecisionModuleFamily::PatchReadiness => relevant_cases
@@ -1297,15 +1302,13 @@ fn manifest_long_context_decision(
 }
 
 fn matches_tool_route_rule(rule: &ToolRouteRule, input: &ToolRouteContext) -> bool {
-    matches_optional_range(
-        input.files_listed,
-        rule.min_files_listed,
-        rule.max_files_listed,
-    ) && matches_optional_range(
-        input.files_searched,
-        rule.min_files_searched,
-        rule.max_files_searched,
-    ) && matches_optional_range(input.files_read, rule.min_files_read, rule.max_files_read)
+    matches_optional_range(input.files_listed, rule.min_files_listed, rule.max_files_listed)
+        && matches_optional_range(
+            input.files_searched,
+            rule.min_files_searched,
+            rule.max_files_searched,
+        )
+        && matches_optional_range(input.files_read, rule.min_files_read, rule.max_files_read)
         && matches_optional_range(
             input.patch_attempts,
             rule.min_patch_attempts,
@@ -1324,15 +1327,13 @@ fn matches_tool_route_rule(rule: &ToolRouteRule, input: &ToolRouteContext) -> bo
 }
 
 fn matches_patch_readiness_rule(rule: &PatchReadinessRule, input: &PatchReadinessContext) -> bool {
-    matches_optional_range(
-        input.files_listed,
-        rule.min_files_listed,
-        rule.max_files_listed,
-    ) && matches_optional_range(
-        input.files_searched,
-        rule.min_files_searched,
-        rule.max_files_searched,
-    ) && matches_optional_range(input.files_read, rule.min_files_read, rule.max_files_read)
+    matches_optional_range(input.files_listed, rule.min_files_listed, rule.max_files_listed)
+        && matches_optional_range(
+            input.files_searched,
+            rule.min_files_searched,
+            rule.max_files_searched,
+        )
+        && matches_optional_range(input.files_read, rule.min_files_read, rule.max_files_read)
         && matches_optional_range(
             input.patch_attempts,
             rule.min_patch_attempts,
@@ -1365,11 +1366,7 @@ fn matches_long_context_rule(rule: &LongContextRule, input: &LongContextEscalati
             rule.min_prompt_char_count,
             rule.max_prompt_char_count,
         )
-        && matches_optional_range(
-            input.files_listed,
-            rule.min_files_listed,
-            rule.max_files_listed,
-        )
+        && matches_optional_range(input.files_listed, rule.min_files_listed, rule.max_files_listed)
         && matches_optional_range(
             input.files_searched,
             rule.min_files_searched,
@@ -1381,11 +1378,7 @@ fn matches_long_context_rule(rule: &LongContextRule, input: &LongContextEscalati
             rule.min_requested_evidence_files,
             rule.max_requested_evidence_files,
         )
-        && matches_optional_range(
-            input.oracle_calls,
-            rule.min_oracle_calls,
-            rule.max_oracle_calls,
-        )
+        && matches_optional_range(input.oracle_calls, rule.min_oracle_calls, rule.max_oracle_calls)
         && matches_optional_range(
             input.long_context_calls,
             rule.min_long_context_calls,
@@ -1455,9 +1448,7 @@ fn patch_readiness_context_from_case(case: &DecisionCaseRecord) -> Option<PatchR
     })
 }
 
-fn long_context_context_from_case(
-    case: &DecisionCaseRecord,
-) -> Option<LongContextEscalationContext> {
+fn long_context_context_from_case(case: &DecisionCaseRecord) -> Option<LongContextEscalationContext> {
     let DecisionCaseContext::LongContextEscalation(LongContextDecisionCaseContext {
         prompt_char_count,
         files_listed,
@@ -1593,10 +1584,10 @@ mod tests {
     };
 
     use super::{
-        AggressiveToolRouteModule, DecisionModule, DecisionModuleEvalSpec,
-        HeuristicLongContextEscalationModule, HeuristicPatchReadinessModule,
-        HeuristicToolRouteModule, StrictPatchReadinessModule, evaluate_candidate_manifest,
-        evaluate_long_context_module, evaluate_patch_readiness_module, evaluate_tool_route_module,
+        AggressiveToolRouteModule, DecisionModule, HeuristicLongContextEscalationModule,
+        DecisionModuleEvalSpec, HeuristicPatchReadinessModule, HeuristicToolRouteModule,
+        StrictPatchReadinessModule, evaluate_candidate_manifest, evaluate_long_context_module,
+        evaluate_patch_readiness_module, evaluate_tool_route_module,
     };
 
     fn sample_summary() -> DecisionSessionSummary {

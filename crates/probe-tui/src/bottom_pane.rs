@@ -6,7 +6,8 @@ use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 
 use crate::event::UiEvent;
 
-const PLACEHOLDER: &str = "Type a Probe message. Enter submits. Ctrl+J inserts a newline.";
+const PLACEHOLDER: &str =
+    "Type a Probe message. Enter submits. Ctrl+J inserts a newline.";
 const MAX_VISIBLE_COMPOSER_LINES: usize = 4;
 const MAX_HISTORY_ENTRIES: usize = 24;
 const ATTACHMENT_LIBRARY: [&str; 3] = ["README.md", "Cargo.toml", "docs/README.md"];
@@ -263,10 +264,7 @@ impl ComposerState {
 
         let mentions = parse_mentions(self.text.as_str());
         if !mentions.is_empty() {
-            parts.push(format!(
-                "mentions: {}",
-                render_mentions(mentions.as_slice())
-            ));
+            parts.push(format!("mentions: {}", render_mentions(mentions.as_slice())));
         }
         if !self.attachments.is_empty() {
             parts.push(format!(
@@ -409,7 +407,13 @@ impl BottomPane {
         }
     }
 
-    pub fn render(&self, frame: &mut Frame<'_>, area: Rect, status: &str, state: &BottomPaneState) {
+    pub fn render(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        status: &str,
+        state: &BottomPaneState,
+    ) {
         let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
             .spacing(1)
             .split(area);
@@ -516,9 +520,7 @@ fn slash_command(value: &str) -> Option<String> {
 fn parse_mentions(value: &str) -> Vec<DraftMention> {
     let mut mentions = Vec::new();
     for token in value.split_whitespace() {
-        let normalized = token.trim_end_matches(|ch: char| {
-            !ch.is_alphanumeric() && ch != ':' && ch != '-' && ch != '_'
-        });
+        let normalized = token.trim_end_matches(|ch: char| !ch.is_alphanumeric() && ch != ':' && ch != '-' && ch != '_');
         if let Some(value) = normalized.strip_prefix("@skill:") {
             if !value.is_empty() {
                 mentions.push(DraftMention {
@@ -603,10 +605,7 @@ mod tests {
         let _ = pane.handle_event(UiEvent::ComposerNewline, &state);
         let _ = pane.handle_event(UiEvent::ComposerInsert('b'), &state);
         let submitted = pane.handle_event(UiEvent::ComposerSubmit, &state);
-        assert_eq!(
-            submitted.as_ref().map(|value| value.text.as_str()),
-            Some("a\nb")
-        );
+        assert_eq!(submitted.as_ref().map(|value| value.text.as_str()), Some("a\nb"));
         assert_eq!(pane.current_text(), "");
     }
 
@@ -651,10 +650,7 @@ mod tests {
             let _ = pane.handle_event(UiEvent::ComposerInsert(ch), &state);
         }
         let _ = pane.handle_event(UiEvent::ComposerAddAttachment, &state);
-        let _ = pane.handle_event(
-            UiEvent::ComposerPaste(String::from("\nalpha\nbeta")),
-            &state,
-        );
+        let _ = pane.handle_event(UiEvent::ComposerPaste(String::from("\nalpha\nbeta")), &state);
         let submitted = pane
             .handle_event(UiEvent::ComposerSubmit, &state)
             .expect("submission should exist");

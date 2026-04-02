@@ -264,7 +264,3 @@ This folder holds technical planning docs for the Probe runtime.
   - first honest WGPUI proof lane for Probe via `Ctrl+G` or
     `probe overlay demo`, using a capability-gated desktop sidecar window
     instead of pretending the terminal grid became a pixel compositor
-- `76-experimental-terminal-inline-overlay.md`
-  - second WGPUI proof lane for Probe, capturing the overlay scene offscreen
-    and sending it back into interactive iTerm2 sessions as an inline image
-    while preserving the TUI as the retained text shell

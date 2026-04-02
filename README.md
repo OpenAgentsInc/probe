@@ -16,8 +16,7 @@ Current shipped surface:
   detached-session reattach with `--resume`
 - three inference lanes in the TUI: Codex, Qwen or Tailnet, and Apple FM
 - `probe overlay demo` plus `Ctrl+G` in the TUI for the experimental WGPUI
-  graphics demo, preferring in-terminal images on supported terminals and
-  falling back to a sidecar window elsewhere
+  sidecar demo window
 - `probe-server` for the first typed local stdio supervision contract
 - `probe-daemon` for the first long-lived local Unix-socket supervision path
 - `probe daemon run|stop` plus `probe ps|attach|logs|stop` for local detached
@@ -276,11 +275,10 @@ tool transcript rows terse. Tool calls and results render as compact command,
 path, or error summaries instead of debug-shaped JSON blobs.
 
 Probe also now ships an explicit experimental graphics lane. `Ctrl+G` in the
-TUI and `probe overlay demo` now prefer an in-terminal WGPUI image overlay when
-Probe detects a supported terminal graphics protocol. The first shipped
-terminal mode targets interactive iTerm2 sessions via the OSC 1337 inline image
-protocol. Unsupported terminals fall back to the separate desktop sidecar
-window, and `probe overlay demo --target sidecar` still forces that path.
+TUI spawns `probe overlay demo`, which opens a separate desktop WGPUI window
+with synthetic telemetry panels and a demo chart. This is intentionally not a
+true terminal pixel overlay; it is a capability-gated sidecar for supported
+desktop sessions.
 
 Keys:
 
@@ -322,14 +320,8 @@ cargo run -p probe-cli -- tui \
   --server-host 127.0.0.1 \
   --server-port 8080
 
-# preferred auto mode: in-terminal on supported iTerm2 sessions, otherwise sidecar
+# standalone experimental WGPUI sidecar demo
 cargo run -p probe-cli -- overlay demo
-
-# force the in-terminal image path
-cargo run -p probe-cli -- overlay demo --target terminal
-
-# force the sidecar window path
-cargo run -p probe-cli -- overlay demo --target sidecar
 ```
 
 ## Dev Helpers

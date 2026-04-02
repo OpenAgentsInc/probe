@@ -5,8 +5,8 @@ pub mod long_context;
 pub mod provider;
 pub mod runtime;
 pub mod server_control;
-pub mod session_store;
 pub mod session_summary_artifacts;
+pub mod session_store;
 pub mod tools;
 
 use probe_protocol::ProtocolDescriptor;
@@ -43,10 +43,7 @@ mod tests {
     #[test]
     fn bootstrap_mentions_all_initial_crates() {
         let bootstrap = runtime_bootstrap();
-        assert_eq!(
-            bootstrap.protocol.version,
-            probe_protocol::PROBE_PROTOCOL_VERSION
-        );
+        assert_eq!(bootstrap.protocol.version, probe_protocol::PROBE_PROTOCOL_VERSION);
         assert_eq!(bootstrap.crate_boundaries.len(), 8);
         assert!(bootstrap.crate_boundaries.contains(&"probe-cli"));
         assert!(bootstrap.crate_boundaries.contains(&"probe-client"));
