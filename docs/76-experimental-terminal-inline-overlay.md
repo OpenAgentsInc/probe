@@ -36,11 +36,10 @@ pixel widgets.
 The flow is:
 
 1. build the same WGPUI demo scene used by the sidecar proof
-2. immediately clear the current terminal surface and paint a minimal loading state
-3. render the first WGPUI frame offscreen to a PNG through `wgpui::capture_scene`
-4. emit that frame back to the terminal with an inline-image escape sequence
-5. keep recapturing and replacing inline frames on a short timer until dismiss
-6. clear the terminal surface and force a fresh TUI redraw
+2. render that scene offscreen to a PNG through `wgpui::capture_scene`
+3. emit the PNG back to the terminal with an inline-image escape sequence
+4. wait for dismissal
+5. restore the Probe alternate screen and force a fresh TUI redraw
 
 So the terminal proof stays honest:
 
@@ -53,13 +52,14 @@ So the terminal proof stays honest:
 When launched from `probe tui`, Probe now:
 
 - blocks the event loop
+- leaves the alternate screen
+- disables raw mode
 - runs the overlay subcommand with a hidden TUI-handoff flag
-- keeps the existing alternate screen and raw-mode terminal session alive
-- renders the inline image directly into that same TUI-owned terminal surface
+- restores raw mode and the alternate screen after the overlay exits
 - clears the terminal state before the next redraw
 
-That keeps `Ctrl+G` inside the active Probe terminal session instead of visibly
-dropping back to the underlying shell before the overlay appears.
+That gives the inline image lane a clean terminal surface without leaving the
+main TUI in a broken post-handoff state.
 
 ## Non-Goals
 

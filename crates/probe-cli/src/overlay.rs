@@ -3,18 +3,20 @@ use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::ValueEnum;
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
-    self as terminal_event, Event as TerminalEvent, KeyCode as TerminalKeyCode, KeyEventKind,
+    self as terminal_event, DisableMouseCapture, EnableMouseCapture, Event as TerminalEvent,
+    KeyCode as TerminalKeyCode, KeyEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    Clear, ClearType, disable_raw_mode, enable_raw_mode, size as terminal_size,
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+    enable_raw_mode, size as terminal_size,
 };
 use wgpui::renderer::Renderer;
 use wgpui::viz::badge::{BadgeTone, tone_color as badge_color};
@@ -38,9 +40,8 @@ const OVERLAY_WIDTH: u32 = 1180;
 const OVERLAY_HEIGHT: u32 = 760;
 const WINDOW_WIDTH: f64 = OVERLAY_WIDTH as f64;
 const WINDOW_HEIGHT: f64 = OVERLAY_HEIGHT as f64;
-const TERMINAL_CELL_WIDTH_PX: u32 = 12;
-const TERMINAL_CELL_HEIGHT_PX: u32 = 24;
-const TERMINAL_OVERLAY_FRAME_INTERVAL: Duration = Duration::from_millis(650);
+const TERMINAL_CELL_WIDTH_PX: u32 = 16;
+const TERMINAL_CELL_HEIGHT_PX: u32 = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum OverlayTarget {
@@ -72,30 +73,32 @@ struct TerminalViewport {
     rows: u16,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OverlayLaunchContext {
-    StandaloneCli,
-    EmbeddedInTui,
+pub fn run_overlay_demo(target: OverlayTarget, from_tui_handoff: bool) -> Result<(), String> {
+    if from_tui_handoff {
+        return run_overlay_demo_with_tui_handoff(target);
+    }
+    run_overlay_demo_inner(target, false)
 }
 
-pub fn run_overlay_demo(target: OverlayTarget, from_tui_handoff: bool) -> Result<(), String> {
-    let launch_context = if from_tui_handoff {
-        OverlayLaunchContext::EmbeddedInTui
-    } else {
-        OverlayLaunchContext::StandaloneCli
-    };
-    run_overlay_demo_inner(target, launch_context)
+fn run_overlay_demo_with_tui_handoff(target: OverlayTarget) -> Result<(), String> {
+    suspend_tui_terminal()?;
+    let run_result = run_overlay_demo_inner(target, true);
+    let restore_result = restore_tui_terminal();
+    run_result.and(restore_result)
 }
 
 fn run_overlay_demo_inner(
     target: OverlayTarget,
-    launch_context: OverlayLaunchContext,
+    show_sidecar_fallback_notice: bool,
 ) -> Result<(), String> {
     match resolve_overlay_target(target)? {
-        ResolvedOverlayTarget::Sidecar => run_sidecar_overlay_demo(),
-        ResolvedOverlayTarget::Terminal(protocol) => {
-            run_terminal_overlay_demo(protocol, launch_context)
+        ResolvedOverlayTarget::Sidecar => {
+            if show_sidecar_fallback_notice {
+                print_sidecar_fallback_notice()?;
+            }
+            run_sidecar_overlay_demo()
         }
+        ResolvedOverlayTarget::Terminal(protocol) => run_terminal_overlay_demo(protocol),
     }
 }
 
@@ -156,15 +159,25 @@ fn detect_terminal_image_protocol_with_inputs(
     None
 }
 
-fn run_terminal_overlay_demo(
-    protocol: TerminalImageProtocol,
-    launch_context: OverlayLaunchContext,
-) -> Result<(), String> {
+fn run_terminal_overlay_demo(protocol: TerminalImageProtocol) -> Result<(), String> {
     let mut stdout = io::stdout();
     let viewport = terminal_viewport()?;
-    prepare_terminal_overlay_surface(&mut stdout, launch_context)?;
-    let run_result = run_live_terminal_overlay_demo(&mut stdout, protocol, viewport);
-    let cleanup_result = cleanup_terminal_overlay_surface(&mut stdout, launch_context);
+    let png_bytes = render_overlay_demo_png(OverlayPresentation::TerminalInline(viewport))?;
+
+    enable_raw_mode()
+        .map_err(|error| format!("failed to enable raw mode for terminal overlay: {error}"))?;
+    let run_result = (|| -> Result<(), String> {
+        execute!(stdout, Hide, Clear(ClearType::All), MoveTo(0, 0))
+            .map_err(|error| format!("failed to prepare terminal overlay surface: {error}"))?;
+        stdout
+            .write_all(terminal_image_escape(protocol, viewport, png_bytes.as_slice()).as_bytes())
+            .map_err(|error| format!("failed to write terminal image payload: {error}"))?;
+        stdout
+            .flush()
+            .map_err(|error| format!("failed to flush terminal overlay output: {error}"))?;
+        wait_for_terminal_overlay_dismissal()
+    })();
+    let cleanup_result = cleanup_terminal_overlay_surface(&mut stdout);
     run_result.and(cleanup_result)
 }
 
@@ -188,10 +201,7 @@ fn iterm2_inline_image_escape(viewport: TerminalViewport, png_bytes: &[u8]) -> S
     )
 }
 
-fn render_overlay_demo_png(
-    presentation: OverlayPresentation,
-    time: f32,
-) -> Result<Vec<u8>, String> {
+fn render_overlay_demo_png(presentation: OverlayPresentation) -> Result<Vec<u8>, String> {
     let capture_nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -211,7 +221,7 @@ fn render_overlay_demo_png(
         &mut text_system,
         capture_size.width as f32,
         capture_size.height as f32,
-        time,
+        0.28,
         presentation,
     );
 
@@ -267,143 +277,71 @@ struct CaptureSize {
     height: u32,
 }
 
-fn run_live_terminal_overlay_demo(
-    stdout: &mut io::Stdout,
-    protocol: TerminalImageProtocol,
-    viewport: TerminalViewport,
-) -> Result<(), String> {
-    paint_terminal_overlay_loading_state(stdout, viewport)?;
-    let started_at = Instant::now();
-    render_terminal_overlay_frame(
-        stdout,
-        protocol,
-        viewport,
-        started_at.elapsed().as_secs_f32(),
-    )?;
-
+fn wait_for_terminal_overlay_dismissal() -> Result<(), String> {
     loop {
-        if wait_for_terminal_overlay_dismissal_or_refresh()? {
-            return Ok(());
-        }
-        render_terminal_overlay_frame(
-            stdout,
-            protocol,
-            viewport,
-            started_at.elapsed().as_secs_f32(),
-        )?;
-    }
-}
-
-fn prepare_terminal_overlay_surface(
-    stdout: &mut io::Stdout,
-    launch_context: OverlayLaunchContext,
-) -> Result<(), String> {
-    if matches!(launch_context, OverlayLaunchContext::StandaloneCli) {
-        enable_raw_mode()
-            .map_err(|error| format!("failed to enable raw mode for terminal overlay: {error}"))?;
-    }
-    execute!(stdout, Hide, Clear(ClearType::All), MoveTo(0, 0))
-        .map_err(|error| format!("failed to prepare terminal overlay surface: {error}"))?;
-    stdout
-        .flush()
-        .map_err(|error| format!("failed to flush terminal overlay setup: {error}"))
-}
-
-fn paint_terminal_overlay_loading_state(
-    stdout: &mut io::Stdout,
-    viewport: TerminalViewport,
-) -> Result<(), String> {
-    let loading_copy = "Rendering first WGPUI frame...";
-    let x = viewport
-        .cols
-        .saturating_sub(loading_copy.len() as u16)
-        .checked_div(2)
-        .unwrap_or(0);
-    let y = viewport.rows.saturating_div(2);
-    execute!(stdout, MoveTo(x, y))
-        .map_err(|error| format!("failed to position terminal overlay loading copy: {error}"))?;
-    write!(stdout, "{loading_copy}")
-        .map_err(|error| format!("failed to write terminal overlay loading copy: {error}"))?;
-    stdout
-        .flush()
-        .map_err(|error| format!("failed to flush terminal overlay loading copy: {error}"))
-}
-
-fn render_terminal_overlay_frame(
-    stdout: &mut io::Stdout,
-    protocol: TerminalImageProtocol,
-    viewport: TerminalViewport,
-    time: f32,
-) -> Result<(), String> {
-    let png_bytes = render_overlay_demo_png(OverlayPresentation::TerminalInline(viewport), time)?;
-    execute!(stdout, MoveTo(0, 0), Clear(ClearType::All))
-        .map_err(|error| format!("failed to prepare terminal overlay frame: {error}"))?;
-    stdout
-        .write_all(terminal_image_escape(protocol, viewport, png_bytes.as_slice()).as_bytes())
-        .map_err(|error| format!("failed to write terminal image payload: {error}"))?;
-    stdout
-        .flush()
-        .map_err(|error| format!("failed to flush terminal overlay frame: {error}"))
-}
-
-fn wait_for_terminal_overlay_dismissal_or_refresh() -> Result<bool, String> {
-    if !terminal_event::poll(TERMINAL_OVERLAY_FRAME_INTERVAL)
-        .map_err(|error| format!("failed to poll terminal overlay events: {error}"))?
-    {
-        return Ok(false);
-    }
-
-    loop {
-        if terminal_overlay_key_should_dismiss(
-            terminal_event::read()
-                .map_err(|error| format!("failed to read terminal overlay event: {error}"))?,
-        ) {
-            return Ok(true);
-        }
-        if !terminal_event::poll(Duration::ZERO)
-            .map_err(|error| format!("failed to drain terminal overlay events: {error}"))?
+        match terminal_event::read()
+            .map_err(|error| format!("failed to read terminal overlay dismissal event: {error}"))?
         {
-            return Ok(false);
+            TerminalEvent::Key(event) if event.kind == KeyEventKind::Press => match event.code {
+                TerminalKeyCode::Enter | TerminalKeyCode::Esc | TerminalKeyCode::Char('q') => {
+                    return Ok(());
+                }
+                _ => {}
+            },
+            _ => {}
         }
     }
 }
 
-fn terminal_overlay_key_should_dismiss(event: TerminalEvent) -> bool {
-    matches!(
-        event,
-        TerminalEvent::Key(key_event)
-            if key_event.kind == KeyEventKind::Press
-                && matches!(
-                    key_event.code,
-                    TerminalKeyCode::Enter | TerminalKeyCode::Esc | TerminalKeyCode::Char('q')
-                )
-    )
+fn cleanup_terminal_overlay_surface(stdout: &mut io::Stdout) -> Result<(), String> {
+    let cleanup_result = execute!(stdout, Show, Clear(ClearType::All), MoveTo(0, 0))
+        .map_err(|error| format!("failed to clear terminal overlay surface: {error}"));
+    let raw_mode_result = disable_raw_mode()
+        .map_err(|error| format!("failed to disable raw mode after terminal overlay: {error}"));
+    cleanup_result.and(raw_mode_result)
 }
 
-fn cleanup_terminal_overlay_surface(
-    stdout: &mut io::Stdout,
-    launch_context: OverlayLaunchContext,
-) -> Result<(), String> {
-    let cleanup_result = match launch_context {
-        OverlayLaunchContext::StandaloneCli => {
-            execute!(stdout, Show, Clear(ClearType::All), MoveTo(0, 0))
-                .map_err(|error| format!("failed to clear terminal overlay surface: {error}"))
-        }
-        OverlayLaunchContext::EmbeddedInTui => {
-            execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))
-                .map_err(|error| format!("failed to clear terminal overlay surface: {error}"))
-        }
-    };
-    let raw_mode_result = if matches!(launch_context, OverlayLaunchContext::StandaloneCli) {
-        disable_raw_mode()
-            .map_err(|error| format!("failed to disable raw mode after terminal overlay: {error}"))
-    } else {
-        Ok(())
-    };
-    let flush_result = stdout
+fn suspend_tui_terminal() -> Result<(), String> {
+    let mut stdout = io::stdout();
+    disable_raw_mode()
+        .map_err(|error| format!("failed to disable raw mode for overlay handoff: {error}"))?;
+    execute!(stdout, LeaveAlternateScreen, DisableMouseCapture)
+        .map_err(|error| format!("failed to leave the Probe TUI alternate screen: {error}"))?;
+    stdout
         .flush()
-        .map_err(|error| format!("failed to flush terminal overlay cleanup: {error}"));
-    cleanup_result.and(raw_mode_result).and(flush_result)
+        .map_err(|error| format!("failed to flush overlay handoff output: {error}"))?;
+    Ok(())
+}
+
+fn restore_tui_terminal() -> Result<(), String> {
+    let mut stdout = io::stdout();
+    enable_raw_mode()
+        .map_err(|error| format!("failed to re-enable raw mode after overlay handoff: {error}"))?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .map_err(|error| format!("failed to restore the Probe TUI alternate screen: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("failed to flush overlay restore output: {error}"))?;
+    Ok(())
+}
+
+fn print_sidecar_fallback_notice() -> Result<(), String> {
+    let mut stdout = io::stdout();
+    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))
+        .map_err(|error| format!("failed to prepare sidecar fallback notice: {error}"))?;
+    writeln!(stdout, "Probe experimental WGPUI overlay")
+        .map_err(|error| format!("failed to write sidecar fallback header: {error}"))?;
+    writeln!(
+        stdout,
+        "No supported in-terminal graphics protocol was detected, so Probe is falling back to the sidecar window."
+    )
+    .map_err(|error| format!("failed to write sidecar fallback detail: {error}"))?;
+    writeln!(stdout, "Close the sidecar window to return to the TUI.")
+        .map_err(|error| format!("failed to write sidecar fallback dismissal copy: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("failed to flush sidecar fallback notice: {error}"))?;
+    Ok(())
 }
 
 fn run_sidecar_overlay_demo() -> Result<(), String> {
@@ -752,7 +690,7 @@ fn overlay_subtitle(presentation: OverlayPresentation) -> &'static str {
             "Ctrl+G can fall back to this sidecar from `probe tui`. Esc or close the window to dismiss it."
         }
         OverlayPresentation::TerminalInline(_) => {
-            "Inline terminal overlay refreshed in-place inside Probe's active screen."
+            "Inline terminal graphics preview driven by offscreen WGPUI capture."
         }
     }
 }
@@ -763,7 +701,7 @@ fn chart_body_note(presentation: OverlayPresentation) -> &'static str {
             "This is an experimental non-portable visual sidecar, not the default TUI renderer."
         }
         OverlayPresentation::TerminalInline(_) => {
-            "Offscreen WGPUI frames are streamed back through the host terminal image protocol."
+            "This image is stretched to the terminal viewport through the host graphics protocol."
         }
     }
 }
@@ -777,9 +715,9 @@ fn overlay_feed_rows(time: f32, presentation: OverlayPresentation) -> [EventFeed
             "Terminal input stays in Probe while the sidecar owns pointer and window focus.",
         ),
         OverlayPresentation::TerminalInline(_) => (
-            "Probe keeps the alternate screen live and swaps inline WGPUI frames in place.",
-            "Pixels come from repeated offscreen WGPUI capture plus the terminal image protocol, not ratatui cells.",
-            "Dismissal returns to the same Probe TUI session without dropping to the shell.",
+            "The Probe TUI handed the terminal to an inline WGPUI overlay that fills the viewport.",
+            "Pixels come from offscreen WGPUI capture plus the terminal image protocol, not ratatui cells.",
+            "Dismissal returns Probe to the alternate screen and forces a fresh redraw.",
         ),
     };
 
@@ -843,10 +781,10 @@ fn paint_overlay_badges(
         ),
         OverlayPresentation::TerminalInline(_) => (
             [
-                "Mode: live inline overlay",
-                "Host: Probe alt-screen + iTerm2 image protocol",
-                "Dismiss: Enter / Esc / q",
-                "Purpose: richer WGPUI telemetry proof inside the terminal",
+                "Mode: experimental inline image",
+                "Host: Probe TUI + iTerm2 image protocol",
+                "Dismiss: Enter to return",
+                "Purpose: richer visual telemetry proof inside the terminal",
             ],
             [
                 ("EXPERIMENTAL", badge_color(BadgeTone::Warning)),
@@ -917,7 +855,7 @@ fn paint_terminal_overlay_footer(bounds: Bounds, paint: &mut PaintContext) {
             .with_corner_radius(8.0),
     );
     paint.scene.draw_text(paint.text.layout_mono(
-        "ESC / ENTER / Q  back to Probe",
+        "ENTER / ESC / Q  return to Probe",
         Point::new(footer.origin.x + 14.0, footer.origin.y + 12.0),
         11.0,
         viz_theme::series::LOSS.with_alpha(0.94),
