@@ -389,6 +389,7 @@ pub enum SessionHostedCleanupStatus {
     NotRequired,
     Pending,
     Completed,
+    Failed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,6 +405,13 @@ pub struct SessionHostedCleanupReceipt {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionHostedLifecycleEvent {
+    ControlPlaneRestartObserved {
+        control_plane_started_at_ms: TimestampMs,
+        session_owner_id: String,
+        execution_host_id: String,
+        summary: String,
+        recorded_at_ms: TimestampMs,
+    },
     RunningTurnFailedOnRestart {
         turn_id: String,
         session_owner_id: String,
@@ -427,6 +435,13 @@ pub enum SessionHostedLifecycleEvent {
         strategy: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         execution_host_id: Option<String>,
+        summary: String,
+        recorded_at_ms: TimestampMs,
+    },
+    OrphanedManagedWorkspaceReaped {
+        workspace_root: PathBuf,
+        session_owner_id: String,
+        execution_host_id: String,
         summary: String,
         recorded_at_ms: TimestampMs,
     },

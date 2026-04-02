@@ -1974,6 +1974,125 @@ mod tests {
     }
 
     #[test]
+    fn hosted_restart_records_restart_history_and_reaps_managed_workspace() {
+        let environment = ProbeTestEnvironment::new();
+        let managed_workspace = environment
+            .probe_home()
+            .join("hosted")
+            .join("workspaces")
+            .join("restart-reap");
+        fs::create_dir_all(&managed_workspace).expect("create managed hosted workspace");
+        fs::write(managed_workspace.join("README.md"), "# restart cleanup proof\n")
+            .expect("seed managed workspace");
+        let fake_backend = delayed_completion_backend(Duration::from_millis(25), "completed");
+        let profile = test_profile(fake_backend.base_url());
+        let address = reserve_loopback_addr();
+        let attach_target = format!("tcp://{address}");
+        let mut server = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+        let mut config = ProbeClientConfig::new(environment.probe_home(), "probe-client-test");
+        config.transport = ProbeClientTransportConfig::HostedTcp {
+            address: address.clone(),
+        };
+        let mut client = wait_for_hosted_client(config.clone());
+        let snapshot = client
+            .start_session(StartSessionRequest {
+                title: Some(String::from("hosted restart cleanup")),
+                cwd: managed_workspace.clone(),
+                profile: profile.clone(),
+                system_prompt: None,
+                harness_profile: None,
+                workspace_state: None,
+                mounted_refs: Vec::new(),
+            })
+            .expect("managed hosted session should start");
+        let session_id = snapshot.session.id.clone();
+
+        client
+            .queue_plain_text_session_turn(PlainTextResumeRequest {
+                session_id: session_id.clone(),
+                profile: profile.clone(),
+                prompt: String::from("complete this hosted turn"),
+                tool_loop: None,
+            })
+            .expect("hosted queue turn should be accepted");
+        drop(client);
+
+        let completed =
+            wait_for_detached_status(config.clone(), &session_id, DetachedSessionStatus::Completed);
+        assert_eq!(completed.status, DetachedSessionStatus::Completed);
+        assert!(
+            managed_workspace.exists(),
+            "managed workspace should still exist before restart reconciliation"
+        );
+
+        server.kill_ungraceful();
+        let mut restarted = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+        let mut reattached = wait_for_hosted_client(config);
+        let inspected = reattached
+            .inspect_detached_session(&session_id)
+            .expect("restarted hosted session should remain inspectable");
+        assert_eq!(inspected.summary.status, DetachedSessionStatus::Completed);
+        assert!(
+            !managed_workspace.exists(),
+            "restart reconciliation should reap the managed hosted workspace"
+        );
+
+        let receipts = inspected
+            .summary
+            .hosted_receipts
+            .expect("restarted hosted summary should keep hosted receipts");
+        let cleanup = receipts
+            .cleanup
+            .expect("restarted hosted summary should keep cleanup receipt");
+        assert_eq!(cleanup.status, SessionHostedCleanupStatus::Completed);
+        assert!(receipts.history.iter().any(|event| {
+            matches!(
+                event,
+                SessionHostedLifecycleEvent::ControlPlaneRestartObserved { summary, .. }
+                    if summary.contains("control-plane restart")
+            )
+        }));
+        assert!(receipts.history.iter().any(|event| {
+            matches!(
+                event,
+                SessionHostedLifecycleEvent::OrphanedManagedWorkspaceReaped {
+                    workspace_root,
+                    ..
+                } if workspace_root == &managed_workspace
+            )
+        }));
+        assert!(receipts.history.iter().any(|event| {
+            matches!(
+                event,
+                SessionHostedLifecycleEvent::CleanupStateChanged {
+                    previous_status: Some(SessionHostedCleanupStatus::Pending),
+                    status: SessionHostedCleanupStatus::Completed,
+                    workspace_root,
+                    strategy,
+                    ..
+                } if workspace_root == &managed_workspace
+                    && strategy == "managed_hosted_workspace"
+            )
+        }));
+
+        reattached
+            .shutdown()
+            .expect("restarted hosted server should accept shutdown");
+        restarted.wait();
+        let _ = fake_backend.finish();
+    }
+
+    #[test]
     fn hosted_restart_keeps_approval_paused_sessions_resumable() {
         let environment = ProbeTestEnvironment::new();
         environment.seed_coding_workspace();

@@ -271,3 +271,7 @@ This folder holds technical planning docs for the Probe runtime.
     sessions, including typed attach and controller actions, hosted control
     conflict enforcement, and retained claim, handoff, release, or takeover
     history in hosted receipts
+- `79-hosted-restart-cleanup-and-takeover-history.md`
+  - typed hosted restart reconciliation, managed-workspace cleanup closure,
+    orphaned workspace reap events, and retained restart plus cleanup history
+    for the internal shared-session MVP

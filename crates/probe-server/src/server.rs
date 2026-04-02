@@ -409,6 +409,7 @@ pub struct ProbeServerCore {
     detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
     runtime_owner: SessionRuntimeOwner,
     hosted_receipt_config: Option<HostedReceiptConfig>,
+    started_at_ms: u64,
 }
 
 struct ProbeServerConnection {
@@ -425,6 +426,12 @@ enum ConnectionRunOutcome {
 enum RequestHandlingOutcome {
     Continue,
     ShutdownAccepted,
+}
+
+#[derive(Clone, Copy)]
+enum HostedCleanupTrigger {
+    ControlPlaneShutdown,
+    ControlPlaneRestart,
 }
 
 #[derive(Clone)]
@@ -548,6 +555,7 @@ impl ProbeServerCore {
             detached_event_hub,
             runtime_owner,
             hosted_receipt_config,
+            started_at_ms: now_ms(),
         }
     }
 
@@ -571,7 +579,75 @@ impl ProbeServerCore {
                 continue;
             }
             self.sync_detached_session_if_tracked(&session_id)?;
+            self.record_hosted_restart_history_if_needed(&session_id)?;
+            self.finalize_hosted_cleanup_for_session(
+                &session_id,
+                HostedCleanupTrigger::ControlPlaneRestart,
+            )?;
         }
+        Ok(())
+    }
+
+    fn record_hosted_restart_history_if_needed(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeProtocolError> {
+        let metadata = load_session_metadata_for_collaboration(self, session_id)?;
+        if !is_hosted_session(&metadata) || metadata.created_at_ms >= self.started_at_ms {
+            return Ok(());
+        }
+        let Some(runtime_owner) = metadata.runtime_owner.as_ref() else {
+            return Ok(());
+        };
+        let execution_host_id = hosted_execution_host_id(&metadata, runtime_owner);
+        let summary = format!(
+            "hosted Probe reconciled this session after control-plane restart at {}",
+            self.started_at_ms
+        );
+        let event = SessionHostedLifecycleEvent::ControlPlaneRestartObserved {
+            control_plane_started_at_ms: self.started_at_ms,
+            session_owner_id: runtime_owner.owner_id.clone(),
+            execution_host_id,
+            summary,
+            recorded_at_ms: self.started_at_ms,
+        };
+        let _ = persist_session_collaboration_metadata(self, metadata, Some(event))?;
+        Ok(())
+    }
+
+    fn finalize_hosted_cleanup_for_all_sessions(
+        &self,
+        trigger: HostedCleanupTrigger,
+    ) -> Result<(), RuntimeProtocolError> {
+        let Some(registry) = self.detached_registry.as_ref() else {
+            return Ok(());
+        };
+        for summary in registry.list().map_err(detached_registry_error_to_protocol)? {
+            self.finalize_hosted_cleanup_for_session(&summary.session_id, trigger)?;
+        }
+        Ok(())
+    }
+
+    fn finalize_hosted_cleanup_for_session(
+        &self,
+        session_id: &SessionId,
+        trigger: HostedCleanupTrigger,
+    ) -> Result<(), RuntimeProtocolError> {
+        let Some(registry) = self.detached_registry.as_ref() else {
+            return Ok(());
+        };
+        let Some(summary) = registry
+            .read(session_id)
+            .map_err(detached_registry_error_to_protocol)?
+        else {
+            return Ok(());
+        };
+        if !hosted_cleanup_ready(&summary) {
+            return Ok(());
+        }
+        let metadata = load_session_metadata_for_collaboration(self, session_id)?;
+        let metadata = finalize_managed_hosted_cleanup(self, metadata, trigger, now_ms())?;
+        let _ = persist_session_collaboration_metadata(self, metadata, None)?;
         Ok(())
     }
 
@@ -1844,6 +1920,13 @@ impl ProbeServerConnection {
             RuntimeRequest::Shutdown => {
                 let active_turns = self.active_turn_count();
                 let accepted = active_turns == 0;
+                if accepted {
+                    self.core
+                        .finalize_hosted_cleanup_for_all_sessions(
+                            HostedCleanupTrigger::ControlPlaneShutdown,
+                        )
+                        .map_err(runtime_protocol_error_to_io)?;
+                }
                 self.writer.send_response_ok(
                     request_id.as_str(),
                     RuntimeResponse::Shutdown(ShutdownResponse {
@@ -3543,19 +3626,7 @@ fn hosted_controller_history_event(
     if runtime_owner.kind != SessionRuntimeOwnerKind::HostedControlPlane {
         return None;
     }
-    let execution_host_id = metadata
-        .hosted_receipts
-        .as_ref()
-        .and_then(|receipts| receipts.worker.as_ref())
-        .map(|worker| worker.execution_host_id.clone())
-        .or_else(|| {
-            metadata
-                .workspace_state
-                .as_ref()
-                .and_then(|state| state.execution_host.as_ref())
-                .map(|host| host.host_id.clone())
-        })
-        .unwrap_or_else(|| runtime_owner.owner_id.clone());
+    let execution_host_id = hosted_execution_host_id(metadata, runtime_owner);
     let actor_label = session_participant_label(metadata, actor_participant_id.as_str());
     let summary = match (action, target_participant_id.as_deref()) {
         (SessionControllerAction::Claim, _) => {
@@ -3602,6 +3673,155 @@ fn session_participant_label(metadata: &SessionMetadata, participant_id: &str) -
                 .map(|display_name| format!("{display_name} ({participant_id})"))
         })
         .unwrap_or_else(|| String::from(participant_id))
+}
+
+fn hosted_execution_host_id(
+    metadata: &SessionMetadata,
+    runtime_owner: &SessionRuntimeOwner,
+) -> String {
+    metadata
+        .hosted_receipts
+        .as_ref()
+        .and_then(|receipts| receipts.worker.as_ref())
+        .map(|worker| worker.execution_host_id.clone())
+        .or_else(|| {
+            metadata
+                .workspace_state
+                .as_ref()
+                .and_then(|state| state.execution_host.as_ref())
+                .map(|host| host.host_id.clone())
+        })
+        .unwrap_or_else(|| runtime_owner.owner_id.clone())
+}
+
+fn hosted_cleanup_ready(summary: &DetachedSessionSummary) -> bool {
+    matches!(
+        summary.status,
+        DetachedSessionStatus::Completed
+            | DetachedSessionStatus::Failed
+            | DetachedSessionStatus::Cancelled
+            | DetachedSessionStatus::TimedOut
+    ) && summary.controller_lease.is_none()
+}
+
+fn finalize_managed_hosted_cleanup(
+    _core: &ProbeServerCore,
+    mut metadata: SessionMetadata,
+    trigger: HostedCleanupTrigger,
+    recorded_at_ms: u64,
+) -> Result<SessionMetadata, RuntimeProtocolError> {
+    if !is_hosted_session(&metadata) {
+        return Ok(metadata);
+    }
+    let Some(runtime_owner) = metadata.runtime_owner.as_ref() else {
+        return Ok(metadata);
+    };
+    let execution_host_id = hosted_execution_host_id(&metadata, runtime_owner);
+    let Some(receipts) = metadata.hosted_receipts.as_mut() else {
+        return Ok(metadata);
+    };
+    let Some(cleanup) = receipts.cleanup.as_mut() else {
+        return Ok(metadata);
+    };
+    if cleanup.strategy != "managed_hosted_workspace"
+        || matches!(
+            cleanup.status,
+            SessionHostedCleanupStatus::Completed | SessionHostedCleanupStatus::NotRequired
+        )
+    {
+        return Ok(metadata);
+    }
+
+    if metadata.cwd.exists() {
+        match fs::remove_dir_all(&metadata.cwd) {
+            Ok(()) => {
+                cleanup.status = SessionHostedCleanupStatus::Completed;
+                cleanup.recorded_at_ms = recorded_at_ms;
+                cleanup.note = Some(match trigger {
+                    HostedCleanupTrigger::ControlPlaneShutdown => String::from(
+                        "Probe removed the managed hosted workspace during clean control-plane shutdown",
+                    ),
+                    HostedCleanupTrigger::ControlPlaneRestart => String::from(
+                        "Probe reaped the orphaned managed hosted workspace during control-plane restart reconciliation",
+                    ),
+                });
+                push_hosted_history_event(
+                    &mut receipts.history,
+                    SessionHostedLifecycleEvent::CleanupStateChanged {
+                        previous_status: Some(SessionHostedCleanupStatus::Pending),
+                        status: SessionHostedCleanupStatus::Completed,
+                        workspace_root: metadata.cwd.clone(),
+                        strategy: cleanup.strategy.clone(),
+                        execution_host_id: Some(execution_host_id.clone()),
+                        summary: cleanup
+                            .note
+                            .clone()
+                            .unwrap_or_else(|| String::from("managed hosted cleanup completed")),
+                        recorded_at_ms,
+                    },
+                );
+                if matches!(trigger, HostedCleanupTrigger::ControlPlaneRestart) {
+                    push_hosted_history_event(
+                        &mut receipts.history,
+                        SessionHostedLifecycleEvent::OrphanedManagedWorkspaceReaped {
+                            workspace_root: metadata.cwd.clone(),
+                            session_owner_id: runtime_owner.owner_id.clone(),
+                            execution_host_id,
+                            summary: String::from(
+                                "hosted Probe reaped an orphaned managed workspace during restart reconciliation",
+                            ),
+                            recorded_at_ms,
+                        },
+                    );
+                }
+            }
+            Err(error) => {
+                cleanup.status = SessionHostedCleanupStatus::Failed;
+                cleanup.recorded_at_ms = recorded_at_ms;
+                cleanup.note = Some(format!(
+                    "Probe failed to remove the managed hosted workspace: {error}"
+                ));
+                push_hosted_history_event(
+                    &mut receipts.history,
+                    SessionHostedLifecycleEvent::CleanupStateChanged {
+                        previous_status: Some(SessionHostedCleanupStatus::Pending),
+                        status: SessionHostedCleanupStatus::Failed,
+                        workspace_root: metadata.cwd.clone(),
+                        strategy: cleanup.strategy.clone(),
+                        execution_host_id: Some(execution_host_id),
+                        summary: cleanup
+                            .note
+                            .clone()
+                            .unwrap_or_else(|| String::from("managed hosted cleanup failed")),
+                        recorded_at_ms,
+                    },
+                );
+            }
+        }
+    } else {
+        cleanup.status = SessionHostedCleanupStatus::Completed;
+        cleanup.recorded_at_ms = recorded_at_ms;
+        cleanup.note = Some(String::from(
+            "Probe no longer sees the managed hosted workspace path and records cleanup as complete",
+        ));
+        push_hosted_history_event(
+            &mut receipts.history,
+            SessionHostedLifecycleEvent::CleanupStateChanged {
+                previous_status: Some(SessionHostedCleanupStatus::Pending),
+                status: SessionHostedCleanupStatus::Completed,
+                workspace_root: metadata.cwd.clone(),
+                strategy: cleanup.strategy.clone(),
+                execution_host_id: Some(execution_host_id),
+                summary: cleanup
+                    .note
+                    .clone()
+                    .unwrap_or_else(|| String::from("managed hosted cleanup completed")),
+                recorded_at_ms,
+            },
+        );
+    }
+
+    Ok(metadata)
 }
 
 fn session_branch_state(cwd: &Path) -> Option<SessionBranchState> {
@@ -3874,7 +4094,12 @@ fn hosted_receipts_for_session(
             .or_else(|| Some(execution_host.host_id.clone())),
         recorded_at_ms,
     };
-    let cleanup = hosted_cleanup_receipt(probe_home, metadata, recorded_at_ms);
+    let cleanup = hosted_cleanup_receipt(
+        probe_home,
+        metadata,
+        previous_receipts.and_then(|receipts| receipts.cleanup.as_ref()),
+        recorded_at_ms,
+    );
     let auth = hosted_receipt_config.map(|config| SessionHostedAuthReceipt {
         authority: config.auth_authority.clone(),
         subject: config.auth_subject.clone(),
@@ -3978,25 +4203,36 @@ fn hosted_cost_receipt(
 fn hosted_cleanup_receipt(
     probe_home: &Path,
     metadata: &SessionMetadata,
+    previous: Option<&SessionHostedCleanupReceipt>,
     recorded_at_ms: u64,
 ) -> SessionHostedCleanupReceipt {
     let managed_root = probe_home.join("hosted").join("workspaces");
     let managed_workspace = same_path_prefix(metadata.cwd.as_path(), managed_root.as_path());
     let (status, strategy, note) = if managed_workspace {
         let workspace_exists = metadata.cwd.exists();
-        let status = if workspace_exists {
-            SessionHostedCleanupStatus::Pending
-        } else {
-            SessionHostedCleanupStatus::Completed
+        let status = match (previous.map(|receipt| receipt.status), workspace_exists) {
+            (Some(SessionHostedCleanupStatus::Failed), true) => SessionHostedCleanupStatus::Failed,
+            (Some(SessionHostedCleanupStatus::Completed), false) => {
+                SessionHostedCleanupStatus::Completed
+            }
+            (_, true) => SessionHostedCleanupStatus::Pending,
+            (_, false) => SessionHostedCleanupStatus::Completed,
         };
-        let note = if workspace_exists {
-            Some(String::from(
-                "Probe marked this workspace as managed hosted state, but no teardown hook has removed it yet",
-            ))
-        } else {
-            Some(String::from(
+        let note = match status {
+            SessionHostedCleanupStatus::Failed => previous
+                .and_then(|receipt| receipt.note.clone())
+                .or_else(|| {
+                    Some(String::from(
+                        "Probe previously failed to clean up this managed hosted workspace",
+                    ))
+                }),
+            SessionHostedCleanupStatus::Pending => Some(String::from(
+                "Probe marked this workspace as managed hosted state and will keep cleanup pending until hosted closeout runs",
+            )),
+            SessionHostedCleanupStatus::Completed => Some(String::from(
                 "Probe no longer sees the managed hosted workspace path and records cleanup as complete",
-            ))
+            )),
+            SessionHostedCleanupStatus::NotRequired => None,
         };
         (status, String::from("managed_hosted_workspace"), note)
     } else {
@@ -4142,6 +4378,16 @@ fn hosted_history_event_matches(
 ) -> bool {
     match (left, right) {
         (
+            SessionHostedLifecycleEvent::ControlPlaneRestartObserved {
+                control_plane_started_at_ms: left_started_at,
+                ..
+            },
+            SessionHostedLifecycleEvent::ControlPlaneRestartObserved {
+                control_plane_started_at_ms: right_started_at,
+                ..
+            },
+        ) => left_started_at == right_started_at,
+        (
             SessionHostedLifecycleEvent::RunningTurnFailedOnRestart {
                 turn_id: left_turn, ..
             },
@@ -4180,6 +4426,32 @@ fn hosted_history_event_matches(
                 && left_root == right_root
                 && left_strategy == right_strategy
         }
+        (
+            SessionHostedLifecycleEvent::OrphanedManagedWorkspaceReaped {
+                workspace_root: left_root,
+                ..
+            },
+            SessionHostedLifecycleEvent::OrphanedManagedWorkspaceReaped {
+                workspace_root: right_root,
+                ..
+            },
+        ) => left_root == right_root,
+        (
+            SessionHostedLifecycleEvent::ControllerLeaseChanged {
+                action: left_action,
+                actor_participant_id: left_actor,
+                target_participant_id: left_target,
+                ..
+            },
+            SessionHostedLifecycleEvent::ControllerLeaseChanged {
+                action: right_action,
+                actor_participant_id: right_actor,
+                target_participant_id: right_target,
+                ..
+            },
+        ) => {
+            left_action == right_action && left_actor == right_actor && left_target == right_target
+        }
         _ => false,
     }
 }
@@ -4189,6 +4461,7 @@ fn hosted_cleanup_status_label(status: SessionHostedCleanupStatus) -> &'static s
         SessionHostedCleanupStatus::NotRequired => "not_required",
         SessionHostedCleanupStatus::Pending => "pending",
         SessionHostedCleanupStatus::Completed => "completed",
+        SessionHostedCleanupStatus::Failed => "failed",
     }
 }
 
