@@ -260,3 +260,7 @@ This folder holds technical planning docs for the Probe runtime.
   - retained hosted receipt-history events for cleanup transitions,
     approval-paused takeover, and running-turn restart failure above the
     latest hosted receipt snapshot
+- `75-experimental-wgpui-overlay-sidecar.md`
+  - first honest WGPUI proof lane for Probe via `Ctrl+G` or
+    `probe overlay demo`, using a capability-gated desktop sidecar window
+    instead of pretending the terminal grid became a pixel compositor

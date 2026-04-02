@@ -15,6 +15,8 @@ Current shipped surface:
 - `probe tui` / `cargo probe` for the local terminal UI plus explicit
   detached-session reattach with `--resume`
 - three inference lanes in the TUI: Codex, Qwen or Tailnet, and Apple FM
+- `probe overlay demo` plus `Ctrl+G` in the TUI for the experimental WGPUI
+  sidecar demo window
 - `probe-server` for the first typed local stdio supervision contract
 - `probe-daemon` for the first long-lived local Unix-socket supervision path
 - `probe daemon run|stop` plus `probe ps|attach|logs|stop` for local detached
@@ -272,6 +274,12 @@ The default `cargo probe` chat lane now auto-approves local tools and keeps
 tool transcript rows terse. Tool calls and results render as compact command,
 path, or error summaries instead of debug-shaped JSON blobs.
 
+Probe also now ships an explicit experimental graphics lane. `Ctrl+G` in the
+TUI spawns `probe overlay demo`, which opens a separate desktop WGPUI window
+with synthetic telemetry panels and a demo chart. This is intentionally not a
+true terminal pixel overlay; it is a capability-gated sidecar for supported
+desktop sessions.
+
 Keys:
 
 - `Tab`: switch active backend
@@ -279,6 +287,7 @@ Keys:
 - `Enter`: submit the composer
 - `Ctrl+J`: insert a newline
 - `Up`, `Down`: recall draft history
+- `Ctrl+G`: launch the experimental WGPUI sidecar
 - `Ctrl+O`: add an attachment placeholder to the draft
 - `Ctrl+R`: rerun backend check when supported
 - `Ctrl+S`: open backend overlay
@@ -310,6 +319,9 @@ cargo run -p probe-cli -- tui \
   --profile psionic-qwen35-2b-q8-registry \
   --server-host 127.0.0.1 \
   --server-port 8080
+
+# standalone experimental WGPUI sidecar demo
+cargo run -p probe-cli -- overlay demo
 ```
 
 ## Dev Helpers

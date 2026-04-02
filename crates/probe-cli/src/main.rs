@@ -1,4 +1,5 @@
 mod acceptance;
+mod overlay;
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -13,6 +14,7 @@ use acceptance::{
     run_acceptance_matrix, run_self_test_harness,
 };
 use clap::{Parser, Subcommand};
+use overlay::run_overlay_demo;
 use probe_client::{
     INTERNAL_DAEMON_SUBCOMMAND, INTERNAL_SERVER_SUBCOMMAND, ProbeClient, ProbeClientConfig,
     ProbeClientError, ProbeClientTransportConfig, is_missing_local_daemon_error,
@@ -84,6 +86,8 @@ struct Cli {
 enum Commands {
     Exec(ExecArgs),
     Chat(ChatArgs),
+    #[command(about = "Launch experimental visual overlay lanes")]
+    Overlay(OverlayArgs),
     #[command(about = "Manage the local detached Probe daemon")]
     Daemon(DaemonArgs),
     #[command(about = "List daemon-owned detached sessions")]
@@ -117,6 +121,12 @@ enum Commands {
 struct CodexArgs {
     #[command(subcommand)]
     command: CodexCommands,
+}
+
+#[derive(clap::Args, Debug)]
+struct OverlayArgs {
+    #[command(subcommand)]
+    command: OverlayCommands,
 }
 
 #[derive(clap::Args, Debug)]
@@ -183,6 +193,12 @@ enum CodexCommands {
     Login(CodexLoginArgs),
     Status(CodexStatusArgs),
     Logout(CodexLogoutArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum OverlayCommands {
+    #[command(about = "Launch the experimental WGPUI overlay demo window")]
+    Demo,
 }
 
 #[derive(clap::Args, Debug)]
@@ -517,6 +533,7 @@ fn run() -> Result<(), String> {
     match cli.command {
         Commands::Exec(args) => run_exec(args),
         Commands::Chat(args) => run_chat(args),
+        Commands::Overlay(args) => run_overlay(args),
         Commands::Daemon(args) => run_daemon(args),
         Commands::Ps(args) => run_ps(args),
         Commands::Attach(args) => run_attach(args),
@@ -536,6 +553,12 @@ fn run() -> Result<(), String> {
         Commands::OptimizeHarness(args) => run_optimize_harness(args),
         Commands::OptimizeSkillPacks(args) => run_optimize_skill_packs(args),
         Commands::AdoptCandidate(args) => run_adopt_candidate(args),
+    }
+}
+
+fn run_overlay(args: OverlayArgs) -> Result<(), String> {
+    match args.command {
+        OverlayCommands::Demo => run_overlay_demo(),
     }
 }
 

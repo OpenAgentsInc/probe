@@ -6,6 +6,7 @@ pub enum UiEvent {
     PreviousView,
     ToggleBody,
     RunBackgroundTask,
+    OpenExperimentalOverlay,
     OpenHelp,
     OpenSetupOverlay,
     OpenApprovalOverlay,
@@ -60,6 +61,9 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
             Some(UiEvent::OpenApprovalOverlay)
         }
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => Some(UiEvent::Quit),
+        KeyCode::Char('g') if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiEvent::OpenExperimentalOverlay)
+        }
         KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::ComposerAddAttachment)
         }
@@ -90,5 +94,23 @@ pub fn event_from_mouse(mouse: MouseEvent) -> Option<UiEvent> {
         MouseEventKind::ScrollUp => Some(UiEvent::ScrollUp),
         MouseEventKind::ScrollDown => Some(UiEvent::ScrollDown),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UiEvent, event_from_key};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    #[test]
+    fn ctrl_g_opens_experimental_overlay() {
+        let event = event_from_key(KeyEvent {
+            code: KeyCode::Char('g'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+
+        assert_eq!(event, Some(UiEvent::OpenExperimentalOverlay));
     }
 }

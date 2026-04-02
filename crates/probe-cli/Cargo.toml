@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 clap.workspace = true
+pollster = "0.4"
 probe-client.workspace = true
 probe-core.workspace = true
 probe-decisions.workspace = true
@@ -16,6 +17,9 @@ probe-server.workspace = true
 probe-tui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+wgpu = "24.0"
+wgpui = { git = "https://github.com/OpenAgentsInc/openagents.git", rev = "5317af607bc323dd5de62cc3f25266d37bedd644", package = "wgpui" }
+winit = "0.30"
 
 [dev-dependencies]
 assert_cmd.workspace = true

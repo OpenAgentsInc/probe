@@ -159,6 +159,7 @@ pub enum ScreenAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScreenCommand {
     RunAppleFmSetup,
+    LaunchExperimentalOverlay,
     ResolvePendingToolApproval {
         session_id: String,
         call_id: String,
@@ -1384,6 +1385,13 @@ impl ChatScreen {
                     )
                 }
             }
+            UiEvent::OpenExperimentalOverlay => {
+                self.record_event(String::from("requested experimental WGPUI overlay"));
+                ScreenOutcome::with_command(
+                    String::from("launching experimental WGPUI overlay"),
+                    ScreenCommand::LaunchExperimentalOverlay,
+                )
+            }
             UiEvent::OpenSetupOverlay => ScreenOutcome::with_status(
                 ScreenAction::OpenSetupOverlay,
                 String::from("opened backend overlay"),
@@ -1929,6 +1937,7 @@ impl HelpScreen {
             Line::from("Up / Down           draft history recall"),
             Line::from("Mouse wheel / PgUp  scroll active panel"),
             Line::from("PgDn                scroll back toward latest"),
+            Line::from("Ctrl+G              experimental WGPUI overlay"),
             Line::from("Ctrl+O              add attachment placeholder"),
             Line::from("Ctrl+R / Ctrl+S     backend check / backend overlay"),
             Line::from("Ctrl+A              approval"),
@@ -1962,6 +1971,7 @@ impl SetupOverlay {
                 String::from("requested backend check"),
                 ScreenCommand::RunAppleFmSetup,
             ),
+            UiEvent::OpenExperimentalOverlay => ScreenOutcome::idle(),
             UiEvent::OpenHelp => ScreenOutcome::with_status(
                 ScreenAction::OpenHelp,
                 String::from("opened help modal"),
@@ -2058,6 +2068,7 @@ impl ApprovalOverlay {
                 ScreenAction::CloseModal,
                 String::from("dismissed approval overlay"),
             ),
+            UiEvent::OpenExperimentalOverlay => ScreenOutcome::idle(),
             UiEvent::OpenHelp => ScreenOutcome::with_status(
                 ScreenAction::OpenHelp,
                 String::from("opened help modal"),

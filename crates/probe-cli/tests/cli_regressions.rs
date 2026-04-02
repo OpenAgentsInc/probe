@@ -96,6 +96,17 @@ fn tui_help_is_available() {
 }
 
 #[test]
+fn overlay_help_is_available() {
+    probe_cli_command()
+        .args(["overlay", "demo", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Launch the experimental WGPUI overlay demo window",
+        ));
+}
+
+#[test]
 fn codex_status_reports_missing_auth_state() {
     let environment = ProbeTestEnvironment::new();
 
