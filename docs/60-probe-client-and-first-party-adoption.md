@@ -152,6 +152,11 @@ Hosted TCP is intentionally narrower today:
 It is only the first remote Rust-to-Rust attach lane above the same Probe
 runtime contract.
 
+Hosted callers can now also seed `StartSessionRequest.workspace_state` when
+they already know the intended prepared baseline, snapshot restore ref, or
+execution host. Probe normalizes that into stored session truth instead of
+forcing the caller to keep its own shadow provenance model.
+
 ## New Shared Control Calls
 
 The shared client now exposes the first queued-turn and control helpers on top
@@ -172,6 +177,9 @@ The migration is covered at two levels:
 - `crates/probe-client/src/lib.rs`
   - a real client test against a real `probe-server` child
   - a real hosted TCP transport test against a real `probe-server` listener
+  - hosted workspace-provenance coverage for prepared baseline hydration,
+    detached-summary projection, and explicit fresh-start fallback when a
+    requested prepared baseline is missing
 - `crates/probe-cli/tests/binary_e2e.rs`
   - process-level `chat` and `tui` coverage now running through the shared
     client and server seam, including detached daemon reattach for both

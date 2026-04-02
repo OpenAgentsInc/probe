@@ -162,6 +162,9 @@ execution handlers are not serializable.
 - current session metadata
 - explicit runtime-owner metadata when Probe knows whether the session is owned
   by a foreground child, local daemon, or hosted control plane
+- typed workspace provenance when Probe knows how the session booted, including
+  boot mode, prepared baseline status, snapshot refs, execution-host metadata,
+  and any explicit fallback note
 - typed branch posture when the cwd is inside a git repo
 - typed forge-agnostic delivery posture derived from that branch state
 - typed child-session summaries when the session has delegated children,
@@ -192,12 +195,16 @@ That keeps branch name, upstream tracking, divergence, and compare posture on
 the typed server seam instead of making clients scrape `git status` or ad hoc
 shell output.
 
+That same event now also carries the typed workspace-provenance payload when it
+is available, so detached consumers can receive boot mode, baseline, snapshot,
+and execution-host changes on the same event stream.
+
 ## Example
 
 Request:
 
 ```json
-{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":9}}
+{"message_type":"request","request_id":"req-1","request":{"op":"initialize","client_name":"probe-cli","client_version":"0.1.0","protocol_version":10}}
 ```
 
 Event:
@@ -228,6 +235,9 @@ Phase 3. It gives Probe:
 
 - a TCP JSONL request or response path for remote Rust consumers
 - explicit hosted runtime-owner identity in session and detached-session state
+- typed hosted workspace provenance in session and detached-session state,
+  including prepared baseline status, snapshot refs, execution-host metadata,
+  and explicit fresh-start fallback notes
 - the same queue, inspect, attach, and shutdown semantics as local transports
 
 It still does not claim:
@@ -235,7 +245,7 @@ It still does not claim:
 - remote worker scheduling
 - browser-facing HTTP or SSE APIs
 - multi-tenant auth or policy surfaces
-- prepared baseline or snapshot manifests for hosted workers
+- actual prepared-workspace pools or snapshot restore execution
 
 The main detached-only additions on top of this contract are documented in:
 

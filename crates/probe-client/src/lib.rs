@@ -253,6 +253,7 @@ impl ProbeClient {
             profile: request.profile.clone(),
             system_prompt: request.system_prompt,
             harness_profile: request.harness_profile,
+            workspace_state: None,
         })?;
         let session_id = session.session.id.clone();
         let turn = self
@@ -1277,6 +1278,7 @@ fn default_session_title(prompt: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::net::TcpListener;
     use std::process::{Child, Command, Stdio};
     use std::sync::{Arc, Mutex};
@@ -1286,7 +1288,11 @@ mod tests {
     use probe_core::runtime::{PlainTextExecRequest, RuntimeEvent};
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
     use probe_protocol::runtime::StartSessionRequest;
-    use probe_protocol::session::{SessionAttachTransport, SessionRuntimeOwnerKind};
+    use probe_protocol::session::{
+        SessionAttachTransport, SessionExecutionHostKind, SessionPreparedBaselineRef,
+        SessionPreparedBaselineStatus, SessionRuntimeOwnerKind, SessionWorkspaceBootMode,
+        SessionWorkspaceSnapshotRef, SessionWorkspaceState,
+    };
     use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
     use super::{ProbeClient, ProbeClientConfig, ProbeClientTransportConfig};
@@ -1347,6 +1353,18 @@ mod tests {
     fn client_can_connect_to_hosted_tcp_transport_and_inspect_runtime_owner() {
         let environment = ProbeTestEnvironment::new();
         environment.seed_coding_workspace();
+        let baseline_dir = environment.probe_home().join("hosted").join("baselines");
+        fs::create_dir_all(&baseline_dir).expect("create hosted baseline dir");
+        fs::write(
+            baseline_dir.join("repo-main.json"),
+            r#"{
+  "baseline_id": "repo-main",
+  "repo_identity": "github.com/OpenAgentsInc/probe",
+  "base_ref": "main",
+  "stale": false
+}"#,
+        )
+        .expect("write hosted baseline manifest");
         let address = reserve_loopback_addr();
         let attach_target = format!("tcp://{address}");
         let mut server = HostedProbeServer::start(
@@ -1376,6 +1394,22 @@ mod tests {
                 profile: test_profile("http://127.0.0.1:9/v1"),
                 system_prompt: None,
                 harness_profile: None,
+                workspace_state: Some(SessionWorkspaceState {
+                    boot_mode: SessionWorkspaceBootMode::PreparedBaseline,
+                    baseline: Some(SessionPreparedBaselineRef {
+                        baseline_id: String::from("repo-main"),
+                        repo_identity: None,
+                        base_ref: None,
+                        status: SessionPreparedBaselineStatus::Ready,
+                    }),
+                    snapshot: Some(SessionWorkspaceSnapshotRef {
+                        snapshot_id: String::from("snap-missing"),
+                        restore_manifest_id: None,
+                        source_baseline_id: None,
+                    }),
+                    execution_host: None,
+                    provenance_note: None,
+                }),
             })
             .expect("hosted transport should start a session");
         let owner = snapshot
@@ -1386,6 +1420,111 @@ mod tests {
         assert_eq!(owner.owner_id, "probe-hosted-test");
         assert_eq!(owner.attach_transport, SessionAttachTransport::TcpJsonl);
         assert_eq!(owner.attach_target.as_deref(), Some(attach_target.as_str()));
+        let workspace_state = snapshot
+            .session
+            .workspace_state
+            .expect("hosted session should persist workspace provenance");
+        assert_eq!(
+            workspace_state.boot_mode,
+            SessionWorkspaceBootMode::PreparedBaseline
+        );
+        let baseline = workspace_state
+            .baseline
+            .expect("hosted session should persist baseline provenance");
+        assert_eq!(baseline.baseline_id, "repo-main");
+        assert_eq!(
+            baseline.repo_identity.as_deref(),
+            Some("github.com/OpenAgentsInc/probe")
+        );
+        assert_eq!(baseline.base_ref.as_deref(), Some("main"));
+        assert_eq!(baseline.status, SessionPreparedBaselineStatus::Ready);
+        let execution_host = workspace_state
+            .execution_host
+            .expect("hosted session should expose execution-host provenance");
+        assert_eq!(execution_host.kind, SessionExecutionHostKind::HostedWorker);
+        assert_eq!(execution_host.host_id, "probe-hosted-test");
+        assert_eq!(
+            workspace_state.provenance_note.as_deref(),
+            Some("snapshot snap-missing has no manifest in hosted/snapshots")
+        );
+        let detached_summary = client
+            .list_detached_sessions()
+            .expect("hosted client should list detached sessions")
+            .into_iter()
+            .find(|summary| summary.session_id == snapshot.session.id)
+            .expect("hosted detached registry should include started session");
+        assert_eq!(
+            detached_summary
+                .workspace_state
+                .as_ref()
+                .and_then(|state| state.baseline.as_ref())
+                .map(|baseline| baseline.status),
+            Some(SessionPreparedBaselineStatus::Ready)
+        );
+
+        client
+            .shutdown()
+            .expect("idle hosted server should accept shutdown");
+        server.wait();
+    }
+
+    #[test]
+    fn hosted_session_falls_back_to_fresh_when_prepared_baseline_is_missing() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        let address = reserve_loopback_addr();
+        let attach_target = format!("tcp://{address}");
+        let mut server = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+
+        let mut config = ProbeClientConfig::new(environment.probe_home(), "probe-client-test");
+        config.transport = ProbeClientTransportConfig::HostedTcp {
+            address: address.clone(),
+        };
+        let mut client = wait_for_hosted_client(config);
+        let snapshot = client
+            .start_session(StartSessionRequest {
+                title: Some(String::from("missing baseline fallback")),
+                cwd: environment.workspace().to_path_buf(),
+                profile: test_profile("http://127.0.0.1:9/v1"),
+                system_prompt: None,
+                harness_profile: None,
+                workspace_state: Some(SessionWorkspaceState {
+                    boot_mode: SessionWorkspaceBootMode::PreparedBaseline,
+                    baseline: Some(SessionPreparedBaselineRef {
+                        baseline_id: String::from("missing-baseline"),
+                        repo_identity: None,
+                        base_ref: None,
+                        status: SessionPreparedBaselineStatus::Ready,
+                    }),
+                    snapshot: None,
+                    execution_host: None,
+                    provenance_note: None,
+                }),
+            })
+            .expect("hosted transport should still start a session when the baseline is missing");
+        let workspace_state = snapshot
+            .session
+            .workspace_state
+            .expect("hosted session should still expose workspace provenance");
+        assert_eq!(workspace_state.boot_mode, SessionWorkspaceBootMode::Fresh);
+        assert_eq!(
+            workspace_state
+                .baseline
+                .as_ref()
+                .map(|baseline| baseline.status),
+            Some(SessionPreparedBaselineStatus::Missing)
+        );
+        assert_eq!(
+            workspace_state.provenance_note.as_deref(),
+            Some(
+                "prepared baseline missing-baseline has no manifest in hosted/baselines prepared baseline missing-baseline was Missing; Probe fell back to a fresh workspace start"
+            )
+        );
 
         client
             .shutdown()

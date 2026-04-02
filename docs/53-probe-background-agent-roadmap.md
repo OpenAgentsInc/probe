@@ -425,17 +425,21 @@ registry," or "add detached watch." It is:
 
 - downstream consumer adoption above the shipped Probe daemon seam
 - richer hosted execution and workspace ownership beyond the local daemon
-- prepared baseline and execution-host manifests for remote workers
+- real prepared-workspace pools and restore execution above the new manifest
+  seam for remote workers
 
 Probe now also has the first hosted control-plane transport:
 
 - `probe-server --listen-tcp ...`
 - a hosted TCP JSONL lane on the same runtime protocol
 - explicit runtime-owner metadata in stored session and detached-session state
+- typed workspace provenance in stored session and detached-session state,
+  including boot mode, prepared baseline status, snapshot refs, and
+  execution-host metadata
 
 That is intentionally only the remote control-plane seam. It does not yet mean
-Probe has hosted worker manifests, prepared baseline restore, or multi-tenant
-auth.
+Probe has hosted worker scheduling, real prepared baseline restore execution,
+or multi-tenant auth.
 
 ## 2. Remote inference is not remote execution
 
@@ -458,10 +462,18 @@ For a real background agent, the detached Probe worker must own:
 
 Otherwise the user's machine is still the actual execution host.
 
-## 3. No prepared workspace pool or snapshot story yet
+## 3. Prepared workspace provenance exists, but no real pool or restore executor yet
 
-The current Probe server-attach docs cover backend readiness, not coding
-workspace readiness.
+Hosted Probe sessions can now persist typed workspace provenance:
+
+- explicit boot mode
+- prepared baseline identity plus `ready`, `missing`, or `stale` status
+- snapshot and restore refs
+- execution-host identity
+- explicit fresh-start fallback notes when a prepared baseline is unavailable
+
+That is enough for remote consumers to stop scraping logs for provenance, but
+it is not yet the actual prepared-workspace subsystem.
 
 Probe still needs a real prepared-environment story for:
 

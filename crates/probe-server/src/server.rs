@@ -39,10 +39,14 @@ use probe_protocol::runtime::{
 use probe_protocol::session::{
     SessionAttachTransport, SessionBackendTarget, SessionBranchState, SessionChildClosureSummary,
     SessionChildLink, SessionChildStatus, SessionChildSummary, SessionDeliveryArtifact,
-    SessionDeliveryState, SessionDeliveryStatus, SessionId, SessionInitiator, SessionMetadata,
-    SessionParentLink, SessionRuntimeOwner, SessionRuntimeOwnerKind, UsageMeasurement, UsageTruth,
+    SessionDeliveryState, SessionDeliveryStatus, SessionExecutionHost, SessionExecutionHostKind,
+    SessionId, SessionInitiator, SessionMetadata, SessionParentLink, SessionPreparedBaselineRef,
+    SessionPreparedBaselineStatus, SessionRuntimeOwner, SessionRuntimeOwnerKind,
+    SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef, SessionWorkspaceState, UsageMeasurement,
+    UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
+use serde::{Deserialize, Serialize};
 
 use crate::detached_events::{DetachedEventError, DetachedSessionEventHub};
 use crate::detached_registry::{DetachedRegistryError, DetachedSessionRegistry};
@@ -345,6 +349,29 @@ impl Drop for SocketCleanupGuard {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
+}
+
+const HOSTED_BASELINES_DIR: &str = "hosted/baselines";
+const HOSTED_SNAPSHOTS_DIR: &str = "hosted/snapshots";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HostedBaselineManifest {
+    baseline_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repo_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base_ref: Option<String>,
+    #[serde(default)]
+    stale: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HostedSnapshotManifest {
+    snapshot_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restore_manifest_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_baseline_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -727,6 +754,7 @@ impl TurnControlPlane {
                         session_id,
                         DetachedSessionEventTruth::Authoritative,
                         DetachedSessionEventPayload::WorkspaceStateUpdated {
+                            workspace_state: metadata.workspace_state.clone(),
                             branch_state: branch_state.clone(),
                             delivery_state: delivery_state.clone(),
                         },
@@ -1675,20 +1703,34 @@ impl ProbeServerConnection {
         &self,
         request: StartSessionRequest,
     ) -> Result<SessionSnapshot, RuntimeProtocolError> {
+        let StartSessionRequest {
+            title,
+            cwd,
+            profile,
+            system_prompt,
+            harness_profile,
+            workspace_state,
+        } = request;
+        let workspace_state = resolve_workspace_state(
+            self.core.runtime.session_store().root(),
+            &self.core.runtime_owner,
+            workspace_state,
+        );
         let session = self
             .core
             .runtime
             .session_store()
             .create_session_with(
-                NewSession::new(normalize_session_title(request.title), request.cwd)
-                    .with_system_prompt(request.system_prompt)
-                    .with_harness_profile(request.harness_profile)
+                NewSession::new(normalize_session_title(title), cwd)
+                    .with_system_prompt(system_prompt)
+                    .with_harness_profile(harness_profile)
                     .with_backend(SessionBackendTarget {
-                        profile_name: request.profile.name,
-                        base_url: request.profile.base_url,
-                        model: request.profile.model,
+                        profile_name: profile.name,
+                        base_url: profile.base_url,
+                        model: profile.model,
                     })
-                    .with_runtime_owner(Some(self.core.runtime_owner.clone())),
+                    .with_runtime_owner(Some(self.core.runtime_owner.clone()))
+                    .with_workspace_state(workspace_state),
             )
             .map_err(session_store_error_to_protocol)?;
         self.session_snapshot(&session.id)
@@ -1739,6 +1781,7 @@ impl ProbeServerConnection {
             .author
             .as_ref()
             .map(session_initiator_from_turn_author);
+        let workspace_state = parent.workspace_state.clone();
         let child = self
             .core
             .runtime
@@ -1753,6 +1796,7 @@ impl ProbeServerConnection {
                         model: request.profile.model,
                     })
                     .with_runtime_owner(Some(self.core.runtime_owner.clone()))
+                    .with_workspace_state(workspace_state)
                     .with_parent_link(Some(SessionParentLink {
                         session_id: request.parent_session_id.clone(),
                         turn_id: request.parent_turn_id,
@@ -3101,6 +3145,7 @@ fn detached_session_summary_from_state(
         cwd: metadata.cwd.clone(),
         status,
         runtime_owner: metadata.runtime_owner.clone(),
+        workspace_state: metadata.workspace_state.clone(),
         active_turn_id: active_turn.map(|turn| turn.turn_id.clone()),
         queued_turn_count: view.queued_turns.len(),
         pending_approval_count,
@@ -3120,6 +3165,202 @@ fn turn_response_to_runtime_response(response: TurnResponse, mode: TurnMode) -> 
         TurnMode::Start => RuntimeResponse::StartTurn(response),
         TurnMode::Continue => RuntimeResponse::ContinueTurn(response),
     }
+}
+
+fn resolve_workspace_state(
+    probe_home: &Path,
+    runtime_owner: &SessionRuntimeOwner,
+    requested: Option<SessionWorkspaceState>,
+) -> Option<SessionWorkspaceState> {
+    if requested.is_none()
+        && !matches!(
+            runtime_owner.kind,
+            SessionRuntimeOwnerKind::HostedControlPlane
+        )
+    {
+        return None;
+    }
+
+    let mut notes = Vec::new();
+    let mut workspace_state = requested.unwrap_or(SessionWorkspaceState {
+        boot_mode: SessionWorkspaceBootMode::Fresh,
+        baseline: None,
+        snapshot: None,
+        execution_host: None,
+        provenance_note: None,
+    });
+
+    if workspace_state.execution_host.is_none() {
+        workspace_state.execution_host = Some(execution_host_for_owner(runtime_owner));
+    }
+
+    workspace_state.baseline = workspace_state
+        .baseline
+        .take()
+        .map(|baseline| resolve_baseline_ref(probe_home, baseline, &mut notes));
+    workspace_state.snapshot = workspace_state
+        .snapshot
+        .take()
+        .map(|snapshot| resolve_snapshot_ref(probe_home, snapshot, &mut notes));
+
+    match workspace_state.boot_mode {
+        SessionWorkspaceBootMode::Fresh => {}
+        SessionWorkspaceBootMode::PreparedBaseline => match workspace_state.baseline.as_ref() {
+            Some(baseline) if matches!(baseline.status, SessionPreparedBaselineStatus::Ready) => {}
+            Some(baseline) => {
+                workspace_state.boot_mode = SessionWorkspaceBootMode::Fresh;
+                notes.push(format!(
+                    "prepared baseline {} was {:?}; Probe fell back to a fresh workspace start",
+                    baseline.baseline_id, baseline.status
+                ));
+            }
+            None => {
+                workspace_state.boot_mode = SessionWorkspaceBootMode::Fresh;
+                notes.push(String::from(
+                    "prepared baseline boot was requested without a baseline ref; Probe fell back to a fresh workspace start",
+                ));
+            }
+        },
+        SessionWorkspaceBootMode::SnapshotRestore => {
+            if workspace_state.snapshot.is_none() {
+                workspace_state.boot_mode = SessionWorkspaceBootMode::Fresh;
+                notes.push(String::from(
+                    "snapshot restore was requested without a snapshot ref; Probe fell back to a fresh workspace start",
+                ));
+            }
+        }
+    }
+
+    workspace_state.provenance_note =
+        combine_provenance_note(workspace_state.provenance_note.take(), notes);
+    Some(workspace_state)
+}
+
+fn execution_host_for_owner(runtime_owner: &SessionRuntimeOwner) -> SessionExecutionHost {
+    let kind = match runtime_owner.kind {
+        SessionRuntimeOwnerKind::HostedControlPlane => SessionExecutionHostKind::HostedWorker,
+        SessionRuntimeOwnerKind::ForegroundChild | SessionRuntimeOwnerKind::LocalDaemon => {
+            SessionExecutionHostKind::LocalMachine
+        }
+    };
+    SessionExecutionHost {
+        kind,
+        host_id: runtime_owner.owner_id.clone(),
+        display_name: runtime_owner.display_name.clone(),
+        location: None,
+    }
+}
+
+fn resolve_baseline_ref(
+    probe_home: &Path,
+    mut baseline: SessionPreparedBaselineRef,
+    notes: &mut Vec<String>,
+) -> SessionPreparedBaselineRef {
+    match read_manifest::<HostedBaselineManifest>(
+        probe_home,
+        HOSTED_BASELINES_DIR,
+        baseline.baseline_id.as_str(),
+    ) {
+        Ok(Some(manifest)) => {
+            baseline.repo_identity = baseline.repo_identity.or(manifest.repo_identity);
+            baseline.base_ref = baseline.base_ref.or(manifest.base_ref);
+            baseline.status = if manifest.stale {
+                SessionPreparedBaselineStatus::Stale
+            } else {
+                SessionPreparedBaselineStatus::Ready
+            };
+        }
+        Ok(None) => {
+            baseline.status = SessionPreparedBaselineStatus::Missing;
+            notes.push(format!(
+                "prepared baseline {} has no manifest in {}",
+                baseline.baseline_id, HOSTED_BASELINES_DIR
+            ));
+        }
+        Err(message) => {
+            baseline.status = SessionPreparedBaselineStatus::Missing;
+            notes.push(format!(
+                "prepared baseline {} could not be read: {}",
+                baseline.baseline_id, message
+            ));
+        }
+    }
+    baseline
+}
+
+fn resolve_snapshot_ref(
+    probe_home: &Path,
+    mut snapshot: SessionWorkspaceSnapshotRef,
+    notes: &mut Vec<String>,
+) -> SessionWorkspaceSnapshotRef {
+    match read_manifest::<HostedSnapshotManifest>(
+        probe_home,
+        HOSTED_SNAPSHOTS_DIR,
+        snapshot.snapshot_id.as_str(),
+    ) {
+        Ok(Some(manifest)) => {
+            snapshot.restore_manifest_id = snapshot
+                .restore_manifest_id
+                .or(manifest.restore_manifest_id);
+            snapshot.source_baseline_id =
+                snapshot.source_baseline_id.or(manifest.source_baseline_id);
+        }
+        Ok(None) => notes.push(format!(
+            "snapshot {} has no manifest in {}",
+            snapshot.snapshot_id, HOSTED_SNAPSHOTS_DIR
+        )),
+        Err(message) => notes.push(format!(
+            "snapshot {} could not be read: {}",
+            snapshot.snapshot_id, message
+        )),
+    }
+    snapshot
+}
+
+fn combine_provenance_note(existing: Option<String>, notes: Vec<String>) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(existing) = existing.filter(|value| !value.trim().is_empty()) {
+        parts.push(existing);
+    }
+    parts.extend(notes.into_iter().filter(|value| !value.trim().is_empty()));
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+fn read_manifest<T>(probe_home: &Path, subdir: &str, manifest_id: &str) -> Result<Option<T>, String>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let path = probe_home
+        .join(subdir)
+        .join(manifest_file_name(manifest_id));
+    match fs::read_to_string(&path) {
+        Ok(contents) => serde_json::from_str(&contents)
+            .map(Some)
+            .map_err(|error| format!("{} at {}", error, path.display())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("{} at {}", error, path.display())),
+    }
+}
+
+fn manifest_file_name(id: &str) -> String {
+    let sanitized: String = id
+        .chars()
+        .map(|value| {
+            if value.is_ascii_alphanumeric() || matches!(value, '-' | '_') {
+                value
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!(
+        "{}.json",
+        if sanitized.is_empty() {
+            String::from("manifest")
+        } else {
+            sanitized
+        }
+    )
 }
 
 fn preferred_terminal_turn(

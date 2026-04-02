@@ -59,6 +59,7 @@ fn stdio_protocol_can_initialize_start_resume_and_run_a_turn() {
             profile: profile.clone(),
             system_prompt: Some(String::from("You are concise.")),
             harness_profile: None,
+            workspace_state: None,
         }),
     );
     let RuntimeResponse::StartSession(snapshot) = expect_ok_response(start_session) else {
@@ -895,6 +896,7 @@ fn start_test_session(
             profile: profile.clone(),
             system_prompt: Some(String::from("You are concise.")),
             harness_profile: None,
+            workspace_state: None,
         }),
     );
     let RuntimeResponse::StartSession(snapshot) = expect_ok_response(response) else {

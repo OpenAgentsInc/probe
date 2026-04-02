@@ -284,6 +284,71 @@ pub struct SessionRuntimeOwner {
     pub attach_target: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionWorkspaceBootMode {
+    Fresh,
+    PreparedBaseline,
+    SnapshotRestore,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPreparedBaselineStatus {
+    Ready,
+    Missing,
+    Stale,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPreparedBaselineRef {
+    pub baseline_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    pub status: SessionPreparedBaselineStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionWorkspaceSnapshotRef {
+    pub snapshot_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_manifest_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_baseline_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionExecutionHostKind {
+    LocalMachine,
+    HostedWorker,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionExecutionHost {
+    pub kind: SessionExecutionHostKind,
+    pub host_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionWorkspaceState {
+    pub boot_mode: SessionWorkspaceBootMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<SessionPreparedBaselineRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<SessionWorkspaceSnapshotRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_host: Option<SessionExecutionHost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_note: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionHarnessProfile {
     pub name: String,
@@ -428,6 +493,8 @@ pub struct SessionMetadata {
     pub backend: Option<SessionBackendTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_owner: Option<SessionRuntimeOwner>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_state: Option<SessionWorkspaceState>,
     pub transcript_path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_link: Option<SessionParentLink>,

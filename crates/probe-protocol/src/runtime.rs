@@ -7,8 +7,8 @@ use crate::backend::BackendProfile;
 use crate::session::{
     PendingToolApproval, SessionBranchState, SessionChildSummary, SessionDeliveryState,
     SessionHarnessProfile, SessionId, SessionMetadata, SessionRuntimeOwner, SessionTurn,
-    TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass, TranscriptEvent,
-    UsageMeasurement,
+    SessionWorkspaceState, TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass,
+    TranscriptEvent, UsageMeasurement,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +124,8 @@ pub struct StartSessionRequest {
     pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_profile: Option<SessionHarnessProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_state: Option<SessionWorkspaceState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +273,8 @@ pub struct DetachedSessionSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_owner: Option<SessionRuntimeOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_state: Option<SessionWorkspaceState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_turn_id: Option<String>,
     pub queued_turn_count: usize,
     pub pending_approval_count: usize,
@@ -303,6 +307,8 @@ pub enum DetachedSessionEventPayload {
         child: SessionChildSummary,
     },
     WorkspaceStateUpdated {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_state: Option<SessionWorkspaceState>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch_state: Option<SessionBranchState>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

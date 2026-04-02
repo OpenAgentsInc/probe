@@ -233,3 +233,7 @@ This folder holds technical planning docs for the Probe runtime.
   - the first hosted Probe control-plane lane for Phase 3, including
     `probe-server --listen-tcp`, shared-client hosted TCP attach, and explicit
     runtime-owner metadata for foreground, daemon, and hosted sessions
+- `68-hosted-worker-baselines-and-execution-host-manifests.md`
+  - hosted session workspace provenance for Phase 3, including boot mode,
+    prepared baseline status, snapshot refs, execution-host metadata, and
+    explicit fresh-start fallback notes

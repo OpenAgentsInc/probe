@@ -119,6 +119,7 @@ fn detached_session_registry_tracks_background_work_after_client_disconnect() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            workspace_state: None,
         })
         .expect("daemon should start session");
     let session_id = session.session.id.clone();
@@ -180,6 +181,7 @@ fn daemon_restart_keeps_approval_paused_sessions_resumable() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            workspace_state: None,
         })
         .expect("daemon should start session");
     let session_id = session.session.id.clone();
@@ -239,6 +241,7 @@ fn daemon_emits_parent_child_updates_when_child_sessions_are_spawned() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            workspace_state: None,
         })
         .expect("daemon should start parent session");
     let parent_session_id = parent.session.id.clone();
@@ -311,6 +314,7 @@ fn daemon_emits_workspace_state_updates_for_git_bound_sessions() {
             profile,
             system_prompt: None,
             harness_profile: None,
+            workspace_state: None,
         })
         .expect("daemon should start git-bound session");
     assert!(session.branch_state.is_some());
@@ -325,6 +329,7 @@ fn daemon_emits_workspace_state_updates_for_git_bound_sessions() {
     assert!(log.events.iter().any(|record| matches!(
         record.payload,
         DetachedSessionEventPayload::WorkspaceStateUpdated {
+            workspace_state: _,
             branch_state: Some(_),
             delivery_state: Some(_),
         }
@@ -350,6 +355,7 @@ fn daemon_restart_marks_running_turns_as_failed_when_the_process_dies() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            workspace_state: None,
         })
         .expect("daemon should start session");
     let session_id = session.session.id.clone();
@@ -414,6 +420,7 @@ fn detached_session_log_replays_recent_events_with_resume_cursor() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            workspace_state: None,
         })
         .expect("daemon should start session");
     let session_id = session.session.id.clone();
@@ -498,6 +505,7 @@ fn detached_session_watch_surfaces_approval_pause_updates_without_polling() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            workspace_state: None,
         })
         .expect("daemon should start session");
     let session_id = session.session.id.clone();
@@ -591,6 +599,7 @@ fn detached_watchdog_times_out_stalled_turn_and_cancels_follow_up_queue() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            workspace_state: None,
         })
         .expect("daemon should start session");
     let session_id = session.session.id.clone();
@@ -685,6 +694,7 @@ fn approval_paused_detached_turns_are_exempt_from_watchdog_timeout() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            workspace_state: None,
         })
         .expect("daemon should start session");
     let session_id = session.session.id.clone();

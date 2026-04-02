@@ -125,6 +125,7 @@ impl DetachedSessionRegistry {
                 .map(|value| value.status)
                 .unwrap_or(DetachedSessionStatus::Idle),
             runtime_owner: metadata.runtime_owner.clone(),
+            workspace_state: metadata.workspace_state.clone(),
             active_turn_id: existing
                 .as_ref()
                 .and_then(|value| value.active_turn_id.clone()),

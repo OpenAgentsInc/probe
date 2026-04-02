@@ -74,6 +74,16 @@ Probe now persists typed runtime-owner state on sessions.
 Detached summaries now mirror that same owner metadata so remote consumers can
 inspect ownership without scraping daemon files or guessing from transport.
 
+Hosted sessions now also persist typed workspace provenance alongside that
+owner metadata:
+
+- boot mode
+- prepared baseline id and readiness or stale state
+- snapshot or restore refs
+- execution-host metadata
+- explicit fresh-start fallback notes when a requested prepared baseline is not
+  actually available
+
 ## Why This Matters
 
 Hosted Forge consumers need more than "a TCP socket exists."
@@ -89,12 +99,11 @@ consumer-side assumptions.
 
 ## Current Limits
 
-This issue does not claim:
+This issue still does not claim:
 
-- hosted worker baseline manifests
-- snapshot or restore provenance
-- remote execution-host metadata
+- hosted worker scheduling
 - auth, tenancy, or cloud policy
 - browser or web transport support
 
-Those stay follow-on work above this first hosted control-plane seam.
+Those stay follow-on work above the first hosted control-plane and provenance
+seams.

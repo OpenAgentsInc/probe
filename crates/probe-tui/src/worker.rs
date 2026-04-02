@@ -1167,6 +1167,7 @@ fn client_error_session_id(error: &ProbeClientError) -> Option<SessionId> {
         ProbeClientError::CurrentExecutable(_)
         | ProbeClientError::Spawn(_)
         | ProbeClientError::ConnectDaemon(_)
+        | ProbeClientError::ConnectHosted(_)
         | ProbeClientError::MissingChildStdin
         | ProbeClientError::MissingChildStdout
         | ProbeClientError::Io(_)

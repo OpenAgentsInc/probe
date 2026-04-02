@@ -371,6 +371,7 @@ fn daemon_operator_commands_manage_detached_sessions() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            workspace_state: None,
         })
         .expect("daemon should start a session");
     let session_id = session.session.id.clone();

@@ -2631,6 +2631,7 @@ fn render_detached_event_line(record: &DetachedSessionEventRecord) -> String {
             child.parent_turn_id.as_deref().unwrap_or("none"),
         ),
         DetachedSessionEventPayload::WorkspaceStateUpdated {
+            workspace_state: _,
             branch_state,
             delivery_state,
         } => format!(

@@ -8,9 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use probe_protocol::session::{
     BackendTurnReceipt, ItemId, PendingToolApproval, SessionBackendTarget, SessionChildLink,
     SessionHarnessProfile, SessionId, SessionIndex, SessionMetadata, SessionParentLink,
-    SessionRuntimeOwner, SessionState, SessionTurn, TimestampMs, ToolApprovalResolution,
-    ToolExecutionRecord, TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnId,
-    TurnObservability,
+    SessionRuntimeOwner, SessionState, SessionTurn, SessionWorkspaceState, TimestampMs,
+    ToolApprovalResolution, ToolExecutionRecord, TranscriptEvent, TranscriptItem,
+    TranscriptItemKind, TurnId, TurnObservability,
 };
 use serde::Serialize;
 
@@ -121,6 +121,7 @@ pub struct NewSession {
     pub harness_profile: Option<SessionHarnessProfile>,
     pub backend: Option<SessionBackendTarget>,
     pub runtime_owner: Option<SessionRuntimeOwner>,
+    pub workspace_state: Option<SessionWorkspaceState>,
     pub parent_link: Option<SessionParentLink>,
 }
 
@@ -134,6 +135,7 @@ impl NewSession {
             harness_profile: None,
             backend: None,
             runtime_owner: None,
+            workspace_state: None,
             parent_link: None,
         }
     }
@@ -159,6 +161,12 @@ impl NewSession {
     #[must_use]
     pub fn with_runtime_owner(mut self, runtime_owner: Option<SessionRuntimeOwner>) -> Self {
         self.runtime_owner = runtime_owner;
+        self
+    }
+
+    #[must_use]
+    pub fn with_workspace_state(mut self, workspace_state: Option<SessionWorkspaceState>) -> Self {
+        self.workspace_state = workspace_state;
         self
     }
 
@@ -225,6 +233,7 @@ impl FilesystemSessionStore {
             next_turn_index: 0,
             backend: session.backend,
             runtime_owner: session.runtime_owner,
+            workspace_state: session.workspace_state,
             transcript_path,
             parent_link: session.parent_link,
             child_links: Vec::new(),
