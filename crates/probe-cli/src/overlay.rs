@@ -45,7 +45,6 @@ const TERMINAL_CELL_HEIGHT_PX: u32 = 24;
 const TERMINAL_OVERLAY_GIF_FRAME_COUNT: usize = 10;
 const TERMINAL_OVERLAY_GIF_FRAME_DELAY_MS: u32 = 110;
 const TERMINAL_OVERLAY_GIF_TIME_STEP: f32 = 0.32;
-const ITERM2_FILE_PART_CHARS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum OverlayTarget {
@@ -173,55 +172,24 @@ fn run_terminal_overlay_demo(
     run_result.and(cleanup_result)
 }
 
-fn write_terminal_image_payload(
-    stdout: &mut io::Stdout,
+fn terminal_image_escape(
     protocol: TerminalImageProtocol,
     viewport: TerminalViewport,
-    image_bytes: &[u8],
-) -> Result<(), String> {
+    png_bytes: &[u8],
+) -> String {
     match protocol {
-        TerminalImageProtocol::ITerm2InlineImage => {
-            write_iterm2_inline_image_payload(stdout, viewport, image_bytes)
-        }
+        TerminalImageProtocol::ITerm2InlineImage => iterm2_inline_image_escape(viewport, png_bytes),
     }
 }
 
-fn write_iterm2_inline_image_payload(
-    stdout: &mut io::Stdout,
-    viewport: TerminalViewport,
-    image_bytes: &[u8],
-) -> Result<(), String> {
-    let chunks = iterm2_multipart_inline_image_chunks(viewport, image_bytes, "image/gif");
-    for chunk in chunks {
-        stdout.write_all(chunk.as_bytes()).map_err(|error| {
-            format!("failed to write terminal overlay multipart chunk: {error}")
-        })?;
-    }
-    Ok(())
-}
-
-fn iterm2_multipart_inline_image_chunks(
-    viewport: TerminalViewport,
-    image_bytes: &[u8],
-    content_type: &str,
-) -> Vec<String> {
+fn iterm2_inline_image_escape(viewport: TerminalViewport, png_bytes: &[u8]) -> String {
+    let payload = STANDARD.encode(png_bytes);
     let image_rows = viewport.rows.saturating_sub(1).max(1);
-    let payload = STANDARD.encode(image_bytes);
-    let mut chunks = Vec::with_capacity(payload.len() / ITERM2_FILE_PART_CHARS + 2);
-    chunks.push(format!(
-        "\u{1b}]1337;MultipartFile=inline=1;size={};width={};height={};preserveAspectRatio=0;type={content_type}\u{7}",
-        image_bytes.len(),
+    format!(
+        "\u{1b}]1337;File=inline=1;width={};height={};preserveAspectRatio=0:{payload}\u{7}",
         viewport.cols.max(1),
         image_rows
-    ));
-    for chunk in payload.as_bytes().chunks(ITERM2_FILE_PART_CHARS) {
-        chunks.push(format!(
-            "\u{1b}]1337;FilePart={}\u{7}",
-            std::str::from_utf8(chunk).expect("base64 payload is always valid ASCII")
-        ));
-    }
-    chunks.push(String::from("\u{1b}]1337;FileEnd\u{7}\n"));
-    chunks
+    )
 }
 
 fn render_overlay_demo_png(
@@ -410,7 +378,9 @@ fn display_terminal_overlay_asset(
 ) -> Result<(), String> {
     execute!(stdout, MoveTo(0, 0), Clear(ClearType::All))
         .map_err(|error| format!("failed to prepare terminal overlay surface: {error}"))?;
-    write_terminal_image_payload(stdout, protocol, viewport, asset_bytes)?;
+    stdout
+        .write_all(terminal_image_escape(protocol, viewport, asset_bytes).as_bytes())
+        .map_err(|error| format!("failed to write terminal overlay asset payload: {error}"))?;
     stdout
         .flush()
         .map_err(|error| format!("failed to flush terminal overlay asset: {error}"))
@@ -1001,8 +971,8 @@ fn draw_badge(bounds: Bounds, label: &str, color: Hsla, paint: &mut PaintContext
 #[cfg(test)]
 mod tests {
     use super::{
-        ITERM2_FILE_PART_CHARS, TerminalImageProtocol, TerminalViewport,
-        detect_terminal_image_protocol_with_inputs, iterm2_multipart_inline_image_chunks,
+        TerminalImageProtocol, TerminalViewport, detect_terminal_image_protocol_with_inputs,
+        iterm2_inline_image_escape,
     };
 
     #[test]
@@ -1035,23 +1005,18 @@ mod tests {
 
     #[test]
     fn iterm2_escape_wraps_base64_payload() {
-        let chunks = iterm2_multipart_inline_image_chunks(
+        let escape = iterm2_inline_image_escape(
             TerminalViewport {
                 cols: 120,
                 rows: 40,
             },
-            &vec![b'p'; ITERM2_FILE_PART_CHARS + 17],
-            "image/gif",
+            b"probe",
         );
 
-        assert!(chunks[0].starts_with("\u{1b}]1337;MultipartFile=inline=1"));
-        assert!(chunks[0].contains("size=4113"));
-        assert!(chunks[0].contains("width=120"));
-        assert!(chunks[0].contains("height=39"));
-        assert!(chunks[0].contains("type=image/gif"));
-        assert_eq!(chunks.len(), 4);
-        assert!(chunks[1].starts_with("\u{1b}]1337;FilePart="));
-        assert!(chunks[2].starts_with("\u{1b}]1337;FilePart="));
-        assert_eq!(chunks[3], "\u{1b}]1337;FileEnd\u{7}\n");
+        assert!(escape.starts_with("\u{1b}]1337;File=inline=1"));
+        assert!(escape.contains("width=120"));
+        assert!(escape.contains("height=39"));
+        assert!(escape.contains("cHJvYmU="));
+        assert!(escape.ends_with('\u{7}'));
     }
 }

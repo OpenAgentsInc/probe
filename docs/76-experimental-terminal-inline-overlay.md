@@ -28,9 +28,7 @@ The first shipped terminal mode targets:
 
 Probe currently uses iTerm2's OSC 1337 inline-image protocol for this lane.
 iTerm2 also supports animated GIF playback, which the current Probe path now
-uses to avoid destructive per-frame terminal swaps. Probe now sends that image
-through the multipart file form of the protocol instead of one giant legacy
-payload so the handoff matches iTerm2's own `imgcat` behavior more closely.
+uses to avoid destructive per-frame terminal swaps.
 
 ## Architecture
 
