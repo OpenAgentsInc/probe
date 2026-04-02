@@ -280,10 +280,9 @@ TUI and `probe overlay demo` now prefer an in-terminal WGPUI image overlay when
 Probe detects a supported terminal graphics protocol. The first shipped
 terminal mode targets interactive iTerm2 sessions via the OSC 1337 inline image
 protocol. That inline lane now keeps the active Probe alt-screen alive, shows a
-loading surface immediately, and uploads one looping animated WGPUI asset
-instead of tearing down and replacing separate still frames. Unsupported
-terminals fall back to the separate desktop sidecar window, and
-`probe overlay demo --target sidecar` still forces that path.
+loading surface immediately, and refreshes multiple WGPUI frames in place until
+dismissal. Unsupported terminals fall back to the separate desktop sidecar
+window, and `probe overlay demo --target sidecar` still forces that path.
 
 Keys:
 

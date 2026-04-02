@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -16,8 +16,6 @@ use crossterm::execute;
 use crossterm::terminal::{
     Clear, ClearType, disable_raw_mode, enable_raw_mode, size as terminal_size,
 };
-use image::codecs::gif::{GifEncoder, Repeat as GifRepeat};
-use image::{Delay as ImageDelay, Frame as ImageFrame, ImageFormat};
 use wgpui::renderer::Renderer;
 use wgpui::viz::badge::{BadgeTone, tone_color as badge_color};
 use wgpui::viz::chart::{HistoryChartSeries, paint_history_chart_body};
@@ -42,9 +40,7 @@ const WINDOW_WIDTH: f64 = OVERLAY_WIDTH as f64;
 const WINDOW_HEIGHT: f64 = OVERLAY_HEIGHT as f64;
 const TERMINAL_CELL_WIDTH_PX: u32 = 12;
 const TERMINAL_CELL_HEIGHT_PX: u32 = 24;
-const TERMINAL_OVERLAY_GIF_FRAME_COUNT: usize = 10;
-const TERMINAL_OVERLAY_GIF_FRAME_DELAY_MS: u32 = 110;
-const TERMINAL_OVERLAY_GIF_TIME_STEP: f32 = 0.32;
+const TERMINAL_OVERLAY_FRAME_INTERVAL: Duration = Duration::from_millis(650);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum OverlayTarget {
@@ -277,9 +273,25 @@ fn run_live_terminal_overlay_demo(
     viewport: TerminalViewport,
 ) -> Result<(), String> {
     paint_terminal_overlay_loading_state(stdout, viewport)?;
-    let gif_bytes = render_overlay_demo_gif(viewport)?;
-    display_terminal_overlay_asset(stdout, protocol, viewport, gif_bytes.as_slice())?;
-    wait_for_terminal_overlay_dismissal()
+    let started_at = Instant::now();
+    render_terminal_overlay_frame(
+        stdout,
+        protocol,
+        viewport,
+        started_at.elapsed().as_secs_f32(),
+    )?;
+
+    loop {
+        if wait_for_terminal_overlay_dismissal_or_refresh()? {
+            return Ok(());
+        }
+        render_terminal_overlay_frame(
+            stdout,
+            protocol,
+            viewport,
+            started_at.elapsed().as_secs_f32(),
+        )?;
+    }
 }
 
 fn prepare_terminal_overlay_surface(
@@ -301,7 +313,7 @@ fn paint_terminal_overlay_loading_state(
     stdout: &mut io::Stdout,
     viewport: TerminalViewport,
 ) -> Result<(), String> {
-    let loading_copy = "Rendering animated WGPUI overlay...";
+    let loading_copy = "Rendering first WGPUI frame...";
     let x = viewport
         .cols
         .saturating_sub(loading_copy.len() as u16)
@@ -317,82 +329,41 @@ fn paint_terminal_overlay_loading_state(
         .map_err(|error| format!("failed to flush terminal overlay loading copy: {error}"))
 }
 
-fn render_overlay_demo_gif(viewport: TerminalViewport) -> Result<Vec<u8>, String> {
-    let capture_size = overlay_capture_size(OverlayPresentation::TerminalInline(viewport));
-    let gif_width = u16::try_from(capture_size.width).map_err(|_| {
-        format!(
-            "terminal overlay width {} exceeds GIF encoder limits",
-            capture_size.width
-        )
-    })?;
-    let gif_height = u16::try_from(capture_size.height).map_err(|_| {
-        format!(
-            "terminal overlay height {} exceeds GIF encoder limits",
-            capture_size.height
-        )
-    })?;
-    let mut gif_bytes = Vec::new();
-    let mut encoder = GifEncoder::new(&mut gif_bytes);
-    encoder
-        .set_repeat(GifRepeat::Infinite)
-        .map_err(|error| format!("failed to configure terminal overlay GIF repeat: {error}"))?;
-
-    for frame_index in 0..TERMINAL_OVERLAY_GIF_FRAME_COUNT {
-        let time = frame_index as f32 * TERMINAL_OVERLAY_GIF_TIME_STEP;
-        let png_bytes =
-            render_overlay_demo_png(OverlayPresentation::TerminalInline(viewport), time)?;
-        let frame_image = image::load_from_memory_with_format(&png_bytes, ImageFormat::Png)
-            .map_err(|error| format!("failed to decode terminal overlay frame PNG: {error}"))?
-            .into_rgba8();
-        if frame_image.width() != u32::from(gif_width)
-            || frame_image.height() != u32::from(gif_height)
-        {
-            return Err(format!(
-                "terminal overlay frame size drifted from {}x{} to {}x{}",
-                gif_width,
-                gif_height,
-                frame_image.width(),
-                frame_image.height()
-            ));
-        }
-        let frame = ImageFrame::from_parts(
-            frame_image,
-            0,
-            0,
-            ImageDelay::from_numer_denom_ms(TERMINAL_OVERLAY_GIF_FRAME_DELAY_MS, 1),
-        );
-        encoder
-            .encode_frame(frame)
-            .map_err(|error| format!("failed to encode terminal overlay GIF frame: {error}"))?;
-    }
-
-    drop(encoder);
-    Ok(gif_bytes)
-}
-
-fn display_terminal_overlay_asset(
+fn render_terminal_overlay_frame(
     stdout: &mut io::Stdout,
     protocol: TerminalImageProtocol,
     viewport: TerminalViewport,
-    asset_bytes: &[u8],
+    time: f32,
 ) -> Result<(), String> {
+    let png_bytes = render_overlay_demo_png(OverlayPresentation::TerminalInline(viewport), time)?;
     execute!(stdout, MoveTo(0, 0), Clear(ClearType::All))
-        .map_err(|error| format!("failed to prepare terminal overlay surface: {error}"))?;
+        .map_err(|error| format!("failed to prepare terminal overlay frame: {error}"))?;
     stdout
-        .write_all(terminal_image_escape(protocol, viewport, asset_bytes).as_bytes())
-        .map_err(|error| format!("failed to write terminal overlay asset payload: {error}"))?;
+        .write_all(terminal_image_escape(protocol, viewport, png_bytes.as_slice()).as_bytes())
+        .map_err(|error| format!("failed to write terminal image payload: {error}"))?;
     stdout
         .flush()
-        .map_err(|error| format!("failed to flush terminal overlay asset: {error}"))
+        .map_err(|error| format!("failed to flush terminal overlay frame: {error}"))
 }
 
-fn wait_for_terminal_overlay_dismissal() -> Result<(), String> {
+fn wait_for_terminal_overlay_dismissal_or_refresh() -> Result<bool, String> {
+    if !terminal_event::poll(TERMINAL_OVERLAY_FRAME_INTERVAL)
+        .map_err(|error| format!("failed to poll terminal overlay events: {error}"))?
+    {
+        return Ok(false);
+    }
+
     loop {
         if terminal_overlay_key_should_dismiss(
             terminal_event::read()
                 .map_err(|error| format!("failed to read terminal overlay event: {error}"))?,
         ) {
-            return Ok(());
+            return Ok(true);
+        }
+        if !terminal_event::poll(Duration::ZERO)
+            .map_err(|error| format!("failed to drain terminal overlay events: {error}"))?
+        {
+            return Ok(false);
         }
     }
 }
