@@ -249,3 +249,7 @@ This folder holds technical planning docs for the Probe runtime.
 - `71-hosted-session-receipts.md`
   - explicit hosted auth, worker, checkout, cost, and cleanup receipts on
     hosted session metadata, session snapshots, and detached-session summaries
+- `72-hosted-repo-checkout-and-cleanup-proof.md`
+  - concrete proof cases for hosted git checkout truth, detached hosted
+    inspection, and managed-workspace cleanup completion above the hosted
+    receipt contract

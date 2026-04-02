@@ -451,6 +451,8 @@ Probe now also has the first hosted control-plane transport:
 - explicit hosted receipts for auth, worker identity, repo checkout,
   cost-estimation observability, and cleanup posture in stored session and
   detached-session state
+- local proof coverage for hosted git checkout, detached hosted inspection,
+  and managed-workspace cleanup completion above that receipt seam
 
 That is intentionally only the remote control-plane seam. It does not yet mean
 Probe has hosted worker scheduling, real prepared baseline restore execution,

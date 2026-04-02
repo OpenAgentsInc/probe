@@ -1582,6 +1582,130 @@ mod tests {
     }
 
     #[test]
+    fn hosted_detached_summary_projects_checkout_worker_and_cleanup_receipts() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        init_git_workspace(environment.workspace());
+        let fake_backend = FakeOpenAiServer::from_responses(vec![
+            FakeHttpResponse::text_event_stream(
+                200,
+                concat!(
+                    "data: {\"id\":\"chatcmpl_hosted_detached\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"detached\"}}]}\n\n",
+                    "data: {\"id\":\"chatcmpl_hosted_detached\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" summary\"}}]}\n\n",
+                    "data: {\"id\":\"chatcmpl_hosted_detached\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\n"
+                ),
+            ),
+        ]);
+        let address = reserve_loopback_addr();
+        let attach_target = format!("tcp://{address}");
+        let mut server = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+        let mut config = ProbeClientConfig::new(environment.probe_home(), "probe-client-test");
+        config.transport = ProbeClientTransportConfig::HostedTcp {
+            address: address.clone(),
+        };
+        let mut client = wait_for_hosted_client(config);
+        let outcome = client
+            .exec_plain_text(PlainTextExecRequest {
+                profile: test_profile(fake_backend.base_url()),
+                prompt: String::from("project detached receipts"),
+                title: Some(String::from("detached receipts")),
+                cwd: environment.workspace().to_path_buf(),
+                system_prompt: None,
+                harness_profile: None,
+                tool_loop: None,
+            })
+            .expect("hosted turn should succeed");
+        let detached = client
+            .inspect_detached_session(&outcome.session.id)
+            .expect("hosted detached session should be inspectable");
+        let receipts = detached
+            .summary
+            .hosted_receipts
+            .expect("detached summary should project hosted receipts");
+        let checkout = receipts
+            .checkout
+            .expect("detached summary should keep checkout receipt");
+        assert_eq!(checkout.kind, SessionHostedCheckoutKind::GitRepository);
+        assert_eq!(
+            checkout.repo_identity.as_deref(),
+            Some("https://github.com/OpenAgentsInc/probe.git")
+        );
+        let worker = receipts
+            .worker
+            .expect("detached summary should keep worker receipt");
+        assert_eq!(worker.execution_host_id, "probe-hosted-test");
+        let cleanup = receipts
+            .cleanup
+            .expect("detached summary should keep cleanup receipt");
+        assert_eq!(cleanup.status, SessionHostedCleanupStatus::NotRequired);
+
+        client
+            .shutdown()
+            .expect("idle hosted server should accept shutdown");
+        server.wait();
+        let requests = fake_backend.finish();
+        assert_eq!(requests.len(), 1);
+    }
+
+    #[test]
+    fn managed_hosted_workspace_cleanup_receipt_marks_completed_once_path_is_gone() {
+        let environment = ProbeTestEnvironment::new();
+        let managed_workspace = environment
+            .probe_home()
+            .join("hosted")
+            .join("workspaces")
+            .join("cleanup-proof");
+        fs::create_dir_all(&managed_workspace).expect("create managed hosted workspace");
+        fs::write(managed_workspace.join("README.md"), "# cleanup proof\n")
+            .expect("seed managed workspace");
+        let address = reserve_loopback_addr();
+        let attach_target = format!("tcp://{address}");
+        let mut server = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+        let mut config = ProbeClientConfig::new(environment.probe_home(), "probe-client-test");
+        config.transport = ProbeClientTransportConfig::HostedTcp {
+            address: address.clone(),
+        };
+        let mut client = wait_for_hosted_client(config);
+        let snapshot = client
+            .start_session(StartSessionRequest {
+                title: Some(String::from("managed cleanup proof")),
+                cwd: managed_workspace.clone(),
+                profile: test_profile("http://127.0.0.1:9/v1"),
+                system_prompt: None,
+                harness_profile: None,
+                workspace_state: None,
+                mounted_refs: Vec::new(),
+            })
+            .expect("managed hosted session should start");
+        fs::remove_dir_all(&managed_workspace).expect("remove managed workspace");
+        let inspected = client
+            .inspect_detached_session(&snapshot.session.id)
+            .expect("managed hosted detached session should be inspectable");
+        let cleanup = inspected
+            .summary
+            .hosted_receipts
+            .and_then(|receipts| receipts.cleanup)
+            .expect("managed hosted session should keep cleanup receipt");
+        assert_eq!(cleanup.status, SessionHostedCleanupStatus::Completed);
+        assert_eq!(cleanup.strategy, "managed_hosted_workspace");
+
+        client
+            .shutdown()
+            .expect("idle hosted server should accept shutdown");
+        server.wait();
+    }
+
+    #[test]
     fn hosted_session_falls_back_to_fresh_when_prepared_baseline_is_missing() {
         let environment = ProbeTestEnvironment::new();
         environment.seed_coding_workspace();
