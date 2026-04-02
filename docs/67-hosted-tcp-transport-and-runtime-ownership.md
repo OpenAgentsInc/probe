@@ -25,16 +25,24 @@ scheduler.
 probe-server \
   --probe-home ~/.probe \
   --listen-tcp 127.0.0.1:7777 \
-  --hosted-owner-id probe-hosted-control-plane
+  --hosted-owner-id probe-hosted-control-plane \
+  --watchdog-stall-ms 180000
 ```
 
 Optional flags:
 
 - `--hosted-display-name <name>`
 - `--hosted-attach-target <target>`
+- `--watchdog-poll-ms <ms>`
+- `--watchdog-stall-ms <ms>`
+- `--watchdog-timeout-ms <ms>`
 
 If `--hosted-attach-target` is omitted, Probe advertises the bound listener as
 `tcp://<resolved-bind-addr>`.
+
+Hosted TCP now accepts the same watchdog knobs as the local daemon path, which
+matters for Codex-backed remote turns that can go quiet for longer than the
+default detached stall window without actually being dead.
 
 ## Client Transport
 

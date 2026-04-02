@@ -260,3 +260,9 @@ This folder holds technical planning docs for the Probe runtime.
   - retained hosted receipt-history events for cleanup transitions,
     approval-paused takeover, and running-turn restart failure above the
     latest hosted receipt snapshot
+- `77-hosted-gcp-forge-dogfood-deploy-lane.md`
+  - boring GCP deploy lane for hosted Forge dogfood: one private GCE worker,
+    one durable `PROBE_HOME`, systemd-managed `probe-server --listen-tcp`, a
+    prepared `openagents` baseline checkout, a local IAP tunnel for the hosted
+    OpenAgents harness, and the first verified April 2, 2026 live hosted
+    session on that lane

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use probe_protocol::session::SessionHostedAuthKind;
+use probe_server::detached_watchdog::DetachedTurnWatchdogPolicy;
 use probe_server::server::{HostedApiServerConfig, run_hosted_tcp_server, run_stdio_server};
 
 fn main() -> ExitCode {
@@ -17,7 +18,8 @@ fn main() -> ExitCode {
             probe_home,
             bind_addr,
             config,
-        }) => match run_hosted_tcp_server(probe_home, bind_addr, config) {
+            watchdog_policy,
+        }) => match run_hosted_tcp_server(probe_home, bind_addr, config, watchdog_policy) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("{error}");
@@ -44,6 +46,7 @@ enum Action {
         probe_home: Option<PathBuf>,
         bind_addr: String,
         config: HostedApiServerConfig,
+        watchdog_policy: DetachedTurnWatchdogPolicy,
     },
     Help,
 }
@@ -59,6 +62,7 @@ fn parse_args() -> Result<Action, String> {
     let mut auth_subject = None;
     let mut auth_kind = SessionHostedAuthKind::ControlPlaneAssertion;
     let mut auth_scope = Some(String::from("probe.hosted.session"));
+    let mut watchdog_policy = DetachedTurnWatchdogPolicy::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--probe-home" => {
@@ -115,6 +119,30 @@ fn parse_args() -> Result<Action, String> {
                 };
                 auth_scope = Some(value);
             }
+            "--watchdog-poll-ms" => {
+                let Some(value) = args.next() else {
+                    return Err(String::from("--watchdog-poll-ms requires a value"));
+                };
+                watchdog_policy.poll_interval_ms = value
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid --watchdog-poll-ms value: {value}"))?;
+            }
+            "--watchdog-stall-ms" => {
+                let Some(value) = args.next() else {
+                    return Err(String::from("--watchdog-stall-ms requires a value"));
+                };
+                watchdog_policy.stall_timeout_ms = value
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid --watchdog-stall-ms value: {value}"))?;
+            }
+            "--watchdog-timeout-ms" => {
+                let Some(value) = args.next() else {
+                    return Err(String::from("--watchdog-timeout-ms requires a value"));
+                };
+                watchdog_policy.execution_timeout_ms = value
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid --watchdog-timeout-ms value: {value}"))?;
+            }
             "--help" | "-h" => return Ok(Action::Help),
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -132,6 +160,7 @@ fn parse_args() -> Result<Action, String> {
                 auth_kind,
                 auth_scope,
             },
+            watchdog_policy,
         })
     } else {
         Ok(Action::RunStdio { probe_home })
@@ -150,7 +179,7 @@ fn parse_hosted_auth_kind(value: &str) -> Result<SessionHostedAuthKind, String> 
 
 fn print_usage() {
     eprintln!(
-        "usage: probe-server [--probe-home <path>] [--listen-tcp <addr>] [--hosted-owner-id <id>] [--hosted-display-name <name>] [--hosted-attach-target <target>] [--hosted-auth-authority <authority>] [--hosted-auth-subject <subject>] [--hosted-auth-kind <control_plane_assertion|operator_token>] [--hosted-auth-scope <scope>]"
+        "usage: probe-server [--probe-home <path>] [--listen-tcp <addr>] [--hosted-owner-id <id>] [--hosted-display-name <name>] [--hosted-attach-target <target>] [--hosted-auth-authority <authority>] [--hosted-auth-subject <subject>] [--hosted-auth-kind <control_plane_assertion|operator_token>] [--hosted-auth-scope <scope>] [--watchdog-poll-ms <ms>] [--watchdog-stall-ms <ms>] [--watchdog-timeout-ms <ms>]"
     );
     eprintln!("transport: stdio jsonl or hosted tcp jsonl");
 }

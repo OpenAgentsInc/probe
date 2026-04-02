@@ -195,6 +195,7 @@ pub fn run_hosted_tcp_server(
     probe_home: Option<PathBuf>,
     bind_addr: String,
     config: HostedApiServerConfig,
+    watchdog_policy: DetachedTurnWatchdogPolicy,
 ) -> Result<(), ServerError> {
     let home = resolve_probe_home(probe_home, "probe-server hosted tcp")?;
     let listener = TcpListener::bind(bind_addr.as_str())?;
@@ -209,11 +210,11 @@ pub fn run_hosted_tcp_server(
             ),
             ..config
         },
-        DetachedTurnWatchdogPolicy::default(),
+        watchdog_policy,
     );
     core.reconcile_detached_sessions()
         .map_err(runtime_protocol_error_to_io)?;
-    spawn_detached_watchdog(core.clone(), DetachedTurnWatchdogPolicy::default())
+    spawn_detached_watchdog(core.clone(), watchdog_policy)
         .map_err(|error| ServerError::Io(io::Error::other(error.to_string())))?;
 
     loop {
