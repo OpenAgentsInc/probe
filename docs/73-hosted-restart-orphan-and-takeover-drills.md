@@ -69,6 +69,13 @@ hosted TCP lane:
 - approval-paused work can still be taken over
 - stale registry entries are reaped on startup
 
+Hosted receipt history now also retains the session-owned part of that proof:
+
+- restart failure is recorded as `running_turn_failed_on_restart`
+- approval-paused takeover availability is recorded as
+  `approval_paused_takeover_available`
+- hosted cleanup transitions are retained as `cleanup_state_changed`
+
 ## Current Limits
 
 This still does not claim:

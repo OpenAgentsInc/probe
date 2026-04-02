@@ -402,6 +402,37 @@ pub struct SessionHostedCleanupReceipt {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionHostedLifecycleEvent {
+    RunningTurnFailedOnRestart {
+        turn_id: String,
+        session_owner_id: String,
+        execution_host_id: String,
+        summary: String,
+        recorded_at_ms: TimestampMs,
+    },
+    ApprovalPausedTakeoverAvailable {
+        turn_id: String,
+        session_owner_id: String,
+        execution_host_id: String,
+        pending_approval_count: usize,
+        summary: String,
+        recorded_at_ms: TimestampMs,
+    },
+    CleanupStateChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_status: Option<SessionHostedCleanupStatus>,
+        status: SessionHostedCleanupStatus,
+        workspace_root: PathBuf,
+        strategy: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_host_id: Option<String>,
+        summary: String,
+        recorded_at_ms: TimestampMs,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionHostedReceipts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<SessionHostedAuthReceipt>,
@@ -413,6 +444,8 @@ pub struct SessionHostedReceipts {
     pub cost: Option<SessionHostedCostReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<SessionHostedCleanupReceipt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<SessionHostedLifecycleEvent>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

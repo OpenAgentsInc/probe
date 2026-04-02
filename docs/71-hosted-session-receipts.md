@@ -37,6 +37,10 @@ The first receipt bundle is intentionally boring:
   - workspace root
   - cleanup strategy
   - an explicit note when Probe is attached to an operator-supplied workspace
+- `history`
+  - retained cleanup-state transitions
+  - retained approval-paused takeover availability
+  - retained running-turn failure on restart
 
 ## Why
 

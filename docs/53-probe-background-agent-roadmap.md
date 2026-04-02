@@ -451,6 +451,9 @@ Probe now also has the first hosted control-plane transport:
 - explicit hosted receipts for auth, worker identity, repo checkout,
   cost-estimation observability, and cleanup posture in stored session and
   detached-session state
+- retained hosted receipt history for restart failure, approval-paused
+  takeover availability, and cleanup transitions in stored session and
+  detached-session state
 - local proof coverage for hosted git checkout, detached hosted inspection,
   and managed-workspace cleanup completion above that receipt seam
 - hosted detached-session drill coverage for restart failure,

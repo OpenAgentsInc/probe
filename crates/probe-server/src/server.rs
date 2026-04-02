@@ -45,12 +45,12 @@ use probe_protocol::session::{
     SessionDeliveryState, SessionDeliveryStatus, SessionExecutionHost, SessionExecutionHostKind,
     SessionHostedAuthKind, SessionHostedAuthReceipt, SessionHostedCheckoutKind,
     SessionHostedCheckoutReceipt, SessionHostedCleanupReceipt, SessionHostedCleanupStatus,
-    SessionHostedCostReceipt, SessionHostedReceipts, SessionHostedWorkerReceipt, SessionId,
-    SessionInitiator, SessionMetadata, SessionMountKind, SessionMountRef, SessionParentLink,
-    SessionPreparedBaselineRef, SessionPreparedBaselineStatus, SessionRuntimeOwner,
-    SessionRuntimeOwnerKind, SessionSummaryArtifact, SessionSummaryArtifactRef,
-    SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef, SessionWorkspaceState, TranscriptEvent,
-    UsageMeasurement, UsageTruth,
+    SessionHostedCostReceipt, SessionHostedLifecycleEvent, SessionHostedReceipts,
+    SessionHostedWorkerReceipt, SessionId, SessionInitiator, SessionMetadata, SessionMountKind,
+    SessionMountRef, SessionParentLink, SessionPreparedBaselineRef, SessionPreparedBaselineStatus,
+    SessionRuntimeOwner, SessionRuntimeOwnerKind, SessionSummaryArtifact,
+    SessionSummaryArtifactRef, SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef,
+    SessionWorkspaceState, TranscriptEvent, UsageMeasurement, UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
 use serde::{Deserialize, Serialize};
@@ -792,13 +792,28 @@ impl TurnControlPlane {
             delivery_state.as_ref(),
         )
         .map_err(session_summary_artifact_error_to_protocol)?;
-        let summary = detached_session_summary_from_state(
+        let now = now_ms();
+        let mut summary = detached_session_summary_from_state(
             &metadata,
             state,
             pending_approval_count,
             summary_artifact_refs(summary_artifacts.as_slice()),
             previous.as_ref(),
-            now_ms(),
+            now,
+        );
+        let metadata = sync_hosted_history_from_detached_summary(
+            self.runtime.session_store(),
+            metadata,
+            &summary,
+            now,
+        )?;
+        summary = detached_session_summary_from_state(
+            &metadata,
+            state,
+            pending_approval_count,
+            summary_artifact_refs(summary_artifacts.as_slice()),
+            previous.as_ref(),
+            now,
         );
         let turn_control = state.inspect_view(session_id);
         registry
@@ -813,7 +828,7 @@ impl TurnControlPlane {
                         summary: summary.clone(),
                         turn_control,
                     },
-                    now_ms(),
+                    now,
                 )
                 .map_err(detached_event_error_to_protocol)?;
             if branch_state.is_some() || delivery_state.is_some() {
@@ -826,7 +841,7 @@ impl TurnControlPlane {
                             branch_state: branch_state.clone(),
                             delivery_state: delivery_state.clone(),
                         },
-                        now_ms(),
+                        now,
                     )
                     .map_err(detached_event_error_to_protocol)?;
             }
@@ -856,7 +871,7 @@ impl TurnControlPlane {
                                 updated_at_ms: metadata.updated_at_ms,
                             },
                         },
-                        now_ms(),
+                        now,
                     )
                     .map_err(detached_event_error_to_protocol)?;
             }
@@ -3185,14 +3200,18 @@ fn detached_session_summary_from_state(
     let view = state.inspect_view(&metadata.id);
     let active_turn = view.active_turn.as_ref();
     let last_terminal_turn = preferred_terminal_turn(view.recent_turns.as_slice());
+    let approval_recovery_note = match metadata.runtime_owner.as_ref().map(|owner| owner.kind) {
+        Some(SessionRuntimeOwnerKind::HostedControlPlane) => {
+            "hosted control plane can resume this session after the pending approval is resolved"
+        }
+        _ => "daemon restart can resume this session after the pending approval is resolved",
+    };
     let (status, recovery_state, recovery_note) = if let Some(active_turn) = active_turn {
         if active_turn.awaiting_approval {
             (
                 DetachedSessionStatus::ApprovalPaused,
                 DetachedSessionRecoveryState::ApprovalPausedResumable,
-                Some(String::from(
-                    "daemon restart can resume this session after the pending approval is resolved",
-                )),
+                Some(String::from(approval_recovery_note)),
             )
         } else {
             (
@@ -3301,6 +3320,7 @@ fn hosted_receipts_for_session(
     transcript: &[TranscriptEvent],
     recorded_at_ms: u64,
 ) -> SessionHostedReceipts {
+    let previous_receipts = metadata.hosted_receipts.as_ref();
     let runtime_owner = metadata
         .runtime_owner
         .as_ref()
@@ -3311,6 +3331,20 @@ fn hosted_receipts_for_session(
         .and_then(|state| state.execution_host.as_ref())
         .cloned()
         .unwrap_or_else(|| execution_host_for_owner(runtime_owner));
+    let worker = SessionHostedWorkerReceipt {
+        owner_kind: runtime_owner.kind,
+        owner_id: runtime_owner.owner_id.clone(),
+        attach_transport: runtime_owner.attach_transport,
+        attach_target: runtime_owner.attach_target.clone(),
+        execution_host_kind: execution_host.kind,
+        execution_host_id: execution_host.host_id.clone(),
+        execution_host_label: execution_host
+            .display_name
+            .clone()
+            .or_else(|| Some(execution_host.host_id.clone())),
+        recorded_at_ms,
+    };
+    let cleanup = hosted_cleanup_receipt(probe_home, metadata, recorded_at_ms);
     let auth = hosted_receipt_config.map(|config| SessionHostedAuthReceipt {
         authority: config.auth_authority.clone(),
         subject: config.auth_subject.clone(),
@@ -3321,21 +3355,10 @@ fn hosted_receipts_for_session(
     SessionHostedReceipts {
         auth,
         checkout: Some(hosted_checkout_receipt(metadata, recorded_at_ms)),
-        worker: Some(SessionHostedWorkerReceipt {
-            owner_kind: runtime_owner.kind,
-            owner_id: runtime_owner.owner_id.clone(),
-            attach_transport: runtime_owner.attach_transport,
-            attach_target: runtime_owner.attach_target.clone(),
-            execution_host_kind: execution_host.kind,
-            execution_host_id: execution_host.host_id.clone(),
-            execution_host_label: execution_host
-                .display_name
-                .clone()
-                .or_else(|| Some(execution_host.host_id.clone())),
-            recorded_at_ms,
-        }),
+        worker: Some(worker.clone()),
         cost: Some(hosted_cost_receipt(transcript, recorded_at_ms)),
-        cleanup: Some(hosted_cleanup_receipt(probe_home, metadata, recorded_at_ms)),
+        cleanup: Some(cleanup.clone()),
+        history: hosted_receipt_history(previous_receipts, &worker, &cleanup, recorded_at_ms),
     }
 }
 
@@ -3461,6 +3484,181 @@ fn hosted_cleanup_receipt(
         strategy,
         note,
         recorded_at_ms,
+    }
+}
+
+fn hosted_receipt_history(
+    previous: Option<&SessionHostedReceipts>,
+    worker: &SessionHostedWorkerReceipt,
+    cleanup: &SessionHostedCleanupReceipt,
+    recorded_at_ms: u64,
+) -> Vec<SessionHostedLifecycleEvent> {
+    let mut history = previous
+        .map(|receipts| receipts.history.clone())
+        .unwrap_or_default();
+    let previous_cleanup = previous.and_then(|receipts| receipts.cleanup.as_ref());
+    let cleanup_changed = previous_cleanup.map(|receipt| receipt.status) != Some(cleanup.status)
+        || previous_cleanup.map(|receipt| receipt.strategy.as_str())
+            != Some(cleanup.strategy.as_str())
+        || previous_cleanup.map(|receipt| receipt.workspace_root.as_path())
+            != Some(cleanup.workspace_root.as_path());
+    if cleanup_changed {
+        push_hosted_history_event(
+            &mut history,
+            SessionHostedLifecycleEvent::CleanupStateChanged {
+                previous_status: previous_cleanup.map(|receipt| receipt.status),
+                status: cleanup.status,
+                workspace_root: cleanup.workspace_root.clone(),
+                strategy: cleanup.strategy.clone(),
+                execution_host_id: Some(worker.execution_host_id.clone()),
+                summary: cleanup.note.clone().unwrap_or_else(|| {
+                    format!(
+                        "Probe recorded hosted cleanup status `{}` for strategy `{}`",
+                        hosted_cleanup_status_label(cleanup.status),
+                        cleanup.strategy
+                    )
+                }),
+                recorded_at_ms,
+            },
+        );
+    }
+    history
+}
+
+fn sync_hosted_history_from_detached_summary(
+    store: &probe_core::session_store::FilesystemSessionStore,
+    mut metadata: SessionMetadata,
+    summary: &DetachedSessionSummary,
+    recorded_at_ms: u64,
+) -> Result<SessionMetadata, RuntimeProtocolError> {
+    let Some(runtime_owner) = metadata.runtime_owner.as_ref() else {
+        return Ok(metadata);
+    };
+    if runtime_owner.kind != SessionRuntimeOwnerKind::HostedControlPlane {
+        return Ok(metadata);
+    }
+    let Some(mut receipts) = metadata.hosted_receipts.clone() else {
+        return Ok(metadata);
+    };
+    let execution_host_id = receipts
+        .worker
+        .as_ref()
+        .map(|worker| worker.execution_host_id.clone())
+        .unwrap_or_else(|| runtime_owner.owner_id.clone());
+    let event = match summary.recovery_state {
+        DetachedSessionRecoveryState::ApprovalPausedResumable => {
+            summary
+                .active_turn_id
+                .as_ref()
+                .map(|turn_id| SessionHostedLifecycleEvent::ApprovalPausedTakeoverAvailable {
+                    turn_id: turn_id.clone(),
+                    session_owner_id: runtime_owner.owner_id.clone(),
+                    execution_host_id,
+                    pending_approval_count: summary.pending_approval_count,
+                    summary: summary.recovery_note.clone().unwrap_or_else(|| {
+                        String::from(
+                            "hosted Probe kept this approval-paused turn reattachable for operator takeover",
+                        )
+                    }),
+                    recorded_at_ms,
+                })
+        }
+        DetachedSessionRecoveryState::RunningTurnFailedOnRestart => summary
+            .last_terminal_turn_id
+            .as_ref()
+            .map(|turn_id| SessionHostedLifecycleEvent::RunningTurnFailedOnRestart {
+                turn_id: turn_id.clone(),
+                session_owner_id: runtime_owner.owner_id.clone(),
+                execution_host_id,
+                summary: summary.recovery_note.clone().unwrap_or_else(|| {
+                    String::from(
+                        "hosted Probe marked the interrupted running turn as failed after restart",
+                    )
+                }),
+                recorded_at_ms,
+            }),
+        DetachedSessionRecoveryState::Clean => None,
+    };
+    let Some(event) = event else {
+        return Ok(metadata);
+    };
+    let original_receipts = receipts.clone();
+    push_hosted_history_event(&mut receipts.history, event);
+    if receipts == original_receipts {
+        return Ok(metadata);
+    }
+    metadata.hosted_receipts = Some(receipts);
+    store
+        .replace_metadata(metadata)
+        .map_err(session_store_error_to_protocol)
+}
+
+fn push_hosted_history_event(
+    history: &mut Vec<SessionHostedLifecycleEvent>,
+    event: SessionHostedLifecycleEvent,
+) {
+    if history
+        .iter()
+        .any(|existing| hosted_history_event_matches(existing, &event))
+    {
+        return;
+    }
+    history.push(event);
+}
+
+fn hosted_history_event_matches(
+    left: &SessionHostedLifecycleEvent,
+    right: &SessionHostedLifecycleEvent,
+) -> bool {
+    match (left, right) {
+        (
+            SessionHostedLifecycleEvent::RunningTurnFailedOnRestart {
+                turn_id: left_turn, ..
+            },
+            SessionHostedLifecycleEvent::RunningTurnFailedOnRestart {
+                turn_id: right_turn,
+                ..
+            },
+        ) => left_turn == right_turn,
+        (
+            SessionHostedLifecycleEvent::ApprovalPausedTakeoverAvailable {
+                turn_id: left_turn, ..
+            },
+            SessionHostedLifecycleEvent::ApprovalPausedTakeoverAvailable {
+                turn_id: right_turn,
+                ..
+            },
+        ) => left_turn == right_turn,
+        (
+            SessionHostedLifecycleEvent::CleanupStateChanged {
+                previous_status: left_previous,
+                status: left_status,
+                workspace_root: left_root,
+                strategy: left_strategy,
+                ..
+            },
+            SessionHostedLifecycleEvent::CleanupStateChanged {
+                previous_status: right_previous,
+                status: right_status,
+                workspace_root: right_root,
+                strategy: right_strategy,
+                ..
+            },
+        ) => {
+            left_previous == right_previous
+                && left_status == right_status
+                && left_root == right_root
+                && left_strategy == right_strategy
+        }
+        _ => false,
+    }
+}
+
+fn hosted_cleanup_status_label(status: SessionHostedCleanupStatus) -> &'static str {
+    match status {
+        SessionHostedCleanupStatus::NotRequired => "not_required",
+        SessionHostedCleanupStatus::Pending => "pending",
+        SessionHostedCleanupStatus::Completed => "completed",
     }
 }
 

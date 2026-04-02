@@ -256,3 +256,7 @@ This folder holds technical planning docs for the Probe runtime.
 - `73-hosted-restart-orphan-and-takeover-drills.md`
   - hosted detached-session drill coverage for restart failure,
     approval-paused takeover, and orphaned registry cleanup on startup
+- `74-hosted-receipt-history.md`
+  - retained hosted receipt-history events for cleanup transitions,
+    approval-paused takeover, and running-turn restart failure above the
+    latest hosted receipt snapshot

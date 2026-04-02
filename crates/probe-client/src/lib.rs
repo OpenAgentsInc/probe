@@ -1293,9 +1293,9 @@ mod tests {
     };
     use probe_protocol::session::{
         SessionAttachTransport, SessionExecutionHostKind, SessionHostedAuthKind,
-        SessionHostedCheckoutKind, SessionHostedCleanupStatus, SessionPreparedBaselineRef,
-        SessionPreparedBaselineStatus, SessionRuntimeOwnerKind, SessionWorkspaceBootMode,
-        SessionWorkspaceSnapshotRef, SessionWorkspaceState,
+        SessionHostedCheckoutKind, SessionHostedCleanupStatus, SessionHostedLifecycleEvent,
+        SessionPreparedBaselineRef, SessionPreparedBaselineStatus, SessionRuntimeOwnerKind,
+        SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef, SessionWorkspaceState,
     };
     use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
@@ -1693,13 +1693,44 @@ mod tests {
         let inspected = client
             .inspect_detached_session(&snapshot.session.id)
             .expect("managed hosted detached session should be inspectable");
-        let cleanup = inspected
+        let receipts = inspected
             .summary
             .hosted_receipts
-            .and_then(|receipts| receipts.cleanup)
+            .expect("managed hosted session should keep hosted receipts");
+        let cleanup = receipts
+            .cleanup
             .expect("managed hosted session should keep cleanup receipt");
         assert_eq!(cleanup.status, SessionHostedCleanupStatus::Completed);
         assert_eq!(cleanup.strategy, "managed_hosted_workspace");
+        let cleanup_events: Vec<_> = receipts
+            .history
+            .iter()
+            .filter_map(|event| match event {
+                SessionHostedLifecycleEvent::CleanupStateChanged {
+                    previous_status,
+                    status,
+                    strategy,
+                    ..
+                } => Some((*previous_status, *status, strategy.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            cleanup_events.contains(&(
+                None,
+                SessionHostedCleanupStatus::Pending,
+                "managed_hosted_workspace"
+            )),
+            "hosted history should retain the initial managed cleanup status"
+        );
+        assert!(
+            cleanup_events.contains(&(
+                Some(SessionHostedCleanupStatus::Pending),
+                SessionHostedCleanupStatus::Completed,
+                "managed_hosted_workspace"
+            )),
+            "hosted history should retain the cleanup completion transition"
+        );
 
         client
             .shutdown()
@@ -1764,13 +1795,38 @@ mod tests {
         let inspected = reattached
             .inspect_detached_session(&session_id)
             .expect("approval-paused hosted session should remain inspectable after restart");
-        assert_eq!(inspected.summary.status, DetachedSessionStatus::ApprovalPaused);
+        assert_eq!(
+            inspected.summary.status,
+            DetachedSessionStatus::ApprovalPaused
+        );
         assert_eq!(
             inspected.summary.recovery_state,
             DetachedSessionRecoveryState::ApprovalPausedResumable
         );
+        assert!(
+            inspected
+                .summary
+                .recovery_note
+                .as_deref()
+                .is_some_and(|note| note.contains("hosted control plane can resume this session"))
+        );
         assert_eq!(inspected.summary.pending_approval_count, 1);
         assert!(inspected.turn_control.active_turn.is_some());
+        let receipts = inspected
+            .summary
+            .hosted_receipts
+            .expect("approval-paused hosted summary should keep hosted receipts");
+        assert!(receipts.history.iter().any(|event| {
+            matches!(
+                event,
+                SessionHostedLifecycleEvent::ApprovalPausedTakeoverAvailable {
+                    turn_id,
+                    pending_approval_count,
+                    ..
+                } if Some(turn_id.as_str()) == inspected.summary.active_turn_id.as_deref()
+                    && *pending_approval_count == 1
+            )
+        }));
 
         drop(reattached);
         restarted.kill_ungraceful();
@@ -1820,7 +1876,8 @@ mod tests {
             .expect("queue turn should be accepted");
         drop(client);
 
-        let running = wait_for_detached_status(config.clone(), &session_id, DetachedSessionStatus::Running);
+        let running =
+            wait_for_detached_status(config.clone(), &session_id, DetachedSessionStatus::Running);
         assert!(running.active_turn_id.is_some());
 
         server.kill_ungraceful();
@@ -1839,17 +1896,34 @@ mod tests {
             inspected.summary.recovery_state,
             DetachedSessionRecoveryState::RunningTurnFailedOnRestart
         );
-        assert!(inspected
+        assert!(
+            inspected
+                .summary
+                .recovery_note
+                .as_deref()
+                .is_some_and(|note| note.contains("restarted before this running turn completed"))
+        );
+        assert!(
+            inspected
+                .turn_control
+                .recent_turns
+                .first()
+                .and_then(|turn| turn.failure_message.as_deref())
+                .is_some_and(
+                    |message| message.contains("restarted before this running turn completed")
+                )
+        );
+        let receipts = inspected
             .summary
-            .recovery_note
-            .as_deref()
-            .is_some_and(|note| note.contains("restarted before this running turn completed")));
-        assert!(inspected
-            .turn_control
-            .recent_turns
-            .first()
-            .and_then(|turn| turn.failure_message.as_deref())
-            .is_some_and(|message| message.contains("restarted before this running turn completed")));
+            .hosted_receipts
+            .expect("restart-failed hosted summary should keep hosted receipts");
+        assert!(receipts.history.iter().any(|event| {
+            matches!(
+                event,
+                SessionHostedLifecycleEvent::RunningTurnFailedOnRestart { turn_id, .. }
+                    if Some(turn_id.as_str()) == inspected.summary.last_terminal_turn_id.as_deref()
+            )
+        }));
 
         reattached
             .shutdown()
