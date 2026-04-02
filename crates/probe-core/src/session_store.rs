@@ -244,6 +244,7 @@ impl FilesystemSessionStore {
             backend: session.backend,
             runtime_owner: session.runtime_owner,
             workspace_state: session.workspace_state,
+            hosted_receipts: None,
             mounted_refs: session.mounted_refs,
             transcript_path,
             parent_link: session.parent_link,

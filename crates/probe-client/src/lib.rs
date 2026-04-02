@@ -1290,7 +1290,8 @@ mod tests {
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
     use probe_protocol::runtime::StartSessionRequest;
     use probe_protocol::session::{
-        SessionAttachTransport, SessionExecutionHostKind, SessionPreparedBaselineRef,
+        SessionAttachTransport, SessionExecutionHostKind, SessionHostedAuthKind,
+        SessionHostedCheckoutKind, SessionHostedCleanupStatus, SessionPreparedBaselineRef,
         SessionPreparedBaselineStatus, SessionRuntimeOwnerKind, SessionWorkspaceBootMode,
         SessionWorkspaceSnapshotRef, SessionWorkspaceState,
     };
@@ -1449,6 +1450,38 @@ mod tests {
             workspace_state.provenance_note.as_deref(),
             Some("snapshot snap-missing has no manifest in hosted/snapshots")
         );
+        let receipts = snapshot
+            .session
+            .hosted_receipts
+            .expect("hosted session should expose hosted receipts");
+        let auth = receipts
+            .auth
+            .expect("hosted session should persist auth receipt");
+        assert_eq!(auth.authority, "probe-hosted-test");
+        assert_eq!(auth.subject, "gcp-internal-dogfood");
+        assert_eq!(auth.auth_kind, SessionHostedAuthKind::ControlPlaneAssertion);
+        let worker = receipts
+            .worker
+            .expect("hosted session should persist worker receipt");
+        assert_eq!(worker.owner_id, "probe-hosted-test");
+        assert_eq!(worker.execution_host_id, "probe-hosted-test");
+        let checkout = receipts
+            .checkout
+            .expect("hosted session should persist checkout receipt");
+        assert_eq!(checkout.kind, SessionHostedCheckoutKind::PlainWorkspace);
+        assert_eq!(
+            checkout.workspace_root,
+            environment.workspace().to_path_buf()
+        );
+        let cost = receipts
+            .cost
+            .expect("hosted session should persist cost receipt");
+        assert_eq!(cost.observed_turn_count, 0);
+        assert_eq!(cost.wallclock_ms, 0);
+        let cleanup = receipts
+            .cleanup
+            .expect("hosted session should persist cleanup receipt");
+        assert_eq!(cleanup.status, SessionHostedCleanupStatus::NotRequired);
         let detached_summary = client
             .list_detached_sessions()
             .expect("hosted client should list detached sessions")
@@ -1468,6 +1501,84 @@ mod tests {
             .shutdown()
             .expect("idle hosted server should accept shutdown");
         server.wait();
+    }
+
+    #[test]
+    fn hosted_turn_receipts_capture_git_checkout_and_cost_observability() {
+        let environment = ProbeTestEnvironment::new();
+        environment.seed_coding_workspace();
+        init_git_workspace(environment.workspace());
+        let fake_backend = FakeOpenAiServer::from_responses(vec![
+            FakeHttpResponse::text_event_stream(
+                200,
+                concat!(
+                    "data: {\"id\":\"chatcmpl_hosted_turn\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hosted\"}}]}\n\n",
+                    "data: {\"id\":\"chatcmpl_hosted_turn\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" receipts\"}}]}\n\n",
+                    "data: {\"id\":\"chatcmpl_hosted_turn\",\"model\":\"tiny-qwen35\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":3,\"total_tokens\":6}}\n\n"
+                ),
+            ),
+        ]);
+        let address = reserve_loopback_addr();
+        let attach_target = format!("tcp://{address}");
+        let mut server = HostedProbeServer::start(
+            environment.probe_home(),
+            address.as_str(),
+            "probe-hosted-test",
+            attach_target.as_str(),
+        );
+        let mut config = ProbeClientConfig::new(environment.probe_home(), "probe-client-test");
+        config.transport = ProbeClientTransportConfig::HostedTcp {
+            address: address.clone(),
+        };
+        let mut client = wait_for_hosted_client(config);
+        let outcome = client
+            .exec_plain_text(PlainTextExecRequest {
+                profile: test_profile(fake_backend.base_url()),
+                prompt: String::from("summarize hosted receipts"),
+                title: Some(String::from("hosted receipts")),
+                cwd: environment.workspace().to_path_buf(),
+                system_prompt: None,
+                harness_profile: None,
+                tool_loop: None,
+            })
+            .expect("hosted turn should succeed");
+        let receipts = outcome
+            .session
+            .hosted_receipts
+            .expect("completed hosted turn should expose hosted receipts");
+        let checkout = receipts
+            .checkout
+            .expect("hosted git workspace should persist checkout receipt");
+        assert_eq!(checkout.kind, SessionHostedCheckoutKind::GitRepository);
+        assert_eq!(
+            checkout.repo_identity.as_deref(),
+            Some("https://github.com/OpenAgentsInc/probe.git")
+        );
+        assert_eq!(checkout.head_ref.as_deref(), Some("main"));
+        assert!(
+            checkout.head_commit.is_some(),
+            "git checkout receipt should include the resolved commit"
+        );
+        let cost = receipts
+            .cost
+            .expect("hosted turn should persist cost receipt");
+        assert_eq!(cost.observed_turn_count, 1);
+        assert!(cost.wallclock_ms > 0);
+        assert_eq!(cost.prompt_tokens, Some(3));
+        assert_eq!(cost.completion_tokens, Some(3));
+        assert_eq!(cost.total_tokens, Some(6));
+        let cleanup = receipts
+            .cleanup
+            .expect("hosted turn should persist cleanup receipt");
+        assert_eq!(cleanup.status, SessionHostedCleanupStatus::NotRequired);
+
+        client
+            .shutdown()
+            .expect("idle hosted server should accept shutdown");
+        server.wait();
+        let requests = fake_backend.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("summarize hosted receipts"));
     }
 
     #[test]
@@ -1563,6 +1674,52 @@ mod tests {
             .expect("loopback listener should expose an address");
         drop(listener);
         address.to_string()
+    }
+
+    fn init_git_workspace(workspace: &std::path::Path) {
+        let status = Command::new("git")
+            .arg("init")
+            .arg("-b")
+            .arg("main")
+            .current_dir(workspace)
+            .status()
+            .expect("git init should succeed");
+        assert!(status.success(), "git init should succeed");
+        let status = Command::new("git")
+            .args(["config", "user.name", "Probe Test"])
+            .current_dir(workspace)
+            .status()
+            .expect("git config user.name should succeed");
+        assert!(status.success(), "git config user.name should succeed");
+        let status = Command::new("git")
+            .args(["config", "user.email", "probe@example.com"])
+            .current_dir(workspace)
+            .status()
+            .expect("git config user.email should succeed");
+        assert!(status.success(), "git config user.email should succeed");
+        let status = Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/OpenAgentsInc/probe.git",
+            ])
+            .current_dir(workspace)
+            .status()
+            .expect("git remote add should succeed");
+        assert!(status.success(), "git remote add should succeed");
+        let status = Command::new("git")
+            .args(["add", "."])
+            .current_dir(workspace)
+            .status()
+            .expect("git add should succeed");
+        assert!(status.success(), "git add should succeed");
+        let status = Command::new("git")
+            .args(["commit", "-m", "initial fixture"])
+            .current_dir(workspace)
+            .status()
+            .expect("git commit should succeed");
+        assert!(status.success(), "git commit should succeed");
     }
 
     fn wait_for_hosted_client(config: ProbeClientConfig) -> ProbeClient {

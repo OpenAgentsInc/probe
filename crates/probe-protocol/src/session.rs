@@ -315,6 +315,108 @@ pub struct SessionRuntimeOwner {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum SessionHostedAuthKind {
+    ControlPlaneAssertion,
+    OperatorToken,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHostedAuthReceipt {
+    pub authority: String,
+    pub subject: String,
+    pub auth_kind: SessionHostedAuthKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    pub recorded_at_ms: TimestampMs,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionHostedCheckoutKind {
+    GitRepository,
+    PlainWorkspace,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHostedCheckoutReceipt {
+    pub kind: SessionHostedCheckoutKind,
+    pub workspace_root: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_root: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub recorded_at_ms: TimestampMs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHostedWorkerReceipt {
+    pub owner_kind: SessionRuntimeOwnerKind,
+    pub owner_id: String,
+    pub attach_transport: SessionAttachTransport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_target: Option<String>,
+    pub execution_host_kind: SessionExecutionHostKind,
+    pub execution_host_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_host_label: Option<String>,
+    pub recorded_at_ms: TimestampMs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHostedCostReceipt {
+    pub observed_turn_count: u64,
+    pub wallclock_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub recorded_at_ms: TimestampMs,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionHostedCleanupStatus {
+    NotRequired,
+    Pending,
+    Completed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHostedCleanupReceipt {
+    pub status: SessionHostedCleanupStatus,
+    pub workspace_root: PathBuf,
+    pub strategy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub recorded_at_ms: TimestampMs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHostedReceipts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<SessionHostedAuthReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<SessionHostedCheckoutReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<SessionHostedWorkerReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<SessionHostedCostReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<SessionHostedCleanupReceipt>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionWorkspaceBootMode {
     Fresh,
     PreparedBaseline,
@@ -627,6 +729,8 @@ pub struct SessionMetadata {
     pub runtime_owner: Option<SessionRuntimeOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_state: Option<SessionWorkspaceState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_receipts: Option<SessionHostedReceipts>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mounted_refs: Vec<SessionMountRef>,
     pub transcript_path: PathBuf,

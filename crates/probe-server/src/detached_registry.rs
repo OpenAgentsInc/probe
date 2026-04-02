@@ -126,6 +126,7 @@ impl DetachedSessionRegistry {
                 .unwrap_or(DetachedSessionStatus::Idle),
             runtime_owner: metadata.runtime_owner.clone(),
             workspace_state: metadata.workspace_state.clone(),
+            hosted_receipts: metadata.hosted_receipts.clone(),
             mounted_refs: metadata.mounted_refs.clone(),
             summary_artifact_refs: existing
                 .as_ref()

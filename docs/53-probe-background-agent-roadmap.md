@@ -448,6 +448,9 @@ Probe now also has the first hosted control-plane transport:
 - typed workspace provenance in stored session and detached-session state,
   including boot mode, prepared baseline status, snapshot refs, and
   execution-host metadata
+- explicit hosted receipts for auth, worker identity, repo checkout,
+  cost-estimation observability, and cleanup posture in stored session and
+  detached-session state
 
 That is intentionally only the remote control-plane seam. It does not yet mean
 Probe has hosted worker scheduling, real prepared baseline restore execution,

@@ -43,11 +43,14 @@ use probe_protocol::session::{
     SessionAttachTransport, SessionBackendTarget, SessionBranchState, SessionChildClosureSummary,
     SessionChildLink, SessionChildStatus, SessionChildSummary, SessionDeliveryArtifact,
     SessionDeliveryState, SessionDeliveryStatus, SessionExecutionHost, SessionExecutionHostKind,
-    SessionId, SessionInitiator, SessionMetadata, SessionMountKind, SessionMountRef,
-    SessionParentLink, SessionPreparedBaselineRef, SessionPreparedBaselineStatus,
-    SessionRuntimeOwner, SessionRuntimeOwnerKind, SessionSummaryArtifact,
-    SessionSummaryArtifactRef, SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef,
-    SessionWorkspaceState, UsageMeasurement, UsageTruth,
+    SessionHostedAuthKind, SessionHostedAuthReceipt, SessionHostedCheckoutKind,
+    SessionHostedCheckoutReceipt, SessionHostedCleanupReceipt, SessionHostedCleanupStatus,
+    SessionHostedCostReceipt, SessionHostedReceipts, SessionHostedWorkerReceipt, SessionId,
+    SessionInitiator, SessionMetadata, SessionMountKind, SessionMountRef, SessionParentLink,
+    SessionPreparedBaselineRef, SessionPreparedBaselineStatus, SessionRuntimeOwner,
+    SessionRuntimeOwnerKind, SessionSummaryArtifact, SessionSummaryArtifactRef,
+    SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef, SessionWorkspaceState, TranscriptEvent,
+    UsageMeasurement, UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
 use serde::{Deserialize, Serialize};
@@ -167,6 +170,10 @@ pub struct HostedApiServerConfig {
     pub owner_id: String,
     pub display_name: Option<String>,
     pub attach_target: Option<String>,
+    pub auth_authority: Option<String>,
+    pub auth_subject: Option<String>,
+    pub auth_kind: SessionHostedAuthKind,
+    pub auth_scope: Option<String>,
 }
 
 impl HostedApiServerConfig {
@@ -176,6 +183,10 @@ impl HostedApiServerConfig {
             owner_id: owner_id.into(),
             display_name: None,
             attach_target: None,
+            auth_authority: None,
+            auth_subject: None,
+            auth_kind: SessionHostedAuthKind::ControlPlaneAssertion,
+            auth_scope: Some(String::from("probe.hosted.session")),
         }
     }
 }
@@ -379,12 +390,21 @@ struct HostedSnapshotManifest {
 }
 
 #[derive(Clone)]
+struct HostedReceiptConfig {
+    auth_authority: String,
+    auth_subject: String,
+    auth_kind: SessionHostedAuthKind,
+    auth_scope: Option<String>,
+}
+
+#[derive(Clone)]
 pub struct ProbeServerCore {
     runtime: ProbeRuntime,
     turn_control: Arc<TurnControlPlane>,
     detached_registry: Option<Arc<DetachedSessionRegistry>>,
     detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
     runtime_owner: SessionRuntimeOwner,
+    hosted_receipt_config: Option<HostedReceiptConfig>,
 }
 
 struct ProbeServerConnection {
@@ -409,6 +429,7 @@ struct TurnControlPlane {
     coordination: Arc<Mutex<HashSet<String>>>,
     detached_registry: Option<Arc<DetachedSessionRegistry>>,
     detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
+    hosted_receipt_config: Option<HostedReceiptConfig>,
     watchdog_policy: DetachedTurnWatchdogPolicy,
 }
 
@@ -441,6 +462,7 @@ impl ProbeServerCore {
                 display_name: Some(String::from("probe-server")),
                 attach_target: None,
             },
+            None,
             DetachedTurnWatchdogPolicy::default(),
         )
     }
@@ -457,6 +479,7 @@ impl ProbeServerCore {
                 display_name: Some(String::from("probe-daemon")),
                 attach_target: Some(socket_path.display().to_string()),
             },
+            None,
             watchdog_policy,
         )
     }
@@ -466,16 +489,31 @@ impl ProbeServerCore {
         config: HostedApiServerConfig,
         watchdog_policy: DetachedTurnWatchdogPolicy,
     ) -> Self {
+        let HostedApiServerConfig {
+            owner_id,
+            display_name,
+            attach_target,
+            auth_authority,
+            auth_subject,
+            auth_kind,
+            auth_scope,
+        } = config;
         Self::with_mode(
             runtime,
             ServerOwnershipMode::HostedControlPlane,
             SessionRuntimeOwner {
                 kind: SessionRuntimeOwnerKind::HostedControlPlane,
-                owner_id: config.owner_id,
+                owner_id: owner_id.clone(),
                 attach_transport: SessionAttachTransport::TcpJsonl,
-                display_name: config.display_name,
-                attach_target: config.attach_target,
+                display_name,
+                attach_target,
             },
+            Some(HostedReceiptConfig {
+                auth_authority: auth_authority.unwrap_or_else(|| owner_id.clone()),
+                auth_subject: auth_subject.unwrap_or_else(|| String::from("gcp-internal-dogfood")),
+                auth_kind,
+                auth_scope,
+            }),
             watchdog_policy,
         )
     }
@@ -484,6 +522,7 @@ impl ProbeServerCore {
         runtime: ProbeRuntime,
         mode: ServerOwnershipMode,
         runtime_owner: SessionRuntimeOwner,
+        hosted_receipt_config: Option<HostedReceiptConfig>,
         watchdog_policy: DetachedTurnWatchdogPolicy,
     ) -> Self {
         let detached_registry = mode
@@ -497,12 +536,14 @@ impl ProbeServerCore {
                 runtime.clone(),
                 detached_registry.clone(),
                 detached_event_hub.clone(),
+                hosted_receipt_config.clone(),
                 watchdog_policy,
             )),
             runtime,
             detached_registry,
             detached_event_hub,
             runtime_owner,
+            hosted_receipt_config,
         }
     }
 
@@ -672,6 +713,7 @@ impl TurnControlPlane {
         runtime: ProbeRuntime,
         detached_registry: Option<Arc<DetachedSessionRegistry>>,
         detached_event_hub: Option<Arc<DetachedSessionEventHub>>,
+        hosted_receipt_config: Option<HostedReceiptConfig>,
         watchdog_policy: DetachedTurnWatchdogPolicy,
     ) -> Self {
         Self {
@@ -679,6 +721,7 @@ impl TurnControlPlane {
             coordination: Arc::new(Mutex::new(HashSet::new())),
             detached_registry,
             detached_event_hub,
+            hosted_receipt_config,
             watchdog_policy,
         }
     }
@@ -730,6 +773,13 @@ impl TurnControlPlane {
             .session_store()
             .read_transcript(session_id)
             .map_err(session_store_error_to_protocol)?;
+        let metadata = sync_hosted_session_metadata_from_store(
+            self.runtime.session_store(),
+            self.hosted_receipt_config.as_ref(),
+            metadata,
+            transcript.as_slice(),
+            now_ms(),
+        )?;
         let branch_state = session_branch_state(metadata.cwd.as_path());
         let delivery_state = branch_state
             .as_ref()
@@ -2590,7 +2640,11 @@ fn run_turn_request(
 
     let response = match result {
         Ok(outcome) => turn_response_to_runtime_response(
-            TurnResponse::Completed(turn_completed(outcome)),
+            TurnResponse::Completed(turn_completed(
+                runtime,
+                turn_control.hosted_receipt_config.as_ref(),
+                outcome,
+            )?),
             mode,
         ),
         Err(RuntimeError::ToolApprovalPending {
@@ -2744,7 +2798,11 @@ fn run_pending_approval_resolution(
         }
         ResolvePendingToolApprovalOutcome::Resumed { outcome } => {
             Ok(RuntimeResponse::ResolvePendingApproval(
-                ResolvePendingApprovalResponse::Resumed(turn_completed(outcome)),
+                ResolvePendingApprovalResponse::Resumed(turn_completed(
+                    runtime,
+                    turn_control.hosted_receipt_config.as_ref(),
+                    outcome,
+                )?),
             ))
         }
     }
@@ -2759,6 +2817,18 @@ fn session_snapshot_from_core(
         .session_store()
         .read_metadata(session_id)
         .map_err(session_store_error_to_protocol)?;
+    let transcript = core
+        .runtime
+        .session_store()
+        .read_transcript(session_id)
+        .map_err(session_store_error_to_protocol)?;
+    let session = sync_hosted_session_metadata_from_store(
+        core.runtime.session_store(),
+        core.hosted_receipt_config.as_ref(),
+        session,
+        transcript.as_slice(),
+        now_ms(),
+    )?;
     let child_sessions = session
         .child_links
         .iter()
@@ -2790,11 +2860,6 @@ fn session_snapshot_from_core(
             },
         )
         .collect();
-    let transcript = core
-        .runtime
-        .session_store()
-        .read_transcript(session_id)
-        .map_err(session_store_error_to_protocol)?;
     let pending_approvals = core
         .runtime
         .pending_tool_approvals(session_id)
@@ -3183,6 +3248,7 @@ fn detached_session_summary_from_state(
         status,
         runtime_owner: metadata.runtime_owner.clone(),
         workspace_state: metadata.workspace_state.clone(),
+        hosted_receipts: metadata.hosted_receipts.clone(),
         mounted_refs: metadata.mounted_refs.clone(),
         summary_artifact_refs,
         active_turn_id: active_turn.map(|turn| turn.turn_id.clone()),
@@ -3196,6 +3262,205 @@ fn detached_session_summary_from_state(
         updated_at_ms: now_ms,
         recovery_state,
         recovery_note,
+    }
+}
+
+fn sync_hosted_session_metadata_from_store(
+    store: &probe_core::session_store::FilesystemSessionStore,
+    hosted_receipt_config: Option<&HostedReceiptConfig>,
+    mut metadata: SessionMetadata,
+    transcript: &[TranscriptEvent],
+    recorded_at_ms: u64,
+) -> Result<SessionMetadata, RuntimeProtocolError> {
+    let Some(runtime_owner) = metadata.runtime_owner.as_ref() else {
+        return Ok(metadata);
+    };
+    if runtime_owner.kind != SessionRuntimeOwnerKind::HostedControlPlane {
+        return Ok(metadata);
+    }
+    let updated_receipts = hosted_receipts_for_session(
+        store.root(),
+        hosted_receipt_config,
+        &metadata,
+        transcript,
+        recorded_at_ms,
+    );
+    if metadata.hosted_receipts.as_ref() == Some(&updated_receipts) {
+        return Ok(metadata);
+    }
+    metadata.hosted_receipts = Some(updated_receipts);
+    store
+        .replace_metadata(metadata)
+        .map_err(session_store_error_to_protocol)
+}
+
+fn hosted_receipts_for_session(
+    probe_home: &Path,
+    hosted_receipt_config: Option<&HostedReceiptConfig>,
+    metadata: &SessionMetadata,
+    transcript: &[TranscriptEvent],
+    recorded_at_ms: u64,
+) -> SessionHostedReceipts {
+    let runtime_owner = metadata
+        .runtime_owner
+        .as_ref()
+        .expect("hosted receipts require runtime owner");
+    let execution_host = metadata
+        .workspace_state
+        .as_ref()
+        .and_then(|state| state.execution_host.as_ref())
+        .cloned()
+        .unwrap_or_else(|| execution_host_for_owner(runtime_owner));
+    let auth = hosted_receipt_config.map(|config| SessionHostedAuthReceipt {
+        authority: config.auth_authority.clone(),
+        subject: config.auth_subject.clone(),
+        auth_kind: config.auth_kind,
+        scope: config.auth_scope.clone(),
+        recorded_at_ms,
+    });
+    SessionHostedReceipts {
+        auth,
+        checkout: Some(hosted_checkout_receipt(metadata, recorded_at_ms)),
+        worker: Some(SessionHostedWorkerReceipt {
+            owner_kind: runtime_owner.kind,
+            owner_id: runtime_owner.owner_id.clone(),
+            attach_transport: runtime_owner.attach_transport,
+            attach_target: runtime_owner.attach_target.clone(),
+            execution_host_kind: execution_host.kind,
+            execution_host_id: execution_host.host_id.clone(),
+            execution_host_label: execution_host
+                .display_name
+                .clone()
+                .or_else(|| Some(execution_host.host_id.clone())),
+            recorded_at_ms,
+        }),
+        cost: Some(hosted_cost_receipt(transcript, recorded_at_ms)),
+        cleanup: Some(hosted_cleanup_receipt(probe_home, metadata, recorded_at_ms)),
+    }
+}
+
+fn hosted_checkout_receipt(
+    metadata: &SessionMetadata,
+    recorded_at_ms: u64,
+) -> SessionHostedCheckoutReceipt {
+    let branch_state = session_branch_state(metadata.cwd.as_path());
+    let repo_identity = metadata
+        .workspace_state
+        .as_ref()
+        .and_then(|state| state.baseline.as_ref())
+        .and_then(|baseline| baseline.repo_identity.clone())
+        .or_else(|| {
+            run_git_string(
+                metadata.cwd.as_path(),
+                &["config", "--get", "remote.origin.url"],
+            )
+        });
+    match branch_state {
+        Some(branch_state) => SessionHostedCheckoutReceipt {
+            kind: SessionHostedCheckoutKind::GitRepository,
+            workspace_root: metadata.cwd.clone(),
+            repo_root: Some(branch_state.repo_root),
+            repo_identity,
+            head_ref: Some(branch_state.head_ref),
+            head_commit: Some(branch_state.head_commit),
+            note: None,
+            recorded_at_ms,
+        },
+        None => SessionHostedCheckoutReceipt {
+            kind: SessionHostedCheckoutKind::PlainWorkspace,
+            workspace_root: metadata.cwd.clone(),
+            repo_root: None,
+            repo_identity,
+            head_ref: None,
+            head_commit: None,
+            note: Some(String::from(
+                "cwd is not inside a git repository; Probe cannot emit branch or commit checkout truth for this session",
+            )),
+            recorded_at_ms,
+        },
+    }
+}
+
+fn hosted_cost_receipt(
+    transcript: &[TranscriptEvent],
+    recorded_at_ms: u64,
+) -> SessionHostedCostReceipt {
+    let mut wallclock_ms = 0_u64;
+    let mut prompt_tokens = 0_u64;
+    let mut completion_tokens = 0_u64;
+    let mut total_tokens = 0_u64;
+    let mut saw_prompt_tokens = false;
+    let mut saw_completion_tokens = false;
+    let mut saw_total_tokens = false;
+    for event in transcript {
+        if let Some(observability) = event.turn.observability.as_ref() {
+            wallclock_ms = wallclock_ms.saturating_add(observability.wallclock_ms);
+            if let Some(value) = observability.prompt_tokens {
+                prompt_tokens = prompt_tokens.saturating_add(value);
+                saw_prompt_tokens = true;
+            }
+            if let Some(value) = observability.completion_tokens {
+                completion_tokens = completion_tokens.saturating_add(value);
+                saw_completion_tokens = true;
+            }
+            if let Some(value) = observability.total_tokens {
+                total_tokens = total_tokens.saturating_add(value);
+                saw_total_tokens = true;
+            }
+        }
+    }
+    SessionHostedCostReceipt {
+        observed_turn_count: transcript.len() as u64,
+        wallclock_ms,
+        prompt_tokens: saw_prompt_tokens.then_some(prompt_tokens),
+        completion_tokens: saw_completion_tokens.then_some(completion_tokens),
+        total_tokens: saw_total_tokens.then_some(total_tokens),
+        note: Some(String::from(
+            "Probe reports raw hosted turn observability for operator cost estimation; provider billing is not wired into the runtime contract yet",
+        )),
+        recorded_at_ms,
+    }
+}
+
+fn hosted_cleanup_receipt(
+    probe_home: &Path,
+    metadata: &SessionMetadata,
+    recorded_at_ms: u64,
+) -> SessionHostedCleanupReceipt {
+    let managed_root = probe_home.join("hosted").join("workspaces");
+    let managed_workspace = same_path_prefix(metadata.cwd.as_path(), managed_root.as_path());
+    let (status, strategy, note) = if managed_workspace {
+        let workspace_exists = metadata.cwd.exists();
+        let status = if workspace_exists {
+            SessionHostedCleanupStatus::Pending
+        } else {
+            SessionHostedCleanupStatus::Completed
+        };
+        let note = if workspace_exists {
+            Some(String::from(
+                "Probe marked this workspace as managed hosted state, but no teardown hook has removed it yet",
+            ))
+        } else {
+            Some(String::from(
+                "Probe no longer sees the managed hosted workspace path and records cleanup as complete",
+            ))
+        };
+        (status, String::from("managed_hosted_workspace"), note)
+    } else {
+        (
+            SessionHostedCleanupStatus::NotRequired,
+            String::from("operator_supplied_workspace"),
+            Some(String::from(
+                "Probe is attached to an existing workspace path and does not delete it during hosted session cleanup",
+            )),
+        )
+    };
+    SessionHostedCleanupReceipt {
+        status,
+        workspace_root: metadata.cwd.clone(),
+        strategy,
+        note,
+        recorded_at_ms,
     }
 }
 
@@ -3490,9 +3755,24 @@ fn terminal_status_rank(status: QueuedTurnStatus) -> u8 {
     }
 }
 
-fn turn_completed(outcome: probe_core::runtime::PlainTextExecOutcome) -> TurnCompleted {
-    TurnCompleted {
-        session: outcome.session,
+fn turn_completed(
+    runtime: &ProbeRuntime,
+    hosted_receipt_config: Option<&HostedReceiptConfig>,
+    outcome: probe_core::runtime::PlainTextExecOutcome,
+) -> Result<TurnCompleted, RuntimeProtocolError> {
+    let transcript = runtime
+        .session_store()
+        .read_transcript(&outcome.session.id)
+        .map_err(session_store_error_to_protocol)?;
+    let session = sync_hosted_session_metadata_from_store(
+        runtime.session_store(),
+        hosted_receipt_config,
+        outcome.session,
+        transcript.as_slice(),
+        now_ms(),
+    )?;
+    Ok(TurnCompleted {
+        session,
         turn: outcome.turn,
         assistant_text: outcome.assistant_text,
         response_id: outcome.response_id,
@@ -3504,7 +3784,7 @@ fn turn_completed(outcome: probe_core::runtime::PlainTextExecOutcome) -> TurnCom
             .into_iter()
             .map(tool_call_result)
             .collect(),
-    }
+    })
 }
 
 fn runtime_usage(usage: probe_core::provider::ProviderUsage) -> RuntimeUsage {
@@ -3845,6 +4125,13 @@ fn same_path(left: &Path, right: &Path) -> bool {
     match (left.canonicalize(), right.canonicalize()) {
         (Ok(left), Ok(right)) => left == right,
         _ => left == right,
+    }
+}
+
+fn same_path_prefix(path: &Path, prefix: &Path) -> bool {
+    match (path.canonicalize(), prefix.canonicalize()) {
+        (Ok(path), Ok(prefix)) => path.starts_with(prefix),
+        _ => path.starts_with(prefix),
     }
 }
 

@@ -6,10 +6,10 @@ use serde_json::Value;
 use crate::backend::BackendProfile;
 use crate::session::{
     PendingToolApproval, SessionBranchState, SessionChildSummary, SessionDeliveryState,
-    SessionHarnessProfile, SessionId, SessionMetadata, SessionMountRef, SessionRuntimeOwner,
-    SessionSummaryArtifact, SessionSummaryArtifactRef, SessionTurn, SessionWorkspaceState,
-    TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass, TranscriptEvent,
-    UsageMeasurement,
+    SessionHarnessProfile, SessionHostedReceipts, SessionId, SessionMetadata, SessionMountRef,
+    SessionRuntimeOwner, SessionSummaryArtifact, SessionSummaryArtifactRef, SessionTurn,
+    SessionWorkspaceState, TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass,
+    TranscriptEvent, UsageMeasurement,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,6 +278,8 @@ pub struct DetachedSessionSummary {
     pub runtime_owner: Option<SessionRuntimeOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_state: Option<SessionWorkspaceState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_receipts: Option<SessionHostedReceipts>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mounted_refs: Vec<SessionMountRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

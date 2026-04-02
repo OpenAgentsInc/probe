@@ -246,3 +246,6 @@ This folder holds technical planning docs for the Probe runtime.
     session directory, typed session-snapshot and detached-session projection
     of those artifacts, and stable digest or provenance rules for later Forge
     knowledge-pack publication
+- `71-hosted-session-receipts.md`
+  - explicit hosted auth, worker, checkout, cost, and cleanup receipts on
+    hosted session metadata, session snapshots, and detached-session summaries
