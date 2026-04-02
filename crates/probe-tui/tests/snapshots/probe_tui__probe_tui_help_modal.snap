@@ -13,7 +13,7 @@ expression: snapshot
            │ Up / Down           draft history recall               │
            │ Mouse wheel / PgUp  scroll active panel                │
            │ PgDn                scroll back toward latest          │
-           │ Ctrl+G              experimental WGPUI overlay         │
+           │ Ctrl+O              add attachment placeholder         │
            └────────────────────────────────────────────────────────┘
 
 

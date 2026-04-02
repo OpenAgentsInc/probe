@@ -1,6 +1,5 @@
-use std::io::{self, Read, Stdout};
+use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent};
@@ -391,20 +390,6 @@ impl AppShell {
                                     String::from("current backend is prepared on launch");
                             }
                         }
-                        ScreenCommand::LaunchExperimentalOverlay => {
-                            match self.launch_experimental_overlay() {
-                                Ok(status) => {
-                                    self.base_screen_mut().record_event(status.clone());
-                                    self.last_status = status;
-                                }
-                                Err(error) => {
-                                    self.base_screen_mut().record_event(format!(
-                                        "experimental overlay launch failed: {error}"
-                                    ));
-                                    self.last_status = error;
-                                }
-                            }
-                        }
                         ScreenCommand::ResolvePendingToolApproval {
                             session_id,
                             call_id,
@@ -434,46 +419,6 @@ impl AppShell {
         }
         self.last_status = format!("queued {}", request.title());
         self.worker.submit(request)
-    }
-
-    fn launch_experimental_overlay(&self) -> Result<String, String> {
-        let executable = std::env::current_exe().map_err(|error| {
-            format!("failed to resolve the Probe executable for overlay launch: {error}")
-        })?;
-        let mut child = Command::new(&executable)
-            .args(["overlay", "demo"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                format!(
-                    "failed to launch the experimental WGPUI overlay via `{}`: {error}",
-                    executable.display()
-                )
-            })?;
-
-        std::thread::sleep(Duration::from_millis(160));
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("failed to poll the experimental overlay process: {error}"))?
-        {
-            let mut detail = String::new();
-            if let Some(mut stderr) = child.stderr.take() {
-                let _ = stderr.read_to_string(&mut detail);
-            }
-            let detail = detail.trim();
-            let suffix = if detail.is_empty() {
-                format!("process exited with status {status}")
-            } else {
-                detail.to_string()
-            };
-            return Err(format!(
-                "experimental WGPUI overlay failed before startup: {suffix}"
-            ));
-        }
-
-        Ok(String::from("launched experimental WGPUI overlay sidecar"))
     }
 
     pub fn poll_background_messages(&mut self) -> usize {
