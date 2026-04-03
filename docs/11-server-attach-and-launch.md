@@ -74,6 +74,8 @@ Current readiness rules:
   - resolves the effective model from the live routed inventory
   - preserves targetable models, local mesh role, local posture, and proxied
     fallback truth in typed session metadata
+  - stays attach-only to an existing Psionic management surface rather than
+    launching or depending on a parallel mesh runtime
 - `apple_fm_bridge`
   - checks `GET <base_url>/health`
   - refuses early if the bridge reports the model unavailable and preserves the

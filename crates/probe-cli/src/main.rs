@@ -2241,7 +2241,7 @@ fn resolve_server_config(
         .map_err(|error| error.to_string())?;
     if matches!(config.mode, PsionicServerMode::Launch) && config.control_plane.is_some() {
         return Err(String::from(
-            "the psionic mesh attach profile is attach-only; use --server-mode attach",
+            "the psionic mesh attach profile is attach-only to an existing Psionic management surface; it does not launch a parallel runtime; use --server-mode attach",
         ));
     }
     config
