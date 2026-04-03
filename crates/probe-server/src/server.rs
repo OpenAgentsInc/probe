@@ -28,9 +28,11 @@ use probe_protocol::runtime::{
     CancelQueuedTurnResponse, ClientMessage, DetachedSessionEventPayload,
     DetachedSessionEventTruth, DetachedSessionRecoveryState, DetachedSessionStatus,
     DetachedSessionSummary, EventDeliveryGuarantee, EventEnvelope, InitializeResponse,
-    InspectDetachedSessionResponse, InspectSessionTurnsResponse, InterruptTurnResponse,
+    InspectDetachedSessionResponse, InspectSessionMeshCoordinationRequest,
+    InspectSessionMeshCoordinationResponse, InspectSessionTurnsResponse, InterruptTurnResponse,
     ListDetachedSessionsResponse, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListSessionsResponse, QueueTurnResponse, QueuedTurnStatus, ReadDetachedSessionLogRequest,
+    ListSessionsResponse, PostSessionMeshCoordinationRequest, PostSessionMeshCoordinationResponse,
+    QueueTurnResponse, QueuedTurnStatus, ReadDetachedSessionLogRequest,
     ReadDetachedSessionLogResponse, RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody,
     ResponseEnvelope, RuntimeCapabilities, RuntimeProgressEvent, RuntimeProtocolError,
     RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage, ServerEvent,
@@ -49,14 +51,16 @@ use probe_protocol::session::{
     SessionHostedAuthReceipt, SessionHostedCheckoutKind, SessionHostedCheckoutReceipt,
     SessionHostedCleanupReceipt, SessionHostedCleanupStatus, SessionHostedCostReceipt,
     SessionHostedLifecycleEvent, SessionHostedReceipts, SessionHostedWorkerReceipt, SessionId,
-    SessionInitiator, SessionMetadata, SessionMountKind, SessionMountRef, SessionParentLink,
-    SessionParticipant, SessionPreparedBaselineRef, SessionPreparedBaselineStatus,
-    SessionRuntimeOwner, SessionRuntimeOwnerKind, SessionSummaryArtifact,
-    SessionSummaryArtifactRef, SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef,
-    SessionWorkspaceState, TranscriptEvent, UsageMeasurement, UsageTruth,
+    SessionInitiator, SessionMeshCoordinationEntry, SessionMeshCoordinationKind,
+    SessionMeshCoordinationMode, SessionMeshCoordinationStatus, SessionMeshCoordinationVisibility,
+    SessionMetadata, SessionMountKind, SessionMountRef, SessionParentLink, SessionParticipant,
+    SessionPreparedBaselineRef, SessionPreparedBaselineStatus, SessionRuntimeOwner,
+    SessionRuntimeOwnerKind, SessionSummaryArtifact, SessionSummaryArtifactRef,
+    SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef, SessionWorkspaceState, TranscriptEvent,
+    UsageMeasurement, UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::detached_events::{DetachedEventError, DetachedSessionEventHub};
 use crate::detached_registry::{DetachedRegistryError, DetachedSessionRegistry};
@@ -372,6 +376,10 @@ impl Drop for SocketCleanupGuard {
 
 const HOSTED_BASELINES_DIR: &str = "hosted/baselines";
 const HOSTED_SNAPSHOTS_DIR: &str = "hosted/snapshots";
+const PSIONIC_MESH_COORDINATION_STATUS_PATH: &str = "/psionic/management/coordination/status";
+const PSIONIC_MESH_COORDINATION_FEED_PATH: &str = "/psionic/management/coordination/feed";
+const PSIONIC_MESH_COORDINATION_SEARCH_PATH: &str = "/psionic/management/coordination/search";
+const PSIONIC_MESH_COORDINATION_POST_PATH: &str = "/psionic/management/coordination/post";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct HostedBaselineManifest {
@@ -426,6 +434,43 @@ enum ConnectionRunOutcome {
 enum RequestHandlingOutcome {
     Continue,
     ShutdownAccepted,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PsionicMeshCoordinationFeedQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    since_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<SessionMeshCoordinationKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    visibility: Option<SessionMeshCoordinationVisibility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PsionicMeshCoordinationSearchQuery {
+    query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    since_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<SessionMeshCoordinationKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    visibility: Option<SessionMeshCoordinationVisibility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PsionicMeshCoordinationPostBody {
+    kind: SessionMeshCoordinationKind,
+    body: String,
+    author: String,
+    visibility: SessionMeshCoordinationVisibility,
 }
 
 #[derive(Clone, Copy)]
@@ -557,6 +602,110 @@ impl ProbeServerCore {
             hosted_receipt_config,
             started_at_ms: now_ms(),
         }
+    }
+
+    fn inspect_session_mesh_coordination(
+        &self,
+        request: InspectSessionMeshCoordinationRequest,
+    ) -> Result<InspectSessionMeshCoordinationResponse, RuntimeProtocolError> {
+        let session = self
+            .runtime
+            .session_store()
+            .read_metadata(&request.session_id)
+            .map_err(session_store_error_to_protocol)?;
+        let management_base_url = psionic_mesh_management_base_url_from_session(&session)?;
+        let client = mesh_coordination_http_client()?;
+        let status: SessionMeshCoordinationStatus = psionic_management_get(
+            &client,
+            &management_base_url,
+            PSIONIC_MESH_COORDINATION_STATUS_PATH,
+            None::<&PsionicMeshCoordinationFeedQuery>,
+        )?;
+        let entries = if status.mode == SessionMeshCoordinationMode::Disabled {
+            Vec::new()
+        } else if let Some(query) = request
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            psionic_management_get(
+                &client,
+                &management_base_url,
+                PSIONIC_MESH_COORDINATION_SEARCH_PATH,
+                Some(&PsionicMeshCoordinationSearchQuery {
+                    query: query.to_string(),
+                    since_ms: request.since_ms,
+                    author: request.author.clone(),
+                    kind: request.kind,
+                    visibility: request.visibility,
+                    limit: request.limit,
+                }),
+            )?
+        } else {
+            psionic_management_get(
+                &client,
+                &management_base_url,
+                PSIONIC_MESH_COORDINATION_FEED_PATH,
+                Some(&PsionicMeshCoordinationFeedQuery {
+                    since_ms: request.since_ms,
+                    author: request.author.clone(),
+                    kind: request.kind,
+                    visibility: request.visibility,
+                    limit: request.limit,
+                }),
+            )?
+        };
+        Ok(InspectSessionMeshCoordinationResponse {
+            session_id: request.session_id,
+            status,
+            entries,
+        })
+    }
+
+    fn post_session_mesh_coordination(
+        &self,
+        request: PostSessionMeshCoordinationRequest,
+    ) -> Result<PostSessionMeshCoordinationResponse, RuntimeProtocolError> {
+        let session = self
+            .runtime
+            .session_store()
+            .read_metadata(&request.session_id)
+            .map_err(session_store_error_to_protocol)?;
+        let management_base_url = psionic_mesh_management_base_url_from_session(&session)?;
+        let client = mesh_coordination_http_client()?;
+        let status: SessionMeshCoordinationStatus = psionic_management_get(
+            &client,
+            &management_base_url,
+            PSIONIC_MESH_COORDINATION_STATUS_PATH,
+            None::<&PsionicMeshCoordinationFeedQuery>,
+        )?;
+        if status.mode == SessionMeshCoordinationMode::Disabled {
+            return Err(protocol_error(
+                "mesh_coordination_unavailable",
+                format!(
+                    "mesh coordination is disabled for session {}",
+                    request.session_id.as_str()
+                ),
+            ));
+        }
+        let entry: SessionMeshCoordinationEntry = psionic_management_post(
+            &client,
+            &management_base_url,
+            PSIONIC_MESH_COORDINATION_POST_PATH,
+            &PsionicMeshCoordinationPostBody {
+                kind: request.kind,
+                body: request.body,
+                author: request.author.unwrap_or_else(|| String::from("probe")),
+                visibility: request
+                    .visibility
+                    .unwrap_or(SessionMeshCoordinationVisibility::Mesh),
+            },
+        )?;
+        Ok(PostSessionMeshCoordinationResponse {
+            session_id: request.session_id,
+            entry,
+        })
     }
 
     fn reconcile_detached_sessions(&self) -> Result<(), RuntimeProtocolError> {
@@ -1715,6 +1864,7 @@ impl ProbeServerConnection {
                                     .core
                                     .detached_event_hub
                                     .is_some(),
+                                supports_mesh_coordination_adjunct: true,
                             },
                         }),
                     )?;
@@ -1811,6 +1961,30 @@ impl ProbeServerConnection {
                     Ok(response) => self.writer.send_response_ok(
                         request_id.as_str(),
                         RuntimeResponse::InspectDetachedSession(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
+            RuntimeRequest::InspectSessionMeshCoordination(request) => {
+                match self.core.inspect_session_mesh_coordination(request) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::InspectSessionMeshCoordination(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
+            RuntimeRequest::PostSessionMeshCoordination(request) => {
+                match self.core.post_session_mesh_coordination(request) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::PostSessionMeshCoordination(response),
                     )?,
                     Err(error) => self
                         .writer
@@ -5223,6 +5397,130 @@ fn long_context_from_recipe(
     config.max_evidence_files = recipe.max_evidence_files;
     config.max_lines_per_file = recipe.max_lines_per_file;
     Ok(config)
+}
+
+fn mesh_coordination_http_client() -> Result<reqwest::blocking::Client, RuntimeProtocolError> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|error| {
+            protocol_error(
+                "mesh_coordination_transport_error",
+                format!("failed to build mesh coordination client: {error}"),
+            )
+        })
+}
+
+fn psionic_mesh_management_base_url_from_session(
+    session: &SessionMetadata,
+) -> Result<String, RuntimeProtocolError> {
+    let Some(backend) = session.backend.as_ref() else {
+        return Err(protocol_error(
+            "mesh_coordination_unavailable",
+            format!(
+                "session {} has no backend target to resolve mesh coordination against",
+                session.id.as_str()
+            ),
+        ));
+    };
+    if let Some(mesh) = backend.psionic_mesh.as_ref() {
+        return Ok(mesh.management_base_url.clone());
+    }
+    if backend.control_plane
+        == Some(probe_protocol::backend::BackendControlPlaneKind::PsionicInferenceMesh)
+    {
+        return Ok(backend.base_url.trim_end_matches("/v1").to_string());
+    }
+    Err(protocol_error(
+        "mesh_coordination_unavailable",
+        format!(
+            "session {} is not attached to a Psionic mesh control plane",
+            session.id.as_str()
+        ),
+    ))
+}
+
+fn psionic_management_get<Q, T>(
+    client: &reqwest::blocking::Client,
+    management_base_url: &str,
+    path: &str,
+    query: Option<&Q>,
+) -> Result<T, RuntimeProtocolError>
+where
+    Q: Serialize,
+    T: DeserializeOwned,
+{
+    let url = format!("{management_base_url}{path}");
+    let request = client.get(url.as_str());
+    let request = if let Some(query) = query {
+        request.query(query)
+    } else {
+        request
+    };
+    let response = request.send().map_err(|error| {
+        protocol_error(
+            "mesh_coordination_transport_error",
+            format!("failed to reach mesh coordination at {url}: {error}"),
+        )
+    })?;
+    psionic_management_json_response(response, url.as_str())
+}
+
+fn psionic_management_post<B, T>(
+    client: &reqwest::blocking::Client,
+    management_base_url: &str,
+    path: &str,
+    body: &B,
+) -> Result<T, RuntimeProtocolError>
+where
+    B: Serialize,
+    T: DeserializeOwned,
+{
+    let url = format!("{management_base_url}{path}");
+    let response = client
+        .post(url.as_str())
+        .json(body)
+        .send()
+        .map_err(|error| {
+            protocol_error(
+                "mesh_coordination_transport_error",
+                format!("failed to reach mesh coordination at {url}: {error}"),
+            )
+        })?;
+    psionic_management_json_response(response, url.as_str())
+}
+
+fn psionic_management_json_response<T>(
+    response: reqwest::blocking::Response,
+    url: &str,
+) -> Result<T, RuntimeProtocolError>
+where
+    T: DeserializeOwned,
+{
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response.text().unwrap_or_default();
+        let code = if status == reqwest::StatusCode::NOT_FOUND {
+            "mesh_coordination_unavailable"
+        } else {
+            "backend_unavailable"
+        };
+        let detail = detail.trim();
+        return Err(protocol_error(
+            code,
+            if detail.is_empty() {
+                format!("mesh coordination request to {url} failed with {status}")
+            } else {
+                format!("mesh coordination request to {url} failed with {status}: {detail}")
+            },
+        ));
+    }
+    response.json::<T>().map_err(|error| {
+        protocol_error(
+            "mesh_coordination_decode_error",
+            format!("failed to decode mesh coordination response from {url}: {error}"),
+        )
+    })
 }
 
 fn protocol_error(code: impl Into<String>, message: impl Into<String>) -> RuntimeProtocolError {

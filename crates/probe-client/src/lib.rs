@@ -18,17 +18,19 @@ use probe_core::tools::{ExecutedToolCall, ProbeToolChoice, ToolDeniedAction, Too
 use probe_protocol::runtime::{
     AttachSessionParticipantRequest, AttachSessionParticipantResponse, CancelQueuedTurnRequest,
     CancelQueuedTurnResponse, ClientMessage, DetachedSessionEventRecord, DetachedSessionSummary,
-    EventEnvelope, InitializeRequest, InspectDetachedSessionResponse, InspectSessionTurnsResponse,
-    InterruptTurnResponse, ListDetachedSessionsResponse, ListSessionsResponse, QueueTurnResponse,
-    ReadDetachedSessionLogRequest, ReadDetachedSessionLogResponse, RequestEnvelope,
-    ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope, RuntimeProgressEvent,
-    RuntimeProtocolError, RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage,
-    ServerEvent, ServerMessage, SessionLookupRequest, SessionSnapshot, SpawnChildSessionRequest,
-    SpawnChildSessionResponse, StartSessionRequest, ToolApprovalRecipe, ToolCallResult, ToolChoice,
-    ToolDeniedAction as ProtocolDeniedAction, ToolLongContextRecipe, ToolLoopRecipe,
-    ToolOracleRecipe, ToolSetKind, TurnAuthor, TurnCompleted, TurnPaused, TurnRequest,
-    TurnResponse, UpdateSessionControllerRequest, UpdateSessionControllerResponse,
-    WatchDetachedSessionRequest, WatchDetachedSessionResponse,
+    EventEnvelope, InitializeRequest, InspectDetachedSessionResponse,
+    InspectSessionMeshCoordinationRequest, InspectSessionMeshCoordinationResponse,
+    InspectSessionTurnsResponse, InterruptTurnResponse, ListDetachedSessionsResponse,
+    ListSessionsResponse, PostSessionMeshCoordinationRequest, PostSessionMeshCoordinationResponse,
+    QueueTurnResponse, ReadDetachedSessionLogRequest, ReadDetachedSessionLogResponse,
+    RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope,
+    RuntimeProgressEvent, RuntimeProtocolError, RuntimeRequest, RuntimeResponse,
+    RuntimeToolCallDelta, RuntimeUsage, ServerEvent, ServerMessage, SessionLookupRequest,
+    SessionSnapshot, SpawnChildSessionRequest, SpawnChildSessionResponse, StartSessionRequest,
+    ToolApprovalRecipe, ToolCallResult, ToolChoice, ToolDeniedAction as ProtocolDeniedAction,
+    ToolLongContextRecipe, ToolLoopRecipe, ToolOracleRecipe, ToolSetKind, TurnAuthor,
+    TurnCompleted, TurnPaused, TurnRequest, TurnResponse, UpdateSessionControllerRequest,
+    UpdateSessionControllerResponse, WatchDetachedSessionRequest, WatchDetachedSessionResponse,
 };
 use probe_protocol::session::{
     PendingToolApproval, SessionControllerAction, SessionId, SessionMetadata, UsageMeasurement,
@@ -519,6 +521,36 @@ impl ProbeClient {
         }
     }
 
+    pub fn inspect_session_mesh_coordination(
+        &mut self,
+        request: InspectSessionMeshCoordinationRequest,
+    ) -> Result<InspectSessionMeshCoordinationResponse, ProbeClientError> {
+        match self.send_request(
+            RuntimeRequest::InspectSessionMeshCoordination(request),
+            None,
+        )? {
+            RuntimeResponse::InspectSessionMeshCoordination(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected inspect_session_mesh_coordination response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub fn post_session_mesh_coordination(
+        &mut self,
+        mut request: PostSessionMeshCoordinationRequest,
+    ) -> Result<PostSessionMeshCoordinationResponse, ProbeClientError> {
+        if request.author.is_none() {
+            request.author = Some(self.coordination_author());
+        }
+        match self.send_request(RuntimeRequest::PostSessionMeshCoordination(request), None)? {
+            RuntimeResponse::PostSessionMeshCoordination(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected post_session_mesh_coordination response, got {other:?}"
+            ))),
+        }
+    }
+
     pub fn read_detached_session_log(
         &mut self,
         session_id: &SessionId,
@@ -719,6 +751,13 @@ impl ProbeClient {
             display_name: self.display_name.clone(),
             participant_id: self.participant_id.clone(),
         }
+    }
+
+    fn coordination_author(&self) -> String {
+        self.display_name
+            .clone()
+            .or_else(|| self.participant_id.clone())
+            .unwrap_or_else(|| self.client_name.clone())
     }
 
     pub fn attach_session_participant(

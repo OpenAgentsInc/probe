@@ -278,6 +278,86 @@ impl SessionBackendTarget {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum SessionMeshCoordinationMode {
+    Disabled,
+    Local,
+    BootstrapProxy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMeshCoordinationKind {
+    Status,
+    Finding,
+    Question,
+    Tip,
+    Done,
+    Note,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMeshCoordinationVisibility {
+    Mesh,
+    OperatorInternal,
+    NodeLocal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMeshCoordinationProvenance {
+    LocalPost,
+    BootstrapProxyForwarded,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMeshCoordinationRedactionReceipt {
+    pub reason: String,
+    pub redacted_by: String,
+    pub redacted_at_ms: TimestampMs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMeshCoordinationEntry {
+    pub id: u64,
+    pub kind: SessionMeshCoordinationKind,
+    pub author: String,
+    pub worker_id: String,
+    pub visibility: SessionMeshCoordinationVisibility,
+    pub provenance: SessionMeshCoordinationProvenance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub created_at_ms: TimestampMs,
+    pub expires_at_ms: TimestampMs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction: Option<SessionMeshCoordinationRedactionReceipt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMeshCoordinationStatus {
+    pub status: String,
+    pub mode: SessionMeshCoordinationMode,
+    pub feed_path: String,
+    pub search_path: String,
+    pub post_path: String,
+    pub redact_path: String,
+    pub ttl_secs: u64,
+    pub max_items: usize,
+    pub max_body_bytes: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_kinds: Vec<SessionMeshCoordinationKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_visibilities: Vec<SessionMeshCoordinationVisibility>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_provenances: Vec<SessionMeshCoordinationProvenance>,
+    pub redaction_mode: String,
+    pub item_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_post_at_ms: Option<TimestampMs>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionMountKind {
     KnowledgePack,
     EvalPack,

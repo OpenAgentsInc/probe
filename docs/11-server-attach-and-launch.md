@@ -90,6 +90,29 @@ Current mesh attach output includes:
   - one line per currently targetable warm model with endpoint and capability
     truth
 
+## Mesh Coordination Adjunct
+
+When a session backend target is attached to the Psionic mesh profile, Probe
+now treats `/psionic/management/coordination/*` as an optional adjunct surface
+for operator notes, findings, and short-lived status.
+
+Current boundary:
+
+- Probe reads or posts that adjunct through typed runtime requests and the
+  shared `probe-client` layer
+- Probe keeps the returned coordination records outside transcript items
+- Probe does not route those records through local approval pause or approval
+  resolution state
+- a disabled coordination surface stays visible as typed status instead of
+  silently mutating session semantics
+
+Current runtime requests:
+
+- `inspect_session_mesh_coordination`
+  - reads typed status plus feed or search results for a mesh-backed session
+- `post_session_mesh_coordination`
+  - posts one bounded note or finding for a mesh-backed session
+
 ## Launch Mode
 
 In `launch` mode, Probe:

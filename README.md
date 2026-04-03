@@ -41,6 +41,9 @@ Probe currently ships four backend profiles across three backend families:
   - selected model: resolved from live mesh management state
   - stored metadata: routed model inventory, local mesh role or posture, and
     proxied fallback truth
+  - optional adjunct: session-scoped coordination reads or posts through
+    `/psionic/management/coordination/*` without mutating Probe transcript or
+    approval truth
 - `openai-codex-subscription`
   - base URL: `https://chatgpt.com/backend-api/codex`
   - request endpoint: `https://chatgpt.com/backend-api/codex/responses`
@@ -60,7 +63,10 @@ The mesh profile is attach-only as well. Probe discovers live routed inventory
 from `GET /psionic/management/status`, picks the effective model from that
 inventory, prints the mesh role or fallback posture in operator output, and
 stores the same typed snapshot in session metadata without pretending it owns
-mesh startup or warmup.
+mesh startup or warmup. Probe can also query or post the optional mesh
+coordination adjunct for a session through the runtime or `probe-client`
+surface, but that data remains outside the append-only transcript and outside
+pending-approval invariants.
 Tool-enabled Codex turns default to the Probe-owned
 `coding_bootstrap_codex@v1` prompt contract, while plain Codex turns use a
 small Codex-specific system prompt instead of the generic local-Qwen path.

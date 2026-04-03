@@ -32,8 +32,9 @@ This folder holds technical planning docs for the Probe runtime.
   - the retained local acceptance runner for plain and tool-backed controller
     cases
 - `11-server-attach-and-launch.md`
-  - local server config, direct attach behavior, mesh attach discovery, and
-    supervised launch behavior for `psionic-openai-server`
+  - local server config, direct attach behavior, mesh attach discovery,
+    optional mesh coordination adjunct access, and supervised launch behavior
+    for `psionic-openai-server`
 - `12-observability-and-cache-signals.md`
   - per-turn wallclock, token usage, throughput, and cache-signal behavior for
     the first local controller lane

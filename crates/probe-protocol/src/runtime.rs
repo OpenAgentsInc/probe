@@ -7,10 +7,11 @@ use crate::backend::BackendProfile;
 use crate::session::{
     PendingToolApproval, SessionBranchState, SessionChildSummary, SessionControllerAction,
     SessionControllerLease, SessionDeliveryState, SessionHarnessProfile, SessionHostedReceipts,
-    SessionId, SessionMetadata, SessionMountRef, SessionParticipant, SessionRuntimeOwner,
-    SessionSummaryArtifact, SessionSummaryArtifactRef, SessionTurn, SessionWorkspaceState,
-    TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass, TranscriptEvent,
-    UsageMeasurement,
+    SessionId, SessionMeshCoordinationEntry, SessionMeshCoordinationKind,
+    SessionMeshCoordinationStatus, SessionMeshCoordinationVisibility, SessionMetadata,
+    SessionMountRef, SessionParticipant, SessionRuntimeOwner, SessionSummaryArtifact,
+    SessionSummaryArtifactRef, SessionTurn, SessionWorkspaceState, TimestampMs,
+    ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass, TranscriptEvent, UsageMeasurement,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +109,8 @@ pub struct RuntimeCapabilities {
     pub supports_queued_turns: bool,
     pub supports_detached_session_registry: bool,
     pub supports_detached_watch_subscriptions: bool,
+    #[serde(default)]
+    pub supports_mesh_coordination_adjunct: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -549,6 +552,48 @@ pub struct ReadDetachedSessionLogResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectSessionMeshCoordinationRequest {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_ms: Option<TimestampMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SessionMeshCoordinationKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<SessionMeshCoordinationVisibility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectSessionMeshCoordinationResponse {
+    pub session_id: SessionId,
+    pub status: SessionMeshCoordinationStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<SessionMeshCoordinationEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostSessionMeshCoordinationRequest {
+    pub session_id: SessionId,
+    pub kind: SessionMeshCoordinationKind,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<SessionMeshCoordinationVisibility>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostSessionMeshCoordinationResponse {
+    pub session_id: SessionId,
+    pub entry: SessionMeshCoordinationEntry,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListPendingApprovalsResponse {
     pub approvals: Vec<PendingToolApproval>,
 }
@@ -723,6 +768,8 @@ pub enum RuntimeRequest {
     ReadDetachedSessionLog(ReadDetachedSessionLogRequest),
     InspectSession(SessionLookupRequest),
     InspectDetachedSession(SessionLookupRequest),
+    InspectSessionMeshCoordination(InspectSessionMeshCoordinationRequest),
+    PostSessionMeshCoordination(PostSessionMeshCoordinationRequest),
     AttachSessionParticipant(AttachSessionParticipantRequest),
     UpdateSessionController(UpdateSessionControllerRequest),
     WatchDetachedSession(WatchDetachedSessionRequest),
@@ -749,6 +796,8 @@ pub enum RuntimeResponse {
     ReadDetachedSessionLog(ReadDetachedSessionLogResponse),
     InspectSession(SessionSnapshot),
     InspectDetachedSession(InspectDetachedSessionResponse),
+    InspectSessionMeshCoordination(InspectSessionMeshCoordinationResponse),
+    PostSessionMeshCoordination(PostSessionMeshCoordinationResponse),
     AttachSessionParticipant(AttachSessionParticipantResponse),
     UpdateSessionController(UpdateSessionControllerResponse),
     WatchDetachedSession(WatchDetachedSessionResponse),
@@ -903,6 +952,7 @@ mod tests {
             supports_queued_turns: true,
             supports_detached_session_registry: false,
             supports_detached_watch_subscriptions: false,
+            supports_mesh_coordination_adjunct: true,
         };
 
         let response_json = serde_json::to_value(&response).expect("response should encode");
