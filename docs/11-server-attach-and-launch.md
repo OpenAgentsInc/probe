@@ -115,6 +115,41 @@ Current runtime requests:
 - `post_session_mesh_coordination`
   - posts one bounded note or finding for a mesh-backed session
 
+## Mesh Plugin Offers
+
+Probe now also supports a small typed plugin-offer layer above that same
+coordination adjunct.
+
+What it does:
+
+- lets one Probe node publish a typed description of a local tool bundle for a
+  mesh-backed session
+- lets another operator or attached client list those published offers through
+  Probe instead of scraping raw coordination notes
+- keeps the advertised tool bundle attached to the Probe runtime that
+  published it
+
+Current shipped tool set:
+
+- `coding_bootstrap`
+  - advertises the built-in bounded coding tools already owned by Probe
+
+Current runtime requests:
+
+- `inspect_session_mesh_plugin_offers`
+  - lists typed plugin offers discovered for a mesh-backed session
+- `publish_session_mesh_plugin_offer`
+  - publishes one typed offer for a supported local Probe tool set
+
+Current boundary:
+
+- this is not a general plugin marketplace
+- this is not remote tool execution inside Psionic
+- Probe is only publishing and reading typed offers above the mesh attach
+  surface
+- approvals, tool execution, and transcript truth still stay inside the local
+  Probe runtime
+
 ## Launch Mode
 
 In `launch` mode, Probe:

@@ -12,8 +12,9 @@ use probe_protocol::backend::{
     PsionicMeshTargetableModel, ServerAttachMode,
 };
 use probe_protocol::runtime::{
-    ClientMessage, InspectSessionMeshCoordinationRequest, InspectSessionTurnsResponse,
-    PostSessionMeshCoordinationRequest, QueueTurnResponse, QueuedTurnStatus, RequestEnvelope,
+    ClientMessage, InspectSessionMeshCoordinationRequest, InspectSessionMeshPluginOffersRequest,
+    InspectSessionTurnsResponse, PostSessionMeshCoordinationRequest,
+    PublishSessionMeshPluginOfferRequest, QueueTurnResponse, QueuedTurnStatus, RequestEnvelope,
     ResponseBody, RuntimeProgressEvent, RuntimeRequest, RuntimeResponse, ServerEvent,
     ServerMessage, SessionLookupRequest, SpawnChildSessionRequest, StartSessionRequest,
     ToolApprovalRecipe, ToolChoice, ToolDeniedAction, ToolLoopRecipe, ToolSetKind, TransportKind,
@@ -374,6 +375,145 @@ fn stdio_protocol_refuses_mesh_coordination_for_non_mesh_sessions() {
     );
 
     harness.shutdown();
+}
+
+#[test]
+fn stdio_protocol_can_publish_and_list_mesh_plugin_offers() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let entries = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let entries_for_handler = Arc::clone(&entries);
+    let fake_backend = FakeOpenAiServer::from_handler(move |request| match request.path.as_str() {
+        PSIONIC_MESH_COORDINATION_STATUS_PATH => {
+            let entries = entries_for_handler.lock().expect("coordination entries");
+            FakeHttpResponse::json_ok(serde_json::json!({
+                "status": "ok",
+                "mode": "bootstrap_proxy",
+                "feed_path": PSIONIC_MESH_COORDINATION_FEED_PATH,
+                "search_path": PSIONIC_MESH_COORDINATION_SEARCH_PATH,
+                "post_path": PSIONIC_MESH_COORDINATION_POST_PATH,
+                "redact_path": "/psionic/management/coordination/redact",
+                "ttl_secs": 86400,
+                "max_items": 500,
+                "max_body_bytes": 4096,
+                "supported_kinds": ["status", "finding", "question", "tip", "done", "note"],
+                "supported_visibilities": ["mesh", "operator_internal", "node_local"],
+                "supported_provenances": ["local_post", "bootstrap_proxy_forwarded"],
+                "redaction_mode": "body_removed_receipt_retained",
+                "item_count": entries.len(),
+                "last_post_at_ms": entries
+                    .last()
+                    .and_then(|entry| entry.get("created_at_ms"))
+                    .and_then(serde_json::Value::as_u64),
+            }))
+        }
+        path if path.starts_with(PSIONIC_MESH_COORDINATION_POST_PATH) => {
+            let payload: serde_json::Value =
+                serde_json::from_str(&request.body).expect("coordination post body should parse");
+            let mut entries = entries_for_handler.lock().expect("coordination entries");
+            let entry = serde_json::json!({
+                "id": (entries.len() as u64) + 1,
+                "kind": payload["kind"].as_str().unwrap_or("note"),
+                "author": payload["author"].as_str().unwrap_or("probe"),
+                "worker_id": "openai_compat",
+                "visibility": payload["visibility"].as_str().unwrap_or("mesh"),
+                "provenance": "local_post",
+                "body": payload["body"].as_str().unwrap_or_default(),
+                "created_at_ms": 55_000,
+                "expires_at_ms": 141_400,
+            });
+            entries.push(entry.clone());
+            FakeHttpResponse::json_ok(entry)
+        }
+        path if path.starts_with(PSIONIC_MESH_COORDINATION_FEED_PATH) => {
+            let entries = entries_for_handler
+                .lock()
+                .expect("coordination entries")
+                .clone();
+            FakeHttpResponse::json_ok(serde_json::Value::Array(entries))
+        }
+        other => panic!("unexpected fake backend request path: {other}"),
+    });
+    let profile = mesh_profile(fake_backend.base_url());
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+
+    let start_session = harness.request(
+        "req-start-plugin-session",
+        RuntimeRequest::StartSession(StartSessionRequest {
+            title: Some(String::from("mesh plugins")),
+            cwd: environment.workspace().to_path_buf(),
+            profile,
+            system_prompt: Some(String::from("Keep runtime-owned plugin truth honest.")),
+            harness_profile: None,
+            workspace_state: None,
+            mounted_refs: Vec::new(),
+        }),
+    );
+    let RuntimeResponse::StartSession(snapshot) = expect_ok_response(start_session) else {
+        panic!("expected start session response");
+    };
+    let session_id = snapshot.session.id.clone();
+
+    let publish = harness.request(
+        "req-publish-mesh-plugin",
+        RuntimeRequest::PublishSessionMeshPluginOffer(PublishSessionMeshPluginOfferRequest {
+            session_id: session_id.clone(),
+            tool_set: String::from("coding_bootstrap"),
+            author: Some(String::from("operator")),
+            visibility: Some(SessionMeshCoordinationVisibility::Mesh),
+        }),
+    );
+    let RuntimeResponse::PublishSessionMeshPluginOffer(response) = expect_ok_response(publish)
+    else {
+        panic!("expected publish session mesh plugin offer response");
+    };
+    assert_eq!(response.entry.author, "operator");
+    assert_eq!(response.offer.tool_set, "coding_bootstrap");
+    assert_eq!(response.offer.plugin_id, "probe.coding_bootstrap.local");
+    assert_eq!(response.offer.tools[0].name, "apply_patch");
+    assert_eq!(response.offer.entry_id, Some(1));
+    assert_eq!(response.offer.published_at_ms, Some(55_000));
+
+    let inspect = harness.request(
+        "req-inspect-mesh-plugins",
+        RuntimeRequest::InspectSessionMeshPluginOffers(InspectSessionMeshPluginOffersRequest {
+            session_id: session_id.clone(),
+            limit: Some(10),
+        }),
+    );
+    let RuntimeResponse::InspectSessionMeshPluginOffers(inspected) = expect_ok_response(inspect)
+    else {
+        panic!("expected inspect session mesh plugin offers response");
+    };
+    assert_eq!(
+        inspected.status.mode,
+        SessionMeshCoordinationMode::BootstrapProxy
+    );
+    assert_eq!(inspected.offers.len(), 1);
+    assert_eq!(inspected.offers[0].tool_set, "coding_bootstrap");
+    assert_eq!(
+        inspected.offers[0].worker_id.as_deref(),
+        Some("openai_compat")
+    );
+    assert!(
+        inspected.offers[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "read_file")
+    );
+
+    harness.shutdown();
+    let requests = fake_backend.finish();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[0].contains("GET /psionic/management/coordination/status HTTP/1.1"));
+    assert!(requests[1].contains("POST /psionic/management/coordination/post HTTP/1.1"));
+    assert!(requests[1].contains("probe.mesh_plugin_offer.v1"));
+    assert!(requests[1].contains("coding_bootstrap"));
+    assert!(requests[2].contains("GET /psionic/management/coordination/status HTTP/1.1"));
+    assert!(
+        requests[3]
+            .contains("GET /psionic/management/coordination/feed?kind=tip&limit=10 HTTP/1.1")
+    );
 }
 
 #[test]

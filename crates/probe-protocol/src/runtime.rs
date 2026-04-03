@@ -8,10 +8,11 @@ use crate::session::{
     PendingToolApproval, SessionBranchState, SessionChildSummary, SessionControllerAction,
     SessionControllerLease, SessionDeliveryState, SessionHarnessProfile, SessionHostedReceipts,
     SessionId, SessionMeshCoordinationEntry, SessionMeshCoordinationKind,
-    SessionMeshCoordinationStatus, SessionMeshCoordinationVisibility, SessionMetadata,
-    SessionMountRef, SessionParticipant, SessionRuntimeOwner, SessionSummaryArtifact,
-    SessionSummaryArtifactRef, SessionTurn, SessionWorkspaceState, TimestampMs,
-    ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass, TranscriptEvent, UsageMeasurement,
+    SessionMeshCoordinationStatus, SessionMeshCoordinationVisibility, SessionMeshPluginOffer,
+    SessionMetadata, SessionMountRef, SessionParticipant, SessionRuntimeOwner,
+    SessionSummaryArtifact, SessionSummaryArtifactRef, SessionTurn, SessionWorkspaceState,
+    TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass, TranscriptEvent,
+    UsageMeasurement,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -594,6 +595,39 @@ pub struct PostSessionMeshCoordinationResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectSessionMeshPluginOffersRequest {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectSessionMeshPluginOffersResponse {
+    pub session_id: SessionId,
+    pub status: SessionMeshCoordinationStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub offers: Vec<SessionMeshPluginOffer>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishSessionMeshPluginOfferRequest {
+    pub session_id: SessionId,
+    #[serde(default = "default_mesh_plugin_tool_set")]
+    pub tool_set: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<SessionMeshCoordinationVisibility>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishSessionMeshPluginOfferResponse {
+    pub session_id: SessionId,
+    pub entry: SessionMeshCoordinationEntry,
+    pub offer: SessionMeshPluginOffer,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListPendingApprovalsResponse {
     pub approvals: Vec<PendingToolApproval>,
 }
@@ -770,6 +804,8 @@ pub enum RuntimeRequest {
     InspectDetachedSession(SessionLookupRequest),
     InspectSessionMeshCoordination(InspectSessionMeshCoordinationRequest),
     PostSessionMeshCoordination(PostSessionMeshCoordinationRequest),
+    InspectSessionMeshPluginOffers(InspectSessionMeshPluginOffersRequest),
+    PublishSessionMeshPluginOffer(PublishSessionMeshPluginOfferRequest),
     AttachSessionParticipant(AttachSessionParticipantRequest),
     UpdateSessionController(UpdateSessionControllerRequest),
     WatchDetachedSession(WatchDetachedSessionRequest),
@@ -798,6 +834,8 @@ pub enum RuntimeResponse {
     InspectDetachedSession(InspectDetachedSessionResponse),
     InspectSessionMeshCoordination(InspectSessionMeshCoordinationResponse),
     PostSessionMeshCoordination(PostSessionMeshCoordinationResponse),
+    InspectSessionMeshPluginOffers(InspectSessionMeshPluginOffersResponse),
+    PublishSessionMeshPluginOffer(PublishSessionMeshPluginOfferResponse),
     AttachSessionParticipant(AttachSessionParticipantResponse),
     UpdateSessionController(UpdateSessionControllerResponse),
     WatchDetachedSession(WatchDetachedSessionResponse),
@@ -816,6 +854,10 @@ pub enum RuntimeResponse {
 pub struct RequestEnvelope {
     pub request_id: String,
     pub request: RuntimeRequest,
+}
+
+fn default_mesh_plugin_tool_set() -> String {
+    String::from("coding_bootstrap")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

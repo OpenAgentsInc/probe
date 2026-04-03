@@ -61,10 +61,12 @@ use probe_protocol::backend::{BackendKind, BackendProfile, PsionicMeshAttachInfo
 use probe_protocol::runtime::{
     DetachedSessionEventPayload, DetachedSessionEventRecord, DetachedSessionEventTruth,
     DetachedSessionRecoveryState, DetachedSessionStatus, InspectDetachedSessionResponse,
+    InspectSessionMeshPluginOffersRequest, PublishSessionMeshPluginOfferRequest,
     RuntimeProgressEvent, SessionTurnControlRecord, WatchDetachedSessionRequest,
 };
 use probe_protocol::session::{
-    BackendTurnReceipt, CacheSignal, SessionBackendTarget, SessionHarnessProfile, SessionId,
+    BackendTurnReceipt, CacheSignal, SessionAttachTransport, SessionBackendTarget,
+    SessionHarnessProfile, SessionId, SessionMeshCoordinationVisibility, SessionMeshPluginOffer,
     SessionTurn, ToolPolicyDecision, ToolRiskClass, TranscriptEvent, TranscriptItemKind,
     UsageMeasurement, UsageTruth,
 };
@@ -86,6 +88,8 @@ struct Cli {
 enum Commands {
     Exec(ExecArgs),
     Chat(ChatArgs),
+    #[command(about = "Inspect or publish Probe plugin offers above the mesh attach surface")]
+    Mesh(MeshArgs),
     #[command(about = "Manage the local detached Probe daemon")]
     Daemon(DaemonArgs),
     #[command(about = "List daemon-owned detached sessions")]
@@ -119,6 +123,53 @@ enum Commands {
 struct CodexArgs {
     #[command(subcommand)]
     command: CodexCommands,
+}
+
+#[derive(clap::Args, Debug)]
+struct MeshArgs {
+    #[command(subcommand)]
+    command: MeshCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum MeshCommands {
+    Plugins(MeshPluginsArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct MeshPluginsArgs {
+    #[command(subcommand)]
+    command: MeshPluginCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum MeshPluginCommands {
+    List(MeshPluginListArgs),
+    Publish(MeshPluginPublishArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct MeshPluginListArgs {
+    session_id: String,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[command(flatten)]
+    hosted: HostedConnectArgs,
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+}
+
+#[derive(clap::Args, Debug)]
+struct MeshPluginPublishArgs {
+    session_id: String,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[command(flatten)]
+    hosted: HostedConnectArgs,
+    #[arg(long, default_value = "coding_bootstrap")]
+    tool_set: String,
+    #[arg(long, default_value = "mesh")]
+    visibility: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -547,6 +598,7 @@ fn run() -> Result<(), String> {
     match cli.command {
         Commands::Exec(args) => run_exec(args),
         Commands::Chat(args) => run_chat(args),
+        Commands::Mesh(args) => run_mesh(args),
         Commands::Daemon(args) => run_daemon(args),
         Commands::Ps(args) => run_ps(args),
         Commands::Attach(args) => run_attach(args),
@@ -1054,6 +1106,19 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
     Ok(())
 }
 
+fn run_mesh(args: MeshArgs) -> Result<(), String> {
+    match args.command {
+        MeshCommands::Plugins(args) => run_mesh_plugins(args),
+    }
+}
+
+fn run_mesh_plugins(args: MeshPluginsArgs) -> Result<(), String> {
+    match args.command {
+        MeshPluginCommands::List(args) => run_mesh_plugin_list(args),
+        MeshPluginCommands::Publish(args) => run_mesh_plugin_publish(args),
+    }
+}
+
 fn run_daemon(args: DaemonArgs) -> Result<(), String> {
     match args.command {
         DaemonCommands::Run(args) => {
@@ -1101,6 +1166,51 @@ fn run_ps(args: PsArgs) -> Result<(), String> {
     for summary in &sessions {
         println!("{}", render_detached_summary_line(summary));
     }
+    Ok(())
+}
+
+fn run_mesh_plugin_list(args: MeshPluginListArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let mut client = resolve_operator_client(probe_home, "mesh-plugins-list", &args.hosted, true)?;
+    let response = client
+        .inspect_session_mesh_plugin_offers(InspectSessionMeshPluginOffersRequest {
+            session_id: SessionId::new(args.session_id),
+            limit: Some(args.limit),
+        })
+        .map_err(|error| error.to_string())?;
+    println!(
+        "mesh_plugin_offers session={} status={} mode={:?} offers={}",
+        response.session_id.as_str(),
+        response.status.status,
+        response.status.mode,
+        response.offers.len()
+    );
+    for offer in &response.offers {
+        print_mesh_plugin_offer(offer);
+    }
+    Ok(())
+}
+
+fn run_mesh_plugin_publish(args: MeshPluginPublishArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let mut client =
+        resolve_operator_client(probe_home, "mesh-plugins-publish", &args.hosted, true)?;
+    let visibility = parse_mesh_coordination_visibility(args.visibility.as_str())?;
+    let response = client
+        .publish_session_mesh_plugin_offer(PublishSessionMeshPluginOfferRequest {
+            session_id: SessionId::new(args.session_id),
+            tool_set: args.tool_set,
+            author: None,
+            visibility: Some(visibility),
+        })
+        .map_err(|error| error.to_string())?;
+    println!(
+        "mesh_plugin_published session={} entry_id={} visibility={:?}",
+        response.session_id.as_str(),
+        response.entry.id,
+        response.entry.visibility
+    );
+    print_mesh_plugin_offer(&response.offer);
     Ok(())
 }
 
@@ -2293,6 +2403,58 @@ fn render_mesh_model_endpoints(
     } else {
         mesh_model.supported_endpoints.join(",")
     }
+}
+
+fn parse_mesh_coordination_visibility(
+    value: &str,
+) -> Result<SessionMeshCoordinationVisibility, String> {
+    match value.trim() {
+        "mesh" => Ok(SessionMeshCoordinationVisibility::Mesh),
+        "operator_internal" => Ok(SessionMeshCoordinationVisibility::OperatorInternal),
+        "node_local" => Ok(SessionMeshCoordinationVisibility::NodeLocal),
+        other => Err(format!(
+            "unsupported mesh visibility `{other}`; expected mesh, operator_internal, or node_local"
+        )),
+    }
+}
+
+fn render_attach_transport(transport: Option<SessionAttachTransport>) -> &'static str {
+    match transport {
+        Some(SessionAttachTransport::StdioJsonl) => "stdio_jsonl",
+        Some(SessionAttachTransport::UnixSocketJsonl) => "unix_socket_jsonl",
+        Some(SessionAttachTransport::TcpJsonl) => "tcp_jsonl",
+        None => "unknown",
+    }
+}
+
+fn render_mesh_plugin_tool_names(offer: &SessionMeshPluginOffer) -> String {
+    if offer.tools.is_empty() {
+        String::from("none")
+    } else {
+        offer
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn print_mesh_plugin_offer(offer: &SessionMeshPluginOffer) {
+    println!(
+        "mesh_plugin plugin_id={} tool_set={} session={} worker={} attach_transport={} attach_target={} tools={}",
+        offer.plugin_id,
+        offer.tool_set,
+        offer.session_id.as_str(),
+        offer.worker_id.as_deref().unwrap_or("unknown"),
+        render_attach_transport(offer.attach_transport),
+        offer.attach_target.as_deref().unwrap_or("none"),
+        render_mesh_plugin_tool_names(offer)
+    );
+    println!(
+        "mesh_plugin_summary label={} execution_scope={} summary={} usage_hint={}",
+        offer.label, offer.execution_scope, offer.summary, offer.usage_hint
+    );
 }
 
 fn print_backend_target_summary_from_summary(surface: &str, summary: &ServerOperatorSummary) {

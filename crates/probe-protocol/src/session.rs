@@ -356,6 +356,38 @@ pub struct SessionMeshCoordinationStatus {
     pub last_post_at_ms: Option<TimestampMs>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMeshPluginTool {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMeshPluginOffer {
+    pub plugin_id: String,
+    pub tool_set: String,
+    pub label: String,
+    pub summary: String,
+    pub session_id: SessionId,
+    pub execution_scope: String,
+    pub usage_hint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_owner_kind: Option<SessionRuntimeOwnerKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_transport: Option<SessionAttachTransport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<SessionMeshPluginTool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at_ms: Option<TimestampMs>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionMountKind {

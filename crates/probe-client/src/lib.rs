@@ -20,17 +20,19 @@ use probe_protocol::runtime::{
     CancelQueuedTurnResponse, ClientMessage, DetachedSessionEventRecord, DetachedSessionSummary,
     EventEnvelope, InitializeRequest, InspectDetachedSessionResponse,
     InspectSessionMeshCoordinationRequest, InspectSessionMeshCoordinationResponse,
+    InspectSessionMeshPluginOffersRequest, InspectSessionMeshPluginOffersResponse,
     InspectSessionTurnsResponse, InterruptTurnResponse, ListDetachedSessionsResponse,
     ListSessionsResponse, PostSessionMeshCoordinationRequest, PostSessionMeshCoordinationResponse,
-    QueueTurnResponse, ReadDetachedSessionLogRequest, ReadDetachedSessionLogResponse,
-    RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope,
-    RuntimeProgressEvent, RuntimeProtocolError, RuntimeRequest, RuntimeResponse,
-    RuntimeToolCallDelta, RuntimeUsage, ServerEvent, ServerMessage, SessionLookupRequest,
-    SessionSnapshot, SpawnChildSessionRequest, SpawnChildSessionResponse, StartSessionRequest,
-    ToolApprovalRecipe, ToolCallResult, ToolChoice, ToolDeniedAction as ProtocolDeniedAction,
-    ToolLongContextRecipe, ToolLoopRecipe, ToolOracleRecipe, ToolSetKind, TurnAuthor,
-    TurnCompleted, TurnPaused, TurnRequest, TurnResponse, UpdateSessionControllerRequest,
-    UpdateSessionControllerResponse, WatchDetachedSessionRequest, WatchDetachedSessionResponse,
+    PublishSessionMeshPluginOfferRequest, PublishSessionMeshPluginOfferResponse, QueueTurnResponse,
+    ReadDetachedSessionLogRequest, ReadDetachedSessionLogResponse, RequestEnvelope,
+    ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope, RuntimeProgressEvent,
+    RuntimeProtocolError, RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage,
+    ServerEvent, ServerMessage, SessionLookupRequest, SessionSnapshot, SpawnChildSessionRequest,
+    SpawnChildSessionResponse, StartSessionRequest, ToolApprovalRecipe, ToolCallResult, ToolChoice,
+    ToolDeniedAction as ProtocolDeniedAction, ToolLongContextRecipe, ToolLoopRecipe,
+    ToolOracleRecipe, ToolSetKind, TurnAuthor, TurnCompleted, TurnPaused, TurnRequest,
+    TurnResponse, UpdateSessionControllerRequest, UpdateSessionControllerResponse,
+    WatchDetachedSessionRequest, WatchDetachedSessionResponse,
 };
 use probe_protocol::session::{
     PendingToolApproval, SessionControllerAction, SessionId, SessionMetadata, UsageMeasurement,
@@ -547,6 +549,36 @@ impl ProbeClient {
             RuntimeResponse::PostSessionMeshCoordination(response) => Ok(response),
             other => Err(ProbeClientError::UnexpectedServerMessage(format!(
                 "expected post_session_mesh_coordination response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub fn inspect_session_mesh_plugin_offers(
+        &mut self,
+        request: InspectSessionMeshPluginOffersRequest,
+    ) -> Result<InspectSessionMeshPluginOffersResponse, ProbeClientError> {
+        match self.send_request(
+            RuntimeRequest::InspectSessionMeshPluginOffers(request),
+            None,
+        )? {
+            RuntimeResponse::InspectSessionMeshPluginOffers(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected inspect_session_mesh_plugin_offers response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub fn publish_session_mesh_plugin_offer(
+        &mut self,
+        mut request: PublishSessionMeshPluginOfferRequest,
+    ) -> Result<PublishSessionMeshPluginOfferResponse, ProbeClientError> {
+        if request.author.is_none() {
+            request.author = Some(self.coordination_author());
+        }
+        match self.send_request(RuntimeRequest::PublishSessionMeshPluginOffer(request), None)? {
+            RuntimeResponse::PublishSessionMeshPluginOffer(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected publish_session_mesh_plugin_offer response, got {other:?}"
             ))),
         }
     }

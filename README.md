@@ -44,6 +44,9 @@ Probe currently ships four backend profiles across three backend families:
   - optional adjunct: session-scoped coordination reads or posts through
     `/psionic/management/coordination/*` without mutating Probe transcript or
     approval truth
+  - optional adjunct: typed mesh plugin-offer publish or list calls so one
+    Probe node can advertise its local tool bundle to other attached operators
+    without pretending Psionic owns those tools
 - `openai-codex-subscription`
   - base URL: `https://chatgpt.com/backend-api/codex`
   - request endpoint: `https://chatgpt.com/backend-api/codex/responses`
@@ -65,8 +68,10 @@ inventory, prints the mesh role or fallback posture in operator output, and
 stores the same typed snapshot in session metadata without pretending it owns
 mesh startup or warmup. Probe can also query or post the optional mesh
 coordination adjunct for a session through the runtime or `probe-client`
-surface, but that data remains outside the append-only transcript and outside
-pending-approval invariants.
+surface, and can publish or inspect typed mesh plugin offers for local Probe
+tool bundles. That data remains outside the append-only transcript and outside
+pending-approval invariants, and the tools themselves still execute inside the
+local Probe runtime that published the offer.
 Tool-enabled Codex turns default to the Probe-owned
 `coding_bootstrap_codex@v1` prompt contract, while plain Codex turns use a
 small Codex-specific system prompt instead of the generic local-Qwen path.
@@ -104,6 +109,18 @@ cargo run -p probe-cli -- chat \
   --profile psionic-inference-mesh \
   --server-host 100.88.7.9 \
   --server-port 8080
+```
+
+Publish the local `coding_bootstrap` tool bundle for a mesh-backed session:
+
+```bash
+cargo run -p probe-cli -- mesh plugins publish <session-id>
+```
+
+List published tool-bundle offers for a mesh-backed session:
+
+```bash
+cargo run -p probe-cli -- mesh plugins list <session-id>
 ```
 
 Run the local stdio server contract directly:
