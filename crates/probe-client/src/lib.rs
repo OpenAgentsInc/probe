@@ -989,7 +989,8 @@ fn reserve_local_tcp_port(host: &str, requested: Option<u16>) -> Result<u16, Pro
     if let Some(port) = requested {
         return Ok(port);
     }
-    let listener = TcpListener::bind(format!("{host}:0")).map_err(ProbeClientError::ConnectHosted)?;
+    let listener =
+        TcpListener::bind(format!("{host}:0")).map_err(ProbeClientError::ConnectHosted)?;
     let port = listener
         .local_addr()
         .map_err(ProbeClientError::ConnectHosted)?
@@ -998,10 +999,7 @@ fn reserve_local_tcp_port(host: &str, requested: Option<u16>) -> Result<u16, Pro
     Ok(port)
 }
 
-fn wait_for_hosted_tunnel(
-    address: &str,
-    child: &mut Child,
-) -> Result<TcpStream, ProbeClientError> {
+fn wait_for_hosted_tunnel(address: &str, child: &mut Child) -> Result<TcpStream, ProbeClientError> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut last_error = None;
     while Instant::now() < deadline {
@@ -1009,11 +1007,7 @@ fn wait_for_hosted_tunnel(
             Ok(stream) => return Ok(stream),
             Err(error) => {
                 last_error = Some(error);
-                if child
-                    .try_wait()
-                    .map_err(ProbeClientError::Spawn)?
-                    .is_some()
-                {
+                if child.try_wait().map_err(ProbeClientError::Spawn)?.is_some() {
                     break;
                 }
                 thread::sleep(Duration::from_millis(50));
@@ -1041,9 +1035,16 @@ fn build_server_command(config: &ProbeClientConfig) -> Result<Command, ProbeClie
             if sibling_server.exists() {
                 Command::new(sibling_server)
             } else {
-                let mut command = Command::new(current_exe);
-                command.arg(INTERNAL_SERVER_SUBCOMMAND);
-                command
+                let sibling_cli = sibling_probe_cli_path(current_exe.as_path());
+                if sibling_cli.exists() {
+                    let mut command = Command::new(sibling_cli);
+                    command.arg(INTERNAL_SERVER_SUBCOMMAND);
+                    command
+                } else {
+                    let mut command = Command::new(current_exe);
+                    command.arg(INTERNAL_SERVER_SUBCOMMAND);
+                    command
+                }
             }
         }
     };
@@ -1083,7 +1084,12 @@ fn build_daemon_command() -> Result<Command, ProbeClientError> {
         return Ok(command);
     }
 
-    let mut command = Command::new(current_exe);
+    let sibling_cli = sibling_probe_cli_path(current_exe.as_path());
+    let mut command = if sibling_cli.exists() {
+        Command::new(sibling_cli)
+    } else {
+        Command::new(current_exe)
+    };
     command.arg(INTERNAL_DAEMON_SUBCOMMAND);
     Ok(command)
 }
@@ -1116,6 +1122,10 @@ fn explicit_server_binary(config: &ProbeClientConfig) -> Option<PathBuf> {
 
 fn sibling_probe_server_path(current_exe: &Path) -> PathBuf {
     sibling_named_binary_path(current_exe, "probe-server")
+}
+
+fn sibling_probe_cli_path(current_exe: &Path) -> PathBuf {
+    sibling_named_binary_path(current_exe, "probe-cli")
 }
 
 fn sibling_named_binary_path(current_exe: &Path, binary_name: &str) -> PathBuf {
@@ -1268,6 +1278,13 @@ fn forward_server_event(
 
 fn runtime_event_from_progress(event: RuntimeProgressEvent) -> RuntimeEvent {
     match event {
+        RuntimeProgressEvent::ActivityUpdated {
+            session_id,
+            activity,
+        } => RuntimeEvent::ActivityUpdated {
+            session_id,
+            activity,
+        },
         RuntimeProgressEvent::TurnStarted {
             session_id,
             profile_name,
@@ -2191,8 +2208,11 @@ mod tests {
             .join("workspaces")
             .join("restart-reap");
         fs::create_dir_all(&managed_workspace).expect("create managed hosted workspace");
-        fs::write(managed_workspace.join("README.md"), "# restart cleanup proof\n")
-            .expect("seed managed workspace");
+        fs::write(
+            managed_workspace.join("README.md"),
+            "# restart cleanup proof\n",
+        )
+        .expect("seed managed workspace");
         let fake_backend = delayed_completion_backend(Duration::from_millis(25), "completed");
         let profile = test_profile(fake_backend.base_url());
         let address = reserve_loopback_addr();
@@ -2231,8 +2251,11 @@ mod tests {
             .expect("hosted queue turn should be accepted");
         drop(client);
 
-        let completed =
-            wait_for_detached_status(config.clone(), &session_id, DetachedSessionStatus::Completed);
+        let completed = wait_for_detached_status(
+            config.clone(),
+            &session_id,
+            DetachedSessionStatus::Completed,
+        );
         assert_eq!(completed.status, DetachedSessionStatus::Completed);
         assert!(
             managed_workspace.exists(),

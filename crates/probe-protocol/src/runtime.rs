@@ -597,9 +597,72 @@ pub struct RuntimeToolCallDelta {
     pub arguments_delta: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeActivityKind {
+    Queued,
+    Starting,
+    WaitingForBackend,
+    StreamingReply,
+    UpdatingReply,
+    PlanningTool,
+    Reading,
+    Editing,
+    Validating,
+    RunningTool,
+    WaitingForApproval,
+    Finalizing,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+impl RuntimeActivityKind {
+    #[must_use]
+    pub const fn default_label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Starting => "starting turn",
+            Self::WaitingForBackend => "waiting for backend",
+            Self::StreamingReply => "streaming reply",
+            Self::UpdatingReply => "updating reply",
+            Self::PlanningTool => "planning tool call",
+            Self::Reading => "reading repo",
+            Self::Editing => "editing workspace",
+            Self::Validating => "running validation",
+            Self::RunningTool => "running tool",
+            Self::WaitingForApproval => "waiting for approval",
+            Self::Finalizing => "finalizing reply",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeActivity {
+    pub kind: RuntimeActivityKind,
+    pub label: String,
+}
+
+impl RuntimeActivity {
+    #[must_use]
+    pub fn new(kind: RuntimeActivityKind, label: impl Into<String>) -> Self {
+        Self {
+            kind,
+            label: label.into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RuntimeProgressEvent {
+    ActivityUpdated {
+        session_id: SessionId,
+        activity: RuntimeActivity,
+    },
     TurnStarted {
         session_id: SessionId,
         profile_name: String,

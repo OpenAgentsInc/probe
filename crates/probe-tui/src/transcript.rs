@@ -1,4 +1,5 @@
-use ratatui::text::{Line, Text};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscriptRole {
@@ -121,9 +122,19 @@ impl TranscriptEntry {
     }
 
     fn render_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(format!("[{}] {}", self.label(), self.title))];
+        let styles = transcript_entry_styles(self.role, self.kind);
+        let mut lines = vec![Line::from(vec![
+            Span::styled(
+                format!("[{}] ", self.label()),
+                styles.label_style.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(self.title.clone(), styles.title_style),
+        ])];
         for line in &self.body {
-            lines.push(Line::from(format!("  {line}")));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(line.clone(), styles.body_style),
+            ]));
         }
         lines
     }
@@ -162,13 +173,19 @@ impl ActiveTurn {
     }
 
     fn render_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(format!(
-            "[active {}] {}",
-            self.role.label(),
-            self.title
-        ))];
+        let styles = active_turn_styles(self.role);
+        let mut lines = vec![Line::from(vec![
+            Span::styled(
+                format!("[active {}] ", self.role.label()),
+                styles.label_style.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(self.title.clone(), styles.title_style),
+        ])];
         for line in &self.body {
-            lines.push(Line::from(format!("  {line}")));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(line.clone(), styles.body_style),
+            ]));
         }
         lines
     }
@@ -212,6 +229,11 @@ impl RetainedTranscript {
     }
 
     #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty() && self.live_entries.is_empty() && self.active_turn.is_none()
+    }
+
+    #[must_use]
     pub fn entries(&self) -> &[TranscriptEntry] {
         self.entries.as_slice()
     }
@@ -243,6 +265,29 @@ impl RetainedTranscript {
 
         Text::from(lines)
     }
+
+    #[must_use]
+    pub fn as_conversation_text(&self) -> Text<'static> {
+        let mut lines = Vec::new();
+        if self.entries.is_empty() && self.live_entries.is_empty() && self.active_turn.is_none() {
+            return Text::from(lines);
+        }
+
+        append_conversation_entry_lines(&mut lines, &self.entries);
+        if !self.entries.is_empty() && !self.live_entries.is_empty() {
+            lines.push(Line::from(""));
+        }
+        append_conversation_entry_lines(&mut lines, &self.live_entries);
+
+        if let Some(active_turn) = &self.active_turn {
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.extend(active_turn.render_lines());
+        }
+
+        Text::from(lines)
+    }
 }
 
 fn append_entry_lines(lines: &mut Vec<Line<'static>>, entries: &[TranscriptEntry]) {
@@ -251,6 +296,232 @@ fn append_entry_lines(lines: &mut Vec<Line<'static>>, entries: &[TranscriptEntry
             lines.push(Line::from(""));
         }
         lines.extend(entry.render_lines());
+    }
+}
+
+fn append_conversation_entry_lines(lines: &mut Vec<Line<'static>>, entries: &[TranscriptEntry]) {
+    if !entries.is_empty()
+        && entries.iter().all(|entry| {
+            matches!(
+                entry.kind(),
+                TranscriptEntryKind::ToolCall | TranscriptEntryKind::ToolResult
+            )
+        })
+    {
+        append_entry_lines(lines, entries);
+        return;
+    }
+
+    let mut hidden_edit_paths = Vec::new();
+    let mut appended_any = !lines.is_empty();
+
+    for entry in entries {
+        if matches!(
+            entry.kind(),
+            TranscriptEntryKind::ToolCall | TranscriptEntryKind::ToolResult
+        ) {
+            append_unique_hidden_edit_paths(&mut hidden_edit_paths, entry);
+            continue;
+        }
+
+        if !hidden_edit_paths.is_empty() {
+            if appended_any {
+                lines.push(Line::from(""));
+            }
+            lines.extend(render_hidden_edit_summary_lines(
+                hidden_edit_paths.as_slice(),
+            ));
+            hidden_edit_paths.clear();
+            appended_any = true;
+        }
+
+        if appended_any {
+            lines.push(Line::from(""));
+        }
+        lines.extend(entry.render_lines());
+        appended_any = true;
+    }
+
+    if !hidden_edit_paths.is_empty() {
+        if appended_any {
+            lines.push(Line::from(""));
+        }
+        lines.extend(render_hidden_edit_summary_lines(
+            hidden_edit_paths.as_slice(),
+        ));
+    }
+}
+
+fn render_hidden_edit_summary_lines(edit_paths: &[String]) -> Vec<Line<'static>> {
+    let styles = transcript_entry_styles(TranscriptRole::Status, TranscriptEntryKind::Generic);
+    vec![Line::from(vec![
+        Span::styled(
+            "[edited] ".to_string(),
+            styles.label_style.add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            summarize_tool_titles(edit_paths, 2),
+            styles.body_style.add_modifier(Modifier::DIM),
+        ),
+    ])]
+}
+
+fn append_unique_hidden_edit_paths(target: &mut Vec<String>, entry: &TranscriptEntry) {
+    for path in hidden_edit_paths(entry) {
+        if !target.iter().any(|existing| existing == &path) {
+            target.push(path);
+        }
+    }
+}
+
+fn hidden_edit_paths(entry: &TranscriptEntry) -> Vec<String> {
+    if entry.title() != "apply_patch" {
+        return Vec::new();
+    }
+
+    let mut paths = Vec::new();
+    for line in entry.body() {
+        if let Some(value) = line.strip_prefix("updated: ") {
+            for path in value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                paths.push(path.to_string());
+            }
+            continue;
+        }
+        if is_relative_file_path_candidate(line) {
+            paths.push(line.trim().to_string());
+            break;
+        }
+    }
+    paths
+}
+
+fn is_relative_file_path_candidate(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && !value.contains(' ')
+        && value.contains('.')
+        && !value.starts_with('#')
+        && !value.ends_with(':')
+        && !value.contains('{')
+        && !value.contains('}')
+}
+
+fn summarize_tool_titles(tool_titles: &[String], max_items: usize) -> String {
+    let mut items = tool_titles
+        .iter()
+        .take(max_items)
+        .cloned()
+        .collect::<Vec<_>>();
+    let remaining = tool_titles.len().saturating_sub(items.len());
+    if remaining > 0 {
+        items.push(format!("+{remaining} more"));
+    }
+    items.join(", ")
+}
+
+#[derive(Clone, Copy)]
+struct TranscriptVisualStyles {
+    label_style: Style,
+    title_style: Style,
+    body_style: Style,
+}
+
+fn transcript_entry_styles(
+    role: TranscriptRole,
+    kind: TranscriptEntryKind,
+) -> TranscriptVisualStyles {
+    match kind {
+        TranscriptEntryKind::ToolCall | TranscriptEntryKind::ToolResult => TranscriptVisualStyles {
+            label_style: Style::default()
+                .fg(Color::Rgb(0x7f, 0x93, 0xa6))
+                .add_modifier(Modifier::DIM),
+            title_style: Style::default()
+                .fg(Color::Rgb(0x9b, 0xae, 0xc0))
+                .add_modifier(Modifier::DIM),
+            body_style: Style::default()
+                .fg(Color::Rgb(0x88, 0x9a, 0xab))
+                .add_modifier(Modifier::DIM),
+        },
+        TranscriptEntryKind::ToolRefused | TranscriptEntryKind::ApprovalPending => {
+            TranscriptVisualStyles {
+                label_style: Style::default()
+                    .fg(Color::Rgb(0xf1, 0xc4, 0x53))
+                    .add_modifier(Modifier::DIM),
+                title_style: Style::default().fg(Color::Rgb(0xff, 0xe2, 0x92)),
+                body_style: Style::default().fg(Color::Rgb(0xe3, 0xca, 0x88)),
+            }
+        }
+        TranscriptEntryKind::Generic => match role {
+            TranscriptRole::Assistant => TranscriptVisualStyles {
+                label_style: Style::default().fg(Color::Rgb(0xf8, 0xf4, 0xe3)),
+                title_style: Style::default()
+                    .fg(Color::Rgb(0xff, 0xf1, 0xd0))
+                    .add_modifier(Modifier::BOLD),
+                body_style: Style::default().fg(Color::Rgb(0xff, 0xfb, 0xef)),
+            },
+            TranscriptRole::User => TranscriptVisualStyles {
+                label_style: Style::default().fg(Color::Rgb(0x9f, 0xd7, 0xff)),
+                title_style: Style::default()
+                    .fg(Color::Rgb(0xc7, 0xe9, 0xff))
+                    .add_modifier(Modifier::BOLD),
+                body_style: Style::default().fg(Color::Rgb(0xe0, 0xf1, 0xff)),
+            },
+            TranscriptRole::Status => TranscriptVisualStyles {
+                label_style: Style::default()
+                    .fg(Color::Rgb(0xa7, 0xb8, 0xc8))
+                    .add_modifier(Modifier::DIM),
+                title_style: Style::default().fg(Color::Rgb(0xc5, 0xd1, 0xdb)),
+                body_style: Style::default().fg(Color::Rgb(0xb7, 0xc3, 0xcf)),
+            },
+            TranscriptRole::System | TranscriptRole::Tool => TranscriptVisualStyles {
+                label_style: Style::default()
+                    .fg(Color::Rgb(0x91, 0xae, 0xc4))
+                    .add_modifier(Modifier::DIM),
+                title_style: Style::default().fg(Color::Rgb(0xc2, 0xd2, 0xe0)),
+                body_style: Style::default().fg(Color::Rgb(0xad, 0xbe, 0xcc)),
+            },
+        },
+    }
+}
+
+fn active_turn_styles(role: TranscriptRole) -> TranscriptVisualStyles {
+    match role {
+        TranscriptRole::Assistant => TranscriptVisualStyles {
+            label_style: Style::default().fg(Color::Rgb(0xff, 0xf1, 0xd0)),
+            title_style: Style::default()
+                .fg(Color::Rgb(0xff, 0xfb, 0xef))
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default().fg(Color::Rgb(0xff, 0xfb, 0xef)),
+        },
+        TranscriptRole::Tool => TranscriptVisualStyles {
+            label_style: Style::default()
+                .fg(Color::Rgb(0x7f, 0x93, 0xa6))
+                .add_modifier(Modifier::DIM),
+            title_style: Style::default()
+                .fg(Color::Rgb(0xb0, 0xc0, 0xce))
+                .add_modifier(Modifier::DIM),
+            body_style: Style::default()
+                .fg(Color::Rgb(0x95, 0xa6, 0xb6))
+                .add_modifier(Modifier::DIM),
+        },
+        TranscriptRole::Status | TranscriptRole::System => TranscriptVisualStyles {
+            label_style: Style::default().fg(Color::Rgb(0xf1, 0xc4, 0x53)),
+            title_style: Style::default()
+                .fg(Color::Rgb(0xff, 0xe2, 0x92))
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default().fg(Color::Rgb(0xf1, 0xde, 0xb0)),
+        },
+        TranscriptRole::User => TranscriptVisualStyles {
+            label_style: Style::default().fg(Color::Rgb(0x9f, 0xd7, 0xff)),
+            title_style: Style::default()
+                .fg(Color::Rgb(0xe0, 0xf1, 0xff))
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default().fg(Color::Rgb(0xe0, 0xf1, 0xff)),
+        },
     }
 }
 

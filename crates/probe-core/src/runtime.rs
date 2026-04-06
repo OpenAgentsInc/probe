@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use probe_protocol::backend::{BackendKind, BackendProfile};
+use probe_protocol::runtime::{RuntimeActivity, RuntimeActivityKind};
 use probe_protocol::session::{
     BackendTurnReceipt, CacheSignal, PendingToolApproval, SessionBackendTarget,
     SessionHarnessProfile, SessionId, SessionMetadata, SessionTurn, ToolApprovalResolution,
@@ -121,6 +122,10 @@ pub enum ResolvePendingToolApprovalOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeEvent {
+    ActivityUpdated {
+        session_id: SessionId,
+        activity: RuntimeActivity,
+    },
     TurnStarted {
         session_id: SessionId,
         profile_name: String,
@@ -560,6 +565,210 @@ fn emit_runtime_event(event_sink: Option<&Arc<dyn RuntimeEventSink>>, event: Run
     if let Some(event_sink) = event_sink {
         event_sink.emit(event);
     }
+}
+
+#[must_use]
+pub fn derived_runtime_activity(event: &RuntimeEvent) -> Option<(SessionId, RuntimeActivity)> {
+    match event {
+        RuntimeEvent::ActivityUpdated { .. } => None,
+        RuntimeEvent::TurnStarted { session_id, .. } => Some((
+            session_id.clone(),
+            RuntimeActivity::new(RuntimeActivityKind::Starting, "starting turn"),
+        )),
+        RuntimeEvent::ModelRequestStarted { session_id, .. } => Some((
+            session_id.clone(),
+            RuntimeActivity::new(
+                RuntimeActivityKind::WaitingForBackend,
+                "waiting for backend",
+            ),
+        )),
+        RuntimeEvent::AssistantStreamStarted { session_id, .. } => Some((
+            session_id.clone(),
+            RuntimeActivity::new(RuntimeActivityKind::StreamingReply, "streaming reply"),
+        )),
+        RuntimeEvent::AssistantSnapshot { session_id, .. } => Some((
+            session_id.clone(),
+            RuntimeActivity::new(RuntimeActivityKind::UpdatingReply, "updating reply"),
+        )),
+        RuntimeEvent::ToolCallDelta { session_id, .. } => Some((
+            session_id.clone(),
+            RuntimeActivity::new(RuntimeActivityKind::PlanningTool, "planning tool call"),
+        )),
+        RuntimeEvent::ToolCallRequested {
+            session_id,
+            tool_name,
+            arguments,
+            ..
+        } => Some((
+            session_id.clone(),
+            activity_for_tool_request(tool_name.as_str(), arguments),
+        )),
+        RuntimeEvent::ToolExecutionStarted { .. }
+        | RuntimeEvent::ToolExecutionCompleted { .. }
+        | RuntimeEvent::ToolRefused { .. }
+        | RuntimeEvent::TimeToFirstTokenObserved { .. }
+        | RuntimeEvent::AssistantDelta { .. } => None,
+        RuntimeEvent::ToolPaused {
+            session_id, tool, ..
+        } => Some((
+            session_id.clone(),
+            RuntimeActivity::new(
+                RuntimeActivityKind::WaitingForApproval,
+                format!("waiting for approval: {}", tool.name),
+            ),
+        )),
+        RuntimeEvent::AssistantStreamFinished { session_id, .. } => Some((
+            session_id.clone(),
+            RuntimeActivity::new(RuntimeActivityKind::Finalizing, "finalizing reply"),
+        )),
+        RuntimeEvent::ModelRequestFailed { session_id, .. } => Some((
+            session_id.clone(),
+            RuntimeActivity::new(RuntimeActivityKind::Failed, "failed"),
+        )),
+        RuntimeEvent::AssistantTurnCommitted { session_id, .. } => Some((
+            session_id.clone(),
+            RuntimeActivity::new(RuntimeActivityKind::Completed, "completed"),
+        )),
+    }
+}
+
+fn activity_for_tool_request(tool_name: &str, arguments: &Value) -> RuntimeActivity {
+    match tool_name {
+        "read_file" => RuntimeActivity::new(
+            RuntimeActivityKind::Reading,
+            format!(
+                "reading {}",
+                tool_argument_path(arguments).unwrap_or_else(|| String::from("file"))
+            ),
+        ),
+        "list_dir" => RuntimeActivity::new(
+            RuntimeActivityKind::Reading,
+            format!(
+                "listing {}",
+                tool_argument_path(arguments).unwrap_or_else(|| String::from("directory"))
+            ),
+        ),
+        "code_search" => RuntimeActivity::new(RuntimeActivityKind::Reading, "searching code"),
+        "analyze_repo" => {
+            RuntimeActivity::new(RuntimeActivityKind::Reading, "inspecting repository")
+        }
+        "oracle" => RuntimeActivity::new(RuntimeActivityKind::Reading, "consulting oracle"),
+        "long_context" => {
+            RuntimeActivity::new(RuntimeActivityKind::Reading, "gathering repo evidence")
+        }
+        "apply_patch" => RuntimeActivity::new(
+            RuntimeActivityKind::Editing,
+            format!(
+                "editing {}",
+                tool_argument_path(arguments).unwrap_or_else(|| String::from("workspace"))
+            ),
+        ),
+        "shell" => activity_for_shell_command(
+            arguments
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
+        _ => RuntimeActivity::new(
+            RuntimeActivityKind::RunningTool,
+            format!("running {tool_name}"),
+        ),
+    }
+}
+
+fn activity_for_shell_command(command: &str) -> RuntimeActivity {
+    let command = command.trim();
+    let preview = preview_activity_text(command, 48);
+    if is_validation_command(command) {
+        RuntimeActivity::new(
+            RuntimeActivityKind::Validating,
+            if preview.is_empty() {
+                String::from("running validation")
+            } else {
+                format!("validating with {preview}")
+            },
+        )
+    } else if is_read_only_shell_command(command) {
+        RuntimeActivity::new(
+            RuntimeActivityKind::Reading,
+            if preview.is_empty() {
+                String::from("inspecting workspace")
+            } else {
+                format!("inspecting with {preview}")
+            },
+        )
+    } else if command.is_empty() {
+        RuntimeActivity::new(RuntimeActivityKind::RunningTool, "running shell command")
+    } else {
+        RuntimeActivity::new(
+            RuntimeActivityKind::Editing,
+            format!("running shell command: {preview}"),
+        )
+    }
+}
+
+fn tool_argument_path(arguments: &Value) -> Option<String> {
+    arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+#[must_use]
+pub fn is_validation_command(command: &str) -> bool {
+    const VALIDATION_PREFIXES: [&str; 18] = [
+        "cargo test",
+        "cargo check",
+        "cargo clippy",
+        "cargo fmt",
+        "npm test",
+        "npm run test",
+        "npm run lint",
+        "pnpm test",
+        "pnpm lint",
+        "yarn test",
+        "yarn lint",
+        "pytest",
+        "ruff",
+        "go test",
+        "bundle exec rspec",
+        "mix test",
+        "deno test",
+        "playwright test",
+    ];
+    VALIDATION_PREFIXES
+        .iter()
+        .any(|prefix| command.starts_with(prefix))
+}
+
+fn is_read_only_shell_command(command: &str) -> bool {
+    const READ_ONLY_PREFIXES: [&str; 14] = [
+        "ls",
+        "pwd",
+        "cat",
+        "sed",
+        "head",
+        "tail",
+        "find",
+        "rg",
+        "grep",
+        "git status",
+        "git diff",
+        "git show",
+        "wc",
+        "stat",
+    ];
+    READ_ONLY_PREFIXES
+        .iter()
+        .any(|prefix| command.starts_with(prefix))
+}
+
+fn preview_activity_text(value: &str, max_chars: usize) -> String {
+    let mut preview = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        preview.push_str("...");
+    }
+    preview
 }
 
 fn parsed_openai_tool_arguments(tool_call: &ChatToolCall) -> Value {
@@ -2251,6 +2460,7 @@ mod tests {
 
     use crate::backend_profiles::{psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry};
     use crate::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig};
+    use probe_protocol::runtime::RuntimeActivityKind;
     use probe_protocol::session::{
         CacheSignal, SessionHarnessProfile, ToolApprovalResolution, ToolApprovalState,
         ToolPolicyDecision, TranscriptItemKind, UsageTruth,
@@ -2301,6 +2511,43 @@ mod tests {
                 .expect("runtime event collector lock")
                 .clone()
         }
+    }
+
+    #[test]
+    fn derived_runtime_activity_classifies_tool_and_terminal_events() {
+        let session_id = probe_protocol::session::SessionId::new("sess_activity");
+
+        let (_, validation) = super::derived_runtime_activity(&RuntimeEvent::ToolCallRequested {
+            session_id: session_id.clone(),
+            round_trip: 1,
+            call_id: String::from("call_1"),
+            tool_name: String::from("shell"),
+            arguments: json!({ "command": "cargo test -p probe-tui" }),
+        })
+        .expect("shell tool request should derive activity");
+        assert_eq!(validation.kind, RuntimeActivityKind::Validating);
+        assert_eq!(validation.label, "validating with cargo test -p probe-tui");
+
+        let (_, editing) = super::derived_runtime_activity(&RuntimeEvent::ToolCallRequested {
+            session_id: session_id.clone(),
+            round_trip: 1,
+            call_id: String::from("call_2"),
+            tool_name: String::from("apply_patch"),
+            arguments: json!({ "path": "src/lib.rs" }),
+        })
+        .expect("apply_patch request should derive activity");
+        assert_eq!(editing.kind, RuntimeActivityKind::Editing);
+        assert_eq!(editing.label, "editing src/lib.rs");
+
+        let (_, failed) = super::derived_runtime_activity(&RuntimeEvent::ModelRequestFailed {
+            session_id,
+            round_trip: 2,
+            backend_kind: probe_protocol::backend::BackendKind::OpenAiChatCompletions,
+            error: String::from("connection refused"),
+        })
+        .expect("failed request should derive activity");
+        assert_eq!(failed.kind, RuntimeActivityKind::Failed);
+        assert_eq!(failed.label, "failed");
     }
 
     fn record_apple_session_create(

@@ -191,6 +191,8 @@ pub struct ToolExecutionRecord {
     pub bytes_returned: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files_touched: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files_changed: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -698,6 +700,84 @@ pub struct SessionDeliveryState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum TaskWorkspaceSummaryStatus {
+    NoRepoChanges,
+    Changed,
+    PartialChangesBeforeFailure,
+    PendingApproval,
+    ChangeAccountingLimited,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskWorkspaceSummary {
+    pub task_start_turn_index: u64,
+    pub status: TaskWorkspaceSummaryStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub touched_but_unchanged_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preexisting_dirty_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outside_tracking_dirty_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_root: Option<PathBuf>,
+    #[serde(default)]
+    pub change_accounting_limited: bool,
+    pub summary_text: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskReceiptDisposition {
+    Succeeded,
+    PendingApproval,
+    Failed,
+    Stopped,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskVerificationStatus {
+    NotRun,
+    Passed,
+    Failed,
+    TimedOut,
+    Mixed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskVerificationCommandStatus {
+    Passed,
+    Failed,
+    TimedOut,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskVerificationCommandSummary {
+    pub command: String,
+    pub status: TaskVerificationCommandStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub truncated_output: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskFinalReceipt {
+    pub disposition: TaskReceiptDisposition,
+    pub workspace: TaskWorkspaceSummary,
+    pub verification_status: TaskVerificationStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_commands: Vec<TaskVerificationCommandSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncertainty_reasons: Vec<String>,
+    pub summary_text: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionSummaryArtifactKind {
     RetainedSessionSummary,
     AcceptedPatchSummary,
@@ -746,6 +826,10 @@ pub struct RetainedSessionSummaryArtifact {
     pub failed_patch_attempts: usize,
     pub verification_step_count: usize,
     pub verification_caught_problem: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_task_workspace_summary: Option<TaskWorkspaceSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_task_receipt: Option<TaskFinalReceipt>,
     pub summary_text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_assistant_text: Option<String>,
@@ -824,6 +908,10 @@ pub struct SessionMetadata {
     pub participants: Vec<SessionParticipant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller_lease: Option<SessionControllerLease>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_task_workspace_summary: Option<TaskWorkspaceSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_task_receipt: Option<TaskFinalReceipt>,
     pub transcript_path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_link: Option<SessionParentLink>,

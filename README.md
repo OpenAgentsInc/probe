@@ -7,6 +7,12 @@ Probe is a coding agent.
 It ships session persistence, tool execution, approvals, backend attachment,
 and CLI/TUI surfaces for local coding work.
 
+For a focused near-term plan to strengthen Probe's coding-agent UX, including
+clear in-progress visibility for operators, see
+[`docs/69-coding-agent-mvp-plan.md`](docs/69-coding-agent-mvp-plan.md). For
+the tracked implementation phases and UX bar above that plan, see
+[`docs/81-coding-agent-phased-execution-plan.md`](docs/81-coding-agent-phased-execution-plan.md).
+
 Current shipped surface:
 
 - `probe exec` for one-shot turns

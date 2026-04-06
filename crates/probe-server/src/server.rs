@@ -12,7 +12,7 @@ use std::time::Duration;
 use probe_core::runtime::{
     PlainTextResumeRequest, ProbeRuntime, ResolvePendingToolApprovalOutcome,
     ResolvePendingToolApprovalRequest, RuntimeError, RuntimeEvent, RuntimeEventSink,
-    default_probe_home,
+    default_probe_home, derived_runtime_activity, is_validation_command,
 };
 use probe_core::session_store::{NewItem, NewSession, SessionStoreError};
 use probe_core::session_summary_artifacts::{
@@ -32,9 +32,9 @@ use probe_protocol::runtime::{
     ListDetachedSessionsResponse, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
     ListSessionsResponse, QueueTurnResponse, QueuedTurnStatus, ReadDetachedSessionLogRequest,
     ReadDetachedSessionLogResponse, RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody,
-    ResponseEnvelope, RuntimeCapabilities, RuntimeProgressEvent, RuntimeProtocolError,
-    RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage, ServerEvent,
-    ServerMessage, SessionLookupRequest, SessionSnapshot, ShutdownResponse,
+    ResponseEnvelope, RuntimeActivity, RuntimeCapabilities, RuntimeProgressEvent,
+    RuntimeProtocolError, RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage,
+    ServerEvent, ServerMessage, SessionLookupRequest, SessionSnapshot, ShutdownResponse,
     SpawnChildSessionRequest, SpawnChildSessionResponse, StartSessionRequest, ToolApprovalRecipe,
     ToolCallResult, ToolChoice, ToolDeniedAction, ToolLongContextRecipe, ToolLoopRecipe,
     ToolOracleRecipe, ToolSetKind, TransportKind, TurnAuthor, TurnCompleted, TurnPaused,
@@ -53,7 +53,10 @@ use probe_protocol::session::{
     SessionParticipant, SessionPreparedBaselineRef, SessionPreparedBaselineStatus,
     SessionRuntimeOwner, SessionRuntimeOwnerKind, SessionSummaryArtifact,
     SessionSummaryArtifactRef, SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef,
-    SessionWorkspaceState, TranscriptEvent, UsageMeasurement, UsageTruth,
+    SessionWorkspaceState, TaskFinalReceipt, TaskReceiptDisposition, TaskVerificationCommandStatus,
+    TaskVerificationCommandSummary, TaskVerificationStatus, TaskWorkspaceSummary,
+    TaskWorkspaceSummaryStatus, ToolPolicyDecision, ToolRiskClass, TranscriptEvent, TranscriptItem,
+    TranscriptItemKind, UsageMeasurement, UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
 use serde::{Deserialize, Serialize};
@@ -622,7 +625,10 @@ impl ProbeServerCore {
         let Some(registry) = self.detached_registry.as_ref() else {
             return Ok(());
         };
-        for summary in registry.list().map_err(detached_registry_error_to_protocol)? {
+        for summary in registry
+            .list()
+            .map_err(detached_registry_error_to_protocol)?
+        {
             self.finalize_hosted_cleanup_for_session(&summary.session_id, trigger)?;
         }
         Ok(())
@@ -1329,6 +1335,11 @@ impl TurnControlPlane {
             Some(String::from("interrupted while waiting for tool approval"));
         let should_start_next = state.queued_turn_count() > 0;
         self.save_state_and_sync(&session_id, &state)?;
+        let _ = persist_latest_task_receipt_from_pending_baseline(
+            &self.runtime,
+            &session_id,
+            TaskReceiptDisposition::Stopped,
+        );
         Ok(InterruptOutcome {
             response: InterruptTurnResponse {
                 session_id,
@@ -2454,6 +2465,769 @@ impl TurnMode {
     }
 }
 
+#[derive(Clone, Debug)]
+struct TaskWorkspaceBaseline {
+    task_start_turn_index: u64,
+    repo_root: Option<PathBuf>,
+    preexisting_dirty_files: Vec<String>,
+}
+
+fn capture_task_workspace_baseline(
+    runtime: &ProbeRuntime,
+    session_id: &SessionId,
+) -> Result<TaskWorkspaceBaseline, RuntimeProtocolError> {
+    let metadata = runtime
+        .session_store()
+        .read_metadata(session_id)
+        .map_err(session_store_error_to_protocol)?;
+    Ok(capture_task_workspace_baseline_from_metadata(&metadata))
+}
+
+fn capture_resumable_task_workspace_baseline(
+    runtime: &ProbeRuntime,
+    session_id: &SessionId,
+) -> Result<TaskWorkspaceBaseline, RuntimeProtocolError> {
+    let metadata = runtime
+        .session_store()
+        .read_metadata(session_id)
+        .map_err(session_store_error_to_protocol)?;
+    Ok(pending_task_workspace_baseline(&metadata)
+        .unwrap_or_else(|| capture_task_workspace_baseline_from_metadata(&metadata)))
+}
+
+fn capture_task_workspace_baseline_from_metadata(
+    metadata: &SessionMetadata,
+) -> TaskWorkspaceBaseline {
+    let repo_root = resolve_git_repo_root(metadata.cwd.as_path());
+    let preexisting_dirty_files =
+        dirty_worktree_paths(metadata.cwd.as_path(), repo_root.as_deref());
+    TaskWorkspaceBaseline {
+        task_start_turn_index: metadata.next_turn_index,
+        repo_root,
+        preexisting_dirty_files,
+    }
+}
+
+fn pending_task_workspace_baseline(metadata: &SessionMetadata) -> Option<TaskWorkspaceBaseline> {
+    metadata
+        .latest_task_receipt
+        .as_ref()
+        .filter(|receipt| receipt.disposition == TaskReceiptDisposition::PendingApproval)
+        .map(|receipt| task_workspace_baseline_from_summary(&receipt.workspace))
+        .or_else(|| {
+            metadata
+                .latest_task_workspace_summary
+                .as_ref()
+                .filter(|summary| summary.status == TaskWorkspaceSummaryStatus::PendingApproval)
+                .map(task_workspace_baseline_from_summary)
+        })
+}
+
+fn task_workspace_baseline_from_summary(summary: &TaskWorkspaceSummary) -> TaskWorkspaceBaseline {
+    TaskWorkspaceBaseline {
+        task_start_turn_index: summary.task_start_turn_index,
+        repo_root: summary.repo_root.clone(),
+        preexisting_dirty_files: summary.preexisting_dirty_files.clone(),
+    }
+}
+
+fn persist_latest_task_receipt(
+    runtime: &ProbeRuntime,
+    session_id: &SessionId,
+    baseline: &TaskWorkspaceBaseline,
+    disposition: TaskReceiptDisposition,
+) -> Result<SessionMetadata, RuntimeProtocolError> {
+    let mut metadata = runtime
+        .session_store()
+        .read_metadata(session_id)
+        .map_err(session_store_error_to_protocol)?;
+    let transcript = runtime
+        .session_store()
+        .read_transcript(session_id)
+        .map_err(session_store_error_to_protocol)?;
+    let observed_dirty_files_after_task =
+        dirty_worktree_paths(metadata.cwd.as_path(), baseline.repo_root.as_deref());
+    let workspace = build_task_workspace_summary(
+        transcript.as_slice(),
+        baseline,
+        workspace_summary_status_for_receipt(disposition),
+        observed_dirty_files_after_task.as_slice(),
+    );
+    metadata.latest_task_workspace_summary = Some(workspace.clone());
+    metadata.latest_task_receipt = Some(build_task_final_receipt(
+        transcript.as_slice(),
+        disposition,
+        &workspace,
+    ));
+    runtime
+        .session_store()
+        .replace_metadata(metadata)
+        .map_err(session_store_error_to_protocol)
+}
+
+fn persist_latest_task_receipt_from_pending_baseline(
+    runtime: &ProbeRuntime,
+    session_id: &SessionId,
+    disposition: TaskReceiptDisposition,
+) -> Result<Option<SessionMetadata>, RuntimeProtocolError> {
+    let metadata = runtime
+        .session_store()
+        .read_metadata(session_id)
+        .map_err(session_store_error_to_protocol)?;
+    let Some(baseline) = pending_task_workspace_baseline(&metadata) else {
+        return Ok(None);
+    };
+    persist_latest_task_receipt(runtime, session_id, &baseline, disposition).map(Some)
+}
+
+fn build_task_workspace_summary(
+    transcript: &[TranscriptEvent],
+    baseline: &TaskWorkspaceBaseline,
+    requested_status: TaskWorkspaceSummaryStatus,
+    observed_dirty_files_after_task: &[String],
+) -> TaskWorkspaceSummary {
+    let mut changed_files = Vec::new();
+    let mut touched_files = Vec::new();
+    let mut change_accounting_limited = false;
+
+    for event in transcript
+        .iter()
+        .filter(|event| event.turn.index >= baseline.task_start_turn_index)
+    {
+        for item in &event.turn.items {
+            if item.kind != TranscriptItemKind::ToolResult || !tool_result_applied(item) {
+                continue;
+            }
+            let Some(tool_execution) = item.tool_execution.as_ref() else {
+                continue;
+            };
+            if matches!(
+                tool_execution.risk_class,
+                ToolRiskClass::Write | ToolRiskClass::Network | ToolRiskClass::Destructive
+            ) {
+                for path in &tool_execution.files_touched {
+                    push_unique_path(&mut touched_files, path);
+                }
+                for path in &tool_execution.files_changed {
+                    push_unique_path(&mut changed_files, path);
+                }
+                if item.name.as_deref() == Some("shell")
+                    && tool_execution.files_touched.is_empty()
+                    && tool_execution.files_changed.is_empty()
+                {
+                    change_accounting_limited = true;
+                }
+            }
+        }
+    }
+
+    let changed_set = changed_files.iter().cloned().collect::<HashSet<_>>();
+    let touched_but_unchanged_files = touched_files
+        .into_iter()
+        .filter(|path| !changed_set.contains(path))
+        .collect::<Vec<_>>();
+    let outside_tracking_dirty_files = dirty_files_outside_tool_tracking(
+        observed_dirty_files_after_task,
+        baseline.preexisting_dirty_files.as_slice(),
+        changed_files.as_slice(),
+    );
+    let status = resolve_task_workspace_summary_status(
+        requested_status,
+        changed_files.is_empty(),
+        change_accounting_limited,
+    );
+    let summary_text = task_workspace_summary_text(
+        status,
+        changed_files.as_slice(),
+        touched_but_unchanged_files.as_slice(),
+        baseline.preexisting_dirty_files.as_slice(),
+        outside_tracking_dirty_files.as_slice(),
+        change_accounting_limited,
+    );
+
+    TaskWorkspaceSummary {
+        task_start_turn_index: baseline.task_start_turn_index,
+        status,
+        changed_files,
+        touched_but_unchanged_files,
+        preexisting_dirty_files: baseline.preexisting_dirty_files.clone(),
+        outside_tracking_dirty_files,
+        repo_root: baseline.repo_root.clone(),
+        change_accounting_limited,
+        summary_text,
+    }
+}
+
+fn workspace_summary_status_for_receipt(
+    disposition: TaskReceiptDisposition,
+) -> TaskWorkspaceSummaryStatus {
+    match disposition {
+        TaskReceiptDisposition::Succeeded => TaskWorkspaceSummaryStatus::Changed,
+        TaskReceiptDisposition::PendingApproval => TaskWorkspaceSummaryStatus::PendingApproval,
+        TaskReceiptDisposition::Failed | TaskReceiptDisposition::Stopped => {
+            TaskWorkspaceSummaryStatus::PartialChangesBeforeFailure
+        }
+    }
+}
+
+fn resolve_task_workspace_summary_status(
+    requested_status: TaskWorkspaceSummaryStatus,
+    changed_files_empty: bool,
+    change_accounting_limited: bool,
+) -> TaskWorkspaceSummaryStatus {
+    match requested_status {
+        TaskWorkspaceSummaryStatus::PendingApproval => TaskWorkspaceSummaryStatus::PendingApproval,
+        TaskWorkspaceSummaryStatus::PartialChangesBeforeFailure => {
+            if changed_files_empty {
+                if change_accounting_limited {
+                    TaskWorkspaceSummaryStatus::ChangeAccountingLimited
+                } else {
+                    TaskWorkspaceSummaryStatus::NoRepoChanges
+                }
+            } else {
+                TaskWorkspaceSummaryStatus::PartialChangesBeforeFailure
+            }
+        }
+        TaskWorkspaceSummaryStatus::Changed => {
+            if changed_files_empty {
+                if change_accounting_limited {
+                    TaskWorkspaceSummaryStatus::ChangeAccountingLimited
+                } else {
+                    TaskWorkspaceSummaryStatus::NoRepoChanges
+                }
+            } else {
+                TaskWorkspaceSummaryStatus::Changed
+            }
+        }
+        TaskWorkspaceSummaryStatus::NoRepoChanges
+        | TaskWorkspaceSummaryStatus::ChangeAccountingLimited => requested_status,
+    }
+}
+
+fn task_workspace_summary_text(
+    status: TaskWorkspaceSummaryStatus,
+    changed_files: &[String],
+    touched_but_unchanged_files: &[String],
+    preexisting_dirty_files: &[String],
+    outside_tracking_dirty_files: &[String],
+    change_accounting_limited: bool,
+) -> String {
+    let mut sentences = vec![match status {
+        TaskWorkspaceSummaryStatus::NoRepoChanges => {
+            String::from("No repo changes were made by this task.")
+        }
+        TaskWorkspaceSummaryStatus::Changed => format!(
+            "This task changed {} file(s): {}.",
+            changed_files.len(),
+            summarize_task_paths(changed_files, 6)
+        ),
+        TaskWorkspaceSummaryStatus::PartialChangesBeforeFailure => format!(
+            "Partial edits landed before failure in {} file(s): {}.",
+            changed_files.len(),
+            summarize_task_paths(changed_files, 6)
+        ),
+        TaskWorkspaceSummaryStatus::PendingApproval => {
+            if changed_files.is_empty() {
+                String::from("This task is waiting for approval. No repo changes have landed yet.")
+            } else {
+                format!(
+                    "This task is waiting for approval. Changes have already landed in {} file(s): {}.",
+                    changed_files.len(),
+                    summarize_task_paths(changed_files, 6)
+                )
+            }
+        }
+        TaskWorkspaceSummaryStatus::ChangeAccountingLimited => String::from(
+            "Probe cannot confirm whether repo changes landed for this task because write-capable shell commands ran without file-level change accounting.",
+        ),
+    }];
+
+    if !touched_but_unchanged_files.is_empty() {
+        sentences.push(format!(
+            "Touched without lasting changes: {}.",
+            summarize_task_paths(touched_but_unchanged_files, 6)
+        ));
+    }
+    if !preexisting_dirty_files.is_empty() {
+        sentences.push(format!(
+            "Dirty before task start: {}.",
+            summarize_task_paths(preexisting_dirty_files, 6)
+        ));
+    }
+    if !outside_tracking_dirty_files.is_empty() {
+        sentences.push(format!(
+            "Additional dirty files appeared during the task outside tracked tool results: {}.",
+            summarize_task_paths(outside_tracking_dirty_files, 6)
+        ));
+    }
+    if change_accounting_limited && status != TaskWorkspaceSummaryStatus::ChangeAccountingLimited {
+        sentences.push(String::from(
+            "Changed-file accounting may be incomplete because write-capable shell commands ran without file-level accounting.",
+        ));
+    }
+
+    sentences.join(" ")
+}
+
+fn build_task_final_receipt(
+    transcript: &[TranscriptEvent],
+    disposition: TaskReceiptDisposition,
+    workspace: &TaskWorkspaceSummary,
+) -> TaskFinalReceipt {
+    let verification_commands =
+        collect_task_verification_commands(transcript, workspace.task_start_turn_index);
+    let verification_status = aggregate_task_verification_status(verification_commands.as_slice());
+    let uncertainty_reasons = task_receipt_uncertainty_reasons(
+        disposition,
+        workspace,
+        verification_status,
+        verification_commands.as_slice(),
+    );
+    let summary_text = task_final_receipt_text(
+        disposition,
+        workspace,
+        verification_status,
+        verification_commands.as_slice(),
+        uncertainty_reasons.as_slice(),
+    );
+    TaskFinalReceipt {
+        disposition,
+        workspace: workspace.clone(),
+        verification_status,
+        verification_commands,
+        uncertainty_reasons,
+        summary_text,
+    }
+}
+
+fn collect_task_verification_commands(
+    transcript: &[TranscriptEvent],
+    task_start_turn_index: u64,
+) -> Vec<TaskVerificationCommandSummary> {
+    let mut commands = Vec::new();
+    for event in transcript
+        .iter()
+        .filter(|event| event.turn.index >= task_start_turn_index)
+    {
+        for item in &event.turn.items {
+            if item.kind != TranscriptItemKind::ToolResult {
+                continue;
+            }
+            let Some(tool_execution) = item.tool_execution.as_ref() else {
+                continue;
+            };
+            if !matches!(
+                tool_execution.policy_decision,
+                ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved
+            ) {
+                continue;
+            }
+            if item.name.as_deref() != Some("shell") {
+                continue;
+            }
+            let Some(command) = tool_execution.command.as_deref() else {
+                continue;
+            };
+            if !is_validation_command(command) {
+                continue;
+            }
+            commands.push(TaskVerificationCommandSummary {
+                command: String::from(command),
+                status: task_verification_command_status(item),
+                exit_code: tool_execution.exit_code,
+                truncated_output: tool_execution.truncated == Some(true),
+            });
+        }
+    }
+    commands
+}
+
+fn task_verification_command_status(item: &TranscriptItem) -> TaskVerificationCommandStatus {
+    let Some(tool_execution) = item.tool_execution.as_ref() else {
+        return TaskVerificationCommandStatus::Failed;
+    };
+    if tool_execution.timed_out == Some(true) {
+        return TaskVerificationCommandStatus::TimedOut;
+    }
+    if tool_result_has_error(item) {
+        return TaskVerificationCommandStatus::Failed;
+    }
+    match tool_execution.exit_code {
+        Some(0) => TaskVerificationCommandStatus::Passed,
+        Some(_) | None => TaskVerificationCommandStatus::Failed,
+    }
+}
+
+fn aggregate_task_verification_status(
+    commands: &[TaskVerificationCommandSummary],
+) -> TaskVerificationStatus {
+    if commands.is_empty() {
+        return TaskVerificationStatus::NotRun;
+    }
+    let all_passed = commands
+        .iter()
+        .all(|command| command.status == TaskVerificationCommandStatus::Passed);
+    if all_passed {
+        return TaskVerificationStatus::Passed;
+    }
+    let all_failed = commands
+        .iter()
+        .all(|command| command.status == TaskVerificationCommandStatus::Failed);
+    if all_failed {
+        return TaskVerificationStatus::Failed;
+    }
+    let all_timed_out = commands
+        .iter()
+        .all(|command| command.status == TaskVerificationCommandStatus::TimedOut);
+    if all_timed_out {
+        return TaskVerificationStatus::TimedOut;
+    }
+    let any_timed_out = commands
+        .iter()
+        .any(|command| command.status == TaskVerificationCommandStatus::TimedOut);
+    if any_timed_out
+        && commands
+            .iter()
+            .all(|command| command.status != TaskVerificationCommandStatus::Failed)
+    {
+        return TaskVerificationStatus::TimedOut;
+    }
+    TaskVerificationStatus::Mixed
+}
+
+fn task_receipt_uncertainty_reasons(
+    disposition: TaskReceiptDisposition,
+    workspace: &TaskWorkspaceSummary,
+    verification_status: TaskVerificationStatus,
+    verification_commands: &[TaskVerificationCommandSummary],
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if !workspace.outside_tracking_dirty_files.is_empty() {
+        reasons.push(format!(
+            "Probe observed dirty files outside tracked tool results during this task: {}.",
+            summarize_task_paths(workspace.outside_tracking_dirty_files.as_slice(), 3)
+        ));
+    }
+    if workspace.change_accounting_limited {
+        reasons.push(String::from(
+            "Changed-file accounting is limited because write-capable shell commands ran without file-level tracking.",
+        ));
+    }
+    if !workspace.changed_files.is_empty() && verification_status == TaskVerificationStatus::NotRun
+    {
+        reasons.push(String::from(
+            "Edits landed without an observed validation command.",
+        ));
+    }
+    if verification_status == TaskVerificationStatus::TimedOut {
+        reasons.push(String::from(
+            "At least one validation command timed out before Probe observed a full result.",
+        ));
+    }
+    if verification_status == TaskVerificationStatus::Mixed {
+        reasons.push(String::from(
+            "Validation results were mixed across the commands Probe observed.",
+        ));
+    }
+    let truncated = verification_commands
+        .iter()
+        .filter(|command| command.truncated_output)
+        .map(|command| summarize_task_command(command.command.as_str()))
+        .collect::<Vec<_>>();
+    if !truncated.is_empty() {
+        reasons.push(format!(
+            "Validation output was truncated for {}.",
+            summarize_task_paths(truncated.as_slice(), 3)
+        ));
+    }
+    if disposition == TaskReceiptDisposition::PendingApproval {
+        reasons.push(String::from(
+            "The task is still waiting for approval and may continue changing the workspace after approval.",
+        ));
+    }
+    if disposition == TaskReceiptDisposition::Stopped {
+        reasons.push(String::from(
+            "The task was stopped before completion, so follow-up work may still be needed.",
+        ));
+    }
+    reasons
+}
+
+fn task_final_receipt_text(
+    disposition: TaskReceiptDisposition,
+    workspace: &TaskWorkspaceSummary,
+    verification_status: TaskVerificationStatus,
+    verification_commands: &[TaskVerificationCommandSummary],
+    uncertainty_reasons: &[String],
+) -> String {
+    let mut sentences = vec![task_receipt_workspace_sentence(disposition, workspace)];
+    sentences.push(task_receipt_verification_sentence(
+        disposition,
+        workspace,
+        verification_status,
+        verification_commands,
+    ));
+    if !uncertainty_reasons.is_empty() {
+        sentences.push(format!(
+            "Remaining uncertainty: {}.",
+            summarize_task_paths(uncertainty_reasons, 2)
+        ));
+    }
+    sentences.join(" ")
+}
+
+fn task_receipt_workspace_sentence(
+    disposition: TaskReceiptDisposition,
+    workspace: &TaskWorkspaceSummary,
+) -> String {
+    match (disposition, workspace.status) {
+        (TaskReceiptDisposition::Failed, TaskWorkspaceSummaryStatus::NoRepoChanges) => {
+            String::from("Task failed before repo changes landed.")
+        }
+        (TaskReceiptDisposition::Failed, TaskWorkspaceSummaryStatus::ChangeAccountingLimited) => {
+            String::from(
+                "Task failed after write-capable shell work, but Probe cannot confirm whether repo changes landed.",
+            )
+        }
+        (TaskReceiptDisposition::Stopped, TaskWorkspaceSummaryStatus::NoRepoChanges) => {
+            String::from("Task was stopped before repo changes landed.")
+        }
+        (TaskReceiptDisposition::Stopped, TaskWorkspaceSummaryStatus::ChangeAccountingLimited) => {
+            String::from(
+                "Task was stopped after write-capable shell work, but Probe cannot confirm whether repo changes landed.",
+            )
+        }
+        (TaskReceiptDisposition::Stopped, _) => {
+            if workspace.changed_files.is_empty() {
+                String::from("Task was stopped before repo changes landed.")
+            } else {
+                format!(
+                    "Task was stopped after changes landed in {} file(s): {}.",
+                    workspace.changed_files.len(),
+                    summarize_task_paths(workspace.changed_files.as_slice(), 6)
+                )
+            }
+        }
+        _ => workspace.summary_text.clone(),
+    }
+}
+
+fn task_receipt_verification_sentence(
+    disposition: TaskReceiptDisposition,
+    workspace: &TaskWorkspaceSummary,
+    verification_status: TaskVerificationStatus,
+    verification_commands: &[TaskVerificationCommandSummary],
+) -> String {
+    match verification_status {
+        TaskVerificationStatus::NotRun => {
+            if disposition == TaskReceiptDisposition::PendingApproval {
+                String::from("No validation command has completed yet.")
+            } else if disposition == TaskReceiptDisposition::Stopped {
+                String::from("No validation command completed before the task was stopped.")
+            } else if workspace.changed_files.is_empty() {
+                String::from("No validation command was observed for this task.")
+            } else {
+                String::from("No validation command was observed after the edits landed.")
+            }
+        }
+        TaskVerificationStatus::Passed => {
+            let prefix = if disposition == TaskReceiptDisposition::Stopped {
+                "Validation passed before the task was stopped"
+            } else {
+                "Validation passed"
+            };
+            format!(
+                "{prefix}: {}.",
+                summarize_task_verification_commands(verification_commands, 3)
+            )
+        }
+        TaskVerificationStatus::Failed => {
+            let prefix = if disposition == TaskReceiptDisposition::Stopped {
+                "Validation failed before the task was stopped"
+            } else {
+                "Validation failed"
+            };
+            format!(
+                "{prefix}: {}.",
+                summarize_task_verification_commands(verification_commands, 3)
+            )
+        }
+        TaskVerificationStatus::TimedOut => {
+            let prefix = if disposition == TaskReceiptDisposition::Stopped {
+                "Validation timed out before the task was stopped"
+            } else {
+                "Validation timed out"
+            };
+            format!(
+                "{prefix}: {}.",
+                summarize_task_verification_commands(verification_commands, 3)
+            )
+        }
+        TaskVerificationStatus::Mixed => {
+            let prefix = if disposition == TaskReceiptDisposition::Stopped {
+                "Validation results were mixed before the task was stopped"
+            } else {
+                "Validation results were mixed"
+            };
+            format!(
+                "{prefix}: {}.",
+                summarize_task_verification_commands(verification_commands, 3)
+            )
+        }
+    }
+}
+
+fn summarize_task_paths(paths: &[String], max_items: usize) -> String {
+    let mut items = paths.iter().take(max_items).cloned().collect::<Vec<_>>();
+    let remaining = paths.len().saturating_sub(items.len());
+    if remaining > 0 {
+        items.push(format!("and {remaining} more"));
+    }
+    items.join(", ")
+}
+
+fn summarize_task_verification_commands(
+    commands: &[TaskVerificationCommandSummary],
+    max_items: usize,
+) -> String {
+    let mut items = commands
+        .iter()
+        .take(max_items)
+        .map(|command| {
+            let status = match command.status {
+                TaskVerificationCommandStatus::Passed => "passed",
+                TaskVerificationCommandStatus::Failed => "failed",
+                TaskVerificationCommandStatus::TimedOut => "timed out",
+            };
+            if command.truncated_output {
+                format!(
+                    "{} ({status}, output truncated)",
+                    summarize_task_command(command.command.as_str())
+                )
+            } else {
+                format!(
+                    "{} ({status})",
+                    summarize_task_command(command.command.as_str())
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    let remaining = commands.len().saturating_sub(items.len());
+    if remaining > 0 {
+        items.push(format!("and {remaining} more"));
+    }
+    items.join(", ")
+}
+
+fn summarize_task_command(command: &str) -> String {
+    let command = command.trim();
+    let mut chars = command.chars();
+    let preview = chars.by_ref().take(60).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else if preview.is_empty() {
+        String::from("[empty command]")
+    } else {
+        preview
+    }
+}
+
+fn dirty_files_outside_tool_tracking(
+    observed_dirty_files_after_task: &[String],
+    preexisting_dirty_files: &[String],
+    changed_files: &[String],
+) -> Vec<String> {
+    let tracked = preexisting_dirty_files
+        .iter()
+        .chain(changed_files.iter())
+        .cloned()
+        .collect::<HashSet<_>>();
+    observed_dirty_files_after_task
+        .iter()
+        .filter(|path| !tracked.contains(*path))
+        .cloned()
+        .collect()
+}
+
+fn dirty_worktree_paths(cwd: &Path, repo_root: Option<&Path>) -> Vec<String> {
+    let Some(repo_root) = repo_root else {
+        return Vec::new();
+    };
+    let Some(output) = run_git_output(
+        repo_root,
+        &["status", "--porcelain", "--untracked-files=all"],
+    ) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for line in output.lines() {
+        let Some(raw_path) = parse_git_status_path(line) else {
+            continue;
+        };
+        let absolute_path = repo_root.join(raw_path);
+        push_unique_path(
+            &mut paths,
+            &render_task_workspace_path(cwd, repo_root, absolute_path.as_path()),
+        );
+    }
+    paths
+}
+
+fn parse_git_status_path(line: &str) -> Option<&str> {
+    if line.len() < 4 {
+        return None;
+    }
+    let path = line.get(3..)?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.rsplit_once(" -> ").map_or(path, |(_, next)| next))
+}
+
+fn render_task_workspace_path(cwd: &Path, repo_root: &Path, path: &Path) -> String {
+    let cwd_abs = if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(cwd)
+    };
+    if let Ok(relative) = path.strip_prefix(&cwd_abs) {
+        return relative.display().to_string();
+    }
+    if let Ok(relative) = path.strip_prefix(repo_root) {
+        return relative.display().to_string();
+    }
+    path.display().to_string()
+}
+
+fn push_unique_path(paths: &mut Vec<String>, path: &str) {
+    if paths.iter().any(|existing| existing == path) {
+        return;
+    }
+    paths.push(path.to_string());
+}
+
+fn tool_result_applied(item: &TranscriptItem) -> bool {
+    let Some(tool_execution) = item.tool_execution.as_ref() else {
+        return false;
+    };
+    if !matches!(
+        tool_execution.policy_decision,
+        ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved
+    ) {
+        return false;
+    }
+    !tool_result_has_error(item)
+}
+
+fn tool_result_has_error(item: &TranscriptItem) -> bool {
+    serde_json::from_str::<serde_json::Value>(&item.text)
+        .ok()
+        .and_then(|value| value.get("error").cloned())
+        .is_some()
+}
+
 fn spawn_turn_worker(
     turn_control: Arc<TurnControlPlane>,
     runtime: ProbeRuntime,
@@ -2815,6 +3589,7 @@ fn run_turn_request(
     mode: TurnMode,
     turn_id: &str,
 ) -> Result<RuntimeResponse, RuntimeProtocolError> {
+    let task_baseline = capture_resumable_task_workspace_baseline(runtime, &request.session_id)?;
     let tool_loop = request.tool_loop.map(tool_loop_from_recipe).transpose()?;
     let event_sink = request_id
         .map(|request_id| (Some(String::from(request_id)), detached_event_hub.clone()))
@@ -2824,30 +3599,37 @@ fn run_turn_request(
             let session_id_for_events = request.session_id.clone();
             let turn_control_for_events = Arc::clone(&turn_control);
             let turn_id_for_events = String::from(turn_id);
+            let last_activity_for_events = Arc::new(Mutex::new(None::<RuntimeActivity>));
             Arc::new(move |event| {
                 let _ = turn_control_for_events
                     .record_runtime_progress(&session_id_for_events, turn_id_for_events.as_str());
-                let delivery = delivery_for_runtime_event(&event);
-                let encoded = encode_runtime_event(event);
-                if let Some(request_id_for_events) = request_id.as_ref() {
-                    let _ = writer_for_events.send_event(
-                        request_id_for_events.as_str(),
-                        ServerEvent::RuntimeProgress {
-                            delivery,
-                            event: encoded.clone(),
-                        },
-                    );
-                }
-                if let Some(detached_event_hub) = detached_event_hub.as_ref() {
-                    let _ = detached_event_hub.append(
-                        &session_id_for_events,
-                        detached_event_truth_from_delivery(delivery),
-                        DetachedSessionEventPayload::RuntimeProgress {
-                            delivery,
-                            event: encoded,
-                        },
-                        now_ms(),
-                    );
+                let activity_update = derived_runtime_activity(&event);
+                emit_runtime_progress(
+                    &writer_for_events,
+                    request_id.as_ref(),
+                    detached_event_hub.as_ref(),
+                    &session_id_for_events,
+                    delivery_for_runtime_event(&event),
+                    encode_runtime_event(event),
+                );
+                if let Some((activity_session_id, activity)) = activity_update {
+                    let mut last_activity = last_activity_for_events
+                        .lock()
+                        .expect("runtime activity mutex should not be poisoned");
+                    if last_activity.as_ref() != Some(&activity) {
+                        *last_activity = Some(activity.clone());
+                        emit_runtime_progress(
+                            &writer_for_events,
+                            request_id.as_ref(),
+                            detached_event_hub.as_ref(),
+                            &activity_session_id,
+                            EventDeliveryGuarantee::Lossless,
+                            RuntimeProgressEvent::ActivityUpdated {
+                                session_id: activity_session_id.clone(),
+                                activity,
+                            },
+                        );
+                    }
                 }
             }) as Arc<dyn RuntimeEventSink>
         });
@@ -2866,20 +3648,40 @@ fn run_turn_request(
     };
 
     let response = match result {
-        Ok(outcome) => turn_response_to_runtime_response(
-            TurnResponse::Completed(turn_completed(
+        Ok(outcome) => {
+            let _ = persist_latest_task_receipt(
                 runtime,
-                turn_control.hosted_receipt_config.as_ref(),
-                outcome,
-            )?),
-            mode,
-        ),
+                &request.session_id,
+                &task_baseline,
+                TaskReceiptDisposition::Succeeded,
+            );
+            turn_response_to_runtime_response(
+                TurnResponse::Completed(turn_completed(
+                    runtime,
+                    turn_control.hosted_receipt_config.as_ref(),
+                    outcome,
+                )?),
+                mode,
+            )
+        }
         Err(RuntimeError::ToolApprovalPending {
             session_id,
             tool_name,
             call_id,
             reason,
         }) => {
+            let session = persist_latest_task_receipt(
+                runtime,
+                &session_id,
+                &task_baseline,
+                TaskReceiptDisposition::PendingApproval,
+            )
+            .unwrap_or_else(|_| {
+                runtime
+                    .session_store()
+                    .read_metadata(&session_id)
+                    .expect("session metadata should remain readable after pending approval")
+            });
             let pending_approvals = runtime
                 .pending_tool_approvals(&session_id)
                 .map_err(runtime_error_to_protocol)?;
@@ -2907,10 +3709,6 @@ fn run_turn_request(
                     )
                     .map_err(detached_event_error_to_protocol)?;
             }
-            let session = runtime
-                .session_store()
-                .read_metadata(&session_id)
-                .map_err(session_store_error_to_protocol)?;
             turn_response_to_runtime_response(
                 TurnResponse::Paused(TurnPaused {
                     session,
@@ -2922,7 +3720,15 @@ fn run_turn_request(
                 mode,
             )
         }
-        Err(error) => return Err(runtime_error_to_protocol(error)),
+        Err(error) => {
+            let _ = persist_latest_task_receipt(
+                runtime,
+                &request.session_id,
+                &task_baseline,
+                TaskReceiptDisposition::Failed,
+            );
+            return Err(runtime_error_to_protocol(error));
+        }
     };
     Ok(response)
 }
@@ -2936,6 +3742,7 @@ fn run_pending_approval_resolution(
     request: probe_protocol::runtime::ResolvePendingApprovalRequest,
     turn_id: &str,
 ) -> Result<RuntimeResponse, RuntimeProtocolError> {
+    let task_baseline = capture_task_workspace_baseline(runtime, &request.session_id)?;
     let tool_loop = tool_loop_from_recipe(request.tool_loop)?;
     let event_sink = request_id
         .map(|request_id| (Some(String::from(request_id)), detached_event_hub.clone()))
@@ -2945,30 +3752,37 @@ fn run_pending_approval_resolution(
             let session_id_for_events = request.session_id.clone();
             let turn_control_for_events = Arc::clone(&turn_control);
             let turn_id_for_events = String::from(turn_id);
+            let last_activity_for_events = Arc::new(Mutex::new(None::<RuntimeActivity>));
             Arc::new(move |event| {
                 let _ = turn_control_for_events
                     .record_runtime_progress(&session_id_for_events, turn_id_for_events.as_str());
-                let delivery = delivery_for_runtime_event(&event);
-                let encoded = encode_runtime_event(event);
-                if let Some(request_id_for_events) = request_id.as_ref() {
-                    let _ = writer_for_events.send_event(
-                        request_id_for_events.as_str(),
-                        ServerEvent::RuntimeProgress {
-                            delivery,
-                            event: encoded.clone(),
-                        },
-                    );
-                }
-                if let Some(detached_event_hub) = detached_event_hub.as_ref() {
-                    let _ = detached_event_hub.append(
-                        &session_id_for_events,
-                        detached_event_truth_from_delivery(delivery),
-                        DetachedSessionEventPayload::RuntimeProgress {
-                            delivery,
-                            event: encoded,
-                        },
-                        now_ms(),
-                    );
+                let activity_update = derived_runtime_activity(&event);
+                emit_runtime_progress(
+                    &writer_for_events,
+                    request_id.as_ref(),
+                    detached_event_hub.as_ref(),
+                    &session_id_for_events,
+                    delivery_for_runtime_event(&event),
+                    encode_runtime_event(event),
+                );
+                if let Some((activity_session_id, activity)) = activity_update {
+                    let mut last_activity = last_activity_for_events
+                        .lock()
+                        .expect("runtime activity mutex should not be poisoned");
+                    if last_activity.as_ref() != Some(&activity) {
+                        *last_activity = Some(activity.clone());
+                        emit_runtime_progress(
+                            &writer_for_events,
+                            request_id.as_ref(),
+                            detached_event_hub.as_ref(),
+                            &activity_session_id,
+                            EventDeliveryGuarantee::Lossless,
+                            RuntimeProgressEvent::ActivityUpdated {
+                                session_id: activity_session_id.clone(),
+                                activity,
+                            },
+                        );
+                    }
                 }
             }) as Arc<dyn RuntimeEventSink>
         });
@@ -2987,11 +3801,23 @@ fn run_pending_approval_resolution(
         None => runtime.resolve_pending_tool_approval(approval_request),
     };
 
-    match result.map_err(runtime_error_to_protocol)? {
-        ResolvePendingToolApprovalOutcome::StillPending {
-            session,
+    match result {
+        Ok(ResolvePendingToolApprovalOutcome::StillPending {
+            session: _,
             pending_approvals,
-        } => {
+        }) => {
+            let session = persist_latest_task_receipt(
+                runtime,
+                &request.session_id,
+                &task_baseline,
+                TaskReceiptDisposition::PendingApproval,
+            )
+            .unwrap_or_else(|_| {
+                runtime
+                    .session_store()
+                    .read_metadata(&request.session_id)
+                    .expect("session metadata should remain readable after pending approval")
+            });
             if let Some(request_id) = request_id {
                 writer
                     .send_event(
@@ -3023,7 +3849,13 @@ fn run_pending_approval_resolution(
                 },
             ))
         }
-        ResolvePendingToolApprovalOutcome::Resumed { outcome } => {
+        Ok(ResolvePendingToolApprovalOutcome::Resumed { outcome }) => {
+            let _ = persist_latest_task_receipt(
+                runtime,
+                &request.session_id,
+                &task_baseline,
+                TaskReceiptDisposition::Succeeded,
+            );
             Ok(RuntimeResponse::ResolvePendingApproval(
                 ResolvePendingApprovalResponse::Resumed(turn_completed(
                     runtime,
@@ -3031,6 +3863,15 @@ fn run_pending_approval_resolution(
                     outcome,
                 )?),
             ))
+        }
+        Err(error) => {
+            let _ = persist_latest_task_receipt(
+                runtime,
+                &request.session_id,
+                &task_baseline,
+                TaskReceiptDisposition::Failed,
+            );
+            Err(runtime_error_to_protocol(error))
         }
     }
 }
@@ -3917,6 +4758,12 @@ fn session_delivery_state(branch_state: &SessionBranchState, now_ms: u64) -> Ses
 }
 
 fn run_git_string(cwd: &Path, args: &[&str]) -> Option<String> {
+    let value = run_git_output(cwd, args)?;
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn run_git_output(cwd: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -3926,8 +4773,7 @@ fn run_git_string(cwd: &Path, args: &[&str]) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!value.is_empty()).then_some(value)
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn parse_ahead_behind(counts: &str) -> Option<(Option<u64>, Option<u64>)> {
@@ -4761,6 +5607,10 @@ fn turn_completed(
     hosted_receipt_config: Option<&HostedReceiptConfig>,
     outcome: probe_core::runtime::PlainTextExecOutcome,
 ) -> Result<TurnCompleted, RuntimeProtocolError> {
+    let session = runtime
+        .session_store()
+        .read_metadata(&outcome.session.id)
+        .map_err(session_store_error_to_protocol)?;
     let transcript = runtime
         .session_store()
         .read_transcript(&outcome.session.id)
@@ -4768,7 +5618,7 @@ fn turn_completed(
     let session = sync_hosted_session_metadata_from_store(
         runtime.session_store(),
         hosted_receipt_config,
-        outcome.session,
+        session,
         transcript.as_slice(),
         now_ms(),
     )?;
@@ -4825,6 +5675,7 @@ fn tool_call_result(tool: ExecutedToolCall) -> ToolCallResult {
 
 fn delivery_for_runtime_event(event: &RuntimeEvent) -> EventDeliveryGuarantee {
     match event {
+        RuntimeEvent::ActivityUpdated { .. } => EventDeliveryGuarantee::Lossless,
         RuntimeEvent::AssistantDelta { .. }
         | RuntimeEvent::AssistantSnapshot { .. }
         | RuntimeEvent::ToolCallDelta { .. } => EventDeliveryGuarantee::BestEffort,
@@ -4843,6 +5694,33 @@ fn delivery_for_runtime_event(event: &RuntimeEvent) -> EventDeliveryGuarantee {
     }
 }
 
+fn emit_runtime_progress(
+    writer: &SharedJsonlWriter,
+    request_id: Option<&String>,
+    detached_event_hub: Option<&Arc<DetachedSessionEventHub>>,
+    session_id: &SessionId,
+    delivery: EventDeliveryGuarantee,
+    event: RuntimeProgressEvent,
+) {
+    if let Some(request_id_for_events) = request_id {
+        let _ = writer.send_event(
+            request_id_for_events.as_str(),
+            ServerEvent::RuntimeProgress {
+                delivery,
+                event: event.clone(),
+            },
+        );
+    }
+    if let Some(detached_event_hub) = detached_event_hub {
+        let _ = detached_event_hub.append(
+            session_id,
+            detached_event_truth_from_delivery(delivery),
+            DetachedSessionEventPayload::RuntimeProgress { delivery, event },
+            now_ms(),
+        );
+    }
+}
+
 fn detached_event_truth_from_delivery(
     delivery: EventDeliveryGuarantee,
 ) -> DetachedSessionEventTruth {
@@ -4854,6 +5732,13 @@ fn detached_event_truth_from_delivery(
 
 fn encode_runtime_event(event: RuntimeEvent) -> RuntimeProgressEvent {
     match event {
+        RuntimeEvent::ActivityUpdated {
+            session_id,
+            activity,
+        } => RuntimeProgressEvent::ActivityUpdated {
+            session_id,
+            activity,
+        },
         RuntimeEvent::TurnStarted {
             session_id,
             profile_name,
@@ -5306,13 +6191,119 @@ fn runtime_error_to_protocol(error: RuntimeError) -> RuntimeProtocolError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
     use probe_protocol::backend::{BackendKind, PrefixCacheMode, ServerAttachMode};
     use probe_protocol::runtime::{ToolApprovalRecipe, ToolChoice, ToolDeniedAction};
+    use probe_protocol::session::{
+        ItemId, SessionId, SessionTurn, TaskReceiptDisposition, TaskVerificationStatus,
+        TaskWorkspaceSummaryStatus, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision,
+        ToolRiskClass, TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnId,
+    };
 
     use super::{
-        ProbeServerCore, ProbeToolChoice, ToolLoopRecipe, ToolSetKind, approval_from_recipe,
-        normalize_session_title, tool_choice_from_recipe, tool_loop_from_recipe,
+        ProbeServerCore, ProbeToolChoice, TaskWorkspaceBaseline, ToolLoopRecipe, ToolSetKind,
+        approval_from_recipe, build_task_final_receipt, build_task_workspace_summary,
+        dirty_worktree_paths, normalize_session_title, resolve_git_repo_root,
+        tool_choice_from_recipe, tool_loop_from_recipe,
     };
+    use tempfile::tempdir;
+
+    fn tool_result_event(
+        turn_index: u64,
+        tool_name: &str,
+        risk_class: ToolRiskClass,
+        files_touched: &[&str],
+        files_changed: &[&str],
+    ) -> TranscriptEvent {
+        TranscriptEvent {
+            session_id: SessionId::new("sess_test"),
+            turn: SessionTurn {
+                id: TurnId(turn_index),
+                index: turn_index,
+                started_at_ms: turn_index,
+                completed_at_ms: Some(turn_index),
+                observability: None,
+                backend_receipt: None,
+                items: vec![TranscriptItem {
+                    id: ItemId::new(format!("item_{turn_index}")),
+                    turn_id: TurnId(turn_index),
+                    sequence: 0,
+                    kind: TranscriptItemKind::ToolResult,
+                    text: String::from(r#"{"ok":true}"#),
+                    name: Some(String::from(tool_name)),
+                    tool_call_id: Some(format!("call_{turn_index}")),
+                    arguments: None,
+                    tool_execution: Some(ToolExecutionRecord {
+                        risk_class,
+                        policy_decision: ToolPolicyDecision::Approved,
+                        approval_state: ToolApprovalState::Approved,
+                        command: None,
+                        exit_code: Some(0),
+                        timed_out: None,
+                        truncated: None,
+                        bytes_returned: None,
+                        files_touched: files_touched
+                            .iter()
+                            .map(|path| String::from(*path))
+                            .collect(),
+                        files_changed: files_changed
+                            .iter()
+                            .map(|path| String::from(*path))
+                            .collect(),
+                        reason: None,
+                    }),
+                }],
+            },
+        }
+    }
+
+    fn shell_validation_event(
+        turn_index: u64,
+        command: &str,
+        exit_code: Option<i32>,
+        timed_out: bool,
+        truncated: bool,
+    ) -> TranscriptEvent {
+        TranscriptEvent {
+            session_id: SessionId::new("sess_test"),
+            turn: SessionTurn {
+                id: TurnId(turn_index),
+                index: turn_index,
+                started_at_ms: turn_index,
+                completed_at_ms: Some(turn_index),
+                observability: None,
+                backend_receipt: None,
+                items: vec![TranscriptItem {
+                    id: ItemId::new(format!("shell_item_{turn_index}")),
+                    turn_id: TurnId(turn_index),
+                    sequence: 0,
+                    kind: TranscriptItemKind::ToolResult,
+                    text: format!(
+                        "{{\"command\":\"{command}\",\"stdout\":\"ok\",\"stderr\":\"\",\"timed_out\":{timed_out},\"exit_code\":{}}}",
+                        exit_code.map_or(String::from("null"), |value| value.to_string())
+                    ),
+                    name: Some(String::from("shell")),
+                    tool_call_id: Some(format!("shell_call_{turn_index}")),
+                    arguments: None,
+                    tool_execution: Some(ToolExecutionRecord {
+                        risk_class: ToolRiskClass::ReadOnly,
+                        policy_decision: ToolPolicyDecision::Approved,
+                        approval_state: ToolApprovalState::Approved,
+                        command: Some(String::from(command)),
+                        exit_code,
+                        timed_out: Some(timed_out),
+                        truncated: Some(truncated),
+                        bytes_returned: Some(2),
+                        files_touched: Vec::new(),
+                        files_changed: Vec::new(),
+                        reason: None,
+                    }),
+                }],
+            },
+        }
+    }
 
     #[test]
     fn session_titles_fall_back_when_blank() {
@@ -5419,5 +6410,421 @@ mod tests {
         };
         let config = tool_loop_from_recipe(loop_recipe).expect("oracle loop recipe should map");
         assert!(config.oracle.is_some());
+    }
+
+    #[test]
+    fn task_workspace_summary_tracks_changed_files_and_preexisting_dirty_state() {
+        let baseline = TaskWorkspaceBaseline {
+            task_start_turn_index: 3,
+            repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
+            preexisting_dirty_files: vec![String::from("Cargo.toml")],
+        };
+        let transcript = vec![
+            tool_result_event(
+                2,
+                "apply_patch",
+                ToolRiskClass::Write,
+                &["src/old.rs"],
+                &["src/old.rs"],
+            ),
+            tool_result_event(
+                3,
+                "apply_patch",
+                ToolRiskClass::Write,
+                &["src/lib.rs", "README.md"],
+                &["src/lib.rs"],
+            ),
+        ];
+
+        let summary = build_task_workspace_summary(
+            transcript.as_slice(),
+            &baseline,
+            TaskWorkspaceSummaryStatus::Changed,
+            &[],
+        );
+
+        assert_eq!(summary.status, TaskWorkspaceSummaryStatus::Changed);
+        assert_eq!(summary.changed_files, vec![String::from("src/lib.rs")]);
+        assert_eq!(
+            summary.touched_but_unchanged_files,
+            vec![String::from("README.md")]
+        );
+        assert_eq!(
+            summary.preexisting_dirty_files,
+            vec![String::from("Cargo.toml")]
+        );
+        assert!(summary.outside_tracking_dirty_files.is_empty());
+        assert!(
+            summary
+                .summary_text
+                .contains("This task changed 1 file(s): src/lib.rs.")
+        );
+        assert!(
+            summary
+                .summary_text
+                .contains("Touched without lasting changes: README.md.")
+        );
+        assert!(
+            summary
+                .summary_text
+                .contains("Dirty before task start: Cargo.toml.")
+        );
+    }
+
+    #[test]
+    fn task_workspace_summary_marks_shell_writes_without_file_accounting_as_limited() {
+        let baseline = TaskWorkspaceBaseline {
+            task_start_turn_index: 7,
+            repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
+            preexisting_dirty_files: Vec::new(),
+        };
+        let transcript = vec![tool_result_event(
+            7,
+            "shell",
+            ToolRiskClass::Write,
+            &[],
+            &[],
+        )];
+
+        let summary = build_task_workspace_summary(
+            transcript.as_slice(),
+            &baseline,
+            TaskWorkspaceSummaryStatus::Changed,
+            &[],
+        );
+
+        assert_eq!(
+            summary.status,
+            TaskWorkspaceSummaryStatus::ChangeAccountingLimited
+        );
+        assert!(summary.changed_files.is_empty());
+        assert!(summary.change_accounting_limited);
+        assert!(
+            summary
+                .summary_text
+                .contains("cannot confirm whether repo changes landed")
+        );
+    }
+
+    #[test]
+    fn task_workspace_summary_marks_read_only_tasks_as_no_repo_changes() {
+        let baseline = TaskWorkspaceBaseline {
+            task_start_turn_index: 5,
+            repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
+            preexisting_dirty_files: Vec::new(),
+        };
+        let transcript = vec![
+            tool_result_event(5, "read_file", ToolRiskClass::ReadOnly, &["README.md"], &[]),
+            tool_result_event(
+                6,
+                "code_search",
+                ToolRiskClass::ReadOnly,
+                &["src/lib.rs"],
+                &[],
+            ),
+        ];
+
+        let summary = build_task_workspace_summary(
+            transcript.as_slice(),
+            &baseline,
+            TaskWorkspaceSummaryStatus::Changed,
+            &[],
+        );
+
+        assert_eq!(summary.status, TaskWorkspaceSummaryStatus::NoRepoChanges);
+        assert!(summary.changed_files.is_empty());
+        assert!(summary.touched_but_unchanged_files.is_empty());
+        assert_eq!(
+            summary.summary_text,
+            "No repo changes were made by this task."
+        );
+    }
+
+    #[test]
+    fn task_workspace_summary_reports_dirty_files_outside_tracked_tool_results() {
+        let baseline = TaskWorkspaceBaseline {
+            task_start_turn_index: 12,
+            repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
+            preexisting_dirty_files: vec![String::from("Cargo.toml")],
+        };
+        let transcript = vec![tool_result_event(
+            12,
+            "apply_patch",
+            ToolRiskClass::Write,
+            &["src/lib.rs"],
+            &["src/lib.rs"],
+        )];
+
+        let summary = build_task_workspace_summary(
+            transcript.as_slice(),
+            &baseline,
+            TaskWorkspaceSummaryStatus::Changed,
+            &[
+                String::from("Cargo.toml"),
+                String::from("src/lib.rs"),
+                String::from("generated/schema.json"),
+            ],
+        );
+
+        assert_eq!(
+            summary.outside_tracking_dirty_files,
+            vec![String::from("generated/schema.json")]
+        );
+        assert!(summary.summary_text.contains(
+            "Additional dirty files appeared during the task outside tracked tool results: generated/schema.json."
+        ));
+    }
+
+    #[test]
+    fn task_final_receipt_summarizes_passed_validation_commands() {
+        let baseline = TaskWorkspaceBaseline {
+            task_start_turn_index: 3,
+            repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
+            preexisting_dirty_files: vec![String::from("Cargo.toml")],
+        };
+        let transcript = vec![
+            tool_result_event(
+                3,
+                "apply_patch",
+                ToolRiskClass::Write,
+                &["src/lib.rs"],
+                &["src/lib.rs"],
+            ),
+            shell_validation_event(4, "cargo test -p probe-tui", Some(0), false, false),
+        ];
+        let workspace = build_task_workspace_summary(
+            transcript.as_slice(),
+            &baseline,
+            TaskWorkspaceSummaryStatus::Changed,
+            &[],
+        );
+        let receipt = build_task_final_receipt(
+            transcript.as_slice(),
+            TaskReceiptDisposition::Succeeded,
+            &workspace,
+        );
+
+        assert_eq!(receipt.verification_status, TaskVerificationStatus::Passed);
+        assert_eq!(receipt.verification_commands.len(), 1);
+        assert!(receipt.summary_text.contains("Validation passed"));
+        assert!(receipt.summary_text.contains("cargo test -p probe-tui"));
+        assert!(receipt.uncertainty_reasons.is_empty());
+    }
+
+    #[test]
+    fn task_final_receipt_marks_unverified_edits_explicitly() {
+        let baseline = TaskWorkspaceBaseline {
+            task_start_turn_index: 9,
+            repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
+            preexisting_dirty_files: Vec::new(),
+        };
+        let transcript = vec![tool_result_event(
+            9,
+            "apply_patch",
+            ToolRiskClass::Write,
+            &["src/main.rs"],
+            &["src/main.rs"],
+        )];
+        let workspace = build_task_workspace_summary(
+            transcript.as_slice(),
+            &baseline,
+            TaskWorkspaceSummaryStatus::Changed,
+            &[],
+        );
+        let receipt = build_task_final_receipt(
+            transcript.as_slice(),
+            TaskReceiptDisposition::Succeeded,
+            &workspace,
+        );
+
+        assert_eq!(receipt.verification_status, TaskVerificationStatus::NotRun);
+        assert!(
+            receipt
+                .summary_text
+                .contains("No validation command was observed")
+        );
+        assert!(
+            receipt.uncertainty_reasons.iter().any(
+                |reason| reason.contains("Edits landed without an observed validation command")
+            )
+        );
+    }
+
+    #[test]
+    fn task_final_receipt_describes_stopped_turns_without_calling_them_failures() {
+        let baseline = TaskWorkspaceBaseline {
+            task_start_turn_index: 11,
+            repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
+            preexisting_dirty_files: Vec::new(),
+        };
+        let transcript = vec![tool_result_event(
+            11,
+            "apply_patch",
+            ToolRiskClass::Write,
+            &["src/main.rs"],
+            &["src/main.rs"],
+        )];
+        let workspace = build_task_workspace_summary(
+            transcript.as_slice(),
+            &baseline,
+            TaskWorkspaceSummaryStatus::PartialChangesBeforeFailure,
+            &[],
+        );
+        let receipt = build_task_final_receipt(
+            transcript.as_slice(),
+            TaskReceiptDisposition::Stopped,
+            &workspace,
+        );
+
+        assert!(
+            receipt
+                .summary_text
+                .contains("Task was stopped after changes landed")
+        );
+        assert!(
+            receipt
+                .summary_text
+                .contains("No validation command completed before the task was stopped.")
+        );
+        assert!(
+            receipt
+                .uncertainty_reasons
+                .iter()
+                .any(|reason| reason.contains("stopped before completion"))
+        );
+        assert!(!receipt.summary_text.contains("failed before"));
+    }
+
+    #[test]
+    fn task_final_receipt_calls_out_backend_failure_before_repo_changes_land() {
+        let baseline = TaskWorkspaceBaseline {
+            task_start_turn_index: 14,
+            repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
+            preexisting_dirty_files: Vec::new(),
+        };
+        let workspace = build_task_workspace_summary(
+            &[],
+            &baseline,
+            TaskWorkspaceSummaryStatus::PartialChangesBeforeFailure,
+            &[],
+        );
+        let receipt = build_task_final_receipt(&[], TaskReceiptDisposition::Failed, &workspace);
+
+        assert_eq!(
+            receipt.workspace.status,
+            TaskWorkspaceSummaryStatus::NoRepoChanges
+        );
+        assert!(
+            receipt
+                .summary_text
+                .contains("Task failed before repo changes landed.")
+        );
+        assert!(
+            receipt
+                .summary_text
+                .contains("No validation command was observed")
+        );
+    }
+
+    #[test]
+    fn task_final_receipt_calls_out_failure_after_edits_landed() {
+        let baseline = TaskWorkspaceBaseline {
+            task_start_turn_index: 16,
+            repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
+            preexisting_dirty_files: Vec::new(),
+        };
+        let transcript = vec![tool_result_event(
+            16,
+            "apply_patch",
+            ToolRiskClass::Write,
+            &["src/main.rs"],
+            &["src/main.rs"],
+        )];
+        let workspace = build_task_workspace_summary(
+            transcript.as_slice(),
+            &baseline,
+            TaskWorkspaceSummaryStatus::PartialChangesBeforeFailure,
+            &["src/main.rs".to_string()],
+        );
+        let receipt = build_task_final_receipt(
+            transcript.as_slice(),
+            TaskReceiptDisposition::Failed,
+            &workspace,
+        );
+
+        assert_eq!(
+            receipt.workspace.status,
+            TaskWorkspaceSummaryStatus::PartialChangesBeforeFailure
+        );
+        assert!(
+            receipt
+                .summary_text
+                .contains("Partial edits landed before failure")
+        );
+        assert!(
+            receipt.uncertainty_reasons.iter().any(
+                |reason| reason.contains("Edits landed without an observed validation command")
+            )
+        );
+    }
+
+    #[test]
+    fn task_final_receipt_calls_out_timed_out_and_truncated_validation() {
+        let baseline = TaskWorkspaceBaseline {
+            task_start_turn_index: 20,
+            repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
+            preexisting_dirty_files: Vec::new(),
+        };
+        let transcript = vec![
+            tool_result_event(
+                20,
+                "apply_patch",
+                ToolRiskClass::Write,
+                &["src/lib.rs"],
+                &["src/lib.rs"],
+            ),
+            shell_validation_event(21, "cargo test -p probe-tui", Some(124), true, true),
+        ];
+        let workspace = build_task_workspace_summary(
+            transcript.as_slice(),
+            &baseline,
+            TaskWorkspaceSummaryStatus::Changed,
+            &["src/lib.rs".to_string()],
+        );
+        let receipt = build_task_final_receipt(
+            transcript.as_slice(),
+            TaskReceiptDisposition::Succeeded,
+            &workspace,
+        );
+
+        assert_eq!(
+            receipt.verification_status,
+            TaskVerificationStatus::TimedOut
+        );
+        assert!(receipt.summary_text.contains("Validation timed out"));
+        assert!(receipt.summary_text.contains("output truncated"));
+        assert!(
+            receipt
+                .uncertainty_reasons
+                .iter()
+                .any(|reason| { reason.contains("timed out before Probe observed a full result") })
+        );
+        assert!(
+            receipt
+                .uncertainty_reasons
+                .iter()
+                .any(|reason| reason.contains("Validation output was truncated"))
+        );
+    }
+
+    #[test]
+    fn task_workspace_baseline_omits_git_state_for_non_git_directories() {
+        let temp = tempdir().expect("tempdir");
+        let cwd = temp.path().join("workspace");
+        fs::create_dir_all(&cwd).expect("create workspace");
+        fs::write(cwd.join("notes.txt"), "hello\n").expect("write file");
+
+        assert!(resolve_git_repo_root(&cwd).is_none());
+        assert!(dirty_worktree_paths(&cwd, None).is_empty());
     }
 }

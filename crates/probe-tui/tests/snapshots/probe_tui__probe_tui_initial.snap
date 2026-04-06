@@ -1,23 +1,22 @@
 ---
 source: crates/probe-tui/tests/probe_tui.rs
-assertion_line: 40
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  Codex │ Qwen │ Apple FM                                                     │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌─ Transcript ─────────────────────────────────────────────────────────────────┐
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌─ Start Here ──────────────────────────────────────┐ ┌─ Ready ────────────────┐
+│ Press Enter after a repo question or code         │ │ activity: ready        │
+│ request.                                          │ │ next: Describe the     │
+│ Probe will inspect the workspace before making    │ │ change you want        │
+│ claims or edits.                                  │ │ lane: Qwen             │
+│                                                   │ │ target: 127.0.0.1:8080 │
+│ Try:                                              │ │ transport:             │
+│ - explain how runtime events reach the TUI        │ │ loopback/ssh           │
+│ - add a focused README note                       │ │ cwd:                   │
+│ - search for approval handling and summarize it   │ │ …ents-Probe/crates/pro │
+└───────────────────────────────────────────────────┘ └────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ status: probe tui launched | backend: openai_chat_completions | target:      │

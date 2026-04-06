@@ -396,6 +396,7 @@ fn daemon_projects_persisted_summary_artifact_refs_for_detached_sessions() {
                     truncated: None,
                     bytes_returned: None,
                     files_touched: vec![String::from("src/main.rs")],
+                    files_changed: Vec::new(),
                     reason: None,
                 },
             )],

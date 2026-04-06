@@ -129,6 +129,8 @@ fn persist_retained_session_summary_artifact(
         failed_patch_attempts: summary.failed_patch_attempts,
         verification_step_count: summary.verification_step_count,
         verification_caught_problem: summary.verification_caught_problem,
+        latest_task_workspace_summary: metadata.latest_task_workspace_summary.clone(),
+        latest_task_receipt: metadata.latest_task_receipt.clone(),
         summary_text: retained_summary_text(metadata, summary),
         final_assistant_text: summary.final_assistant_text.clone(),
         source: source.clone(),
@@ -233,6 +235,17 @@ fn retained_summary_text(metadata: &SessionMetadata, summary: &DecisionSessionSu
         sentences.push(format!(
             "Verification steps after patching: {}.",
             summary.verification_step_count
+        ));
+    }
+    if let Some(task_receipt) = metadata.latest_task_receipt.as_ref() {
+        sentences.push(format!(
+            "Latest task receipt: {}",
+            task_receipt.summary_text
+        ));
+    } else if let Some(task_summary) = metadata.latest_task_workspace_summary.as_ref() {
+        sentences.push(format!(
+            "Latest task receipt: {}",
+            task_summary.summary_text
         ));
     }
     if let Some(final_assistant_text) = summary.final_assistant_text.as_deref() {
@@ -354,6 +367,8 @@ fn retained_session_summary_digest(
         failed_patch_attempts: usize,
         verification_step_count: usize,
         verification_caught_problem: bool,
+        latest_task_workspace_summary: &'a Option<probe_protocol::session::TaskWorkspaceSummary>,
+        latest_task_receipt: &'a Option<probe_protocol::session::TaskFinalReceipt>,
         final_assistant_text: &'a Option<String>,
         transcript_sha256: &'a str,
         session_created_at_ms: u64,
@@ -377,6 +392,8 @@ fn retained_session_summary_digest(
             failed_patch_attempts: summary.failed_patch_attempts,
             verification_step_count: summary.verification_step_count,
             verification_caught_problem: summary.verification_caught_problem,
+            latest_task_workspace_summary: &metadata.latest_task_workspace_summary,
+            latest_task_receipt: &metadata.latest_task_receipt,
             final_assistant_text: &summary.final_assistant_text,
             transcript_sha256: &source.transcript_sha256,
             session_created_at_ms: source.session_created_at_ms,
@@ -547,6 +564,7 @@ mod tests {
                         truncated: None,
                         bytes_returned: None,
                         files_touched: vec![String::from("src/lib.rs")],
+                        files_changed: Vec::new(),
                         reason: None,
                     },
                 )],

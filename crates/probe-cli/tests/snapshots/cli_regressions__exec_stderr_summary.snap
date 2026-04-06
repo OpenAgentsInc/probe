@@ -6,3 +6,5 @@ backend_target surface=exec kind=openai_chat_completions attach_mode=attach tran
 session=<session-id> profile=psionic-qwen35-2b-q8-registry model=tiny-qwen35 transcript=$TEST_ROOT/.probe/sessions/<session-id>/transcript.jsonl
 harness_profile=coding_bootstrap_default@v1
 observability wallclock_ms=<dynamic> cache_signal=cold_start model_output_ms=<dynamic> prompt_tokens=42(exact) completion_tokens=3(exact) total_tokens=45(exact) completion_tps=<dynamic>
+task_receipt No repo changes were made by this task. No validation command was observed for this task.
+task_verification not_run

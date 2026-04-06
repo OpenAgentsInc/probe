@@ -11,9 +11,13 @@ use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ResolvePendingToolApprovalOutcome,
     ResolvePendingToolApprovalRequest, RuntimeEvent, RuntimeEventSink,
 };
+use probe_protocol::runtime::{
+    DetachedSessionEventPayload, DetachedSessionStatus, InspectDetachedSessionResponse,
+    QueuedTurnStatus, RuntimeActivity, RuntimeActivityKind, RuntimeProgressEvent,
+};
 use probe_protocol::session::{
     SessionId, SessionMetadata, ToolApprovalResolution, ToolPolicyDecision, TranscriptEvent,
-    TranscriptItem, TranscriptItemKind,
+    TranscriptItem, TranscriptItemKind, TurnObservability, UsageTruth,
 };
 use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError};
 use psionic_apple_fm::AppleFmSystemLanguageModelAvailability;
@@ -22,6 +26,7 @@ use serde_json::Value;
 use crate::message::{
     AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
     AppleFmFailureSummary, AppleFmUsageSummary, BackgroundTaskRequest, ProbeRuntimeTurnConfig,
+    SessionUsageSummary, UsageCountsSummary,
 };
 use crate::transcript::{TranscriptEntry, TranscriptRole};
 
@@ -58,6 +63,7 @@ struct ProbeRuntimeSessionState {
     profile_base_url: String,
     profile_model: String,
     profile_reasoning_level: Option<String>,
+    session_generation: u64,
 }
 
 #[derive(Debug)]
@@ -184,13 +190,30 @@ fn run_attach_probe_runtime_session(
     };
 
     let previous_turns = state.rendered_turns_for_session(&response.session.session.id);
-    if emit_session_ready(message_tx, &response.session.session, &config).is_err() {
+    if emit_session_ready(
+        message_tx,
+        &response.session.session,
+        &config,
+        recovered_runtime_activity(&mut client, &response),
+        response.summary.recovery_note.clone(),
+    )
+    .is_err()
+    {
         return;
     }
     if emit_transcript_delta(
         message_tx,
         Ok(response.session.transcript.clone()),
         previous_turns,
+    )
+    .is_err()
+    {
+        return;
+    }
+    if emit_session_usage(
+        message_tx,
+        &response.session.session.id,
+        &response.session.transcript,
     )
     .is_err()
     {
@@ -272,7 +295,7 @@ fn run_probe_runtime_turn(
             let previous_turns = previous_session
                 .as_ref()
                 .map_or(0, |session| session.rendered_turns);
-            if emit_session_ready(message_tx, &outcome.session, &config).is_err() {
+            if emit_session_ready(message_tx, &outcome.session, &config, None, None).is_err() {
                 return;
             }
             if emit_transcript_delta(
@@ -281,6 +304,11 @@ fn run_probe_runtime_turn(
                 previous_turns,
             )
             .is_err()
+            {
+                return;
+            }
+            if let Ok(transcript) = client.read_transcript(&outcome.session.id)
+                && emit_session_usage(message_tx, &outcome.session.id, &transcript).is_err()
             {
                 return;
             }
@@ -314,7 +342,7 @@ fn run_probe_runtime_turn(
 
             let metadata = client.read_metadata(&session_id).ok();
             if let Some(metadata) = metadata.as_ref()
-                && emit_session_ready(message_tx, metadata, &config).is_err()
+                && emit_session_ready(message_tx, metadata, &config, None, None).is_err()
             {
                 return;
             }
@@ -329,6 +357,11 @@ fn run_probe_runtime_turn(
                 .map(|events| events.len() == previous_turns)
                 .unwrap_or(true);
             if emit_transcript_delta(message_tx, transcript, previous_turns).is_err() {
+                return;
+            }
+            if let Ok(transcript) = client.read_transcript(&session_id)
+                && emit_session_usage(message_tx, &session_id, &transcript).is_err()
+            {
                 return;
             }
             if emit_pending_tool_approvals(message_tx, &mut client, &session_id).is_err() {
@@ -427,7 +460,7 @@ fn run_pending_tool_approval_resolution(
             session,
             pending_approvals,
         }) => {
-            if emit_session_ready(message_tx, &session, &config).is_err() {
+            if emit_session_ready(message_tx, &session, &config, None, None).is_err() {
                 return;
             }
             if emit_transcript_delta(
@@ -458,7 +491,7 @@ fn run_pending_tool_approval_resolution(
             ));
         }
         Ok(ResolvePendingToolApprovalOutcome::Resumed { outcome }) => {
-            if emit_session_ready(message_tx, &outcome.session, &config).is_err() {
+            if emit_session_ready(message_tx, &outcome.session, &config, None, None).is_err() {
                 return;
             }
             if emit_transcript_delta(
@@ -533,6 +566,7 @@ impl ProbeRuntimeSessionState {
             && self.profile_base_url == config.profile.base_url
             && self.profile_model == config.profile.model
             && self.profile_reasoning_level == config.profile.reasoning_level
+            && self.session_generation == config.session_generation
     }
 
     fn same_runtime_config(&self, other: &Self) -> bool {
@@ -542,6 +576,7 @@ impl ProbeRuntimeSessionState {
             && self.profile_base_url == other.profile_base_url
             && self.profile_model == other.profile_model
             && self.profile_reasoning_level == other.profile_reasoning_level
+            && self.session_generation == other.session_generation
     }
 
     fn from_metadata(
@@ -558,6 +593,7 @@ impl ProbeRuntimeSessionState {
             profile_base_url: config.profile.base_url.clone(),
             profile_model: config.profile.model.clone(),
             profile_reasoning_level: config.profile.reasoning_level.clone(),
+            session_generation: config.session_generation,
         }
     }
 }
@@ -566,6 +602,8 @@ fn emit_session_ready(
     message_tx: &Sender<AppMessage>,
     metadata: &SessionMetadata,
     config: &ProbeRuntimeTurnConfig,
+    runtime_activity: Option<RuntimeActivity>,
+    recovery_note: Option<String>,
 ) -> Result<(), ()> {
     message_tx
         .send(AppMessage::ProbeRuntimeSessionReady {
@@ -573,8 +611,205 @@ fn emit_session_ready(
             profile_name: config.profile.name.clone(),
             model_id: config.profile.model.clone(),
             cwd: metadata.cwd.display().to_string(),
+            runtime_activity,
+            latest_task_workspace_summary: metadata.latest_task_workspace_summary.clone(),
+            latest_task_receipt: metadata.latest_task_receipt.clone(),
+            recovery_note,
         })
         .map_err(|_| ())
+}
+
+fn emit_session_usage(
+    message_tx: &Sender<AppMessage>,
+    session_id: &SessionId,
+    transcript: &[TranscriptEvent],
+) -> Result<(), ()> {
+    message_tx
+        .send(AppMessage::SessionUsageUpdated {
+            session_id: session_id.as_str().to_string(),
+            usage: session_usage_from_transcript(transcript),
+        })
+        .map_err(|_| ())
+}
+
+fn session_usage_from_transcript(transcript: &[TranscriptEvent]) -> SessionUsageSummary {
+    let usage_turns = transcript
+        .iter()
+        .filter_map(|event| event.turn.observability.as_ref())
+        .filter(|observability| {
+            observability.prompt_tokens.is_some()
+                || observability.completion_tokens.is_some()
+                || observability.total_tokens.is_some()
+        })
+        .collect::<Vec<_>>();
+
+    let latest_turn = usage_turns
+        .last()
+        .map(|observability| usage_counts_from_observability(observability));
+
+    SessionUsageSummary {
+        latest_turn,
+        aggregate: aggregate_usage_counts(usage_turns.as_slice()),
+        turns_with_usage: usage_turns.len(),
+    }
+}
+
+fn usage_counts_from_observability(observability: &TurnObservability) -> UsageCountsSummary {
+    UsageCountsSummary {
+        prompt_tokens: observability.prompt_tokens,
+        prompt_truth: observability
+            .prompt_tokens_detail
+            .as_ref()
+            .map(usage_truth_from_session),
+        completion_tokens: observability.completion_tokens,
+        completion_truth: observability
+            .completion_tokens_detail
+            .as_ref()
+            .map(usage_truth_from_session),
+        total_tokens: observability.total_tokens,
+        total_truth: observability
+            .total_tokens_detail
+            .as_ref()
+            .map(usage_truth_from_session),
+    }
+}
+
+fn aggregate_usage_counts(observabilities: &[&TurnObservability]) -> UsageCountsSummary {
+    UsageCountsSummary {
+        prompt_tokens: sum_usage_value(observabilities, |item| item.prompt_tokens),
+        prompt_truth: aggregate_usage_truth(observabilities, |item| {
+            item.prompt_tokens_detail
+                .as_ref()
+                .map(|detail| detail.truth)
+        }),
+        completion_tokens: sum_usage_value(observabilities, |item| item.completion_tokens),
+        completion_truth: aggregate_usage_truth(observabilities, |item| {
+            item.completion_tokens_detail
+                .as_ref()
+                .map(|detail| detail.truth)
+        }),
+        total_tokens: sum_usage_value(observabilities, |item| item.total_tokens),
+        total_truth: aggregate_usage_truth(observabilities, |item| {
+            item.total_tokens_detail.as_ref().map(|detail| detail.truth)
+        }),
+    }
+}
+
+fn sum_usage_value(
+    observabilities: &[&TurnObservability],
+    selector: impl Fn(&TurnObservability) -> Option<u64>,
+) -> Option<u64> {
+    let mut found = false;
+    let mut total = 0u64;
+    for observability in observabilities {
+        if let Some(value) = selector(observability) {
+            found = true;
+            total = total.saturating_add(value);
+        }
+    }
+    found.then_some(total)
+}
+
+fn aggregate_usage_truth(
+    observabilities: &[&TurnObservability],
+    selector: impl Fn(&TurnObservability) -> Option<UsageTruth>,
+) -> Option<String> {
+    let mut saw_estimated = false;
+    let mut saw_any = false;
+    for observability in observabilities {
+        if let Some(truth) = selector(observability) {
+            saw_any = true;
+            if truth == UsageTruth::Estimated {
+                saw_estimated = true;
+            }
+        }
+    }
+    if !saw_any {
+        None
+    } else if saw_estimated {
+        Some(String::from("estimated"))
+    } else {
+        Some(String::from("exact"))
+    }
+}
+
+fn usage_truth_from_session(detail: &probe_protocol::session::UsageMeasurement) -> String {
+    match detail.truth {
+        UsageTruth::Exact => String::from("exact"),
+        UsageTruth::Estimated => String::from("estimated"),
+    }
+}
+
+fn recovered_runtime_activity(
+    client: &mut ProbeClient,
+    response: &InspectDetachedSessionResponse,
+) -> Option<RuntimeActivity> {
+    client
+        .read_detached_session_log(&response.session.session.id, None, 64)
+        .ok()
+        .and_then(|log| {
+            log.events
+                .into_iter()
+                .rev()
+                .find_map(|record| match record.payload {
+                    DetachedSessionEventPayload::RuntimeProgress {
+                        event: RuntimeProgressEvent::ActivityUpdated { activity, .. },
+                        ..
+                    } => Some(activity),
+                    _ => None,
+                })
+        })
+        .or_else(|| {
+            let active_turn = response.turn_control.active_turn.as_ref()?;
+            Some(
+                if active_turn.awaiting_approval || response.summary.pending_approval_count > 0 {
+                    RuntimeActivity::new(
+                        RuntimeActivityKind::WaitingForApproval,
+                        "action needed: review approval",
+                    )
+                } else {
+                    RuntimeActivity::new(RuntimeActivityKind::RunningTool, "running turn")
+                },
+            )
+        })
+        .or_else(|| match response.summary.status {
+            DetachedSessionStatus::Queued => {
+                Some(RuntimeActivity::new(RuntimeActivityKind::Queued, "queued"))
+            }
+            DetachedSessionStatus::Completed => Some(RuntimeActivity::new(
+                RuntimeActivityKind::Completed,
+                "completed",
+            )),
+            DetachedSessionStatus::Failed => {
+                Some(RuntimeActivity::new(RuntimeActivityKind::Failed, "failed"))
+            }
+            DetachedSessionStatus::Cancelled | DetachedSessionStatus::TimedOut => Some(
+                RuntimeActivity::new(RuntimeActivityKind::Stopped, "stopped"),
+            ),
+            DetachedSessionStatus::Idle
+            | DetachedSessionStatus::Running
+            | DetachedSessionStatus::ApprovalPaused => response
+                .summary
+                .last_terminal_status
+                .and_then(|status| detached_terminal_activity(status)),
+        })
+}
+
+fn detached_terminal_activity(status: QueuedTurnStatus) -> Option<RuntimeActivity> {
+    match status {
+        QueuedTurnStatus::Completed => Some(RuntimeActivity::new(
+            RuntimeActivityKind::Completed,
+            "completed",
+        )),
+        QueuedTurnStatus::Failed => {
+            Some(RuntimeActivity::new(RuntimeActivityKind::Failed, "failed"))
+        }
+        QueuedTurnStatus::Cancelled | QueuedTurnStatus::TimedOut => Some(RuntimeActivity::new(
+            RuntimeActivityKind::Stopped,
+            "stopped",
+        )),
+        QueuedTurnStatus::Queued | QueuedTurnStatus::Running => None,
+    }
 }
 
 fn emit_pending_tool_approvals(
@@ -863,9 +1098,15 @@ fn tool_invocation_subject(item: &TranscriptItem) -> Option<String> {
 }
 
 fn successful_tool_result_lines(item: &TranscriptItem, subject: Option<String>) -> Vec<String> {
+    if let Some(lines) = validation_tool_result_lines(item) {
+        return lines;
+    }
     if let Ok(parsed) = serde_json::from_str::<Value>(item.text.as_str())
-        && let Some(lines) = structured_tool_result_lines(&parsed)
+        && let Some(mut lines) = structured_tool_result_lines(&parsed)
     {
+        if let Some(updated_line) = changed_files_line(item) {
+            lines.insert(0, updated_line);
+        }
         return lines;
     }
 
@@ -877,10 +1118,52 @@ fn successful_tool_result_lines(item: &TranscriptItem, subject: Option<String>) 
     {
         lines.push(summary);
     }
+    if let Some(updated_line) = changed_files_line(item) {
+        lines.push(updated_line);
+    }
     if lines.is_empty() {
         lines.push(String::from("completed"));
     }
     lines
+}
+
+fn changed_files_line(item: &TranscriptItem) -> Option<String> {
+    let record = item.tool_execution.as_ref()?;
+    if record.files_changed.is_empty() {
+        return None;
+    }
+    Some(format!("updated: {}", record.files_changed.join(", ")))
+}
+
+fn validation_tool_result_lines(item: &TranscriptItem) -> Option<Vec<String>> {
+    let record = item.tool_execution.as_ref()?;
+    if item.name.as_deref() != Some("shell") {
+        return None;
+    }
+    let command = record.command.as_deref()?;
+    if !is_validation_shell_command(command) {
+        return None;
+    }
+
+    let mut lines = vec![preview(command, 120)];
+    if record.timed_out == Some(true) {
+        lines.push(String::from("verification: timed out"));
+    } else if tool_result_has_error(item) {
+        lines.push(String::from("verification: failed"));
+    } else if let Some(0) = record.exit_code {
+        lines.push(String::from("verification: passed"));
+    } else if let Some(exit_code) = record.exit_code {
+        lines.push(format!("verification: failed (exit {exit_code})"));
+    } else {
+        lines.push(String::from("verification: failed"));
+    }
+    if record.truncated == Some(true) {
+        lines.push(String::from("output: truncated"));
+    }
+    if let Some(detail) = validation_detail_line(item) {
+        lines.push(detail);
+    }
+    Some(lines)
 }
 
 fn structured_tool_result_lines(value: &Value) -> Option<Vec<String>> {
@@ -946,6 +1229,59 @@ fn structured_tool_result_lines(value: &Value) -> Option<Vec<String>> {
     None
 }
 
+fn validation_detail_line(item: &TranscriptItem) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(item.text.as_str()).ok()?;
+    if let Some(error) = parsed.get("error").and_then(Value::as_str) {
+        return Some(format!("detail: {}", preview(error, 96)));
+    }
+    if let Some(stderr) = parsed.get("stderr").and_then(Value::as_str)
+        && !stderr.trim().is_empty()
+    {
+        return Some(format!("stderr: {}", preview(stderr.trim(), 96)));
+    }
+    if let Some(stdout) = parsed.get("stdout").and_then(Value::as_str)
+        && !stdout.trim().is_empty()
+    {
+        return Some(format!("stdout: {}", preview(stdout.trim(), 96)));
+    }
+    None
+}
+
+fn tool_result_has_error(item: &TranscriptItem) -> bool {
+    serde_json::from_str::<Value>(item.text.as_str())
+        .ok()
+        .and_then(|value| value.get("error").cloned())
+        .is_some()
+}
+
+fn is_validation_shell_command(command: &str) -> bool {
+    let command = command.trim();
+    let prefixes = [
+        "cargo test",
+        "cargo check",
+        "cargo clippy",
+        "cargo fmt --check",
+        "cargo nextest",
+        "pytest",
+        "npm test",
+        "npm run test",
+        "npm run lint",
+        "npm run check",
+        "pnpm test",
+        "pnpm run test",
+        "pnpm lint",
+        "pnpm run lint",
+        "pnpm check",
+        "pnpm run check",
+        "yarn test",
+        "yarn lint",
+        "go test",
+        "bundle exec rspec",
+        "mix test",
+    ];
+    prefixes.iter().any(|prefix| command.starts_with(prefix))
+}
+
 fn compact_policy_reason(reason: Option<&str>, tool_name: Option<&str>) -> String {
     let fallback = "approval required";
     let value = reason.unwrap_or(fallback);
@@ -1000,8 +1336,12 @@ fn split_body_lines(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProbeRuntimeSessionState, WorkerState, tool_call_lines, tool_result_lines};
+    use super::{
+        ProbeRuntimeSessionState, WorkerState, detached_terminal_activity, tool_call_lines,
+        tool_result_lines,
+    };
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
+    use probe_protocol::runtime::{QueuedTurnStatus, RuntimeActivityKind};
     use probe_protocol::session::{
         ItemId, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
         TranscriptItem, TranscriptItemKind, TurnId,
@@ -1061,6 +1401,7 @@ mod tests {
                 truncated: Some(false),
                 bytes_returned: None,
                 files_touched: Vec::new(),
+                files_changed: Vec::new(),
                 reason: Some(String::from("tool `shell` requires write approval")),
             }),
         );
@@ -1070,6 +1411,38 @@ mod tests {
             vec![
                 String::from("whoami"),
                 String::from("blocked: write approval")
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_result_lines_render_validation_status_compactly() {
+        let item = transcript_item(
+            TranscriptItemKind::ToolResult,
+            "shell",
+            r#"{"command":"cargo test -p probe-tui","stdout":"ok","stderr":"","timed_out":false,"exit_code":0}"#,
+            Some(json!({ "command": "cargo test -p probe-tui" })),
+            Some(ToolExecutionRecord {
+                risk_class: ToolRiskClass::ReadOnly,
+                policy_decision: ToolPolicyDecision::Approved,
+                approval_state: ToolApprovalState::Approved,
+                command: Some(String::from("cargo test -p probe-tui")),
+                exit_code: Some(0),
+                timed_out: Some(false),
+                truncated: Some(false),
+                bytes_returned: Some(2),
+                files_touched: Vec::new(),
+                files_changed: Vec::new(),
+                reason: None,
+            }),
+        );
+
+        assert_eq!(
+            tool_result_lines(3, &item),
+            vec![
+                String::from("cargo test -p probe-tui"),
+                String::from("verification: passed"),
+                String::from("stdout: ok"),
             ]
         );
     }
@@ -1092,6 +1465,7 @@ mod tests {
             system_prompt: None,
             harness_profile: None,
             tool_loop: None,
+            session_generation: 0,
         }
     }
 
@@ -1131,6 +1505,7 @@ mod tests {
             profile_base_url: qwen.profile.base_url.clone(),
             profile_model: qwen.profile.model.clone(),
             profile_reasoning_level: qwen.profile.reasoning_level.clone(),
+            session_generation: qwen.session_generation,
         });
         state.upsert_runtime_session(ProbeRuntimeSessionState {
             session_id: probe_protocol::session::SessionId::new("sess_apple"),
@@ -1141,6 +1516,7 @@ mod tests {
             profile_base_url: apple.profile.base_url.clone(),
             profile_model: apple.profile.model.clone(),
             profile_reasoning_level: apple.profile.reasoning_level.clone(),
+            session_generation: apple.session_generation,
         });
 
         assert_eq!(
@@ -1157,6 +1533,14 @@ mod tests {
                 .rendered_turns,
             2
         );
+    }
+
+    #[test]
+    fn detached_terminal_activity_maps_cancelled_turns_to_stopped() {
+        let activity = detached_terminal_activity(QueuedTurnStatus::Cancelled)
+            .expect("cancelled turns should map to a stopped activity");
+        assert_eq!(activity.kind, RuntimeActivityKind::Stopped);
+        assert_eq!(activity.label, "stopped");
     }
 }
 

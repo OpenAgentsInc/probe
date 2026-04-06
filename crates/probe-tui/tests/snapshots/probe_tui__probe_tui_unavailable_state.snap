@@ -6,14 +6,14 @@ expression: snapshot
 
 
            ┌─ Backend ──────────────────────────────────────────────┐
-           │ Apple FM is not ready on this machine right now.       │
+           │ Apple FM is not ready on this machine.                 │
            │                                                        │
            │ Foundation model is still preparing                    │
            │                                                        │
-           │ Press Ctrl+R to rerun the setup check after the        │
-           │ machine is admitted.                                   │
+           │ Press Ctrl+R to rerun the check after the machine is   │
+           │ admitted.                                              │
            │                                                        │
-           │ Backend Status                                         │
+           │ status: unavailable                                    │
            └────────────────────────────────────────────────────────┘
 
 
@@ -24,5 +24,5 @@ expression: snapshot
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer (disabled) ────────────────────────────────────────────────────────┐
-│ Composer disabled while backend overlay owns focus. Esc returns to chat.     │
+│ Backend details own focus. Esc returns to chat.                              │
 └──────────────────────────────────────────────────────────────────────────────┘

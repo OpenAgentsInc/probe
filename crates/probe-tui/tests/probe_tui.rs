@@ -30,6 +30,7 @@ fn apple_fm_chat_config(base_url: &str) -> ProbeRuntimeTurnConfig {
         system_prompt: None,
         harness_profile: None,
         tool_loop: None,
+        session_generation: 0,
     }
 }
 
@@ -69,6 +70,10 @@ fn approval_overlay_snapshot_is_stable() {
         profile_name: String::from("psionic-qwen35-2b-q8-registry"),
         model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::PendingToolApprovalsUpdated {
         session_id: String::from("sess_tui_pending"),
@@ -103,6 +108,10 @@ fn transcript_running_turn_snapshot_is_stable() {
         profile_name: String::from("psionic-qwen35-2b-q8-registry"),
         model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
         entry: TranscriptEntry::new(
@@ -133,6 +142,10 @@ fn completed_tool_turn_renders_compact_output_text() {
         profile_name: String::from("psionic-apple-fm-bridge"),
         model_id: String::from("apple-foundation-model"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::ProbeRuntimeEvent {
         event: RuntimeEvent::ToolExecutionCompleted {
@@ -160,6 +173,7 @@ fn completed_tool_turn_renders_compact_output_text() {
                     truncated: Some(false),
                     bytes_returned: Some(26),
                     files_touched: vec![String::from("README.md")],
+                    files_changed: Vec::new(),
                     reason: None,
                 },
             },
@@ -167,8 +181,7 @@ fn completed_tool_turn_renders_compact_output_text() {
     });
 
     let rendered = app.render_to_string(100, 24);
-    assert!(rendered.contains("README.md:1-4"));
-    assert!(rendered.contains("# Probe"));
+    assert!(!rendered.contains("[edited]"), "{rendered}");
     assert!(!rendered.contains("\"content\""));
     assert!(!rendered.contains("bytes_returned"));
 }
@@ -182,6 +195,10 @@ fn transcript_streaming_delta_turn_snapshot_is_stable() {
         profile_name: String::from("psionic-qwen35-2b-q8-registry"),
         model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
         entry: TranscriptEntry::new(
@@ -224,6 +241,10 @@ fn streaming_message_envelope_stays_condensed_until_plain_text_is_visible() {
         profile_name: String::from("psionic-qwen35-2b-q8-registry"),
         model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::AssistantStreamStarted {
         session_id: String::from("sess_tui_stream_envelope"),
@@ -238,7 +259,7 @@ fn streaming_message_envelope_stays_condensed_until_plain_text_is_visible() {
     });
 
     let waiting = app.render_to_string(100, 24);
-    assert!(waiting.contains("[active assistant] Waiting for Reply"));
+    assert!(waiting.contains("[active assistant] Streaming Reply"));
     assert!(!waiting.contains("\"kind\""));
     assert!(!waiting.contains("waiting for backend reply"));
 
@@ -262,6 +283,10 @@ fn manual_scroll_pauses_stream_follow_until_return_to_bottom() {
         profile_name: String::from("openai-codex-subscription"),
         model_id: String::from("gpt-5.4"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
         entry: TranscriptEntry::new(
@@ -275,7 +300,7 @@ fn manual_scroll_pauses_stream_follow_until_return_to_bottom() {
 
     app.dispatch(UiEvent::PageUp);
     let scrolled = app.render_to_string(100, 24);
-    assert!(scrolled.contains("Transcript v "));
+    assert!(scrolled.contains("Transcript · "));
     assert!(!scrolled.contains("older line 39"));
 
     app.apply_message(AppMessage::AssistantStreamStarted {
@@ -291,7 +316,7 @@ fn manual_scroll_pauses_stream_follow_until_return_to_bottom() {
     });
 
     let still_scrolled = app.render_to_string(100, 24);
-    assert!(still_scrolled.contains("Transcript v "));
+    assert!(still_scrolled.contains("Transcript · "));
     assert!(!still_scrolled.contains("STREAMING MARKER"));
 
     for _ in 0..8 {
@@ -299,7 +324,7 @@ fn manual_scroll_pauses_stream_follow_until_return_to_bottom() {
     }
 
     let at_bottom = app.render_to_string(100, 24);
-    assert!(!at_bottom.contains("Transcript v "));
+    assert!(!at_bottom.contains("Transcript · "));
     assert!(at_bottom.contains("STREAMING MARKER"));
 }
 
@@ -311,6 +336,10 @@ fn model_request_placeholder_stays_on_one_line_until_stream_events_arrive() {
         profile_name: String::from("psionic-qwen35-2b-q8-registry"),
         model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::ProbeRuntimeEvent {
         event: RuntimeEvent::ModelRequestStarted {
@@ -321,7 +350,7 @@ fn model_request_placeholder_stays_on_one_line_until_stream_events_arrive() {
     });
 
     let rendered = app.render_to_string(100, 24);
-    assert!(rendered.contains("[active assistant] Waiting for Reply"));
+    assert!(rendered.contains("[active assistant] Waiting for Backend"));
     assert!(!rendered.contains("stream_state: awaiting first backend event"));
     assert!(!rendered.contains("round_trip: 1"));
     assert!(!rendered.contains("session: sess_"));
@@ -335,6 +364,10 @@ fn transcript_streaming_snapshot_turn_snapshot_is_stable() {
         profile_name: String::from("psionic-apple-fm-bridge"),
         model_id: String::from("apple-foundation-model"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
         entry: TranscriptEntry::new(
@@ -367,6 +400,10 @@ fn transcript_committed_turn_snapshot_is_stable() {
         profile_name: String::from("psionic-qwen35-2b-q8-registry"),
         model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
         entry: TranscriptEntry::new(
@@ -421,6 +458,10 @@ fn completed_shell_tool_turn_does_not_repeat_command_in_result_body() {
         profile_name: String::from("psionic-apple-fm-bridge"),
         model_id: String::from("apple-foundation-model"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::ProbeRuntimeEvent {
         event: RuntimeEvent::ToolCallRequested {
@@ -459,6 +500,7 @@ fn completed_shell_tool_turn_does_not_repeat_command_in_result_body() {
                     truncated: Some(false),
                     bytes_returned: Some(16),
                     files_touched: Vec::new(),
+                    files_changed: Vec::new(),
                     reason: None,
                 },
             },
@@ -478,6 +520,10 @@ fn stream_failure_keeps_partial_output_visible() {
         profile_name: String::from("psionic-qwen35-2b-q8-registry"),
         model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::AssistantStreamStarted {
         session_id: String::from("sess_tui_failed_stream"),
@@ -498,7 +544,7 @@ fn stream_failure_keeps_partial_output_visible() {
     });
 
     let rendered = app.render_to_string(120, 30);
-    assert!(rendered.contains("Assistant Stream Failed"));
+    assert!(rendered.contains("Backend Request Failed"));
     assert!(rendered.contains("Probe had started answering before"));
     assert!(rendered.contains("transport connection dropped"));
 }
@@ -511,6 +557,10 @@ fn streamed_tool_call_deltas_render_before_authoritative_tool_row() {
         profile_name: String::from("psionic-qwen35-2b-q8-registry"),
         model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::AssistantStreamStarted {
         session_id: String::from("sess_tui_stream_tool"),
@@ -530,7 +580,7 @@ fn streamed_tool_call_deltas_render_before_authoritative_tool_row() {
     });
 
     let rendered = app.render_to_string(120, 30);
-    assert!(rendered.contains("Streaming Tool Call"));
+    assert!(rendered.contains("Planning Tool Call"));
     assert!(rendered.contains("read_file"));
     assert!(rendered.contains("README.md"));
 }
@@ -543,6 +593,10 @@ fn committed_transcript_replaces_live_stream_cell() {
         profile_name: String::from("psionic-qwen35-2b-q8-registry"),
         model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::AssistantStreamStarted {
         session_id: String::from("sess_tui_stream_commit"),

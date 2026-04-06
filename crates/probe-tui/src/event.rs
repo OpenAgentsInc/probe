@@ -24,6 +24,7 @@ pub enum UiEvent {
     ComposerHistoryNext,
     ComposerAddAttachment,
     ComposerPaste(String),
+    PasteSystemClipboard,
     ComposerMoveHome,
     ComposerMoveEnd,
     ComposerNewline,
@@ -71,6 +72,9 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
         }
         KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::ToggleBody)
+        }
+        KeyCode::Char('v') if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiEvent::PasteSystemClipboard)
         }
         KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::ComposerNewline)

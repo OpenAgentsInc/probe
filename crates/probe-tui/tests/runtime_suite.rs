@@ -11,6 +11,10 @@ fn tui_runtime_suite_renders_runtime_progress_inside_the_transcript() {
         profile_name: String::from("psionic-qwen35-2b-q8-registry"),
         model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
         entry: TranscriptEntry::new(
@@ -29,7 +33,7 @@ fn tui_runtime_suite_renders_runtime_progress_inside_the_transcript() {
         },
     });
     let mid_turn = app.render_to_string(100, 28);
-    assert!(mid_turn.contains("[tool call] read_file"));
+    assert!(mid_turn.contains("[active status] Planning Tool Call"));
     app.apply_message(AppMessage::ProbeRuntimeEvent {
         event: RuntimeEvent::AssistantTurnCommitted {
             session_id: SessionId::new("sess_tui_runtime_suite"),
@@ -51,6 +55,10 @@ fn tui_runtime_suite_renders_backend_failures_without_raw_json_noise() {
         profile_name: String::from("psionic-apple-fm-bridge"),
         model_id: String::from("apple-foundation-model"),
         cwd: String::from("/tmp/probe-workspace"),
+        runtime_activity: None,
+        latest_task_workspace_summary: None,
+        latest_task_receipt: None,
+        recovery_note: None,
     });
     app.apply_message(AppMessage::ProbeRuntimeEvent {
         event: RuntimeEvent::ModelRequestFailed {

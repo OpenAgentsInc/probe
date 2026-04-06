@@ -6,14 +6,14 @@ expression: snapshot
 
 
            ┌─ Backend ──────────────────────────────────────────────┐
-           │ Last completed call: Next Step                         │
+           │ Latest proof step: Next Step                           │
            │                                                        │
-           │ Response                                               │
+           │ reply                                                  │
            │ The TUI should now prove live Apple FM setup truth on  │
            │ startup.                                               │
+           │ usage_total: 34 (exact)                                │
            │                                                        │
-           │ response_id: resp-3                                    │
-           │ model: apple-foundation-model                          │
+           │ status: completed                                      │
            └────────────────────────────────────────────────────────┘
 
 
@@ -24,5 +24,5 @@ expression: snapshot
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer (disabled) ────────────────────────────────────────────────────────┐
-│ Composer disabled while backend overlay owns focus. Esc returns to chat.     │
+│ Backend details own focus. Esc returns to chat.                              │
 └──────────────────────────────────────────────────────────────────────────────┘

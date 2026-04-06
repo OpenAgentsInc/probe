@@ -6,14 +6,14 @@ expression: snapshot
 
 
            ┌─ Backend ──────────────────────────────────────────────┐
-           │ Running call 1/3: Sanity Check                         │
+           │ Working through Apple FM proof 1/3: Sanity Check       │
            │                                                        │
-           │ Prompt                                                 │
+           │ now: Sanity Check                                      │
+           │ prompt                                                 │
            │ Reply with exactly READY.                              │
            │                                                        │
-           │ Response                                               │
+           │ reply                                                  │
            │ [waiting for Apple FM reply]                           │
-           │                                                        │
            └────────────────────────────────────────────────────────┘
 
 
@@ -24,5 +24,5 @@ expression: snapshot
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer (disabled) ────────────────────────────────────────────────────────┐
-│ Composer disabled while backend overlay owns focus. Esc returns to chat.     │
+│ Backend details own focus. Esc returns to chat.                              │
 └──────────────────────────────────────────────────────────────────────────────┘

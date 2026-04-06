@@ -1,27 +1,26 @@
 ---
 source: crates/probe-tui/tests/probe_tui.rs
-assertion_line: 309
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
 │  Codex │ Qwen │ Apple FM                                                                         │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 
-┌─ Transcript ─────────────────────────────────────────────────────────────────────────────────────┐
-│ [user] You                                                                                       │
-│   Reply with the next honest proof target.                                                       │
-│                                                                                                  │
-│ [active assistant] Probe                                                                         │
-│   Stream remote Qwen tokens into the retained transcript.                                        │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌─ Working ─────────────────────────────────────────────────────────┐ ┌─ Working ──────────────────┐
+│ [user] You                                                        │ │ activity: updating reply   │
+│   Reply with the next honest proof target.                        │ │ next: Working now; PgUp    │
+│                                                                   │ │ scrolls without losing     │
+│ [active assistant] Probe                                          │ │ your place                 │
+│   Stream remote Qwen tokens into the retained transcript.         │ │ lane: Qwen                 │
+│                                                                   │ │ target: 127.0.0.1:8080     │
+│                                                                   │ │ transport: loopback/ssh    │
+│                                                                   │ │ cwd: /tmp/probe-workspace  │
+│                                                                   │ │ mode: coding               │
+│                                                                   │ │ tools: on                  │
+│                                                                   │ │ approvals:                 │
+│                                                                   │ │ write/network/destructive  │
+│                                                                   │ │ auto                       │
+└───────────────────────────────────────────────────────────────────┘ └────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ status: assistant snapshot updated for round 1 | backend: openai_chat_completions | target:      │

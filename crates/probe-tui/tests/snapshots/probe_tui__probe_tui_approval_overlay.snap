@@ -7,18 +7,18 @@ expression: snapshot
 
 
            ┌─ Approval ─────────────────────────────────────────────┐
+           │ Review this tool request.                              │
+           │                                                        │
            │ tool: apply_patch                                      │
            │ call: call_patch_1                                     │
            │ risk: write                                            │
-           │ requested_turn: 1                                      │
-           │ paused_turn: 2                                         │
-           │ reason: tool `apply_patch` requires write approval     │
+           │ turns: 1 -> 2                                          │
+           │ why: tool `apply_patch` requires write approval        │
            │                                                        │
-           │ arguments                                              │
+           │ preview                                                │
            │   {                                                    │
            │     "new_text": "probe",                               │
            │     "old_text": "world",                               │
            │     "path": "hello.txt"                                │
            │   }                                                    │
-           │                                                        │
            └────────────────────────────────────────────────────────┘

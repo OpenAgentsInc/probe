@@ -67,6 +67,50 @@ fn tool_suite_reads_lists_and_searches_relative_to_the_workspace() {
 }
 
 #[test]
+fn tool_suite_treats_blank_navigation_paths_as_workspace_root() {
+    let temp = tempdir().expect("tempdir");
+    fs::create_dir_all(temp.path().join("src")).expect("create src tree");
+    fs::write(
+        temp.path().join("src/lib.rs"),
+        "pub fn beta_function() {}\n",
+    )
+    .expect("write lib.rs");
+    let registry = ToolRegistry::coding_bootstrap(false, false);
+    let context = ToolExecutionContext::new(temp.path());
+
+    let results = registry.execute_batch(
+        &context,
+        &[
+            ChatToolCall {
+                id: String::from("call_list_root"),
+                kind: String::from("function"),
+                function: ChatToolCallFunction {
+                    name: String::from("list_files"),
+                    arguments: String::from("{\"path\":\"\",\"max_depth\":2,\"max_entries\":10}"),
+                },
+            },
+            ChatToolCall {
+                id: String::from("call_search_root"),
+                kind: String::from("function"),
+                function: ChatToolCallFunction {
+                    name: String::from("code_search"),
+                    arguments: String::from(
+                        "{\"pattern\":\"beta_function\",\"path\":\"\",\"max_matches\":5}",
+                    ),
+                },
+            },
+        ],
+        &ToolApprovalConfig::conservative(),
+    );
+
+    let entries = results[0].output["entries"]
+        .as_array()
+        .expect("list_files should return root entries");
+    assert!(entries.iter().any(|entry| entry["path"] == "src"));
+    assert_eq!(results[1].output["matches"][0]["path"], "src/lib.rs");
+}
+
+#[test]
 fn tool_suite_renders_compact_model_text_for_read_and_shell_results() {
     let read_rendered = tool_result_model_text(
         "read_file",

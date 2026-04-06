@@ -159,6 +159,7 @@ pub struct ToolInvocationOutcome {
     pub truncated: Option<bool>,
     pub bytes_returned: Option<u64>,
     pub files_touched: Vec<String>,
+    pub files_changed: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -373,6 +374,7 @@ impl ToolInvocationOutcome {
             truncated: None,
             bytes_returned: None,
             files_touched: Vec::new(),
+            files_changed: Vec::new(),
         }
     }
 }
@@ -861,6 +863,7 @@ impl ToolExecutionSession {
                 truncated: invocation.truncated,
                 bytes_returned: invocation.bytes_returned,
                 files_touched: invocation.files_touched,
+                files_changed: invocation.files_changed,
                 reason,
             },
         }
@@ -921,6 +924,7 @@ fn read_file(
         truncated: Some(truncated),
         bytes_returned: Some(content_bytes),
         files_touched: vec![relative_path],
+        files_changed: Vec::new(),
     })
 }
 
@@ -932,6 +936,7 @@ fn list_files(
         .get("path")
         .and_then(serde_json::Value::as_str)
         .unwrap_or(".");
+    let requested_path = normalize_optional_workspace_path(requested_path);
     let max_depth = expect_u64(arguments, "max_depth").unwrap_or(LIST_FILES_DEFAULT_MAX_DEPTH);
     let max_entries = expect_u64(arguments, "max_entries")
         .unwrap_or(LIST_FILES_DEFAULT_MAX_ENTRIES as u64) as usize;
@@ -984,6 +989,7 @@ fn list_files(
         truncated: Some(truncated),
         bytes_returned: Some(entries_bytes),
         files_touched: vec![relative_path],
+        files_changed: Vec::new(),
     })
 }
 
@@ -996,6 +1002,7 @@ fn code_search(
         .get("path")
         .and_then(serde_json::Value::as_str)
         .unwrap_or(".");
+    let requested_path = normalize_optional_workspace_path(requested_path);
     let glob = arguments
         .get("glob")
         .and_then(serde_json::Value::as_str)
@@ -1100,6 +1107,7 @@ fn code_search(
         truncated: Some(truncated),
         bytes_returned: Some(output.stdout.len() as u64),
         files_touched: matched_paths,
+        files_changed: Vec::new(),
     })
 }
 
@@ -1151,6 +1159,7 @@ fn code_search_without_ripgrep(
         truncated: Some(hit_limit),
         bytes_returned: None,
         files_touched: matched_paths,
+        files_changed: Vec::new(),
     })
 }
 
@@ -1171,9 +1180,17 @@ fn collect_code_search_matches_without_ripgrep(
 
     if path.is_dir() {
         let mut entries = fs::read_dir(path)
-            .map_err(|error| ToolInvocationError::ExecutionFailed(format!("failed to read search directory: {error}")))?
+            .map_err(|error| {
+                ToolInvocationError::ExecutionFailed(format!(
+                    "failed to read search directory: {error}"
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| ToolInvocationError::ExecutionFailed(format!("failed to read search directory: {error}")))?;
+            .map_err(|error| {
+                ToolInvocationError::ExecutionFailed(format!(
+                    "failed to read search directory: {error}"
+                ))
+            })?;
         entries.sort_by_key(|entry| entry.path());
         for entry in entries {
             collect_code_search_matches_without_ripgrep(
@@ -1323,6 +1340,7 @@ fn run_shell(
         truncated: Some(stdout_truncated || stderr_truncated),
         bytes_returned: Some((output.stdout.len() + output.stderr.len()) as u64),
         files_touched: Vec::new(),
+        files_changed: Vec::new(),
     })
 }
 
@@ -1344,12 +1362,19 @@ fn apply_patch(
 
     let resolved_path = resolve_workspace_path(context.cwd(), path)?;
     let existed = resolved_path.exists();
+    let existing = existed
+        .then(|| {
+            fs::read_to_string(&resolved_path).map_err(|error| {
+                ToolInvocationError::ExecutionFailed(format!(
+                    "failed to read file `{path}` for patching: {error}"
+                ))
+            })
+        })
+        .transpose()?;
     let new_contents = if existed {
-        let existing = fs::read_to_string(&resolved_path).map_err(|error| {
-            ToolInvocationError::ExecutionFailed(format!(
-                "failed to read file `{path}` for patching: {error}"
-            ))
-        })?;
+        let existing = existing
+            .as_deref()
+            .expect("existing contents should be available when the file exists");
         if old_text.is_empty() {
             if !existing.is_empty() {
                 return Err(ToolInvocationError::InvalidArguments(String::from(
@@ -1398,19 +1423,24 @@ fn apply_patch(
     })?;
 
     let relative_path = display_relative_path(context.cwd(), &resolved_path);
+    let content_changed = existing.as_deref() != Some(new_contents.as_str());
     Ok(ToolInvocationOutcome {
         output: serde_json::json!({
             "path": relative_path.clone(),
             "created": !existed,
             "replace_all": replace_all,
             "bytes_written": new_contents.len(),
+            "content_changed": content_changed,
         }),
         command: None,
         exit_code: None,
         timed_out: None,
         truncated: Some(false),
         bytes_returned: None,
-        files_touched: vec![relative_path],
+        files_touched: vec![relative_path.clone()],
+        files_changed: content_changed
+            .then(|| vec![relative_path])
+            .unwrap_or_default(),
     })
 }
 
@@ -1466,6 +1496,7 @@ fn consult_oracle(
         truncated: Some(false),
         bytes_returned: Some(answer.len() as u64),
         files_touched: Vec::new(),
+        files_changed: Vec::new(),
     })
 }
 
@@ -1567,6 +1598,7 @@ fn analyze_repository(
         truncated: Some(false),
         bytes_returned: Some(analysis.len() as u64 + evidence_bytes),
         files_touched,
+        files_changed: Vec::new(),
     })
 }
 
@@ -1665,6 +1697,7 @@ fn refused_named_tool_call(
             truncated: invocation.truncated,
             bytes_returned: invocation.bytes_returned,
             files_touched: invocation.files_touched,
+            files_changed: invocation.files_changed,
             reason,
         },
     }
@@ -1692,6 +1725,7 @@ fn undeclared_tool_call(
             truncated: None,
             bytes_returned: None,
             files_touched: Vec::new(),
+            files_changed: Vec::new(),
             reason: Some(format!(
                 "tool `{tool_name}` is not registered in this tool loop"
             )),
@@ -1866,6 +1900,7 @@ fn denied_tool_invocation(
         truncated: Some(false),
         bytes_returned: None,
         files_touched,
+        files_changed: Vec::new(),
     }
 }
 
@@ -1899,8 +1934,27 @@ fn looks_like_natural_language_shell_misuse(command: &str) -> bool {
     let has_shell_punctuation = trimmed.chars().any(|ch| {
         matches!(
             ch,
-            '/' | '\\' | '.' | '-' | '_' | '=' | ':' | '$' | '~' | '*' | '|' | '&' | ';' | '<'
-                | '>' | '(' | ')' | '[' | ']' | '{' | '}' | '@'
+            '/' | '\\'
+                | '.'
+                | '-'
+                | '_'
+                | '='
+                | ':'
+                | '$'
+                | '~'
+                | '*'
+                | '|'
+                | '&'
+                | ';'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '@'
         )
     });
 
@@ -1914,8 +1968,7 @@ fn looks_like_natural_language_shell_misuse(command: &str) -> bool {
 fn is_common_shell_command(token: &str) -> bool {
     matches!(
         token,
-        "ls"
-            | "cat"
+        "ls" | "cat"
             | "pwd"
             | "cd"
             | "git"
@@ -2192,6 +2245,14 @@ fn resolve_workspace_path(
         }
     }
     Ok(resolved)
+}
+
+fn normalize_optional_workspace_path(requested_path: &str) -> &str {
+    if requested_path.trim().is_empty() {
+        "."
+    } else {
+        requested_path
+    }
 }
 
 fn display_relative_path(base: &Path, path: &Path) -> String {
@@ -2478,7 +2539,10 @@ fn render_shell_model_text(output: &serde_json::Value) -> String {
         .get("stderr_truncated")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    let mut lines = vec![format!("timed_out: {timed_out}"), format!("exit_code: {exit_code}")];
+    let mut lines = vec![
+        format!("timed_out: {timed_out}"),
+        format!("exit_code: {exit_code}"),
+    ];
     if !stdout.is_empty() {
         lines.push(format!("stdout_truncated: {stdout_truncated}"));
         lines.push(String::from("output:"));
@@ -2502,8 +2566,10 @@ fn simple_glob_matches(glob: &str, candidate: &str) -> bool {
             return candidate.is_empty();
         }
         match glob[0] {
-            b'*' => inner(&glob[1..], candidate)
-                || (!candidate.is_empty() && inner(glob, &candidate[1..])),
+            b'*' => {
+                inner(&glob[1..], candidate)
+                    || (!candidate.is_empty() && inner(glob, &candidate[1..]))
+            }
             b'?' => !candidate.is_empty() && inner(&glob[1..], &candidate[1..]),
             byte => {
                 !candidate.is_empty() && byte == candidate[0] && inner(&glob[1..], &candidate[1..])
@@ -2800,20 +2866,11 @@ mod tests {
         .expect("write file");
         let context = ToolExecutionContext::new(tempdir.path());
 
-        let result = code_search_without_ripgrep(
-            &context,
-            tempdir.path(),
-            "beta",
-            ".",
-            None,
-            5,
-            false,
-        )
-        .expect("fallback code search should succeed");
+        let result =
+            code_search_without_ripgrep(&context, tempdir.path(), "beta", ".", None, 5, false)
+                .expect("fallback code search should succeed");
 
-        let matches = result.output["matches"]
-            .as_array()
-            .expect("matches array");
+        let matches = result.output["matches"].as_array().expect("matches array");
         assert_eq!(result.output["search_backend"], "rust_fallback");
         assert!(!matches.is_empty());
         assert_eq!(matches[0]["path"], "lib.rs");
@@ -2875,7 +2932,10 @@ mod tests {
             &ToolApprovalConfig::allow_all(),
         );
 
-        assert_eq!(results[0].tool_execution.policy_decision, ToolPolicyDecision::Approved);
+        assert_eq!(
+            results[0].tool_execution.policy_decision,
+            ToolPolicyDecision::Approved
+        );
         assert_eq!(
             results[0].output["error"],
             "shell requires a literal shell command, not a natural-language request"

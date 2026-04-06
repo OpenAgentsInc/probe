@@ -64,8 +64,8 @@ use probe_protocol::runtime::{
 };
 use probe_protocol::session::{
     BackendTurnReceipt, CacheSignal, SessionHarnessProfile, SessionId, SessionTurn,
-    ToolPolicyDecision, ToolRiskClass, TranscriptEvent, TranscriptItemKind, UsageMeasurement,
-    UsageTruth,
+    TaskFinalReceipt, TaskVerificationCommandStatus, TaskVerificationStatus, ToolPolicyDecision,
+    ToolRiskClass, TranscriptEvent, TranscriptItemKind, UsageMeasurement, UsageTruth,
 };
 use probe_server::detached_watchdog::DetachedTurnWatchdogPolicy;
 use probe_server::server::{run_local_daemon_with_watchdog_policy, run_stdio_server};
@@ -887,6 +887,7 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
         eprintln!("tool_calls executed={}", outcome.executed_tool_calls);
     }
     print_tool_policy_summary(&outcome.tool_results);
+    print_task_receipt(outcome.session.latest_task_receipt.as_ref());
     Ok(())
 }
 
@@ -1070,6 +1071,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
             eprintln!("tool_calls executed={}", outcome.executed_tool_calls);
         }
         print_tool_policy_summary(&outcome.tool_results);
+        print_task_receipt(outcome.session.latest_task_receipt.as_ref());
     }
 
     Ok(())
@@ -1391,7 +1393,12 @@ fn resolve_daemon_client(
     surface: &str,
     autostart: bool,
 ) -> Result<ProbeClient, String> {
-    resolve_operator_client(probe_home, surface, &HostedConnectArgs::default(), autostart)
+    resolve_operator_client(
+        probe_home,
+        surface,
+        &HostedConnectArgs::default(),
+        autostart,
+    )
 }
 
 fn missing_local_daemon(error: &ProbeClientError) -> bool {
@@ -2179,6 +2186,7 @@ fn build_tui_runtime_config(
         system_prompt,
         harness_profile,
         tool_loop: Some(tool_loop),
+        session_generation: 0,
     })
 }
 
@@ -2821,6 +2829,7 @@ fn render_detached_truth(truth: DetachedSessionEventTruth) -> &'static str {
 
 fn render_runtime_progress_kind(event: &RuntimeProgressEvent) -> &'static str {
     match event {
+        RuntimeProgressEvent::ActivityUpdated { .. } => "activity_updated",
         RuntimeProgressEvent::TurnStarted { .. } => "turn_started",
         RuntimeProgressEvent::ModelRequestStarted { .. } => "model_request_started",
         RuntimeProgressEvent::AssistantStreamStarted { .. } => "assistant_stream_started",
@@ -2849,6 +2858,17 @@ fn print_turn_backend_receipt(turn: &SessionTurn) {
     if let Some(line) = render_turn_backend_receipt(turn) {
         eprintln!("{line}");
     }
+}
+
+fn print_task_receipt(receipt: Option<&TaskFinalReceipt>) {
+    let Some(receipt) = receipt else {
+        return;
+    };
+    eprintln!("task_receipt {}", receipt.summary_text);
+    eprintln!(
+        "task_verification {}",
+        render_task_verification_summary(receipt)
+    );
 }
 
 fn render_turn_observability(turn: &SessionTurn) -> Option<String> {
@@ -2934,6 +2954,58 @@ fn append_backend_receipt_fields(fields: &mut Vec<String>, receipt: &BackendTurn
             "transcript_payload_bytes={}",
             transcript.payload.len()
         ));
+    }
+}
+
+fn render_task_verification_summary(receipt: &TaskFinalReceipt) -> String {
+    match receipt.verification_status {
+        TaskVerificationStatus::NotRun => String::from("not_run"),
+        TaskVerificationStatus::Passed => {
+            format!("passed {}", render_task_verification_commands(receipt, 3))
+        }
+        TaskVerificationStatus::Failed => {
+            format!("failed {}", render_task_verification_commands(receipt, 3))
+        }
+        TaskVerificationStatus::TimedOut => format!(
+            "timed_out {}",
+            render_task_verification_commands(receipt, 3)
+        ),
+        TaskVerificationStatus::Mixed => {
+            format!("mixed {}", render_task_verification_commands(receipt, 3))
+        }
+    }
+}
+
+fn render_task_verification_commands(receipt: &TaskFinalReceipt, max_items: usize) -> String {
+    let mut items = receipt
+        .verification_commands
+        .iter()
+        .take(max_items)
+        .map(|command| {
+            let status = match command.status {
+                TaskVerificationCommandStatus::Passed => "passed",
+                TaskVerificationCommandStatus::Failed => "failed",
+                TaskVerificationCommandStatus::TimedOut => "timed_out",
+            };
+            let rendered_command = command.command.replace(' ', "_");
+            if command.truncated_output {
+                format!("{rendered_command}({status},truncated)")
+            } else {
+                format!("{rendered_command}({status})")
+            }
+        })
+        .collect::<Vec<_>>();
+    let remaining = receipt
+        .verification_commands
+        .len()
+        .saturating_sub(items.len());
+    if remaining > 0 {
+        items.push(format!("and_{remaining}_more"));
+    }
+    if items.is_empty() {
+        String::from("-")
+    } else {
+        items.join(",")
     }
 }
 
@@ -3100,8 +3172,10 @@ mod tests {
     };
     use probe_protocol::session::{
         BackendTurnReceipt, CacheSignal, SessionAttachTransport, SessionControllerLease,
-        SessionRuntimeOwner, SessionRuntimeOwnerKind, SessionTurn, TranscriptItem, TurnId,
-        TurnObservability, UsageMeasurement, UsageTruth,
+        SessionRuntimeOwner, SessionRuntimeOwnerKind, SessionTurn, TaskFinalReceipt,
+        TaskReceiptDisposition, TaskVerificationCommandStatus, TaskVerificationCommandSummary,
+        TaskVerificationStatus, TranscriptItem, TurnId, TurnObservability, UsageMeasurement,
+        UsageTruth,
     };
 
     use super::{
@@ -3193,6 +3267,37 @@ mod tests {
     }
 
     #[test]
+    fn render_task_verification_summary_includes_status_and_commands() {
+        let rendered = super::render_task_verification_summary(&TaskFinalReceipt {
+            disposition: TaskReceiptDisposition::Succeeded,
+            workspace: probe_protocol::session::TaskWorkspaceSummary {
+                task_start_turn_index: 3,
+                status: probe_protocol::session::TaskWorkspaceSummaryStatus::Changed,
+                changed_files: vec![String::from("src/lib.rs")],
+                touched_but_unchanged_files: Vec::new(),
+                preexisting_dirty_files: Vec::new(),
+                outside_tracking_dirty_files: Vec::new(),
+                repo_root: None,
+                change_accounting_limited: false,
+                summary_text: String::from("This task changed 1 file(s): src/lib.rs."),
+            },
+            verification_status: TaskVerificationStatus::Passed,
+            verification_commands: vec![TaskVerificationCommandSummary {
+                command: String::from("cargo test -p probe-tui"),
+                status: TaskVerificationCommandStatus::Passed,
+                exit_code: Some(0),
+                truncated_output: false,
+            }],
+            uncertainty_reasons: Vec::new(),
+            summary_text: String::from(
+                "This task changed 1 file(s): src/lib.rs. Validation passed: cargo test -p probe-tui (passed).",
+            ),
+        });
+
+        assert_eq!(rendered, "passed cargo_test_-p_probe-tui(passed)");
+    }
+
+    #[test]
     fn resolve_server_config_does_not_wait_for_attach_mode_tui_startup() {
         let probe_home = tempdir().expect("temp probe home");
         let start = Instant::now();
@@ -3273,10 +3378,7 @@ mod tests {
                 assert_eq!(iap.remote_port, 7777);
                 assert_eq!(iap.local_host, "127.0.0.1");
                 assert_eq!(iap.local_port, Some(17777));
-                assert_eq!(
-                    iap.gcloud_binary,
-                    Some(PathBuf::from("/tmp/fake-gcloud"))
-                );
+                assert_eq!(iap.gcloud_binary, Some(PathBuf::from("/tmp/fake-gcloud")));
             }
             other => panic!("expected hosted gcp iap transport, got {other:?}"),
         }

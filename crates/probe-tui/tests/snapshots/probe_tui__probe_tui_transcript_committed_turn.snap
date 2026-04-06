@@ -1,23 +1,22 @@
 ---
 source: crates/probe-tui/tests/probe_tui.rs
-assertion_line: 363
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  Codex │ Qwen │ Apple FM                                                     │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌─ Transcript ─────────────────────────────────────────────────────────────────┐
-│   result: read README.md:1-3                                                 │
-│   turn: 2                                                                    │
-│   policy: auto_allow                                                         │
-│   risk: read_only                                                            │
-│   approval: not_required                                                     │
-│                                                                              │
-│ [assistant] Probe                                                            │
-│   Probe owns the coding-agent runtime: sessions, transcripts, tools,         │
-│ approvals, and CLI/TUI surfaces.                                             │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌─ Transcript ──────────────────────────────────────┐ ┌─ Session ──────────────┐
+│ [user] You                                        │ │ activity: ready        │
+│   Summarize what Probe owns.                      │ │ next: Ask for the next │
+│                                                   │ │ change or a follow-up  │
+│ [assistant] Probe                                 │ │ lane: Qwen             │
+│   Probe owns the coding-agent runtime: sessions,  │ │ target: 127.0.0.1:8080 │
+│ transcripts, tools, approvals, and CLI/TUI        │ │ transport:             │
+│ surfaces.                                         │ │ loopback/ssh           │
+│   This reply came back through the persisted      │ │ cwd:                   │
+│ runtime session.                                  │ │ /tmp/probe-workspace   │
+└───────────────────────────────────────────────────┘ └────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ status: committed assistant row | backend: openai_chat_completions | target: │

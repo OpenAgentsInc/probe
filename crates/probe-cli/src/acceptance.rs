@@ -13,9 +13,8 @@ use probe_core::runtime::{
 use probe_core::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig};
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_protocol::session::{
-    BackendTurnReceipt, CacheSignal, SessionMetadata, ToolApprovalResolution,
-    ToolPolicyDecision, TranscriptEvent, TranscriptItemKind, TurnObservability,
-    UsageMeasurement,
+    BackendTurnReceipt, CacheSignal, SessionMetadata, ToolApprovalResolution, ToolPolicyDecision,
+    TranscriptEvent, TranscriptItemKind, TurnObservability, UsageMeasurement,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1032,11 +1031,11 @@ fn run_case_approval_pause_then_resume(
                     .map_err(AcceptanceExecutionError::Runtime)?
                 {
                     ResolvePendingToolApprovalOutcome::Resumed { outcome } => Ok(outcome),
-                    ResolvePendingToolApprovalOutcome::StillPending { .. } => Err(
-                        AcceptanceExecutionError::Setup(String::from(
+                    ResolvePendingToolApprovalOutcome::StillPending { .. } => {
+                        Err(AcceptanceExecutionError::Setup(String::from(
                             "approval remained pending after approval resolution",
-                        )),
-                    ),
+                        )))
+                    }
                 },
                 Err(other) => Err(other),
                 Ok(_) => Err(AcceptanceExecutionError::Setup(String::from(
@@ -1067,7 +1066,8 @@ fn run_case_backend_failure_is_honest(
         "backend_failure_is_honest",
         |runtime, profile, workspace, title| {
             let mut failing_profile = profile.clone();
-            failing_profile.base_url = format!("{}/missing", profile.base_url.trim_end_matches('/'));
+            failing_profile.base_url =
+                format!("{}/missing", profile.base_url.trim_end_matches('/'));
             runtime
                 .exec_plain_text(PlainTextExecRequest {
                     profile: failing_profile,
@@ -1171,7 +1171,9 @@ fn run_matrix_scenario_attempt(
 ) -> AcceptanceAttemptReport {
     let title = format!("matrix-{scenario}-{}", attempt_index + 1);
     let workspace = prepare_acceptance_workspace(probe_home, scenario, attempt_index)
-        .unwrap_or_else(|error| panic!("failed to prepare matrix workspace for {scenario}: {error}"));
+        .unwrap_or_else(|error| {
+            panic!("failed to prepare matrix workspace for {scenario}: {error}")
+        });
     let outcome = match scenario {
         "read_file_answer" => execute_coding_case_with_harness(
             runtime,
@@ -1270,8 +1272,7 @@ fn validate_matrix_scenario(
                 return false;
             };
             let events = load_transcript_events(transcript_path.as_path());
-            attempt.assistant_text.as_deref() == Some("SELF_TEST_TURN_TWO.")
-                && events.len() == 2
+            attempt.assistant_text.as_deref() == Some("SELF_TEST_TURN_TWO.") && events.len() == 2
         }
         _ => false,
     }
@@ -1284,7 +1285,10 @@ fn build_matrix_cell_report(
     scenario: &str,
     repetitions: Vec<AcceptanceAttemptReport>,
 ) -> AcceptanceMatrixCellReport {
-    let worst_repetition_index = repetitions.iter().position(|attempt| !attempt.passed).unwrap_or(0);
+    let worst_repetition_index = repetitions
+        .iter()
+        .position(|attempt| !attempt.passed)
+        .unwrap_or(0);
     let worst = repetitions
         .get(worst_repetition_index)
         .cloned()
@@ -1395,13 +1399,17 @@ fn execute_eventful_case_with_harness(
         )
         .map_err(AcceptanceExecutionError::Runtime)?;
     let captured = events.lock().expect("matrix event collection lock");
-    if !captured
-        .iter()
-        .any(|event| matches!(event, probe_core::runtime::RuntimeEvent::ModelRequestStarted { .. }))
-        || !captured.iter().any(
-            |event| matches!(event, probe_core::runtime::RuntimeEvent::AssistantTurnCommitted { .. }),
+    if !captured.iter().any(|event| {
+        matches!(
+            event,
+            probe_core::runtime::RuntimeEvent::ModelRequestStarted { .. }
         )
-    {
+    }) || !captured.iter().any(|event| {
+        matches!(
+            event,
+            probe_core::runtime::RuntimeEvent::AssistantTurnCommitted { .. }
+        )
+    }) {
         return Err(AcceptanceExecutionError::Setup(String::from(
             "streaming stability scenario did not emit the required runtime lifecycle events",
         )));
@@ -1995,12 +2003,10 @@ mod tests {
 
     use super::{
         AcceptanceComparisonBackendCaseStatus, AcceptanceComparisonConfig,
-        AcceptanceMatrixConfig,
-        AcceptanceComparisonStatus, AcceptanceHarnessConfig, default_comparison_report_path,
-        default_matrix_report_path, default_report_path, default_self_test_report_path,
-        run_acceptance_comparison_for_case_names, run_acceptance_harness,
-        run_acceptance_matrix,
-        run_acceptance_harness_for_case_names,
+        AcceptanceComparisonStatus, AcceptanceHarnessConfig, AcceptanceMatrixConfig,
+        default_comparison_report_path, default_matrix_report_path, default_report_path,
+        default_self_test_report_path, run_acceptance_comparison_for_case_names,
+        run_acceptance_harness, run_acceptance_harness_for_case_names, run_acceptance_matrix,
     };
 
     #[derive(Default)]
@@ -2323,7 +2329,10 @@ mod tests {
         assert_eq!(report.results.len(), 4);
         assert_eq!(report.counts.total_cases, 4);
         assert_eq!(report.counts.passed_cases, 4);
-        assert_eq!(report.results[0].latest_tool_names, vec![String::from("shell")]);
+        assert_eq!(
+            report.results[0].latest_tool_names,
+            vec![String::from("shell")]
+        );
         assert_eq!(
             report.results[1].latest_assistant_text.as_deref(),
             Some("SELF_TEST_TURN_TWO.")

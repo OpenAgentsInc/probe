@@ -244,6 +244,14 @@ fn coding_bootstrap_default_manifest() -> HarnessCandidateManifest {
          - Verify relevant files after editing before claiming success.\n\
          - Keep tool usage bounded and avoid repeating large reads when a narrower read or search would do.\n\
          - If a tool returns truncated output, narrow the next call instead of guessing.\n\
+         - If you made repo edits, do not end with tool activity alone.\n\
+         - If you made repo edits, end with a short plain-English teammate handoff.\n\
+         - In that handoff, mention the edited file path or paths, briefly confirm what you changed, and briefly say how you checked it.\n\
+         - If there is remaining risk, mention it briefly; if not, do not force a risk section.\n\
+         - Prefer natural sentences over headings, checklists, or rigid templates unless the user explicitly asks for that structure.\n\
+         - Keep that edit handoff under 4 lines total.\n\
+         - If you did not edit files or the user is asking for advice, explanation, or general help, answer normally and do not force the edit handoff format.\n\
+         - Do not include raw tool output, JSON, or long code blocks in the final handoff unless the user asks for them.\n\
          - Ground final answers in observed tool output.",
     )
 }
@@ -271,6 +279,14 @@ fn coding_bootstrap_codex_manifest() -> HarnessCandidateManifest {
          - Avoid repeating large reads when a narrower read or search would do.\n\
          - If a tool returns truncated output, narrow the next call instead of guessing.\n\
          - Do not claim edits, test results, or repo facts that you have not actually observed.\n\
+         - If you made repo edits, do not end with tool activity alone.\n\
+         - If you made repo edits, end with a short plain-English teammate handoff.\n\
+         - In that handoff, mention the edited file path or paths, briefly confirm what you changed, and briefly say how you checked it.\n\
+         - If there is remaining risk, mention it briefly; if not, do not force a risk section.\n\
+         - Prefer natural sentences over headings, checklists, or rigid templates unless the user explicitly asks for that structure.\n\
+         - Keep that edit handoff under 4 lines total.\n\
+         - If you did not edit files or the user is asking for advice, explanation, or general help, answer normally and do not force the edit handoff format.\n\
+         - Do not include raw tool output, JSON, or long code blocks in the final handoff unless the user asks for them.\n\
          - Ground final answers in observed tool output.",
     )
 }
@@ -300,6 +316,14 @@ fn coding_bootstrap_patch_guard_manifest() -> HarnessCandidateManifest {
          - Verify relevant files after editing before claiming success.\n\
          - Keep tool usage bounded and avoid repeating large reads when a narrower read or search would do.\n\
          - If a tool returns truncated output, narrow the next call instead of guessing.\n\
+         - If you made repo edits, do not end with tool activity alone.\n\
+         - If you made repo edits, end with a short plain-English teammate handoff.\n\
+         - In that handoff, mention the edited file path or paths, briefly confirm what you changed, and briefly say how you checked it.\n\
+         - If there is remaining risk, mention it briefly; if not, do not force a risk section.\n\
+         - Prefer natural sentences over headings, checklists, or rigid templates unless the user explicitly asks for that structure.\n\
+         - Keep that edit handoff under 4 lines total.\n\
+         - If you did not edit files or the user is asking for advice, explanation, or general help, answer normally and do not force the edit handoff format.\n\
+         - Do not include raw tool output, JSON, or long code blocks in the final handoff unless the user asks for them.\n\
          - Ground final answers in observed tool output.",
     )
 }
@@ -329,6 +353,14 @@ fn coding_bootstrap_verify_first_manifest() -> HarnessCandidateManifest {
          - After every edit, schedule an explicit verification step before finalizing.\n\
          - Keep tool usage bounded and avoid repeating large reads when a narrower read or search would do.\n\
          - If a tool returns truncated output, narrow the next call instead of guessing.\n\
+         - If you made repo edits, do not end with tool activity alone.\n\
+         - If you made repo edits, end with a short plain-English teammate handoff.\n\
+         - In that handoff, mention the edited file path or paths, briefly confirm what you changed, and briefly say how you checked it.\n\
+         - If there is remaining risk, mention it briefly; if not, do not force a risk section.\n\
+         - Prefer natural sentences over headings, checklists, or rigid templates unless the user explicitly asks for that structure.\n\
+         - Keep that edit handoff under 4 lines total.\n\
+         - If you did not edit files or the user is asking for advice, explanation, or general help, answer normally and do not force the edit handoff format.\n\
+         - Do not include raw tool output, JSON, or long code blocks in the final handoff unless the user asks for them.\n\
          - Ground final answers in observed tool output and mention the verification step you ran.",
     )
 }

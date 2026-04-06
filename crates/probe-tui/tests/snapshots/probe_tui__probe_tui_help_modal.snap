@@ -6,14 +6,14 @@ expression: snapshot
 
 
            ┌─ Help ─────────────────────────────────────────────────┐
-           │ Probe Chat Shell Keys                                  │
+           │ Move                                                   │
            │                                                        │
-           │ Tab / Shift+Tab     backend / Codex effort             │
-           │ Enter / Ctrl+J      submit / newline                   │
-           │ Up / Down           draft history recall               │
-           │ Mouse wheel / PgUp  scroll active panel                │
-           │ PgDn                scroll back toward latest          │
-           │ Ctrl+O              add attachment placeholder         │
+           │ Tab / Shift+Tab   lanes / Codex effort                 │
+           │ PgUp / PgDn       scroll transcript                    │
+           │ Up / Down         draft history                        │
+           │                                                        │
+           │ Act                                                    │
+           │                                                        │
            └────────────────────────────────────────────────────────┘
 
 
@@ -24,5 +24,5 @@ expression: snapshot
 └──────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ Composer (disabled) ────────────────────────────────────────────────────────┐
-│ Composer disabled while help owns focus. Esc or F1 returns to chat.          │
+│ Help owns focus. Esc closes it.                                              │
 └──────────────────────────────────────────────────────────────────────────────┘

@@ -6,11 +6,85 @@ use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 
 use crate::event::UiEvent;
 
-const PLACEHOLDER: &str =
-    "Type a Probe message. Enter submits. Ctrl+J inserts a newline.";
+const PLACEHOLDER: &str = "Type a Probe message. Enter submits. Ctrl+J inserts a newline.";
 const MAX_VISIBLE_COMPOSER_LINES: usize = 4;
 const MAX_HISTORY_ENTRIES: usize = 24;
 const ATTACHMENT_LIBRARY: [&str; 3] = ["README.md", "Cargo.toml", "docs/README.md"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SlashCommandSpec {
+    name: &'static str,
+    description: &'static str,
+    submit_on_select: bool,
+}
+
+const SLASH_COMMANDS: [SlashCommandSpec; 13] = [
+    SlashCommandSpec {
+        name: "help",
+        description: "Show keyboard help and shortcuts",
+        submit_on_select: true,
+    },
+    SlashCommandSpec {
+        name: "backend",
+        description: "Inspect or switch the active backend lane",
+        submit_on_select: true,
+    },
+    SlashCommandSpec {
+        name: "model",
+        description: "Choose the model for the active backend",
+        submit_on_select: true,
+    },
+    SlashCommandSpec {
+        name: "mcp",
+        description: "Inspect integrations and MCP status",
+        submit_on_select: true,
+    },
+    SlashCommandSpec {
+        name: "reasoning",
+        description: "Adjust Codex reasoning effort",
+        submit_on_select: true,
+    },
+    SlashCommandSpec {
+        name: "plan",
+        description: "Toggle plan mode for the active lane",
+        submit_on_select: true,
+    },
+    SlashCommandSpec {
+        name: "cwd",
+        description: "Inspect or change the current workspace",
+        submit_on_select: true,
+    },
+    SlashCommandSpec {
+        name: "approvals",
+        description: "Review pending approval requests",
+        submit_on_select: true,
+    },
+    SlashCommandSpec {
+        name: "new",
+        description: "Start a fresh task or session",
+        submit_on_select: true,
+    },
+    SlashCommandSpec {
+        name: "clear",
+        description: "Start a fresh context on the active lane",
+        submit_on_select: true,
+    },
+    SlashCommandSpec {
+        name: "compact",
+        description: "Carry forward a compact summary",
+        submit_on_select: true,
+    },
+    SlashCommandSpec {
+        name: "usage",
+        description: "Inspect token usage for this lane",
+        submit_on_select: true,
+    },
+    SlashCommandSpec {
+        name: "resume",
+        description: "Resume a previous Probe session",
+        submit_on_select: true,
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BottomPaneState {
@@ -91,6 +165,7 @@ struct ComposerState {
     cursor: usize,
     attachments: Vec<DraftAttachment>,
     pasted_multiline: bool,
+    slash_selection: usize,
     history: Vec<DraftSnapshot>,
     history_index: Option<usize>,
     stashed_snapshot: Option<DraftSnapshot>,
@@ -101,6 +176,7 @@ impl ComposerState {
         self.prepare_for_edit();
         self.text.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
+        self.clamp_slash_selection();
     }
 
     fn insert_text(&mut self, value: &str) {
@@ -110,12 +186,14 @@ impl ComposerState {
         if value.contains('\n') || value.chars().count() > 24 {
             self.pasted_multiline = true;
         }
+        self.clamp_slash_selection();
     }
 
     fn insert_newline(&mut self) {
         self.prepare_for_edit();
         self.text.insert(self.cursor, '\n');
         self.cursor += 1;
+        self.clamp_slash_selection();
     }
 
     fn backspace(&mut self) {
@@ -124,6 +202,7 @@ impl ComposerState {
             self.text.replace_range(start..end, "");
             self.cursor = start;
         }
+        self.clamp_slash_selection();
     }
 
     fn delete(&mut self) {
@@ -131,6 +210,7 @@ impl ComposerState {
         if let Some((start, end)) = next_grapheme_bounds(self.text.as_str(), self.cursor) {
             self.text.replace_range(start..end, "");
         }
+        self.clamp_slash_selection();
     }
 
     fn move_left(&mut self) {
@@ -160,6 +240,7 @@ impl ComposerState {
             label: label.to_string(),
             source: String::from("local-placeholder"),
         });
+        self.clamp_slash_selection();
     }
 
     fn recall_previous(&mut self) {
@@ -230,6 +311,7 @@ impl ComposerState {
         self.cursor = 0;
         self.attachments.clear();
         self.pasted_multiline = false;
+        self.slash_selection = 0;
         self.history_index = None;
         self.stashed_snapshot = None;
     }
@@ -254,6 +336,7 @@ impl ComposerState {
         self.cursor = self.text.len();
         self.attachments = snapshot.attachments;
         self.pasted_multiline = snapshot.pasted_multiline;
+        self.clamp_slash_selection();
     }
 
     fn metadata_line(&self) -> String {
@@ -264,7 +347,10 @@ impl ComposerState {
 
         let mentions = parse_mentions(self.text.as_str());
         if !mentions.is_empty() {
-            parts.push(format!("mentions: {}", render_mentions(mentions.as_slice())));
+            parts.push(format!(
+                "mentions: {}",
+                render_mentions(mentions.as_slice())
+            ));
         }
         if !self.attachments.is_empty() {
             parts.push(format!(
@@ -284,6 +370,95 @@ impl ComposerState {
         }
 
         parts.join(" | ")
+    }
+
+    fn slash_palette(&self) -> Option<Vec<SlashCommandSpec>> {
+        let query = slash_command_query(self.text.as_str())?;
+        let mut matches = SLASH_COMMANDS
+            .iter()
+            .copied()
+            .filter(|command| command.name.starts_with(query))
+            .collect::<Vec<_>>();
+        if matches.is_empty() && !query.is_empty() {
+            matches = SLASH_COMMANDS
+                .iter()
+                .copied()
+                .filter(|command| command.name.contains(query))
+                .collect::<Vec<_>>();
+        }
+        (!matches.is_empty()).then_some(matches)
+    }
+
+    fn clamp_slash_selection(&mut self) {
+        if let Some(commands) = self.slash_palette() {
+            self.slash_selection = self.slash_selection.min(commands.len().saturating_sub(1));
+        } else {
+            self.slash_selection = 0;
+        }
+    }
+
+    fn select_previous_slash_command(&mut self) -> bool {
+        let Some(commands) = self.slash_palette() else {
+            return false;
+        };
+        if self.slash_selection == 0 {
+            self.slash_selection = commands.len().saturating_sub(1);
+        } else {
+            self.slash_selection = self.slash_selection.saturating_sub(1);
+        }
+        true
+    }
+
+    fn select_next_slash_command(&mut self) -> bool {
+        let Some(commands) = self.slash_palette() else {
+            return false;
+        };
+        self.slash_selection = (self.slash_selection + 1) % commands.len();
+        true
+    }
+
+    fn complete_selected_slash_command(&mut self) -> bool {
+        let Some(commands) = self.slash_palette() else {
+            return false;
+        };
+        let Some(selected) = commands.get(self.slash_selection).copied() else {
+            return false;
+        };
+        self.text = format!("/{} ", selected.name);
+        self.cursor = self.text.len();
+        self.clamp_slash_selection();
+        true
+    }
+
+    fn submit_selected_slash_command(&mut self) -> Option<ComposerSubmission> {
+        let commands = self.slash_palette()?;
+        let selected = commands.get(self.slash_selection).copied()?;
+        if !selected.submit_on_select {
+            return None;
+        }
+
+        let submission = ComposerSubmission {
+            text: format!("/{}", selected.name),
+            slash_command: Some(selected.name.to_string()),
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+            pasted_multiline: false,
+        };
+        let snapshot = DraftSnapshot {
+            text: submission.text.clone(),
+            attachments: Vec::new(),
+            pasted_multiline: false,
+        };
+        self.history.push(snapshot);
+        while self.history.len() > MAX_HISTORY_ENTRIES {
+            self.history.remove(0);
+        }
+        self.clear();
+        Some(submission)
+    }
+
+    fn visible_slash_palette(&self) -> Vec<SlashCommandSpec> {
+        self.slash_palette().unwrap_or_default()
     }
 
     fn visible_lines(&self) -> Vec<String> {
@@ -339,7 +514,8 @@ impl BottomPane {
         let content_lines = if state.helper_copy().is_some() {
             1u16
         } else {
-            1 + self.composer.line_count().min(MAX_VISIBLE_COMPOSER_LINES) as u16
+            1 + self.composer.visible_slash_palette().len() as u16
+                + self.composer.line_count().min(MAX_VISIBLE_COMPOSER_LINES) as u16
         };
         3 + 1 + content_lines + 2
     }
@@ -383,11 +559,15 @@ impl BottomPane {
                 None
             }
             UiEvent::ComposerHistoryPrevious => {
-                self.composer.recall_previous();
+                if !self.composer.select_previous_slash_command() {
+                    self.composer.recall_previous();
+                }
                 None
             }
             UiEvent::ComposerHistoryNext => {
-                self.composer.recall_next();
+                if !self.composer.select_next_slash_command() {
+                    self.composer.recall_next();
+                }
                 None
             }
             UiEvent::ComposerAddAttachment => {
@@ -402,18 +582,20 @@ impl BottomPane {
                 self.composer.insert_newline();
                 None
             }
-            UiEvent::ComposerSubmit => self.composer.submit(),
+            UiEvent::ComposerSubmit => {
+                if let Some(submission) = self.composer.submit_selected_slash_command() {
+                    Some(submission)
+                } else if self.composer.complete_selected_slash_command() {
+                    None
+                } else {
+                    self.composer.submit()
+                }
+            }
             _ => None,
         }
     }
 
-    pub fn render(
-        &self,
-        frame: &mut Frame<'_>,
-        area: Rect,
-        status: &str,
-        state: &BottomPaneState,
-    ) {
+    pub fn render(&self, frame: &mut Frame<'_>, area: Rect, status: &str, state: &BottomPaneState) {
         let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
             .spacing(1)
             .split(area);
@@ -454,6 +636,23 @@ impl BottomPane {
                     .fg(Color::Rgb(0xf1, 0xc4, 0x53))
                     .add_modifier(Modifier::DIM),
             )];
+            let slash_commands = self.composer.visible_slash_palette();
+            let selected_index = self.composer.slash_selection;
+            lines.extend(slash_commands.iter().enumerate().map(|(index, command)| {
+                let selected = index == selected_index;
+                let prefix = if selected { ">" } else { " " };
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Rgb(0x73, 0xc2, 0xfb))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Rgb(0x91, 0xae, 0xc4))
+                };
+                Line::styled(
+                    format!("{prefix} /{}  {}", command.name, command.description),
+                    style,
+                )
+            }));
             if self.composer.text.is_empty() {
                 lines.push(Line::styled(
                     PLACEHOLDER,
@@ -485,6 +684,7 @@ impl BottomPane {
             .padding(Padding::horizontal(1))
             .inner(rows[1]);
         let visible_lines = self.composer.visible_lines();
+        let slash_palette_rows = self.composer.visible_slash_palette().len();
         let visible_start_row = self
             .composer
             .line_count()
@@ -493,7 +693,9 @@ impl BottomPane {
         let row = row.saturating_sub(visible_start_row);
         Some((
             composer_inner.x.saturating_add(col as u16),
-            composer_inner.y.saturating_add(1 + row as u16),
+            composer_inner
+                .y
+                .saturating_add(1 + slash_palette_rows as u16 + row as u16),
         ))
     }
 
@@ -517,10 +719,21 @@ fn slash_command(value: &str) -> Option<String> {
     }
 }
 
+fn slash_command_query(value: &str) -> Option<&str> {
+    let trimmed = value.trim_start();
+    let remainder = trimmed.strip_prefix('/')?;
+    if remainder.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(remainder)
+}
+
 fn parse_mentions(value: &str) -> Vec<DraftMention> {
     let mut mentions = Vec::new();
     for token in value.split_whitespace() {
-        let normalized = token.trim_end_matches(|ch: char| !ch.is_alphanumeric() && ch != ':' && ch != '-' && ch != '_');
+        let normalized = token.trim_end_matches(|ch: char| {
+            !ch.is_alphanumeric() && ch != ':' && ch != '-' && ch != '_'
+        });
         if let Some(value) = normalized.strip_prefix("@skill:") {
             if !value.is_empty() {
                 mentions.push(DraftMention {
@@ -605,7 +818,10 @@ mod tests {
         let _ = pane.handle_event(UiEvent::ComposerNewline, &state);
         let _ = pane.handle_event(UiEvent::ComposerInsert('b'), &state);
         let submitted = pane.handle_event(UiEvent::ComposerSubmit, &state);
-        assert_eq!(submitted.as_ref().map(|value| value.text.as_str()), Some("a\nb"));
+        assert_eq!(
+            submitted.as_ref().map(|value| value.text.as_str()),
+            Some("a\nb")
+        );
         assert_eq!(pane.current_text(), "");
     }
 
@@ -650,7 +866,10 @@ mod tests {
             let _ = pane.handle_event(UiEvent::ComposerInsert(ch), &state);
         }
         let _ = pane.handle_event(UiEvent::ComposerAddAttachment, &state);
-        let _ = pane.handle_event(UiEvent::ComposerPaste(String::from("\nalpha\nbeta")), &state);
+        let _ = pane.handle_event(
+            UiEvent::ComposerPaste(String::from("\nalpha\nbeta")),
+            &state,
+        );
         let submitted = pane
             .handle_event(UiEvent::ComposerSubmit, &state)
             .expect("submission should exist");
@@ -659,5 +878,89 @@ mod tests {
         assert_eq!(submitted.mentions.len(), 2);
         assert_eq!(submitted.attachments.len(), 1);
         assert!(submitted.pasted_multiline);
+    }
+
+    #[test]
+    fn slash_palette_navigation_completes_the_selected_command_before_submit() {
+        let mut pane = BottomPane::new();
+        let state = BottomPaneState::Active;
+
+        let _ = pane.handle_event(UiEvent::ComposerInsert('/'), &state);
+        let _ = pane.handle_event(UiEvent::ComposerInsert('r'), &state);
+        let _ = pane.handle_event(UiEvent::ComposerHistoryNext, &state);
+        let submitted = pane
+            .handle_event(UiEvent::ComposerSubmit, &state)
+            .expect("resume should submit immediately");
+
+        assert_eq!(submitted.text, "/resume");
+        assert_eq!(submitted.slash_command.as_deref(), Some("resume"));
+        assert_eq!(pane.current_text(), "");
+    }
+
+    #[test]
+    fn slash_palette_can_submit_immediate_action_commands() {
+        let mut pane = BottomPane::new();
+        let state = BottomPaneState::Active;
+
+        let _ = pane.handle_event(UiEvent::ComposerInsert('/'), &state);
+        let _ = pane.handle_event(UiEvent::ComposerInsert('m'), &state);
+        let submitted = pane
+            .handle_event(UiEvent::ComposerSubmit, &state)
+            .expect("model should submit immediately");
+
+        assert_eq!(submitted.text, "/model");
+        assert_eq!(submitted.slash_command.as_deref(), Some("model"));
+        assert_eq!(pane.current_text(), "");
+    }
+
+    #[test]
+    fn slash_palette_shows_all_available_commands_after_typing_slash() {
+        let mut pane = BottomPane::new();
+        let state = BottomPaneState::Active;
+
+        let _ = pane.handle_event(UiEvent::ComposerInsert('/'), &state);
+
+        let visible = pane.composer.visible_slash_palette();
+        let names = visible
+            .into_iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "help",
+                "backend",
+                "model",
+                "mcp",
+                "reasoning",
+                "plan",
+                "cwd",
+                "approvals",
+                "new",
+                "clear",
+                "compact",
+                "usage",
+                "resume",
+            ]
+        );
+    }
+
+    #[test]
+    fn slash_palette_defers_to_history_when_no_command_list_is_open() {
+        let mut pane = BottomPane::new();
+        let state = BottomPaneState::Active;
+
+        for ch in "first".chars() {
+            let _ = pane.handle_event(UiEvent::ComposerInsert(ch), &state);
+        }
+        let _ = pane.handle_event(UiEvent::ComposerSubmit, &state);
+
+        for ch in "next".chars() {
+            let _ = pane.handle_event(UiEvent::ComposerInsert(ch), &state);
+        }
+        let _ = pane.handle_event(UiEvent::ComposerHistoryPrevious, &state);
+
+        assert_eq!(pane.current_text(), "first");
     }
 }

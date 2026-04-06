@@ -1674,6 +1674,7 @@ dependencies = [
  "probe-test-support",
  "psionic-apple-fm",
  "ratatui",
+ "serde",
  "serde_json",
  "tempfile",
 ]

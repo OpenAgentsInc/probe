@@ -1,23 +1,22 @@
 ---
 source: crates/probe-tui/tests/probe_tui.rs
-assertion_line: 124
 expression: snapshot
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  Codex │ Qwen │ Apple FM                                                     │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌─ Transcript ─────────────────────────────────────────────────────────────────┐
-│ [user] You                                                                   │
-│   Summarize what Probe owns.                                                 │
-│                                                                              │
-│ [tool call] read_file                                                        │
-│   README.md                                                                  │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌─ Working ─────────────────────────────────────────┐ ┌─ Working ──────────────┐
+│ [user] You                                        │ │ activity: planning     │
+│   Summarize what Probe owns.                      │ │ tool call              │
+│                                                   │ │ next: Working now;     │
+│ [tool call] read_file                             │ │ PgUp scrolls without   │
+│   README.md                                       │ │ losing your place      │
+│                                                   │ │ lane: Qwen             │
+│                                                   │ │ target: 127.0.0.1:8080 │
+│                                                   │ │ transport:             │
+│                                                   │ │ loopback/ssh           │
+└───────────────────────────────────────────────────┘ └────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ status: tool call requested: read_file | backend: openai_chat_completions |  │

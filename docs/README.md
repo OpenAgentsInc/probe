@@ -279,3 +279,19 @@ This folder holds technical planning docs for the Probe runtime.
   - internal GCP IAP attach for hosted Probe sessions, reuse of the detached
     registry as the runtime-owned discovery surface, and CLI hosted attach
     flags for team session inspection
+- `81-coding-agent-phased-execution-plan.md`
+  - tracked phase-by-phase execution plan for making Probe feel like an
+    intuitive day-to-day coding agent in the TUI, including UX principles,
+    exit criteria, and mandatory edge-case coverage
+- `82-slash-command-command-surface-plan.md`
+  - tracked plan for a Claude Code style slash-command surface in Probe,
+    including the composer command palette, local action commands, backend
+    setting flows, and polish phases
+- `83-operator-commands-and-context-controls-plan.md`
+  - tracked plan for standard operator commands in Probe, including `/mcp`,
+    `/plan`, `/clear`, `/compact`, and `/usage`, plus the required context,
+    mode, usage, and integrations semantics behind them
+- `84-mcp-provider-command-onboarding-plan.md`
+  - tracked plan for making MCP onboarding in Probe feel like standard
+    provider-doc workflows, with provider-command-first setup, advanced manual
+    fallback, saved recipes, import adapters, and eventual runtime wiring

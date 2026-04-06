@@ -17,8 +17,8 @@ use probe_protocol::runtime::{
 };
 use probe_protocol::session::{
     SessionDeliveryStatus, SessionId, SessionMountKind, SessionMountProvenance, SessionMountRef,
-    ToolApprovalResolution, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision,
-    ToolRiskClass, TranscriptItemKind,
+    TaskReceiptDisposition, ToolApprovalResolution, ToolApprovalState, ToolExecutionRecord,
+    ToolPolicyDecision, ToolRiskClass, TranscriptItemKind,
 };
 use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
@@ -454,6 +454,7 @@ fn inspect_session_exposes_persisted_summary_artifacts() {
                     truncated: None,
                     bytes_returned: None,
                     files_touched: vec![String::from("src/main.rs")],
+                    files_changed: Vec::new(),
                     reason: None,
                 },
             )],
@@ -637,6 +638,74 @@ fn interrupt_turn_is_explicit_when_session_is_idle() {
     assert!(!interrupt.interrupted);
     assert_eq!(interrupt.reason_code.as_deref(), Some("not_running"));
     harness.shutdown();
+}
+
+#[test]
+fn interrupting_approval_paused_turn_persists_a_stopped_task_receipt() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let fake_backend = approval_pause_then_interrupt_backend(Duration::from_millis(150));
+    let profile = test_profile(fake_backend.base_url());
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let session_id = start_test_session(&mut harness, &environment, &profile);
+
+    harness.send_request(
+        "req-turn-stopped",
+        RuntimeRequest::ContinueTurn(TurnRequest {
+            session_id: session_id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("patch hello.txt"),
+            author: Some(operator_author()),
+            tool_loop: Some(approval_pause_tool_loop()),
+        }),
+    );
+
+    let RuntimeResponse::ContinueTurn(probe_protocol::runtime::TurnResponse::Paused(_)) =
+        expect_ok_response(harness.read_until_response("req-turn-stopped").1)
+    else {
+        panic!("expected paused turn response");
+    };
+
+    let response = harness.request(
+        "req-interrupt-stopped",
+        RuntimeRequest::InterruptTurn(probe_protocol::runtime::InterruptTurnRequest {
+            session_id: session_id.clone(),
+            author: Some(operator_author()),
+        }),
+    );
+    let RuntimeResponse::InterruptTurn(interrupt) = expect_ok_response(response) else {
+        panic!("expected interrupt response");
+    };
+    assert!(interrupt.interrupted);
+
+    let inspect = harness.request(
+        "req-inspect-stopped",
+        RuntimeRequest::InspectSession(SessionLookupRequest {
+            session_id: session_id.clone(),
+        }),
+    );
+    let RuntimeResponse::InspectSession(snapshot) = expect_ok_response(inspect) else {
+        panic!("expected inspect session response");
+    };
+    let receipt = snapshot
+        .session
+        .latest_task_receipt
+        .expect("stopped interrupt should persist a task receipt");
+    assert_eq!(receipt.disposition, TaskReceiptDisposition::Stopped);
+    assert!(
+        receipt
+            .summary_text
+            .contains("Task was stopped before repo changes landed.")
+    );
+    assert!(
+        receipt
+            .summary_text
+            .contains("No validation command completed before the task was stopped.")
+    );
+
+    harness.shutdown();
+    let requests = fake_backend.finish();
+    assert_eq!(requests.len(), 1);
 }
 
 #[test]

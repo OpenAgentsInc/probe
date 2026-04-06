@@ -3,7 +3,11 @@ use std::path::PathBuf;
 use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_core::tools::ToolLoopConfig;
 use probe_protocol::backend::{BackendKind, BackendProfile};
-use probe_protocol::session::{PendingToolApproval, SessionHarnessProfile, ToolApprovalResolution};
+use probe_protocol::runtime::RuntimeActivity;
+use probe_protocol::session::{
+    PendingToolApproval, SessionHarnessProfile, TaskFinalReceipt, TaskWorkspaceSummary,
+    ToolApprovalResolution,
+};
 
 use crate::transcript::{ActiveTurn, TranscriptEntry};
 
@@ -97,6 +101,24 @@ pub struct ProbeRuntimeTurnConfig {
     pub system_prompt: Option<String>,
     pub harness_profile: Option<SessionHarnessProfile>,
     pub tool_loop: Option<ToolLoopConfig>,
+    pub session_generation: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UsageCountsSummary {
+    pub prompt_tokens: Option<u64>,
+    pub prompt_truth: Option<String>,
+    pub completion_tokens: Option<u64>,
+    pub completion_truth: Option<String>,
+    pub total_tokens: Option<u64>,
+    pub total_truth: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionUsageSummary {
+    pub latest_turn: Option<UsageCountsSummary>,
+    pub aggregate: UsageCountsSummary,
+    pub turns_with_usage: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +235,14 @@ pub enum AppMessage {
         profile_name: String,
         model_id: String,
         cwd: String,
+        runtime_activity: Option<RuntimeActivity>,
+        latest_task_workspace_summary: Option<TaskWorkspaceSummary>,
+        latest_task_receipt: Option<TaskFinalReceipt>,
+        recovery_note: Option<String>,
+    },
+    SessionUsageUpdated {
+        session_id: String,
+        usage: SessionUsageSummary,
     },
     ProbeRuntimeEvent {
         event: RuntimeEvent,
