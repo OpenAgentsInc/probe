@@ -18,8 +18,12 @@ use probe_core::tools::{ExecutedToolCall, ProbeToolChoice, ToolDeniedAction, Too
 use probe_protocol::runtime::{
     AttachSessionParticipantRequest, AttachSessionParticipantResponse, CancelQueuedTurnRequest,
     CancelQueuedTurnResponse, ClientMessage, DetachedSessionEventRecord, DetachedSessionSummary,
-    EventEnvelope, InitializeRequest, InspectDetachedSessionResponse, InspectSessionTurnsResponse,
-    InterruptTurnResponse, ListDetachedSessionsResponse, ListSessionsResponse, QueueTurnResponse,
+    EventEnvelope, InitializeRequest, InspectDetachedSessionResponse,
+    InspectSessionMeshCoordinationRequest, InspectSessionMeshCoordinationResponse,
+    InspectSessionMeshPluginOffersRequest, InspectSessionMeshPluginOffersResponse,
+    InspectSessionTurnsResponse, InterruptTurnResponse, ListDetachedSessionsResponse,
+    ListSessionsResponse, PostSessionMeshCoordinationRequest, PostSessionMeshCoordinationResponse,
+    PublishSessionMeshPluginOfferRequest, PublishSessionMeshPluginOfferResponse, QueueTurnResponse,
     ReadDetachedSessionLogRequest, ReadDetachedSessionLogResponse, RequestEnvelope,
     ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope, RuntimeProgressEvent,
     RuntimeProtocolError, RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage,
@@ -519,6 +523,66 @@ impl ProbeClient {
         }
     }
 
+    pub fn inspect_session_mesh_coordination(
+        &mut self,
+        request: InspectSessionMeshCoordinationRequest,
+    ) -> Result<InspectSessionMeshCoordinationResponse, ProbeClientError> {
+        match self.send_request(
+            RuntimeRequest::InspectSessionMeshCoordination(request),
+            None,
+        )? {
+            RuntimeResponse::InspectSessionMeshCoordination(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected inspect_session_mesh_coordination response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub fn post_session_mesh_coordination(
+        &mut self,
+        mut request: PostSessionMeshCoordinationRequest,
+    ) -> Result<PostSessionMeshCoordinationResponse, ProbeClientError> {
+        if request.author.is_none() {
+            request.author = Some(self.coordination_author());
+        }
+        match self.send_request(RuntimeRequest::PostSessionMeshCoordination(request), None)? {
+            RuntimeResponse::PostSessionMeshCoordination(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected post_session_mesh_coordination response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub fn inspect_session_mesh_plugin_offers(
+        &mut self,
+        request: InspectSessionMeshPluginOffersRequest,
+    ) -> Result<InspectSessionMeshPluginOffersResponse, ProbeClientError> {
+        match self.send_request(
+            RuntimeRequest::InspectSessionMeshPluginOffers(request),
+            None,
+        )? {
+            RuntimeResponse::InspectSessionMeshPluginOffers(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected inspect_session_mesh_plugin_offers response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub fn publish_session_mesh_plugin_offer(
+        &mut self,
+        mut request: PublishSessionMeshPluginOfferRequest,
+    ) -> Result<PublishSessionMeshPluginOfferResponse, ProbeClientError> {
+        if request.author.is_none() {
+            request.author = Some(self.coordination_author());
+        }
+        match self.send_request(RuntimeRequest::PublishSessionMeshPluginOffer(request), None)? {
+            RuntimeResponse::PublishSessionMeshPluginOffer(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected publish_session_mesh_plugin_offer response, got {other:?}"
+            ))),
+        }
+    }
+
     pub fn read_detached_session_log(
         &mut self,
         session_id: &SessionId,
@@ -719,6 +783,13 @@ impl ProbeClient {
             display_name: self.display_name.clone(),
             participant_id: self.participant_id.clone(),
         }
+    }
+
+    fn coordination_author(&self) -> String {
+        self.display_name
+            .clone()
+            .or_else(|| self.participant_id.clone())
+            .unwrap_or_else(|| self.client_name.clone())
     }
 
     pub fn attach_session_participant(
@@ -2971,6 +3042,8 @@ PY
             timeout_secs: 30,
             attach_mode: ServerAttachMode::AttachToExisting,
             prefix_cache_mode: PrefixCacheMode::BackendDefault,
+            control_plane: None,
+            psionic_mesh: None,
         }
     }
 }

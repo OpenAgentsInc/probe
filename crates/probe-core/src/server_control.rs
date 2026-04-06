@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::net::IpAddr;
@@ -6,14 +7,18 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use probe_protocol::backend::{BackendKind, BackendProfile};
+use probe_protocol::backend::{
+    BackendControlPlaneKind, BackendKind, BackendProfile, PsionicMeshAttachInfo,
+    PsionicMeshTargetableModel,
+};
 use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig};
 use psionic_apple_fm::AppleFmSystemLanguageModelAvailability;
 use serde::{Deserialize, Serialize};
 
 use crate::backend_profiles::{
-    OPENAI_CODEX_SUBSCRIPTION_MODEL, PSIONIC_APPLE_FM_MODEL, PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL,
-    persisted_reasoning_level_for_backend, resolved_reasoning_level_for_backend,
+    OPENAI_CODEX_SUBSCRIPTION_MODEL, PSIONIC_APPLE_FM_MODEL, PSIONIC_INFERENCE_MESH_DEFAULT_MODEL,
+    PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL, persisted_reasoning_level_for_backend,
+    resolved_reasoning_level_for_backend,
 };
 
 const DEFAULT_SERVER_CONFIG_PATH: &str = "server/psionic-local.json";
@@ -26,6 +31,7 @@ const DEFAULT_OPENAI_SERVER_PORT: u16 = 8080;
 const DEFAULT_CODEX_SERVER_PORT: u16 = 443;
 const DEFAULT_APPLE_FM_SERVER_PORT: u16 = 11435;
 const DEFAULT_SERVER_BACKEND: &str = "cpu";
+const OPENAI_COMPAT_LOCAL_WORKER_ID: &str = "openai_compat";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,6 +54,8 @@ pub struct PsionicServerConfig {
     pub reasoning_budget: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane: Option<BackendControlPlaneKind>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,6 +76,8 @@ pub struct ServerOperatorSummary {
     pub base_url: String,
     pub model_id: Option<String>,
     pub reasoning_level: Option<String>,
+    pub control_plane: Option<BackendControlPlaneKind>,
+    pub psionic_mesh: Option<PsionicMeshAttachInfo>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -87,12 +97,23 @@ pub enum ServerControlError {
     Io(std::io::Error),
     Json(serde_json::Error),
     InvalidBackend(String),
-    UnsupportedManagedLaunch { backend: BackendKind },
+    UnsupportedManagedLaunch {
+        backend: BackendKind,
+    },
+    UnsupportedManagedLaunchControlPlane {
+        control_plane: BackendControlPlaneKind,
+    },
     MissingBinaryPath,
     MissingModelPath,
     SpawnFailed(String),
-    ReadinessTimeout { base_url: String, timeout_secs: u64 },
-    BackendUnavailable { base_url: String, detail: String },
+    ReadinessTimeout {
+        base_url: String,
+        timeout_secs: u64,
+    },
+    BackendUnavailable {
+        base_url: String,
+        detail: String,
+    },
     Http(String),
 }
 
@@ -108,6 +129,11 @@ impl Display for ServerControlError {
                 f,
                 "managed launch is not supported for backend {:?}; attach to an already-running bridge instead",
                 backend
+            ),
+            Self::UnsupportedManagedLaunchControlPlane { control_plane } => write!(
+                f,
+                "managed launch is not supported for control plane {:?}; attach to an existing Psionic mesh instead",
+                control_plane
             ),
             Self::MissingBinaryPath => write!(
                 f,
@@ -152,6 +178,47 @@ impl From<serde_json::Error> for ServerControlError {
 pub struct ServerProcessGuard {
     config: PsionicServerConfig,
     child: Option<Child>,
+    operator_summary: ServerOperatorSummary,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PsionicMeshManagementStatusResponse {
+    topology_digest: String,
+    default_model: String,
+    nodes: Vec<PsionicMeshManagementNodeStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PsionicMeshManagementNodeStatus {
+    worker_id: String,
+    served_mesh_role: PsionicMeshManagementRoleState,
+    execution_mode_label: String,
+    execution_engine_label: String,
+    models: Vec<PsionicMeshManagementModelStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PsionicMeshManagementRoleState {
+    role: String,
+    posture: String,
+    #[serde(default)]
+    reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PsionicMeshManagementModelStatus {
+    canonical_name: String,
+    family: String,
+    supported_endpoints: Vec<String>,
+    warm_state: String,
+    structured_outputs: bool,
+    tool_calling: bool,
+    response_state: bool,
+}
+
+enum PsionicMeshDiscoveryError {
+    Retryable(String),
+    Fatal(ServerControlError),
 }
 
 impl Drop for ServerProcessGuard {
@@ -176,6 +243,7 @@ impl Default for PsionicServerConfig {
             model_id: Some(String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL)),
             reasoning_budget: None,
             reasoning_level: None,
+            control_plane: None,
         }
     }
 }
@@ -195,6 +263,7 @@ impl PsionicServerConfig {
             model_id: Some(profile.model.clone()),
             reasoning_budget: None,
             reasoning_level: profile.reasoning_level.clone(),
+            control_plane: profile.control_plane,
         };
         config.set_api_kind(profile.kind);
         config.model_id = Some(profile.model.clone());
@@ -242,7 +311,7 @@ impl PsionicServerConfig {
                         .map(|name| name.to_string_lossy().to_string())
                 })
             })
-            .or_else(|| default_model_id_for(self.api_kind))
+            .or_else(|| default_model_id_for(self.api_kind, self.control_plane))
     }
 
     pub fn set_api_kind(&mut self, api_kind: BackendKind) {
@@ -253,7 +322,7 @@ impl PsionicServerConfig {
 
         let previous_default_port = default_port_for(self.api_kind);
         let previous_default_host = default_host_for(self.api_kind);
-        let previous_default_model = default_model_id_for(self.api_kind);
+        let previous_default_model = default_model_id_for(self.api_kind, self.control_plane);
         if self.host == previous_default_host {
             self.host = String::from(default_host_for(api_kind));
         }
@@ -261,20 +330,22 @@ impl PsionicServerConfig {
             self.port = default_port_for(api_kind);
         }
         if self.model_id.is_none() || self.model_id == previous_default_model {
-            self.model_id = default_model_id_for(api_kind);
+            self.model_id = default_model_id_for(api_kind, self.control_plane);
         }
         self.api_kind = api_kind;
         self.ensure_kind_defaults();
     }
 
     fn ensure_kind_defaults(&mut self) {
+        if self.api_kind != BackendKind::OpenAiChatCompletions {
+            self.control_plane = None;
+        }
         if self.model_id.is_none()
-            || self
-                .model_id
-                .as_deref()
-                .is_some_and(|model_id| is_legacy_default_model(self.api_kind, model_id))
+            || self.model_id.as_deref().is_some_and(|model_id| {
+                is_legacy_default_model(self.api_kind, self.control_plane, model_id)
+            })
         {
-            self.model_id = default_model_id_for(self.api_kind);
+            self.model_id = default_model_id_for(self.api_kind, self.control_plane);
         }
         self.reasoning_level =
             persisted_reasoning_level_for_backend(self.api_kind, self.reasoning_level.as_deref());
@@ -282,6 +353,14 @@ impl PsionicServerConfig {
 
     #[must_use]
     pub fn operator_summary(&self) -> ServerOperatorSummary {
+        self.operator_summary_with(None, self.resolved_model_id())
+    }
+
+    fn operator_summary_with(
+        &self,
+        psionic_mesh: Option<PsionicMeshAttachInfo>,
+        model_id: Option<String>,
+    ) -> ServerOperatorSummary {
         ServerOperatorSummary {
             backend_kind: self.api_kind,
             mode: self.mode.clone(),
@@ -289,12 +368,14 @@ impl PsionicServerConfig {
             host: self.host.clone(),
             port: self.port,
             base_url: self.base_url(),
-            model_id: self.resolved_model_id(),
+            model_id,
             reasoning_level: resolved_reasoning_level_for_backend(
                 self.api_kind,
                 self.reasoning_level.as_deref(),
             )
             .map(str::to_string),
+            control_plane: self.control_plane,
+            psionic_mesh,
         }
     }
 
@@ -374,13 +455,19 @@ impl PsionicServerConfig {
     ) -> Result<ServerProcessGuard, ServerControlError> {
         match self.mode {
             PsionicServerMode::Attach => {
-                wait_for_ready(self, startup_timeout)?;
+                let operator_summary = wait_for_ready(self, startup_timeout)?;
                 Ok(ServerProcessGuard {
                     config: self.clone(),
                     child: None,
+                    operator_summary,
                 })
             }
             PsionicServerMode::Launch => {
+                if let Some(control_plane) = self.control_plane {
+                    return Err(ServerControlError::UnsupportedManagedLaunchControlPlane {
+                        control_plane,
+                    });
+                }
                 if self.api_kind != BackendKind::OpenAiChatCompletions {
                     return Err(ServerControlError::UnsupportedManagedLaunch {
                         backend: self.api_kind,
@@ -415,14 +502,18 @@ impl PsionicServerConfig {
                 let mut child = command.spawn().map_err(|error| {
                     ServerControlError::SpawnFailed(format!("failed to launch server: {error}"))
                 })?;
-                if let Err(error) = wait_for_ready(self, startup_timeout) {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(error);
-                }
+                let operator_summary = match wait_for_ready(self, startup_timeout) {
+                    Ok(summary) => summary,
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(error);
+                    }
+                };
                 Ok(ServerProcessGuard {
                     config: self.clone(),
                     child: Some(child),
+                    operator_summary,
                 })
             }
         }
@@ -432,12 +523,12 @@ impl PsionicServerConfig {
 impl ServerProcessGuard {
     #[must_use]
     pub fn base_url(&self) -> String {
-        self.config.base_url()
+        self.operator_summary.base_url.clone()
     }
 
     #[must_use]
     pub fn model_id(&self) -> Option<String> {
-        self.config.resolved_model_id()
+        self.operator_summary.model_id.clone()
     }
 
     #[must_use]
@@ -452,7 +543,7 @@ impl ServerProcessGuard {
 
     #[must_use]
     pub fn operator_summary(&self) -> ServerOperatorSummary {
-        self.config.operator_summary()
+        self.operator_summary.clone()
     }
 }
 
@@ -538,7 +629,14 @@ fn is_tailnet_host(host: &str) -> bool {
 fn wait_for_ready(
     config: &PsionicServerConfig,
     timeout: Duration,
-) -> Result<(), ServerControlError> {
+) -> Result<ServerOperatorSummary, ServerControlError> {
+    if matches!(
+        config.control_plane,
+        Some(BackendControlPlaneKind::PsionicInferenceMesh)
+    ) {
+        return wait_for_psionic_mesh_ready(config, timeout);
+    }
+
     let deadline = Instant::now() + timeout;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(1))
@@ -548,14 +646,16 @@ fn wait_for_ready(
         BackendKind::OpenAiChatCompletions => {
             format!("{}/models", config.base_url().trim_end_matches('/'))
         }
-        BackendKind::OpenAiCodexSubscription => return Ok(()),
+        BackendKind::OpenAiCodexSubscription => return Ok(config.operator_summary()),
         BackendKind::AppleFmBridge => format!("{}/health", config.base_url().trim_end_matches('/')),
     };
 
     loop {
         match config.api_kind {
             BackendKind::OpenAiChatCompletions => match client.get(readiness_url.as_str()).send() {
-                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(response) if response.status().is_success() => {
+                    return Ok(config.operator_summary());
+                }
                 Ok(_) | Err(_) if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(250));
                 }
@@ -579,7 +679,9 @@ fn wait_for_ready(
                 })
                 .map_err(|error| ServerControlError::Http(error.to_string()))?;
                 match apple_client.system_model_availability() {
-                    Ok(availability) if availability.is_ready() => return Ok(()),
+                    Ok(availability) if availability.is_ready() => {
+                        return Ok(config.operator_summary());
+                    }
                     Ok(availability) => {
                         return Err(ServerControlError::BackendUnavailable {
                             base_url: config.base_url(),
@@ -601,6 +703,217 @@ fn wait_for_ready(
     }
 }
 
+fn wait_for_psionic_mesh_ready(
+    config: &PsionicServerConfig,
+    timeout: Duration,
+) -> Result<ServerOperatorSummary, ServerControlError> {
+    let deadline = Instant::now() + timeout;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .map_err(|error| ServerControlError::Http(error.to_string()))?;
+    let management_base_url = psionic_mesh_management_base_url(config);
+    let mut last_retryable_detail = None;
+    loop {
+        match probe_psionic_mesh_once(config, &client) {
+            Ok(summary) => return Ok(summary),
+            Err(PsionicMeshDiscoveryError::Fatal(error)) => return Err(error),
+            Err(PsionicMeshDiscoveryError::Retryable(detail)) if Instant::now() < deadline => {
+                last_retryable_detail = Some(detail);
+                thread::sleep(Duration::from_millis(250));
+            }
+            Err(PsionicMeshDiscoveryError::Retryable(detail)) => {
+                return Err(ServerControlError::BackendUnavailable {
+                    base_url: management_base_url,
+                    detail: last_retryable_detail.unwrap_or(detail),
+                });
+            }
+        }
+    }
+}
+
+fn probe_psionic_mesh_once(
+    config: &PsionicServerConfig,
+    client: &reqwest::blocking::Client,
+) -> Result<ServerOperatorSummary, PsionicMeshDiscoveryError> {
+    let management_base_url = psionic_mesh_management_base_url(config);
+    let management_url = format!("{management_base_url}/psionic/management/status");
+    let response = client
+        .get(management_url.as_str())
+        .send()
+        .map_err(|error| PsionicMeshDiscoveryError::Retryable(error.to_string()))?;
+    let response = response
+        .error_for_status()
+        .map_err(|error| PsionicMeshDiscoveryError::Retryable(error.to_string()))?;
+    let status = response
+        .json::<PsionicMeshManagementStatusResponse>()
+        .map_err(|error| PsionicMeshDiscoveryError::Retryable(error.to_string()))?;
+    let attach_info = psionic_mesh_attach_info(&management_base_url, &status);
+    if attach_info.targetable_models.is_empty() {
+        return Err(PsionicMeshDiscoveryError::Retryable(format!(
+            "mesh management at {} does not advertise any warm targetable models yet{}",
+            management_base_url,
+            attach_info
+                .served_mesh_role
+                .as_deref()
+                .map(|role| format!(
+                    " (role={} posture={} reasons={})",
+                    role,
+                    attach_info
+                        .served_mesh_posture
+                        .as_deref()
+                        .unwrap_or("unknown"),
+                    if attach_info.served_mesh_reasons.is_empty() {
+                        String::from("none")
+                    } else {
+                        attach_info.served_mesh_reasons.join(",")
+                    }
+                ))
+                .unwrap_or_default()
+        )));
+    }
+    let selected_model = resolve_psionic_mesh_model(config, &attach_info)
+        .map_err(PsionicMeshDiscoveryError::Fatal)?;
+    Ok(config.operator_summary_with(Some(attach_info), Some(selected_model)))
+}
+
+fn psionic_mesh_attach_info(
+    management_base_url: &str,
+    status: &PsionicMeshManagementStatusResponse,
+) -> PsionicMeshAttachInfo {
+    let local_node = status
+        .nodes
+        .iter()
+        .find(|node| node.worker_id == OPENAI_COMPAT_LOCAL_WORKER_ID);
+    PsionicMeshAttachInfo {
+        management_base_url: management_base_url.to_string(),
+        topology_digest: status.topology_digest.clone(),
+        default_model: status.default_model.clone(),
+        targetable_models: targetable_psionic_mesh_models(status),
+        local_worker_id: local_node.map(|node| node.worker_id.clone()),
+        served_mesh_role: local_node.map(|node| node.served_mesh_role.role.clone()),
+        served_mesh_posture: local_node.map(|node| node.served_mesh_role.posture.clone()),
+        served_mesh_reasons: local_node
+            .map(|node| node.served_mesh_role.reasons.clone())
+            .unwrap_or_default(),
+        execution_mode: local_node.map(|node| node.execution_mode_label.clone()),
+        execution_engine: local_node.map(|node| node.execution_engine_label.clone()),
+        fallback_posture: local_node.and_then(psionic_mesh_fallback_posture),
+    }
+}
+
+fn targetable_psionic_mesh_models(
+    status: &PsionicMeshManagementStatusResponse,
+) -> Vec<PsionicMeshTargetableModel> {
+    let mut merged = BTreeMap::<String, PsionicMeshTargetableModel>::new();
+    for node in &status.nodes {
+        for model in &node.models {
+            if model.warm_state != "warm" {
+                continue;
+            }
+            let entry = merged
+                .entry(model.canonical_name.clone())
+                .or_insert_with(|| PsionicMeshTargetableModel {
+                    model: model.canonical_name.clone(),
+                    family: model.family.clone(),
+                    supported_endpoints: Vec::new(),
+                    structured_outputs: model.structured_outputs,
+                    tool_calling: model.tool_calling,
+                    response_state: model.response_state,
+                });
+            let mut endpoints = entry
+                .supported_endpoints
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            endpoints.extend(model.supported_endpoints.iter().cloned());
+            entry.supported_endpoints = endpoints.into_iter().collect();
+            entry.structured_outputs |= model.structured_outputs;
+            entry.tool_calling |= model.tool_calling;
+            entry.response_state |= model.response_state;
+        }
+    }
+    merged.into_values().collect()
+}
+
+fn psionic_mesh_fallback_posture(node: &PsionicMeshManagementNodeStatus) -> Option<String> {
+    if node.execution_mode_label != "proxy" {
+        return None;
+    }
+    if node.served_mesh_role.role == "thin_client"
+        && node
+            .served_mesh_role
+            .reasons
+            .iter()
+            .any(|reason| reason == "remote_only")
+    {
+        return Some(String::from("thin_client_remote_only"));
+    }
+    if node
+        .served_mesh_role
+        .reasons
+        .iter()
+        .any(|reason| reason == "warming")
+    {
+        return Some(String::from("warming_until_local_ready"));
+    }
+    None
+}
+
+fn resolve_psionic_mesh_model(
+    config: &PsionicServerConfig,
+    attach_info: &PsionicMeshAttachInfo,
+) -> Result<String, ServerControlError> {
+    let requested_model = config
+        .model_id
+        .as_deref()
+        .filter(|model| *model != PSIONIC_INFERENCE_MESH_DEFAULT_MODEL)
+        .map(str::to_string);
+    if let Some(requested_model) = requested_model {
+        if attach_info
+            .targetable_models
+            .iter()
+            .any(|model| model.model == requested_model)
+        {
+            return Ok(requested_model);
+        }
+        return Err(ServerControlError::BackendUnavailable {
+            base_url: attach_info.management_base_url.clone(),
+            detail: format!(
+                "mesh does not advertise requested model `{}`; targetable_models={}",
+                requested_model,
+                attach_info
+                    .targetable_models
+                    .iter()
+                    .map(|model| model.model.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        });
+    }
+
+    if attach_info
+        .targetable_models
+        .iter()
+        .any(|model| model.model == attach_info.default_model)
+    {
+        return Ok(attach_info.default_model.clone());
+    }
+
+    attach_info
+        .targetable_models
+        .first()
+        .map(|model| model.model.clone())
+        .ok_or_else(|| ServerControlError::BackendUnavailable {
+            base_url: attach_info.management_base_url.clone(),
+            detail: String::from("mesh does not advertise any warm targetable models"),
+        })
+}
+
+fn psionic_mesh_management_base_url(config: &PsionicServerConfig) -> String {
+    config.base_url().trim_end_matches("/v1").to_string()
+}
+
 const fn default_server_api_kind() -> BackendKind {
     BackendKind::OpenAiChatCompletions
 }
@@ -620,20 +933,37 @@ const fn default_port_for(api_kind: BackendKind) -> u16 {
     }
 }
 
-fn default_model_id_for(api_kind: BackendKind) -> Option<String> {
-    match api_kind {
-        BackendKind::OpenAiChatCompletions => {
+fn default_model_id_for(
+    api_kind: BackendKind,
+    control_plane: Option<BackendControlPlaneKind>,
+) -> Option<String> {
+    match (api_kind, control_plane) {
+        (
+            BackendKind::OpenAiChatCompletions,
+            Some(BackendControlPlaneKind::PsionicInferenceMesh),
+        ) => Some(String::from(PSIONIC_INFERENCE_MESH_DEFAULT_MODEL)),
+        (BackendKind::OpenAiChatCompletions, None) => {
             Some(String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL))
         }
-        BackendKind::OpenAiCodexSubscription => Some(String::from(OPENAI_CODEX_SUBSCRIPTION_MODEL)),
-        BackendKind::AppleFmBridge => Some(String::from(PSIONIC_APPLE_FM_MODEL)),
+        (BackendKind::OpenAiCodexSubscription, _) => {
+            Some(String::from(OPENAI_CODEX_SUBSCRIPTION_MODEL))
+        }
+        (BackendKind::AppleFmBridge, _) => Some(String::from(PSIONIC_APPLE_FM_MODEL)),
     }
 }
 
-fn is_legacy_default_model(api_kind: BackendKind, model_id: &str) -> bool {
-    match api_kind {
-        BackendKind::OpenAiCodexSubscription => model_id == "gpt-5.3-codex",
-        BackendKind::OpenAiChatCompletions | BackendKind::AppleFmBridge => false,
+fn is_legacy_default_model(
+    api_kind: BackendKind,
+    control_plane: Option<BackendControlPlaneKind>,
+    model_id: &str,
+) -> bool {
+    match (api_kind, control_plane) {
+        (BackendKind::OpenAiCodexSubscription, _) => model_id == "gpt-5.3-codex",
+        (
+            BackendKind::OpenAiChatCompletions,
+            Some(BackendControlPlaneKind::PsionicInferenceMesh),
+        ) => model_id == PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL,
+        (BackendKind::OpenAiChatCompletions, _) | (BackendKind::AppleFmBridge, _) => false,
     }
 }
 
@@ -660,13 +990,13 @@ mod tests {
     use std::time::Duration;
 
     use probe_protocol::backend::BackendKind;
-    use probe_test_support::{FakeAppleFmServer, FakeHttpResponse};
+    use probe_test_support::{FakeAppleFmServer, FakeHttpResponse, FakeOpenAiServer};
     use serde_json::json;
 
     use super::{
         DEFAULT_APPLE_FM_SERVER_PORT, DEFAULT_CODEX_SERVER_PORT, PSIONIC_APPLE_FM_MODEL,
-        PsionicServerConfig, PsionicServerMode, ServerConfigOverrides, ServerProcessGuard,
-        ServerTargetKind,
+        PSIONIC_INFERENCE_MESH_DEFAULT_MODEL, PsionicServerConfig, PsionicServerMode,
+        ServerConfigOverrides, ServerProcessGuard, ServerTargetKind,
     };
 
     #[test]
@@ -819,6 +1149,7 @@ mod tests {
             model_id: Some(String::from("gpt-5.3-codex")),
             reasoning_budget: None,
             reasoning_level: Some(String::from("invalid")),
+            control_plane: None,
         };
         legacy.save(path.as_path()).expect("save legacy config");
 
@@ -854,6 +1185,7 @@ mod tests {
             model_id: Some(String::from("gpt-5.4")),
             reasoning_budget: None,
             reasoning_level: Some(String::from("xhigh")),
+            control_plane: None,
         };
         config.save(path.as_path()).expect("save codex config");
 
@@ -897,6 +1229,127 @@ mod tests {
             .expect("attach should succeed");
         assert!(matches!(guard.mode(), PsionicServerMode::Attach));
         handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn mesh_attach_mode_discovers_targetable_models_and_proxy_posture() {
+        let server = FakeOpenAiServer::from_responses(vec![FakeHttpResponse::json_ok(json!({
+            "status": "ok",
+            "topology_digest": "mesh-topology-v1",
+            "default_model": "gemma4:e4b",
+            "nodes": [
+                {
+                    "worker_id": "openai_compat",
+                    "served_mesh_role": {
+                        "role": "thin_client",
+                        "posture": "ready",
+                        "reasons": ["remote_only"]
+                    },
+                    "execution_mode_label": "proxy",
+                    "execution_engine_label": "psionic",
+                    "models": []
+                },
+                {
+                    "worker_id": "mesh-peer-gamma",
+                    "served_mesh_role": {
+                        "role": "worker",
+                        "posture": "ready",
+                        "reasons": []
+                    },
+                    "execution_mode_label": "native",
+                    "execution_engine_label": "psionic",
+                    "models": [
+                        {
+                            "canonical_name": "gemma4:e4b",
+                            "family": "gemma4",
+                            "supported_endpoints": ["/v1/chat/completions", "/v1/responses"],
+                            "warm_state": "warm",
+                            "structured_outputs": false,
+                            "tool_calling": true,
+                            "response_state": true
+                        }
+                    ]
+                }
+            ]
+        }))]);
+        let address = server
+            .base_url()
+            .strip_prefix("http://")
+            .expect("base url should start with http://");
+        let address = address.trim_end_matches("/v1");
+        let (host, port) = address.rsplit_once(':').expect("host:port pair");
+        let port = port.parse::<u16>().expect("port should parse");
+
+        let config = PsionicServerConfig {
+            host: host.to_string(),
+            port,
+            model_id: Some(String::from(PSIONIC_INFERENCE_MESH_DEFAULT_MODEL)),
+            control_plane: Some(
+                probe_protocol::backend::BackendControlPlaneKind::PsionicInferenceMesh,
+            ),
+            ..PsionicServerConfig::default()
+        };
+        let guard = config
+            .prepare(Duration::from_secs(2))
+            .expect("mesh attach should succeed");
+        let summary = guard.operator_summary();
+        let mesh = summary.psionic_mesh.expect("mesh metadata");
+        assert_eq!(summary.base_url, server.base_url());
+        assert_eq!(summary.model_id.as_deref(), Some("gemma4:e4b"));
+        assert_eq!(summary.control_plane, config.control_plane);
+        assert_eq!(
+            mesh.management_base_url,
+            server.base_url().trim_end_matches("/v1")
+        );
+        assert_eq!(mesh.topology_digest, "mesh-topology-v1");
+        assert_eq!(mesh.default_model, "gemma4:e4b");
+        assert_eq!(mesh.local_worker_id.as_deref(), Some("openai_compat"));
+        assert_eq!(mesh.served_mesh_role.as_deref(), Some("thin_client"));
+        assert_eq!(mesh.served_mesh_posture.as_deref(), Some("ready"));
+        assert_eq!(mesh.served_mesh_reasons, vec![String::from("remote_only")]);
+        assert_eq!(mesh.execution_mode.as_deref(), Some("proxy"));
+        assert_eq!(mesh.execution_engine.as_deref(), Some("psionic"));
+        assert_eq!(
+            mesh.fallback_posture.as_deref(),
+            Some("thin_client_remote_only")
+        );
+        assert_eq!(mesh.targetable_models.len(), 1);
+        assert_eq!(mesh.targetable_models[0].model, "gemma4:e4b");
+        assert_eq!(mesh.targetable_models[0].family, "gemma4");
+        assert_eq!(
+            mesh.targetable_models[0].supported_endpoints,
+            vec![
+                String::from("/v1/chat/completions"),
+                String::from("/v1/responses")
+            ]
+        );
+        assert!(mesh.targetable_models[0].tool_calling);
+        assert!(mesh.targetable_models[0].response_state);
+        assert!(!mesh.targetable_models[0].structured_outputs);
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("GET /psionic/management/status HTTP/1.1"));
+    }
+
+    #[test]
+    fn mesh_attach_profile_refuses_managed_launch_before_persisting_fake_runtime_semantics() {
+        let config = PsionicServerConfig {
+            mode: PsionicServerMode::Launch,
+            control_plane: Some(
+                probe_protocol::backend::BackendControlPlaneKind::PsionicInferenceMesh,
+            ),
+            ..PsionicServerConfig::default()
+        };
+        let error = config
+            .prepare(Duration::from_millis(10))
+            .expect_err("mesh profile should stay attach only");
+        assert!(
+            error
+                .to_string()
+                .contains("managed launch is not supported for control plane"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -1023,6 +1476,7 @@ cd "$(dirname "$0")" && exec python3 -m http.server "$PORT" --bind "$HOST"
             model_id: Some(String::from("fake.gguf")),
             reasoning_budget: None,
             reasoning_level: None,
+            control_plane: None,
         };
 
         let guard: ServerProcessGuard = config

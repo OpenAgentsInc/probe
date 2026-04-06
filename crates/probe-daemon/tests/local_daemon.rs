@@ -1031,6 +1031,8 @@ fn test_profile(base_url: &str) -> BackendProfile {
         timeout_secs: 30,
         attach_mode: ServerAttachMode::AttachToExisting,
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        control_plane: None,
+        psionic_mesh: None,
     }
 }
 

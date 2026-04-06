@@ -22,7 +22,7 @@ use probe_core::backend_profiles::{
     PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE,
     PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
     named_backend_profile, openai_codex_subscription, psionic_apple_fm_bridge,
-    psionic_qwen35_2b_q8_registry, resolved_reasoning_level_for_backend,
+    psionic_inference_mesh, psionic_qwen35_2b_q8_registry, resolved_reasoning_level_for_backend,
 };
 use probe_core::dataset_export::{
     DatasetExportConfig, DatasetKind, DecisionCaseRecord, DecisionSessionSummary, export_dataset,
@@ -36,7 +36,8 @@ use probe_core::runtime::{
     default_probe_home,
 };
 use probe_core::server_control::{
-    PsionicServerConfig, PsionicServerMode, ServerConfigOverrides, ServerProcessGuard,
+    PsionicServerConfig, PsionicServerMode, ServerConfigOverrides, ServerOperatorSummary,
+    ServerProcessGuard,
 };
 use probe_core::tools::{
     ExecutedToolCall, ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLongContextConfig,
@@ -56,16 +57,19 @@ use probe_optimizer::{
     optimize_decision_modules, optimize_harness_profiles, optimize_skill_packs,
     skill_pack_ledger_entries_from_bundle,
 };
-use probe_protocol::backend::BackendKind;
+use probe_protocol::backend::{BackendKind, BackendProfile, PsionicMeshAttachInfo};
 use probe_protocol::runtime::{
     DetachedSessionEventPayload, DetachedSessionEventRecord, DetachedSessionEventTruth,
     DetachedSessionRecoveryState, DetachedSessionStatus, InspectDetachedSessionResponse,
+    InspectSessionMeshPluginOffersRequest, PublishSessionMeshPluginOfferRequest,
     RuntimeProgressEvent, SessionTurnControlRecord, WatchDetachedSessionRequest,
 };
 use probe_protocol::session::{
-    BackendTurnReceipt, CacheSignal, SessionHarnessProfile, SessionId, SessionTurn,
-    TaskFinalReceipt, TaskVerificationCommandStatus, TaskVerificationStatus, ToolPolicyDecision,
-    ToolRiskClass, TranscriptEvent, TranscriptItemKind, UsageMeasurement, UsageTruth,
+    BackendTurnReceipt, CacheSignal, SessionAttachTransport, SessionBackendTarget,
+    SessionHarnessProfile, SessionId, SessionMeshCoordinationVisibility, SessionMeshPluginOffer,
+    SessionTurn, TaskFinalReceipt, TaskVerificationCommandStatus, TaskVerificationStatus,
+    ToolPolicyDecision, ToolRiskClass, TranscriptEvent, TranscriptItemKind, UsageMeasurement,
+    UsageTruth,
 };
 use probe_server::detached_watchdog::DetachedTurnWatchdogPolicy;
 use probe_server::server::{run_local_daemon_with_watchdog_policy, run_stdio_server};
@@ -85,6 +89,8 @@ struct Cli {
 enum Commands {
     Exec(ExecArgs),
     Chat(ChatArgs),
+    #[command(about = "Inspect or publish Probe plugin offers above the mesh attach surface")]
+    Mesh(MeshArgs),
     #[command(about = "Manage the local detached Probe daemon")]
     Daemon(DaemonArgs),
     #[command(about = "List daemon-owned detached sessions")]
@@ -118,6 +124,53 @@ enum Commands {
 struct CodexArgs {
     #[command(subcommand)]
     command: CodexCommands,
+}
+
+#[derive(clap::Args, Debug)]
+struct MeshArgs {
+    #[command(subcommand)]
+    command: MeshCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum MeshCommands {
+    Plugins(MeshPluginsArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct MeshPluginsArgs {
+    #[command(subcommand)]
+    command: MeshPluginCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum MeshPluginCommands {
+    List(MeshPluginListArgs),
+    Publish(MeshPluginPublishArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct MeshPluginListArgs {
+    session_id: String,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[command(flatten)]
+    hosted: HostedConnectArgs,
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+}
+
+#[derive(clap::Args, Debug)]
+struct MeshPluginPublishArgs {
+    session_id: String,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[command(flatten)]
+    hosted: HostedConnectArgs,
+    #[arg(long, default_value = "coding_bootstrap")]
+    tool_set: String,
+    #[arg(long, default_value = "mesh")]
+    visibility: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -546,6 +599,7 @@ fn run() -> Result<(), String> {
     match cli.command {
         Commands::Exec(args) => run_exec(args),
         Commands::Chat(args) => run_chat(args),
+        Commands::Mesh(args) => run_mesh(args),
         Commands::Daemon(args) => run_daemon(args),
         Commands::Ps(args) => run_ps(args),
         Commands::Attach(args) => run_attach(args),
@@ -667,28 +721,11 @@ fn run_tui(args: TuiArgs) -> Result<(), String> {
     } else {
         resolve_tui_profile(probe_home.as_path(), args.profile.as_deref(), &args.server)?
     };
-    let config = resolve_server_config(probe_home.as_path(), &args.server, desired_profile.kind)?;
-    let (profile, operator_backend, _server_guard) = match config.mode {
-        PsionicServerMode::Attach => {
-            let profile = profile_from_server_config(&config);
-            let summary = config.operator_summary();
-            print_backend_target_summary_from_summary("tui", &summary);
-            (profile, summary, None)
-        }
-        PsionicServerMode::Launch => {
-            let server_guard = config
-                .prepare(Duration::from_secs(15))
-                .map_err(|error| error.to_string())?;
-            let mut profile = profile_from_server_config(&config);
-            profile.base_url = server_guard.base_url();
-            if let Some(model_id) = server_guard.model_id() {
-                profile.model = model_id;
-            }
-            let summary = server_guard.operator_summary();
-            print_backend_target_summary_from_summary("tui", &summary);
-            (profile, summary, Some(server_guard))
-        }
-    };
+    let server_guard = prepare_server(probe_home.as_path(), &args.server, &desired_profile)?;
+    let operator_backend = server_guard.operator_summary();
+    let mut profile = desired_profile.clone();
+    apply_server_summary_to_profile(&mut profile, &operator_backend);
+    print_backend_target_summary_from_summary("tui", &operator_backend);
     let launch_config = TuiLaunchConfig {
         chat_runtime: build_tui_runtime_config(
             Some(probe_home),
@@ -705,6 +742,7 @@ fn run_tui(args: TuiArgs) -> Result<(), String> {
             .as_ref()
             .map(|session| session.session.session.id.as_str().to_string()),
     };
+    let _server_guard = server_guard;
     if args.smoke_prompt.is_some() || args.smoke_attach_only {
         return run_tui_smoke(launch_config, &args);
     }
@@ -784,12 +822,9 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
     let mut client = resolve_client(probe_home.clone(), "exec")?;
     let mut profile = named_profile(args.profile.as_str())?;
-    let server_guard = prepare_server(probe_home.as_path(), &args.server, profile.kind)?;
+    let server_guard = prepare_server(probe_home.as_path(), &args.server, &profile)?;
     print_backend_target_summary("exec", &server_guard);
-    profile.base_url = server_guard.base_url();
-    if let Some(model_id) = server_guard.model_id() {
-        profile.model = model_id;
-    }
+    apply_server_summary_to_profile(&mut profile, &server_guard.operator_summary());
     let cwd = args
         .cwd
         .unwrap_or(current_working_dir().map_err(|error| error.to_string())?);
@@ -915,7 +950,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
         (None, None) => String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE),
     };
     let initial_profile = named_profile(initial_profile_name.as_str())?;
-    let server_guard = prepare_server(probe_home.as_path(), &args.server, initial_profile.kind)?;
+    let server_guard = prepare_server(probe_home.as_path(), &args.server, &initial_profile)?;
     print_backend_target_summary("chat", &server_guard);
     let tool_loop = resolve_tool_loop(
         args.tool_set.as_deref(),
@@ -1027,10 +1062,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
         }
 
         let mut profile = named_profile(profile_name.as_str())?;
-        profile.base_url = server_guard.base_url();
-        if let Some(model_id) = server_guard.model_id() {
-            profile.model = model_id;
-        }
+        apply_server_summary_to_profile(&mut profile, &server_guard.operator_summary());
         let outcome = if let Some(active_session_id) = &session_id {
             client
                 .continue_plain_text_session(PlainTextResumeRequest {
@@ -1075,6 +1107,19 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn run_mesh(args: MeshArgs) -> Result<(), String> {
+    match args.command {
+        MeshCommands::Plugins(args) => run_mesh_plugins(args),
+    }
+}
+
+fn run_mesh_plugins(args: MeshPluginsArgs) -> Result<(), String> {
+    match args.command {
+        MeshPluginCommands::List(args) => run_mesh_plugin_list(args),
+        MeshPluginCommands::Publish(args) => run_mesh_plugin_publish(args),
+    }
 }
 
 fn run_daemon(args: DaemonArgs) -> Result<(), String> {
@@ -1127,6 +1172,51 @@ fn run_ps(args: PsArgs) -> Result<(), String> {
     Ok(())
 }
 
+fn run_mesh_plugin_list(args: MeshPluginListArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let mut client = resolve_operator_client(probe_home, "mesh-plugins-list", &args.hosted, true)?;
+    let response = client
+        .inspect_session_mesh_plugin_offers(InspectSessionMeshPluginOffersRequest {
+            session_id: SessionId::new(args.session_id),
+            limit: Some(args.limit),
+        })
+        .map_err(|error| error.to_string())?;
+    println!(
+        "mesh_plugin_offers session={} status={} mode={:?} offers={}",
+        response.session_id.as_str(),
+        response.status.status,
+        response.status.mode,
+        response.offers.len()
+    );
+    for offer in &response.offers {
+        print_mesh_plugin_offer(offer);
+    }
+    Ok(())
+}
+
+fn run_mesh_plugin_publish(args: MeshPluginPublishArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let mut client =
+        resolve_operator_client(probe_home, "mesh-plugins-publish", &args.hosted, true)?;
+    let visibility = parse_mesh_coordination_visibility(args.visibility.as_str())?;
+    let response = client
+        .publish_session_mesh_plugin_offer(PublishSessionMeshPluginOfferRequest {
+            session_id: SessionId::new(args.session_id),
+            tool_set: args.tool_set,
+            author: None,
+            visibility: Some(visibility),
+        })
+        .map_err(|error| error.to_string())?;
+    println!(
+        "mesh_plugin_published session={} entry_id={} visibility={:?}",
+        response.session_id.as_str(),
+        response.entry.id,
+        response.entry.visibility
+    );
+    print_mesh_plugin_offer(&response.offer);
+    Ok(())
+}
+
 fn run_attach(args: AttachArgs) -> Result<(), String> {
     let probe_home = resolve_probe_home_path(args.probe_home)?;
     let mut client = resolve_operator_client(probe_home, "attach", &args.hosted, true)?;
@@ -1148,6 +1238,9 @@ fn run_attach(args: AttachArgs) -> Result<(), String> {
         response.session.transcript.len(),
         response.session.pending_approvals.len(),
     );
+    if let Some(backend) = response.session.session.backend.as_ref() {
+        print_session_backend_target(backend);
+    }
     if let Some(active_turn) = response.turn_control.active_turn.as_ref() {
         println!("active_turn {}", render_turn_control_kv(active_turn));
     }
@@ -1426,11 +1519,8 @@ fn run_accept(args: AcceptArgs) -> Result<(), String> {
         .probe_home
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
     let mut profile = named_profile(args.profile.as_str())?;
-    let server_guard = prepare_server(probe_home.as_path(), &args.server, profile.kind)?;
-    profile.base_url = server_guard.base_url();
-    if let Some(model_id) = server_guard.model_id() {
-        profile.model = model_id;
-    }
+    let server_guard = prepare_server(probe_home.as_path(), &args.server, &profile)?;
+    apply_server_summary_to_profile(&mut profile, &server_guard.operator_summary());
     if let Some(base_url) = args.base_url {
         profile.base_url = base_url;
     }
@@ -1502,11 +1592,8 @@ fn run_self_test(args: AcceptArgs) -> Result<(), String> {
         .probe_home
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
     let mut profile = named_profile(args.profile.as_str())?;
-    let server_guard = prepare_server(probe_home.as_path(), &args.server, profile.kind)?;
-    profile.base_url = server_guard.base_url();
-    if let Some(model_id) = server_guard.model_id() {
-        profile.model = model_id;
-    }
+    let server_guard = prepare_server(probe_home.as_path(), &args.server, &profile)?;
+    apply_server_summary_to_profile(&mut profile, &server_guard.operator_summary());
     if let Some(base_url) = args.base_url {
         profile.base_url = base_url;
     }
@@ -2121,7 +2208,7 @@ fn resolve_tui_profile(
     probe_home: &Path,
     profile_name: Option<&str>,
     server_args: &ServerArgs,
-) -> Result<probe_protocol::backend::BackendProfile, String> {
+) -> Result<BackendProfile, String> {
     if let Some(profile_name) = profile_name {
         return named_profile(profile_name);
     }
@@ -2133,16 +2220,30 @@ fn resolve_tui_profile(
     let config = PsionicServerConfig::load_or_create(config_path.as_path())
         .map_err(|error| error.to_string())?;
     Ok(match config.api_kind {
+        BackendKind::OpenAiChatCompletions
+            if matches!(
+                config.control_plane,
+                Some(probe_protocol::backend::BackendControlPlaneKind::PsionicInferenceMesh)
+            ) =>
+        {
+            psionic_inference_mesh()
+        }
         BackendKind::OpenAiChatCompletions => psionic_qwen35_2b_q8_registry(),
         BackendKind::OpenAiCodexSubscription => openai_codex_subscription(),
         BackendKind::AppleFmBridge => psionic_apple_fm_bridge(),
     })
 }
 
-fn profile_from_server_config(
-    config: &PsionicServerConfig,
-) -> probe_protocol::backend::BackendProfile {
+fn profile_from_server_config(config: &PsionicServerConfig) -> BackendProfile {
     let mut profile = match config.api_kind {
+        BackendKind::OpenAiChatCompletions
+            if matches!(
+                config.control_plane,
+                Some(probe_protocol::backend::BackendControlPlaneKind::PsionicInferenceMesh)
+            ) =>
+        {
+            psionic_inference_mesh()
+        }
         BackendKind::OpenAiChatCompletions => psionic_qwen35_2b_q8_registry(),
         BackendKind::OpenAiCodexSubscription => openai_codex_subscription(),
         BackendKind::AppleFmBridge => psionic_apple_fm_bridge(),
@@ -2155,7 +2256,7 @@ fn profile_from_server_config(
     profile
 }
 
-fn resolve_codex_backend_profile(probe_home: &Path) -> probe_protocol::backend::BackendProfile {
+fn resolve_codex_backend_profile(probe_home: &Path) -> BackendProfile {
     PsionicServerConfig::load_or_default_for_backend(
         probe_home,
         BackendKind::OpenAiCodexSubscription,
@@ -2167,7 +2268,7 @@ fn resolve_codex_backend_profile(probe_home: &Path) -> probe_protocol::backend::
 fn build_tui_runtime_config(
     probe_home: Option<PathBuf>,
     cwd: Option<PathBuf>,
-    profile: probe_protocol::backend::BackendProfile,
+    profile: BackendProfile,
 ) -> Result<probe_tui::ProbeRuntimeTurnConfig, String> {
     let cwd = cwd.unwrap_or(current_working_dir().map_err(|error| error.to_string())?);
     let (system_prompt, harness_profile) = resolve_prompt_contract(
@@ -2202,7 +2303,7 @@ fn load_detached_session_for_resume(
 
 fn detached_session_profile(
     response: &InspectDetachedSessionResponse,
-) -> Result<probe_protocol::backend::BackendProfile, String> {
+) -> Result<BackendProfile, String> {
     let backend =
         response.session.session.backend.as_ref().ok_or_else(|| {
             String::from("detached session does not have a stored backend target")
@@ -2210,6 +2311,8 @@ fn detached_session_profile(
     let mut profile = named_profile(backend.profile_name.as_str())?;
     profile.base_url = backend.base_url.clone();
     profile.model = backend.model.clone();
+    profile.control_plane = backend.control_plane;
+    profile.psionic_mesh = backend.psionic_mesh.clone();
     Ok(profile)
 }
 
@@ -2228,7 +2331,7 @@ fn resolve_client(probe_home: PathBuf, surface: &str) -> Result<ProbeClient, Str
 fn resolve_server_config(
     probe_home: &Path,
     server_args: &ServerArgs,
-    desired_backend_kind: BackendKind,
+    desired_profile: &BackendProfile,
 ) -> Result<PsionicServerConfig, String> {
     let config_path = server_args
         .server_config
@@ -2236,7 +2339,8 @@ fn resolve_server_config(
         .unwrap_or_else(|| PsionicServerConfig::config_path(probe_home));
     let mut config = PsionicServerConfig::load_or_create(config_path.as_path())
         .map_err(|error| error.to_string())?;
-    config.set_api_kind(desired_backend_kind);
+    config.set_api_kind(desired_profile.kind);
+    config.control_plane = desired_profile.control_plane;
     config
         .apply_overrides(&ServerConfigOverrides {
             mode: Some(parse_server_mode(server_args.server_mode.as_str())?),
@@ -2249,11 +2353,16 @@ fn resolve_server_config(
             reasoning_budget: server_args.server_reasoning_budget,
         })
         .map_err(|error| error.to_string())?;
+    if matches!(config.mode, PsionicServerMode::Launch) && config.control_plane.is_some() {
+        return Err(String::from(
+            "the psionic mesh attach profile is attach-only to an existing Psionic management surface; it does not launch a parallel runtime; use --server-mode attach",
+        ));
+    }
     config
         .save(config_path.as_path())
         .map_err(|error| error.to_string())?;
     config
-        .save(PsionicServerConfig::backend_config_path(probe_home, desired_backend_kind).as_path())
+        .save(PsionicServerConfig::backend_config_path(probe_home, desired_profile.kind).as_path())
         .map_err(|error| error.to_string())?;
     Ok(config)
 }
@@ -2261,22 +2370,98 @@ fn resolve_server_config(
 fn prepare_server(
     probe_home: &Path,
     server_args: &ServerArgs,
-    desired_backend_kind: BackendKind,
+    desired_profile: &BackendProfile,
 ) -> Result<ServerProcessGuard, String> {
-    let config = resolve_server_config(probe_home, server_args, desired_backend_kind)?;
+    let config = resolve_server_config(probe_home, server_args, desired_profile)?;
     config
         .prepare(Duration::from_secs(15))
         .map_err(|error| error.to_string())
+}
+
+fn apply_server_summary_to_profile(profile: &mut BackendProfile, summary: &ServerOperatorSummary) {
+    profile.base_url = summary.base_url.clone();
+    if let Some(model_id) = summary.model_id.as_ref() {
+        profile.model = model_id.clone();
+    }
+    profile.control_plane = summary.control_plane;
+    profile.psionic_mesh = summary.psionic_mesh.clone();
 }
 
 fn print_backend_target_summary(surface: &str, server_guard: &ServerProcessGuard) {
     print_backend_target_summary_from_summary(surface, &server_guard.operator_summary());
 }
 
-fn print_backend_target_summary_from_summary(
-    surface: &str,
-    summary: &probe_core::server_control::ServerOperatorSummary,
-) {
+fn render_mesh_role_reasons(mesh: &PsionicMeshAttachInfo) -> String {
+    if mesh.served_mesh_reasons.is_empty() {
+        String::from("none")
+    } else {
+        mesh.served_mesh_reasons.join(",")
+    }
+}
+
+fn render_mesh_model_endpoints(
+    mesh_model: &probe_protocol::backend::PsionicMeshTargetableModel,
+) -> String {
+    if mesh_model.supported_endpoints.is_empty() {
+        String::from("none")
+    } else {
+        mesh_model.supported_endpoints.join(",")
+    }
+}
+
+fn parse_mesh_coordination_visibility(
+    value: &str,
+) -> Result<SessionMeshCoordinationVisibility, String> {
+    match value.trim() {
+        "mesh" => Ok(SessionMeshCoordinationVisibility::Mesh),
+        "operator_internal" => Ok(SessionMeshCoordinationVisibility::OperatorInternal),
+        "node_local" => Ok(SessionMeshCoordinationVisibility::NodeLocal),
+        other => Err(format!(
+            "unsupported mesh visibility `{other}`; expected mesh, operator_internal, or node_local"
+        )),
+    }
+}
+
+fn render_attach_transport(transport: Option<SessionAttachTransport>) -> &'static str {
+    match transport {
+        Some(SessionAttachTransport::StdioJsonl) => "stdio_jsonl",
+        Some(SessionAttachTransport::UnixSocketJsonl) => "unix_socket_jsonl",
+        Some(SessionAttachTransport::TcpJsonl) => "tcp_jsonl",
+        None => "unknown",
+    }
+}
+
+fn render_mesh_plugin_tool_names(offer: &SessionMeshPluginOffer) -> String {
+    if offer.tools.is_empty() {
+        String::from("none")
+    } else {
+        offer
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn print_mesh_plugin_offer(offer: &SessionMeshPluginOffer) {
+    println!(
+        "mesh_plugin plugin_id={} tool_set={} session={} worker={} attach_transport={} attach_target={} tools={}",
+        offer.plugin_id,
+        offer.tool_set,
+        offer.session_id.as_str(),
+        offer.worker_id.as_deref().unwrap_or("unknown"),
+        render_attach_transport(offer.attach_transport),
+        offer.attach_target.as_deref().unwrap_or("none"),
+        render_mesh_plugin_tool_names(offer)
+    );
+    println!(
+        "mesh_plugin_summary label={} execution_scope={} summary={} usage_hint={}",
+        offer.label, offer.execution_scope, offer.summary, offer.usage_hint
+    );
+}
+
+fn print_backend_target_summary_from_summary(surface: &str, summary: &ServerOperatorSummary) {
     eprintln!(
         "backend_target surface={} kind={} attach_mode={} transport={} target={} model={} base_url={}",
         surface,
@@ -2291,6 +2476,81 @@ fn print_backend_target_summary_from_summary(
         eprintln!(
             "remote_contract inference_only=true local_probe_owns=sessions,transcripts,tools,approvals,ui"
         );
+    }
+    if let Some(mesh) = summary.psionic_mesh.as_ref() {
+        eprintln!(
+            "mesh_control_plane kind={} management_base_url={} topology_digest={} default_model={}",
+            match summary.control_plane {
+                Some(probe_protocol::backend::BackendControlPlaneKind::PsionicInferenceMesh) => {
+                    "psionic_inference_mesh"
+                }
+                None => "unknown",
+            },
+            mesh.management_base_url,
+            mesh.topology_digest,
+            mesh.default_model
+        );
+        eprintln!(
+            "mesh_posture worker={} role={} posture={} reasons={} execution_mode={} execution_engine={} fallback_posture={}",
+            mesh.local_worker_id.as_deref().unwrap_or("unknown"),
+            mesh.served_mesh_role.as_deref().unwrap_or("unknown"),
+            mesh.served_mesh_posture.as_deref().unwrap_or("unknown"),
+            render_mesh_role_reasons(mesh),
+            mesh.execution_mode.as_deref().unwrap_or("unknown"),
+            mesh.execution_engine.as_deref().unwrap_or("unknown"),
+            mesh.fallback_posture.as_deref().unwrap_or("none")
+        );
+        for mesh_model in &mesh.targetable_models {
+            eprintln!(
+                "mesh_model model={} family={} endpoints={} tool_calling={} structured_outputs={} response_state={}",
+                mesh_model.model,
+                mesh_model.family,
+                render_mesh_model_endpoints(mesh_model),
+                mesh_model.tool_calling,
+                mesh_model.structured_outputs,
+                mesh_model.response_state
+            );
+        }
+    }
+}
+
+fn print_session_backend_target(backend: &SessionBackendTarget) {
+    println!(
+        "backend_target_stored base_url={} model={} control_plane={}",
+        backend.base_url,
+        backend.model,
+        match backend.control_plane {
+            Some(probe_protocol::backend::BackendControlPlaneKind::PsionicInferenceMesh) => {
+                "psionic_inference_mesh"
+            }
+            None => "none",
+        }
+    );
+    if let Some(mesh) = backend.psionic_mesh.as_ref() {
+        println!(
+            "backend_mesh management_base_url={} topology_digest={} default_model={} worker={} role={} posture={} reasons={} execution_mode={} execution_engine={} fallback_posture={}",
+            mesh.management_base_url,
+            mesh.topology_digest,
+            mesh.default_model,
+            mesh.local_worker_id.as_deref().unwrap_or("unknown"),
+            mesh.served_mesh_role.as_deref().unwrap_or("unknown"),
+            mesh.served_mesh_posture.as_deref().unwrap_or("unknown"),
+            render_mesh_role_reasons(mesh),
+            mesh.execution_mode.as_deref().unwrap_or("unknown"),
+            mesh.execution_engine.as_deref().unwrap_or("unknown"),
+            mesh.fallback_posture.as_deref().unwrap_or("none")
+        );
+        for mesh_model in &mesh.targetable_models {
+            println!(
+                "backend_mesh_model model={} family={} endpoints={} tool_calling={} structured_outputs={} response_state={}",
+                mesh_model.model,
+                mesh_model.family,
+                render_mesh_model_endpoints(mesh_model),
+                mesh_model.tool_calling,
+                mesh_model.structured_outputs,
+                mesh_model.response_state
+            );
+        }
     }
 }
 
@@ -3166,7 +3426,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use probe_core::backend_profiles::psionic_apple_fm_bridge;
+    use probe_core::backend_profiles::{psionic_apple_fm_bridge, psionic_inference_mesh};
     use probe_protocol::runtime::{
         DetachedSessionRecoveryState, DetachedSessionStatus, DetachedSessionSummary,
     };
@@ -3315,7 +3575,7 @@ mod tests {
                 server_backend: None,
                 server_reasoning_budget: None,
             },
-            BackendKind::AppleFmBridge,
+            &psionic_apple_fm_bridge(),
         )
         .expect("attach-mode tui config should resolve without readiness check");
 
@@ -3338,6 +3598,28 @@ mod tests {
         .expect("load saved backend snapshot");
         assert_eq!(saved_backend.api_kind, BackendKind::AppleFmBridge);
         assert_eq!(saved_backend.host, "203.0.113.10");
+    }
+
+    #[test]
+    fn resolve_server_config_refuses_launch_for_psionic_mesh_attach_profile() {
+        let probe_home = tempdir().expect("temp probe home");
+        let error = resolve_server_config(
+            probe_home.path(),
+            &ServerArgs {
+                server_mode: String::from("launch"),
+                server_config: None,
+                server_binary: None,
+                server_model_path: None,
+                server_model_id: None,
+                server_host: Some(String::from("203.0.113.10")),
+                server_port: Some(8080),
+                server_backend: None,
+                server_reasoning_budget: None,
+            },
+            &psionic_inference_mesh(),
+        )
+        .expect_err("mesh attach profile should stay attach only");
+        assert!(error.contains("attach-only"));
     }
 
     #[test]

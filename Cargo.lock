@@ -1645,6 +1645,7 @@ dependencies = [
  "probe-core",
  "probe-protocol",
  "probe-test-support",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

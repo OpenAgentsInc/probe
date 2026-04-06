@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::backend::{BackendControlPlaneKind, BackendProfile, PsionicMeshAttachInfo};
+
 pub type TimestampMs = u64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -257,6 +259,135 @@ pub struct SessionBackendTarget {
     pub profile_name: String,
     pub base_url: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane: Option<BackendControlPlaneKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub psionic_mesh: Option<PsionicMeshAttachInfo>,
+}
+
+impl SessionBackendTarget {
+    #[must_use]
+    pub fn from_profile(profile: &BackendProfile) -> Self {
+        Self {
+            profile_name: profile.name.clone(),
+            base_url: profile.base_url.clone(),
+            model: profile.model.clone(),
+            control_plane: profile.control_plane,
+            psionic_mesh: profile.psionic_mesh.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMeshCoordinationMode {
+    Disabled,
+    Local,
+    BootstrapProxy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMeshCoordinationKind {
+    Status,
+    Finding,
+    Question,
+    Tip,
+    Done,
+    Note,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMeshCoordinationVisibility {
+    Mesh,
+    OperatorInternal,
+    NodeLocal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMeshCoordinationProvenance {
+    LocalPost,
+    BootstrapProxyForwarded,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMeshCoordinationRedactionReceipt {
+    pub reason: String,
+    pub redacted_by: String,
+    pub redacted_at_ms: TimestampMs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMeshCoordinationEntry {
+    pub id: u64,
+    pub kind: SessionMeshCoordinationKind,
+    pub author: String,
+    pub worker_id: String,
+    pub visibility: SessionMeshCoordinationVisibility,
+    pub provenance: SessionMeshCoordinationProvenance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub created_at_ms: TimestampMs,
+    pub expires_at_ms: TimestampMs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction: Option<SessionMeshCoordinationRedactionReceipt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMeshCoordinationStatus {
+    pub status: String,
+    pub mode: SessionMeshCoordinationMode,
+    pub feed_path: String,
+    pub search_path: String,
+    pub post_path: String,
+    pub redact_path: String,
+    pub ttl_secs: u64,
+    pub max_items: usize,
+    pub max_body_bytes: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_kinds: Vec<SessionMeshCoordinationKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_visibilities: Vec<SessionMeshCoordinationVisibility>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_provenances: Vec<SessionMeshCoordinationProvenance>,
+    pub redaction_mode: String,
+    pub item_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_post_at_ms: Option<TimestampMs>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMeshPluginTool {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMeshPluginOffer {
+    pub plugin_id: String,
+    pub tool_set: String,
+    pub label: String,
+    pub summary: String,
+    pub session_id: SessionId,
+    pub execution_scope: String,
+    pub usage_hint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_owner_kind: Option<SessionRuntimeOwnerKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_transport: Option<SessionAttachTransport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<SessionMeshPluginTool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at_ms: Option<TimestampMs>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

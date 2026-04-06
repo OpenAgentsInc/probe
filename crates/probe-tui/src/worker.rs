@@ -1461,6 +1461,8 @@ mod tests {
                 timeout_secs: 120,
                 attach_mode: ServerAttachMode::AttachToExisting,
                 prefix_cache_mode: PrefixCacheMode::BackendDefault,
+                control_plane: None,
+                psionic_mesh: None,
             },
             system_prompt: None,
             harness_profile: None,
@@ -1487,6 +1489,8 @@ mod tests {
                 timeout_secs: 120,
                 attach_mode: ServerAttachMode::AttachToExisting,
                 prefix_cache_mode: PrefixCacheMode::BackendDefault,
+                control_plane: None,
+                psionic_mesh: None,
             },
             ..turn_config(
                 "psionic-qwen35-2b-q8-registry",

@@ -129,11 +129,27 @@ That lets Probe reconstruct:
 - tool result messages
 - later resume context after a tool-backed session already happened
 
+## Mesh Plugin Offers
+
+Probe can now publish a typed mesh plugin offer for its built-in local tool
+bundle when a session is attached to the Psionic mesh profile.
+
+Current behavior:
+
+- the offer describes a local Probe-owned tool bundle
+- the first shipped tool set is `coding_bootstrap`
+- other operators can list those offers through Probe's runtime or CLI
+- the published offer lives in the mesh coordination adjunct instead of the
+  append-only transcript
+
+This gives mesh-backed sessions a small discovery layer for Probe tool
+capabilities without pretending the tools moved into Psionic.
+
 ## Current Boundary
 
 The current built-in tool lanes intentionally do not try to solve everything:
 
-- no plugin marketplace
+- no general plugin marketplace
 - no arbitrary external executors
 - no streaming tool deltas
 - no unbounded multi-agent planner

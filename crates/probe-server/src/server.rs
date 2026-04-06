@@ -20,7 +20,7 @@ use probe_core::session_summary_artifacts::{
 };
 use probe_core::tools::{
     ExecutedToolCall, ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction as CoreDeniedAction,
-    ToolLongContextConfig, ToolLoopConfig, ToolOracleConfig,
+    ToolLongContextConfig, ToolLoopConfig, ToolOracleConfig, ToolRegistry,
 };
 use probe_protocol::default_local_daemon_socket_path;
 use probe_protocol::runtime::{
@@ -28,13 +28,17 @@ use probe_protocol::runtime::{
     CancelQueuedTurnResponse, ClientMessage, DetachedSessionEventPayload,
     DetachedSessionEventTruth, DetachedSessionRecoveryState, DetachedSessionStatus,
     DetachedSessionSummary, EventDeliveryGuarantee, EventEnvelope, InitializeResponse,
-    InspectDetachedSessionResponse, InspectSessionTurnsResponse, InterruptTurnResponse,
+    InspectDetachedSessionResponse, InspectSessionMeshCoordinationRequest,
+    InspectSessionMeshCoordinationResponse, InspectSessionMeshPluginOffersRequest,
+    InspectSessionMeshPluginOffersResponse, InspectSessionTurnsResponse, InterruptTurnResponse,
     ListDetachedSessionsResponse, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListSessionsResponse, QueueTurnResponse, QueuedTurnStatus, ReadDetachedSessionLogRequest,
-    ReadDetachedSessionLogResponse, RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody,
-    ResponseEnvelope, RuntimeActivity, RuntimeCapabilities, RuntimeProgressEvent,
-    RuntimeProtocolError, RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage,
-    ServerEvent, ServerMessage, SessionLookupRequest, SessionSnapshot, ShutdownResponse,
+    ListSessionsResponse, PostSessionMeshCoordinationRequest, PostSessionMeshCoordinationResponse,
+    PublishSessionMeshPluginOfferRequest, PublishSessionMeshPluginOfferResponse, QueueTurnResponse,
+    QueuedTurnStatus, ReadDetachedSessionLogRequest, ReadDetachedSessionLogResponse,
+    RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope,
+    RuntimeActivity, RuntimeCapabilities, RuntimeProgressEvent, RuntimeProtocolError,
+    RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage, ServerEvent,
+    ServerMessage, SessionLookupRequest, SessionSnapshot, ShutdownResponse,
     SpawnChildSessionRequest, SpawnChildSessionResponse, StartSessionRequest, ToolApprovalRecipe,
     ToolCallResult, ToolChoice, ToolDeniedAction, ToolLongContextRecipe, ToolLoopRecipe,
     ToolOracleRecipe, ToolSetKind, TransportKind, TurnAuthor, TurnCompleted, TurnPaused,
@@ -49,17 +53,19 @@ use probe_protocol::session::{
     SessionHostedAuthReceipt, SessionHostedCheckoutKind, SessionHostedCheckoutReceipt,
     SessionHostedCleanupReceipt, SessionHostedCleanupStatus, SessionHostedCostReceipt,
     SessionHostedLifecycleEvent, SessionHostedReceipts, SessionHostedWorkerReceipt, SessionId,
-    SessionInitiator, SessionMetadata, SessionMountKind, SessionMountRef, SessionParentLink,
-    SessionParticipant, SessionPreparedBaselineRef, SessionPreparedBaselineStatus,
-    SessionRuntimeOwner, SessionRuntimeOwnerKind, SessionSummaryArtifact,
-    SessionSummaryArtifactRef, SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef,
-    SessionWorkspaceState, TaskFinalReceipt, TaskReceiptDisposition, TaskVerificationCommandStatus,
-    TaskVerificationCommandSummary, TaskVerificationStatus, TaskWorkspaceSummary,
-    TaskWorkspaceSummaryStatus, ToolPolicyDecision, ToolRiskClass, TranscriptEvent, TranscriptItem,
-    TranscriptItemKind, UsageMeasurement, UsageTruth,
+    SessionInitiator, SessionMeshCoordinationEntry, SessionMeshCoordinationKind,
+    SessionMeshCoordinationMode, SessionMeshCoordinationStatus, SessionMeshCoordinationVisibility,
+    SessionMeshPluginOffer, SessionMeshPluginTool, SessionMetadata, SessionMountKind,
+    SessionMountRef, SessionParentLink, SessionParticipant, SessionPreparedBaselineRef,
+    SessionPreparedBaselineStatus, SessionRuntimeOwner, SessionRuntimeOwnerKind,
+    SessionSummaryArtifact, SessionSummaryArtifactRef, SessionWorkspaceBootMode,
+    SessionWorkspaceSnapshotRef, SessionWorkspaceState, TaskFinalReceipt, TaskReceiptDisposition,
+    TaskVerificationCommandStatus, TaskVerificationCommandSummary, TaskVerificationStatus,
+    TaskWorkspaceSummary, TaskWorkspaceSummaryStatus, ToolPolicyDecision, ToolRiskClass,
+    TranscriptEvent, TranscriptItem, TranscriptItemKind, UsageMeasurement, UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::detached_events::{DetachedEventError, DetachedSessionEventHub};
 use crate::detached_registry::{DetachedRegistryError, DetachedSessionRegistry};
@@ -375,6 +381,18 @@ impl Drop for SocketCleanupGuard {
 
 const HOSTED_BASELINES_DIR: &str = "hosted/baselines";
 const HOSTED_SNAPSHOTS_DIR: &str = "hosted/snapshots";
+const PSIONIC_MESH_COORDINATION_STATUS_PATH: &str = "/psionic/management/coordination/status";
+const PSIONIC_MESH_COORDINATION_FEED_PATH: &str = "/psionic/management/coordination/feed";
+const PSIONIC_MESH_COORDINATION_SEARCH_PATH: &str = "/psionic/management/coordination/search";
+const PSIONIC_MESH_COORDINATION_POST_PATH: &str = "/psionic/management/coordination/post";
+const PROBE_MESH_PLUGIN_OFFER_SCHEMA: &str = "probe.mesh_plugin_offer.v1";
+const PROBE_MESH_PLUGIN_CODING_BOOTSTRAP_ID: &str = "probe.coding_bootstrap.local";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ProbeMeshPluginOfferEnvelope {
+    schema: String,
+    offer: SessionMeshPluginOffer,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct HostedBaselineManifest {
@@ -429,6 +447,43 @@ enum ConnectionRunOutcome {
 enum RequestHandlingOutcome {
     Continue,
     ShutdownAccepted,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PsionicMeshCoordinationFeedQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    since_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<SessionMeshCoordinationKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    visibility: Option<SessionMeshCoordinationVisibility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PsionicMeshCoordinationSearchQuery {
+    query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    since_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<SessionMeshCoordinationKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    visibility: Option<SessionMeshCoordinationVisibility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PsionicMeshCoordinationPostBody {
+    kind: SessionMeshCoordinationKind,
+    body: String,
+    author: String,
+    visibility: SessionMeshCoordinationVisibility,
 }
 
 #[derive(Clone, Copy)]
@@ -560,6 +615,176 @@ impl ProbeServerCore {
             hosted_receipt_config,
             started_at_ms: now_ms(),
         }
+    }
+
+    fn inspect_session_mesh_coordination(
+        &self,
+        request: InspectSessionMeshCoordinationRequest,
+    ) -> Result<InspectSessionMeshCoordinationResponse, RuntimeProtocolError> {
+        let session = self
+            .runtime
+            .session_store()
+            .read_metadata(&request.session_id)
+            .map_err(session_store_error_to_protocol)?;
+        let management_base_url = psionic_mesh_management_base_url_from_session(&session)?;
+        let client = mesh_coordination_http_client()?;
+        let status: SessionMeshCoordinationStatus = psionic_management_get(
+            &client,
+            &management_base_url,
+            PSIONIC_MESH_COORDINATION_STATUS_PATH,
+            None::<&PsionicMeshCoordinationFeedQuery>,
+        )?;
+        let entries = if status.mode == SessionMeshCoordinationMode::Disabled {
+            Vec::new()
+        } else if let Some(query) = request
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            psionic_management_get(
+                &client,
+                &management_base_url,
+                PSIONIC_MESH_COORDINATION_SEARCH_PATH,
+                Some(&PsionicMeshCoordinationSearchQuery {
+                    query: query.to_string(),
+                    since_ms: request.since_ms,
+                    author: request.author.clone(),
+                    kind: request.kind,
+                    visibility: request.visibility,
+                    limit: request.limit,
+                }),
+            )?
+        } else {
+            psionic_management_get(
+                &client,
+                &management_base_url,
+                PSIONIC_MESH_COORDINATION_FEED_PATH,
+                Some(&PsionicMeshCoordinationFeedQuery {
+                    since_ms: request.since_ms,
+                    author: request.author.clone(),
+                    kind: request.kind,
+                    visibility: request.visibility,
+                    limit: request.limit,
+                }),
+            )?
+        };
+        Ok(InspectSessionMeshCoordinationResponse {
+            session_id: request.session_id,
+            status,
+            entries,
+        })
+    }
+
+    fn post_session_mesh_coordination(
+        &self,
+        request: PostSessionMeshCoordinationRequest,
+    ) -> Result<PostSessionMeshCoordinationResponse, RuntimeProtocolError> {
+        let session = self
+            .runtime
+            .session_store()
+            .read_metadata(&request.session_id)
+            .map_err(session_store_error_to_protocol)?;
+        let management_base_url = psionic_mesh_management_base_url_from_session(&session)?;
+        let client = mesh_coordination_http_client()?;
+        let status: SessionMeshCoordinationStatus = psionic_management_get(
+            &client,
+            &management_base_url,
+            PSIONIC_MESH_COORDINATION_STATUS_PATH,
+            None::<&PsionicMeshCoordinationFeedQuery>,
+        )?;
+        if status.mode == SessionMeshCoordinationMode::Disabled {
+            return Err(protocol_error(
+                "mesh_coordination_unavailable",
+                format!(
+                    "mesh coordination is disabled for session {}",
+                    request.session_id.as_str()
+                ),
+            ));
+        }
+        let entry: SessionMeshCoordinationEntry = psionic_management_post(
+            &client,
+            &management_base_url,
+            PSIONIC_MESH_COORDINATION_POST_PATH,
+            &PsionicMeshCoordinationPostBody {
+                kind: request.kind,
+                body: request.body,
+                author: request.author.unwrap_or_else(|| String::from("probe")),
+                visibility: request
+                    .visibility
+                    .unwrap_or(SessionMeshCoordinationVisibility::Mesh),
+            },
+        )?;
+        Ok(PostSessionMeshCoordinationResponse {
+            session_id: request.session_id,
+            entry,
+        })
+    }
+
+    fn inspect_session_mesh_plugin_offers(
+        &self,
+        request: InspectSessionMeshPluginOffersRequest,
+    ) -> Result<InspectSessionMeshPluginOffersResponse, RuntimeProtocolError> {
+        let response =
+            self.inspect_session_mesh_coordination(InspectSessionMeshCoordinationRequest {
+                session_id: request.session_id.clone(),
+                query: None,
+                since_ms: None,
+                author: None,
+                kind: Some(SessionMeshCoordinationKind::Tip),
+                visibility: None,
+                limit: request.limit,
+            })?;
+        let offers = response
+            .entries
+            .iter()
+            .filter_map(mesh_plugin_offer_from_entry)
+            .collect::<Vec<_>>();
+        Ok(InspectSessionMeshPluginOffersResponse {
+            session_id: request.session_id,
+            status: response.status,
+            offers,
+        })
+    }
+
+    fn publish_session_mesh_plugin_offer(
+        &self,
+        request: PublishSessionMeshPluginOfferRequest,
+    ) -> Result<PublishSessionMeshPluginOfferResponse, RuntimeProtocolError> {
+        let session = self
+            .runtime
+            .session_store()
+            .read_metadata(&request.session_id)
+            .map_err(session_store_error_to_protocol)?;
+        let mut offer = build_probe_mesh_plugin_offer(&session, request.tool_set.as_str())?;
+        let body = serde_json::to_string(&ProbeMeshPluginOfferEnvelope {
+            schema: String::from(PROBE_MESH_PLUGIN_OFFER_SCHEMA),
+            offer: offer.clone(),
+        })
+        .map_err(|error| {
+            protocol_error(
+                "mesh_plugin_encode_error",
+                format!("failed to encode mesh plugin offer: {error}"),
+            )
+        })?;
+        let response = self.post_session_mesh_coordination(PostSessionMeshCoordinationRequest {
+            session_id: request.session_id.clone(),
+            kind: SessionMeshCoordinationKind::Tip,
+            body,
+            author: request.author,
+            visibility: Some(
+                request
+                    .visibility
+                    .unwrap_or(SessionMeshCoordinationVisibility::Mesh),
+            ),
+        })?;
+        offer.entry_id = Some(response.entry.id);
+        offer.published_at_ms = Some(response.entry.created_at_ms);
+        Ok(PublishSessionMeshPluginOfferResponse {
+            session_id: request.session_id,
+            entry: response.entry,
+            offer,
+        })
     }
 
     fn reconcile_detached_sessions(&self) -> Result<(), RuntimeProtocolError> {
@@ -1723,6 +1948,7 @@ impl ProbeServerConnection {
                                     .core
                                     .detached_event_hub
                                     .is_some(),
+                                supports_mesh_coordination_adjunct: true,
                             },
                         }),
                     )?;
@@ -1819,6 +2045,54 @@ impl ProbeServerConnection {
                     Ok(response) => self.writer.send_response_ok(
                         request_id.as_str(),
                         RuntimeResponse::InspectDetachedSession(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
+            RuntimeRequest::InspectSessionMeshCoordination(request) => {
+                match self.core.inspect_session_mesh_coordination(request) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::InspectSessionMeshCoordination(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
+            RuntimeRequest::PostSessionMeshCoordination(request) => {
+                match self.core.post_session_mesh_coordination(request) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::PostSessionMeshCoordination(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
+            RuntimeRequest::InspectSessionMeshPluginOffers(request) => {
+                match self.core.inspect_session_mesh_plugin_offers(request) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::InspectSessionMeshPluginOffers(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
+            RuntimeRequest::PublishSessionMeshPluginOffer(request) => {
+                match self.core.publish_session_mesh_plugin_offer(request) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::PublishSessionMeshPluginOffer(response),
                     )?,
                     Err(error) => self
                         .writer
@@ -1981,11 +2255,7 @@ impl ProbeServerConnection {
                 NewSession::new(normalize_session_title(title), cwd)
                     .with_system_prompt(system_prompt)
                     .with_harness_profile(harness_profile)
-                    .with_backend(SessionBackendTarget {
-                        profile_name: profile.name,
-                        base_url: profile.base_url,
-                        model: profile.model,
-                    })
+                    .with_backend(SessionBackendTarget::from_profile(&profile))
                     .with_runtime_owner(Some(self.core.runtime_owner.clone()))
                     .with_workspace_state(workspace_state)
                     .with_mounted_refs(mounted_refs),
@@ -2049,11 +2319,7 @@ impl ProbeServerConnection {
                 NewSession::new(child_title, child_cwd)
                     .with_system_prompt(request.system_prompt)
                     .with_harness_profile(request.harness_profile)
-                    .with_backend(SessionBackendTarget {
-                        profile_name: request.profile.name,
-                        base_url: request.profile.base_url,
-                        model: request.profile.model,
-                    })
+                    .with_backend(SessionBackendTarget::from_profile(&request.profile))
                     .with_runtime_owner(Some(self.core.runtime_owner.clone()))
                     .with_workspace_state(workspace_state)
                     .with_mounted_refs(mounted_refs)
@@ -6115,6 +6381,214 @@ fn long_context_from_recipe(
     Ok(config)
 }
 
+fn build_probe_mesh_plugin_offer(
+    session: &SessionMetadata,
+    tool_set: &str,
+) -> Result<SessionMeshPluginOffer, RuntimeProtocolError> {
+    let registry = match tool_set {
+        "coding_bootstrap" => ToolRegistry::coding_bootstrap(false, false),
+        other => {
+            return Err(protocol_error(
+                "mesh_plugin_unsupported_tool_set",
+                format!("unsupported mesh plugin tool set: {other}"),
+            ));
+        }
+    };
+    let tools = registry
+        .declared_tools()
+        .into_iter()
+        .map(|tool| SessionMeshPluginTool {
+            name: tool.function.name,
+            description: tool.function.description,
+        })
+        .collect::<Vec<_>>();
+    let worker_id = session
+        .backend
+        .as_ref()
+        .and_then(|backend| backend.psionic_mesh.as_ref())
+        .and_then(|mesh| mesh.local_worker_id.clone());
+    let runtime_owner_kind = session.runtime_owner.as_ref().map(|owner| owner.kind);
+    let attach_transport = session
+        .runtime_owner
+        .as_ref()
+        .map(|owner| owner.attach_transport);
+    let attach_target = session
+        .runtime_owner
+        .as_ref()
+        .and_then(|owner| owner.attach_target.clone());
+    let usage_hint = if let Some(target) = attach_target.as_deref() {
+        format!(
+            "Attach to Probe session {} via {} to use this local tool bundle on the published node.",
+            session.id.as_str(),
+            target
+        )
+    } else {
+        format!(
+            "Attach to Probe session {} to use this local tool bundle on the published node.",
+            session.id.as_str()
+        )
+    };
+    Ok(SessionMeshPluginOffer {
+        plugin_id: String::from(PROBE_MESH_PLUGIN_CODING_BOOTSTRAP_ID),
+        tool_set: tool_set.to_string(),
+        label: String::from("Probe coding bootstrap"),
+        summary: String::from(
+            "Bounded Probe coding tools run locally on one node but can be discovered across the mesh.",
+        ),
+        session_id: session.id.clone(),
+        execution_scope: String::from("local_probe_runtime"),
+        usage_hint,
+        worker_id,
+        runtime_owner_kind,
+        attach_transport,
+        attach_target,
+        tools,
+        entry_id: None,
+        published_at_ms: None,
+    })
+}
+
+fn mesh_plugin_offer_from_entry(
+    entry: &SessionMeshCoordinationEntry,
+) -> Option<SessionMeshPluginOffer> {
+    let body = entry.body.as_deref()?;
+    let envelope = serde_json::from_str::<ProbeMeshPluginOfferEnvelope>(body).ok()?;
+    if envelope.schema != PROBE_MESH_PLUGIN_OFFER_SCHEMA {
+        return None;
+    }
+    let mut offer = envelope.offer;
+    if offer.worker_id.is_none() {
+        offer.worker_id = Some(entry.worker_id.clone());
+    }
+    offer.entry_id = Some(entry.id);
+    offer.published_at_ms = Some(entry.created_at_ms);
+    Some(offer)
+}
+
+fn mesh_coordination_http_client() -> Result<reqwest::blocking::Client, RuntimeProtocolError> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|error| {
+            protocol_error(
+                "mesh_coordination_transport_error",
+                format!("failed to build mesh coordination client: {error}"),
+            )
+        })
+}
+
+fn psionic_mesh_management_base_url_from_session(
+    session: &SessionMetadata,
+) -> Result<String, RuntimeProtocolError> {
+    let Some(backend) = session.backend.as_ref() else {
+        return Err(protocol_error(
+            "mesh_coordination_unavailable",
+            format!(
+                "session {} has no backend target to resolve mesh coordination against",
+                session.id.as_str()
+            ),
+        ));
+    };
+    if let Some(mesh) = backend.psionic_mesh.as_ref() {
+        return Ok(mesh.management_base_url.clone());
+    }
+    if backend.control_plane
+        == Some(probe_protocol::backend::BackendControlPlaneKind::PsionicInferenceMesh)
+    {
+        return Ok(backend.base_url.trim_end_matches("/v1").to_string());
+    }
+    Err(protocol_error(
+        "mesh_coordination_unavailable",
+        format!(
+            "session {} is not attached to a Psionic mesh control plane",
+            session.id.as_str()
+        ),
+    ))
+}
+
+fn psionic_management_get<Q, T>(
+    client: &reqwest::blocking::Client,
+    management_base_url: &str,
+    path: &str,
+    query: Option<&Q>,
+) -> Result<T, RuntimeProtocolError>
+where
+    Q: Serialize,
+    T: DeserializeOwned,
+{
+    let url = format!("{management_base_url}{path}");
+    let request = client.get(url.as_str());
+    let request = if let Some(query) = query {
+        request.query(query)
+    } else {
+        request
+    };
+    let response = request.send().map_err(|error| {
+        protocol_error(
+            "mesh_coordination_transport_error",
+            format!("failed to reach mesh coordination at {url}: {error}"),
+        )
+    })?;
+    psionic_management_json_response(response, url.as_str())
+}
+
+fn psionic_management_post<B, T>(
+    client: &reqwest::blocking::Client,
+    management_base_url: &str,
+    path: &str,
+    body: &B,
+) -> Result<T, RuntimeProtocolError>
+where
+    B: Serialize,
+    T: DeserializeOwned,
+{
+    let url = format!("{management_base_url}{path}");
+    let response = client
+        .post(url.as_str())
+        .json(body)
+        .send()
+        .map_err(|error| {
+            protocol_error(
+                "mesh_coordination_transport_error",
+                format!("failed to reach mesh coordination at {url}: {error}"),
+            )
+        })?;
+    psionic_management_json_response(response, url.as_str())
+}
+
+fn psionic_management_json_response<T>(
+    response: reqwest::blocking::Response,
+    url: &str,
+) -> Result<T, RuntimeProtocolError>
+where
+    T: DeserializeOwned,
+{
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response.text().unwrap_or_default();
+        let code = if status == reqwest::StatusCode::NOT_FOUND {
+            "mesh_coordination_unavailable"
+        } else {
+            "backend_unavailable"
+        };
+        let detail = detail.trim();
+        return Err(protocol_error(
+            code,
+            if detail.is_empty() {
+                format!("mesh coordination request to {url} failed with {status}")
+            } else {
+                format!("mesh coordination request to {url} failed with {status}: {detail}")
+            },
+        ));
+    }
+    response.json::<T>().map_err(|error| {
+        protocol_error(
+            "mesh_coordination_decode_error",
+            format!("failed to decode mesh coordination response from {url}: {error}"),
+        )
+    })
+}
+
 fn protocol_error(code: impl Into<String>, message: impl Into<String>) -> RuntimeProtocolError {
     RuntimeProtocolError {
         code: code.into(),
@@ -6390,6 +6864,8 @@ mod tests {
             timeout_secs: 30,
             attach_mode: ServerAttachMode::AttachToExisting,
             prefix_cache_mode: PrefixCacheMode::BackendDefault,
+            control_plane: None,
+            psionic_mesh: None,
         };
         let loop_recipe = ToolLoopRecipe {
             tool_set: ToolSetKind::CodingBootstrap,

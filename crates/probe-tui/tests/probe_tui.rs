@@ -26,6 +26,8 @@ fn apple_fm_chat_config(base_url: &str) -> ProbeRuntimeTurnConfig {
             timeout_secs: 120,
             attach_mode: probe_protocol::backend::ServerAttachMode::AttachToExisting,
             prefix_cache_mode: probe_protocol::backend::PrefixCacheMode::BackendDefault,
+            control_plane: None,
+            psionic_mesh: None,
         },
         system_prompt: None,
         harness_profile: None,

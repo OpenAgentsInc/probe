@@ -995,6 +995,8 @@ mod tests {
             timeout_secs: 45,
             attach_mode: ServerAttachMode::AttachToExisting,
             prefix_cache_mode: PrefixCacheMode::BackendDefault,
+            control_plane: None,
+            psionic_mesh: None,
         };
         let config = AppleFmProviderConfig::from_backend_profile(&profile);
         assert_eq!(config.base_url, "http://127.0.0.1:11435");

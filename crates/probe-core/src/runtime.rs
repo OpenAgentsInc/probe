@@ -433,11 +433,7 @@ impl ProbeRuntime {
             )
             .with_system_prompt(request.system_prompt.clone())
             .with_harness_profile(request.harness_profile.clone())
-            .with_backend(SessionBackendTarget {
-                profile_name: request.profile.name.clone(),
-                base_url: request.profile.base_url.clone(),
-                model: request.profile.model.clone(),
-            }),
+            .with_backend(SessionBackendTarget::from_profile(&request.profile)),
         )?;
 
         self.run_plain_text_turn(

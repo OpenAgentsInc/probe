@@ -627,6 +627,8 @@ mod tests {
                     profile_name: String::from("psionic-qwen35-2b-q8-registry"),
                     base_url: String::from("http://127.0.0.1:8080/v1"),
                     model: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+                    control_plane: None,
+                    psionic_mesh: None,
                 },
             ))
             .expect("create session");

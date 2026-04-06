@@ -7,22 +7,32 @@ use std::time::Duration;
 
 use probe_core::session_store::{FilesystemSessionStore, NewItem};
 use probe_protocol::PROBE_PROTOCOL_VERSION;
-use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
+use probe_protocol::backend::{
+    BackendControlPlaneKind, BackendKind, BackendProfile, PrefixCacheMode, PsionicMeshAttachInfo,
+    PsionicMeshTargetableModel, ServerAttachMode,
+};
 use probe_protocol::runtime::{
-    ClientMessage, InspectSessionTurnsResponse, QueueTurnResponse, QueuedTurnStatus,
-    RequestEnvelope, ResponseBody, RuntimeProgressEvent, RuntimeRequest, RuntimeResponse,
-    ServerEvent, ServerMessage, SessionLookupRequest, SpawnChildSessionRequest,
-    StartSessionRequest, ToolApprovalRecipe, ToolChoice, ToolDeniedAction, ToolLoopRecipe,
-    ToolSetKind, TransportKind, TurnAuthor, TurnRequest,
+    ClientMessage, InspectSessionMeshCoordinationRequest, InspectSessionMeshPluginOffersRequest,
+    InspectSessionTurnsResponse, PostSessionMeshCoordinationRequest,
+    PublishSessionMeshPluginOfferRequest, QueueTurnResponse, QueuedTurnStatus, RequestEnvelope,
+    ResponseBody, RuntimeProgressEvent, RuntimeRequest, RuntimeResponse, ServerEvent,
+    ServerMessage, SessionLookupRequest, SpawnChildSessionRequest, StartSessionRequest,
+    ToolApprovalRecipe, ToolChoice, ToolDeniedAction, ToolLoopRecipe, ToolSetKind, TransportKind,
+    TurnAuthor, TurnRequest,
 };
 use probe_protocol::session::{
-    SessionDeliveryStatus, SessionId, SessionMountKind, SessionMountProvenance, SessionMountRef,
+    SessionDeliveryStatus, SessionId, SessionMeshCoordinationKind, SessionMeshCoordinationMode,
+    SessionMeshCoordinationVisibility, SessionMountKind, SessionMountProvenance, SessionMountRef,
     TaskReceiptDisposition, ToolApprovalResolution, ToolApprovalState, ToolExecutionRecord,
     ToolPolicyDecision, ToolRiskClass, TranscriptItemKind,
 };
 use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
 const TEST_MODEL: &str = "tiny-qwen35";
+const PSIONIC_MESH_COORDINATION_STATUS_PATH: &str = "/psionic/management/coordination/status";
+const PSIONIC_MESH_COORDINATION_FEED_PATH: &str = "/psionic/management/coordination/feed";
+const PSIONIC_MESH_COORDINATION_SEARCH_PATH: &str = "/psionic/management/coordination/search";
+const PSIONIC_MESH_COORDINATION_POST_PATH: &str = "/psionic/management/coordination/post";
 
 #[test]
 fn stdio_protocol_can_initialize_start_resume_and_run_a_turn() {
@@ -53,6 +63,7 @@ fn stdio_protocol_can_initialize_start_resume_and_run_a_turn() {
     assert_eq!(response.protocol_version, PROBE_PROTOCOL_VERSION);
     assert_eq!(response.capabilities.transport, TransportKind::StdioJsonl);
     assert!(response.capabilities.supports_queued_turns);
+    assert!(response.capabilities.supports_mesh_coordination_adjunct);
 
     let start_session = harness.request(
         "req-start-session",
@@ -152,6 +163,357 @@ fn stdio_protocol_can_initialize_start_resume_and_run_a_turn() {
     let requests = fake_backend.finish();
     assert_eq!(requests.len(), 1);
     assert!(requests[0].contains("hello"));
+}
+
+#[test]
+fn stdio_protocol_can_read_and_post_mesh_coordination_without_mutating_transcript() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let entries = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let entries_for_handler = Arc::clone(&entries);
+    let fake_backend = FakeOpenAiServer::from_handler(move |request| match request.path.as_str() {
+        PSIONIC_MESH_COORDINATION_STATUS_PATH => {
+            let entries = entries_for_handler.lock().expect("coordination entries");
+            FakeHttpResponse::json_ok(serde_json::json!({
+                "status": "ok",
+                "mode": "bootstrap_proxy",
+                "feed_path": PSIONIC_MESH_COORDINATION_FEED_PATH,
+                "search_path": PSIONIC_MESH_COORDINATION_SEARCH_PATH,
+                "post_path": PSIONIC_MESH_COORDINATION_POST_PATH,
+                "redact_path": "/psionic/management/coordination/redact",
+                "ttl_secs": 86400,
+                "max_items": 500,
+                "max_body_bytes": 4096,
+                "supported_kinds": ["status", "finding", "question", "tip", "done", "note"],
+                "supported_visibilities": ["mesh", "operator_internal", "node_local"],
+                "supported_provenances": ["local_post", "bootstrap_proxy_forwarded"],
+                "redaction_mode": "body_removed_receipt_retained",
+                "item_count": entries.len(),
+                "last_post_at_ms": entries
+                    .last()
+                    .and_then(|entry| entry.get("created_at_ms"))
+                    .and_then(serde_json::Value::as_u64),
+            }))
+        }
+        path if path.starts_with(PSIONIC_MESH_COORDINATION_POST_PATH) => {
+            let payload: serde_json::Value =
+                serde_json::from_str(&request.body).expect("coordination post body should parse");
+            let mut entries = entries_for_handler.lock().expect("coordination entries");
+            let entry = serde_json::json!({
+                "id": (entries.len() as u64) + 1,
+                "kind": payload["kind"].as_str().unwrap_or("note"),
+                "author": payload["author"].as_str().unwrap_or("probe"),
+                "worker_id": "openai_compat",
+                "visibility": payload["visibility"].as_str().unwrap_or("mesh"),
+                "provenance": "local_post",
+                "body": payload["body"].as_str().unwrap_or_default(),
+                "created_at_ms": 42_000,
+                "expires_at_ms": 128_400,
+            });
+            entries.push(entry.clone());
+            FakeHttpResponse::json_ok(entry)
+        }
+        path if path.starts_with(PSIONIC_MESH_COORDINATION_FEED_PATH) => {
+            let entries = entries_for_handler
+                .lock()
+                .expect("coordination entries")
+                .clone();
+            FakeHttpResponse::json_ok(serde_json::Value::Array(entries))
+        }
+        path if path.starts_with(PSIONIC_MESH_COORDINATION_SEARCH_PATH) => {
+            let entries = entries_for_handler
+                .lock()
+                .expect("coordination entries")
+                .iter()
+                .filter(|entry| {
+                    request.path.contains("query=triage")
+                        && entry["body"]
+                            .as_str()
+                            .is_some_and(|body| body.contains("triage"))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            FakeHttpResponse::json_ok(serde_json::Value::Array(entries))
+        }
+        other => panic!("unexpected fake backend request path: {other}"),
+    });
+    let profile = mesh_profile(fake_backend.base_url());
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+
+    let start_session = harness.request(
+        "req-start-mesh-session",
+        RuntimeRequest::StartSession(StartSessionRequest {
+            title: Some(String::from("mesh coordination")),
+            cwd: environment.workspace().to_path_buf(),
+            profile,
+            system_prompt: Some(String::from("Keep transcript truth local.")),
+            harness_profile: None,
+            workspace_state: None,
+            mounted_refs: Vec::new(),
+        }),
+    );
+    let RuntimeResponse::StartSession(snapshot) = expect_ok_response(start_session) else {
+        panic!("expected start session response");
+    };
+    let session_id = snapshot.session.id.clone();
+    assert!(snapshot.transcript.is_empty());
+
+    let post = harness.request(
+        "req-mesh-post",
+        RuntimeRequest::PostSessionMeshCoordination(PostSessionMeshCoordinationRequest {
+            session_id: session_id.clone(),
+            kind: SessionMeshCoordinationKind::Finding,
+            body: String::from("triage note from probe"),
+            author: Some(String::from("operator")),
+            visibility: Some(SessionMeshCoordinationVisibility::OperatorInternal),
+        }),
+    );
+    let RuntimeResponse::PostSessionMeshCoordination(posted) = expect_ok_response(post) else {
+        panic!("expected post session mesh coordination response");
+    };
+    assert_eq!(posted.entry.author, "operator");
+    assert_eq!(posted.entry.body.as_deref(), Some("triage note from probe"));
+    assert_eq!(
+        posted.entry.visibility,
+        SessionMeshCoordinationVisibility::OperatorInternal
+    );
+
+    let feed = harness.request(
+        "req-mesh-feed",
+        RuntimeRequest::InspectSessionMeshCoordination(InspectSessionMeshCoordinationRequest {
+            session_id: session_id.clone(),
+            query: None,
+            since_ms: None,
+            author: None,
+            kind: None,
+            visibility: None,
+            limit: Some(10),
+        }),
+    );
+    let RuntimeResponse::InspectSessionMeshCoordination(feed) = expect_ok_response(feed) else {
+        panic!("expected inspect session mesh coordination response");
+    };
+    assert_eq!(
+        feed.status.mode,
+        SessionMeshCoordinationMode::BootstrapProxy
+    );
+    assert_eq!(feed.entries.len(), 1);
+    assert_eq!(feed.entries[0].author, "operator");
+
+    let search = harness.request(
+        "req-mesh-search",
+        RuntimeRequest::InspectSessionMeshCoordination(InspectSessionMeshCoordinationRequest {
+            session_id: session_id.clone(),
+            query: Some(String::from("triage")),
+            since_ms: None,
+            author: None,
+            kind: Some(SessionMeshCoordinationKind::Finding),
+            visibility: None,
+            limit: Some(10),
+        }),
+    );
+    let RuntimeResponse::InspectSessionMeshCoordination(search) = expect_ok_response(search) else {
+        panic!("expected inspect session mesh coordination response");
+    };
+    assert_eq!(search.entries.len(), 1);
+    assert_eq!(
+        search.entries[0].body.as_deref(),
+        Some("triage note from probe")
+    );
+
+    let inspect = harness.request(
+        "req-inspect-mesh-session",
+        RuntimeRequest::InspectSession(SessionLookupRequest {
+            session_id: session_id.clone(),
+        }),
+    );
+    let RuntimeResponse::InspectSession(inspect) = expect_ok_response(inspect) else {
+        panic!("expected inspect session response");
+    };
+    assert!(inspect.transcript.is_empty());
+    assert!(inspect.pending_approvals.is_empty());
+
+    harness.shutdown();
+    let requests = fake_backend.finish();
+    assert_eq!(requests.len(), 6);
+    assert!(requests[0].contains("GET /psionic/management/coordination/status HTTP/1.1"));
+    assert!(requests[1].contains("POST /psionic/management/coordination/post HTTP/1.1"));
+    assert!(requests[2].contains("GET /psionic/management/coordination/status HTTP/1.1"));
+    assert!(requests[3].contains("GET /psionic/management/coordination/feed?limit=10 HTTP/1.1"));
+    assert!(requests[4].contains("GET /psionic/management/coordination/status HTTP/1.1"));
+    assert!(requests[5].contains(
+        "GET /psionic/management/coordination/search?query=triage&kind=finding&limit=10 HTTP/1.1"
+    ));
+}
+
+#[test]
+fn stdio_protocol_refuses_mesh_coordination_for_non_mesh_sessions() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let profile = test_profile("http://127.0.0.1:9/v1");
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let session_id = start_test_session(&mut harness, &environment, &profile);
+
+    let response = harness.request(
+        "req-non-mesh-coordination",
+        RuntimeRequest::InspectSessionMeshCoordination(InspectSessionMeshCoordinationRequest {
+            session_id,
+            query: None,
+            since_ms: None,
+            author: None,
+            kind: None,
+            visibility: None,
+            limit: None,
+        }),
+    );
+    let error = expect_protocol_error(response);
+    assert_eq!(error.code, "mesh_coordination_unavailable");
+    assert!(
+        error
+            .message
+            .contains("not attached to a Psionic mesh control plane")
+    );
+
+    harness.shutdown();
+}
+
+#[test]
+fn stdio_protocol_can_publish_and_list_mesh_plugin_offers() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let entries = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let entries_for_handler = Arc::clone(&entries);
+    let fake_backend = FakeOpenAiServer::from_handler(move |request| match request.path.as_str() {
+        PSIONIC_MESH_COORDINATION_STATUS_PATH => {
+            let entries = entries_for_handler.lock().expect("coordination entries");
+            FakeHttpResponse::json_ok(serde_json::json!({
+                "status": "ok",
+                "mode": "bootstrap_proxy",
+                "feed_path": PSIONIC_MESH_COORDINATION_FEED_PATH,
+                "search_path": PSIONIC_MESH_COORDINATION_SEARCH_PATH,
+                "post_path": PSIONIC_MESH_COORDINATION_POST_PATH,
+                "redact_path": "/psionic/management/coordination/redact",
+                "ttl_secs": 86400,
+                "max_items": 500,
+                "max_body_bytes": 4096,
+                "supported_kinds": ["status", "finding", "question", "tip", "done", "note"],
+                "supported_visibilities": ["mesh", "operator_internal", "node_local"],
+                "supported_provenances": ["local_post", "bootstrap_proxy_forwarded"],
+                "redaction_mode": "body_removed_receipt_retained",
+                "item_count": entries.len(),
+                "last_post_at_ms": entries
+                    .last()
+                    .and_then(|entry| entry.get("created_at_ms"))
+                    .and_then(serde_json::Value::as_u64),
+            }))
+        }
+        path if path.starts_with(PSIONIC_MESH_COORDINATION_POST_PATH) => {
+            let payload: serde_json::Value =
+                serde_json::from_str(&request.body).expect("coordination post body should parse");
+            let mut entries = entries_for_handler.lock().expect("coordination entries");
+            let entry = serde_json::json!({
+                "id": (entries.len() as u64) + 1,
+                "kind": payload["kind"].as_str().unwrap_or("note"),
+                "author": payload["author"].as_str().unwrap_or("probe"),
+                "worker_id": "openai_compat",
+                "visibility": payload["visibility"].as_str().unwrap_or("mesh"),
+                "provenance": "local_post",
+                "body": payload["body"].as_str().unwrap_or_default(),
+                "created_at_ms": 55_000,
+                "expires_at_ms": 141_400,
+            });
+            entries.push(entry.clone());
+            FakeHttpResponse::json_ok(entry)
+        }
+        path if path.starts_with(PSIONIC_MESH_COORDINATION_FEED_PATH) => {
+            let entries = entries_for_handler
+                .lock()
+                .expect("coordination entries")
+                .clone();
+            FakeHttpResponse::json_ok(serde_json::Value::Array(entries))
+        }
+        other => panic!("unexpected fake backend request path: {other}"),
+    });
+    let profile = mesh_profile(fake_backend.base_url());
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+
+    let start_session = harness.request(
+        "req-start-plugin-session",
+        RuntimeRequest::StartSession(StartSessionRequest {
+            title: Some(String::from("mesh plugins")),
+            cwd: environment.workspace().to_path_buf(),
+            profile,
+            system_prompt: Some(String::from("Keep runtime-owned plugin truth honest.")),
+            harness_profile: None,
+            workspace_state: None,
+            mounted_refs: Vec::new(),
+        }),
+    );
+    let RuntimeResponse::StartSession(snapshot) = expect_ok_response(start_session) else {
+        panic!("expected start session response");
+    };
+    let session_id = snapshot.session.id.clone();
+
+    let publish = harness.request(
+        "req-publish-mesh-plugin",
+        RuntimeRequest::PublishSessionMeshPluginOffer(PublishSessionMeshPluginOfferRequest {
+            session_id: session_id.clone(),
+            tool_set: String::from("coding_bootstrap"),
+            author: Some(String::from("operator")),
+            visibility: Some(SessionMeshCoordinationVisibility::Mesh),
+        }),
+    );
+    let RuntimeResponse::PublishSessionMeshPluginOffer(response) = expect_ok_response(publish)
+    else {
+        panic!("expected publish session mesh plugin offer response");
+    };
+    assert_eq!(response.entry.author, "operator");
+    assert_eq!(response.offer.tool_set, "coding_bootstrap");
+    assert_eq!(response.offer.plugin_id, "probe.coding_bootstrap.local");
+    assert_eq!(response.offer.tools[0].name, "apply_patch");
+    assert_eq!(response.offer.entry_id, Some(1));
+    assert_eq!(response.offer.published_at_ms, Some(55_000));
+
+    let inspect = harness.request(
+        "req-inspect-mesh-plugins",
+        RuntimeRequest::InspectSessionMeshPluginOffers(InspectSessionMeshPluginOffersRequest {
+            session_id: session_id.clone(),
+            limit: Some(10),
+        }),
+    );
+    let RuntimeResponse::InspectSessionMeshPluginOffers(inspected) = expect_ok_response(inspect)
+    else {
+        panic!("expected inspect session mesh plugin offers response");
+    };
+    assert_eq!(
+        inspected.status.mode,
+        SessionMeshCoordinationMode::BootstrapProxy
+    );
+    assert_eq!(inspected.offers.len(), 1);
+    assert_eq!(inspected.offers[0].tool_set, "coding_bootstrap");
+    assert_eq!(
+        inspected.offers[0].worker_id.as_deref(),
+        Some("openai_compat")
+    );
+    assert!(
+        inspected.offers[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "read_file")
+    );
+
+    harness.shutdown();
+    let requests = fake_backend.finish();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[0].contains("GET /psionic/management/coordination/status HTTP/1.1"));
+    assert!(requests[1].contains("POST /psionic/management/coordination/post HTTP/1.1"));
+    assert!(requests[1].contains("probe.mesh_plugin_offer.v1"));
+    assert!(requests[1].contains("coding_bootstrap"));
+    assert!(requests[2].contains("GET /psionic/management/coordination/status HTTP/1.1"));
+    assert!(
+        requests[3]
+            .contains("GET /psionic/management/coordination/feed?kind=tip&limit=10 HTTP/1.1")
+    );
 }
 
 #[test]
@@ -297,6 +659,79 @@ fn start_session_persists_typed_mount_refs_in_session_snapshots() {
     assert_eq!(snapshot.session.mounted_refs, mounted_refs);
 
     harness.shutdown();
+}
+
+#[test]
+fn start_session_preserves_psionic_mesh_backend_metadata() {
+    let environment = ProbeTestEnvironment::new();
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let profile = BackendProfile {
+        name: String::from("psionic-inference-mesh"),
+        kind: BackendKind::OpenAiChatCompletions,
+        base_url: String::from("http://127.0.0.1:8080/v1"),
+        model: String::from("gemma4:e4b"),
+        reasoning_level: None,
+        api_key_env: String::from("PROBE_OPENAI_API_KEY"),
+        timeout_secs: 30,
+        attach_mode: ServerAttachMode::AttachToExisting,
+        prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        control_plane: Some(BackendControlPlaneKind::PsionicInferenceMesh),
+        psionic_mesh: Some(PsionicMeshAttachInfo {
+            management_base_url: String::from("http://127.0.0.1:8080"),
+            topology_digest: String::from("mesh-topology-v1"),
+            default_model: String::from("gemma4:e4b"),
+            targetable_models: vec![PsionicMeshTargetableModel {
+                model: String::from("gemma4:e4b"),
+                family: String::from("gemma4"),
+                supported_endpoints: vec![
+                    String::from("/v1/chat/completions"),
+                    String::from("/v1/responses"),
+                ],
+                structured_outputs: false,
+                tool_calling: true,
+                response_state: true,
+            }],
+            local_worker_id: Some(String::from("openai_compat")),
+            served_mesh_role: Some(String::from("thin_client")),
+            served_mesh_posture: Some(String::from("ready")),
+            served_mesh_reasons: vec![String::from("remote_only")],
+            execution_mode: Some(String::from("proxy")),
+            execution_engine: Some(String::from("psionic")),
+            fallback_posture: Some(String::from("thin_client_remote_only")),
+        }),
+    };
+
+    let response = harness.request(
+        "req-start-mesh-session",
+        RuntimeRequest::StartSession(StartSessionRequest {
+            title: Some(String::from("mesh session")),
+            cwd: environment.workspace().to_path_buf(),
+            profile,
+            system_prompt: None,
+            harness_profile: None,
+            workspace_state: None,
+            mounted_refs: Vec::new(),
+        }),
+    );
+    let RuntimeResponse::StartSession(snapshot) = expect_ok_response(response) else {
+        panic!("expected start session response");
+    };
+    let backend = snapshot.session.backend.expect("backend metadata");
+    assert_eq!(
+        backend.control_plane,
+        Some(BackendControlPlaneKind::PsionicInferenceMesh)
+    );
+    let mesh = backend.psionic_mesh.expect("mesh metadata");
+    assert_eq!(mesh.management_base_url, "http://127.0.0.1:8080");
+    assert_eq!(mesh.topology_digest, "mesh-topology-v1");
+    assert_eq!(mesh.default_model, "gemma4:e4b");
+    assert_eq!(mesh.served_mesh_role.as_deref(), Some("thin_client"));
+    assert_eq!(
+        mesh.fallback_posture.as_deref(),
+        Some("thin_client_remote_only")
+    );
+    assert_eq!(mesh.targetable_models.len(), 1);
+    assert_eq!(mesh.targetable_models[0].model, "gemma4:e4b");
 }
 
 #[test]
@@ -1354,6 +1789,17 @@ fn test_profile(base_url: &str) -> BackendProfile {
         timeout_secs: 30,
         attach_mode: ServerAttachMode::AttachToExisting,
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        control_plane: None,
+        psionic_mesh: None,
+    }
+}
+
+fn mesh_profile(base_url: &str) -> BackendProfile {
+    BackendProfile {
+        name: String::from("psionic-inference-mesh"),
+        control_plane: Some(BackendControlPlaneKind::PsionicInferenceMesh),
+        model: String::from("psionic-mesh-default"),
+        ..test_profile(base_url)
     }
 }
 

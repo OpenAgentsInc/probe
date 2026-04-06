@@ -1,6 +1,8 @@
 use std::env;
 
-use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
+use probe_protocol::backend::{
+    BackendControlPlaneKind, BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode,
+};
 
 pub const PSIONIC_APPLE_FM_BRIDGE_PROFILE: &str = "psionic-apple-fm-bridge";
 pub const PSIONIC_APPLE_FM_ORACLE_PROFILE: &str = "psionic-apple-fm-oracle";
@@ -17,6 +19,8 @@ pub const OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVELS: [&str; 5] = [
     "xhigh",
 ];
 pub const DEFAULT_OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+pub const PSIONIC_INFERENCE_MESH_PROFILE: &str = "psionic-inference-mesh";
+pub const PSIONIC_INFERENCE_MESH_DEFAULT_MODEL: &str = "psionic-mesh-default";
 pub const PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE: &str = "psionic-qwen35-2b-q8-registry";
 pub const PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE: &str = "psionic-qwen35-2b-q8-oracle";
 pub const PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE: &str = "psionic-qwen35-2b-q8-long-context";
@@ -29,6 +33,7 @@ const APPLE_FM_BASE_URL_ENV_KEYS: [&str; 2] =
 pub fn named_backend_profile(name: &str) -> Option<BackendProfile> {
     match name {
         OPENAI_CODEX_SUBSCRIPTION_PROFILE => Some(openai_codex_subscription()),
+        PSIONIC_INFERENCE_MESH_PROFILE => Some(psionic_inference_mesh()),
         PSIONIC_APPLE_FM_BRIDGE_PROFILE => Some(psionic_apple_fm_bridge()),
         PSIONIC_APPLE_FM_ORACLE_PROFILE => Some(psionic_apple_fm_oracle()),
         PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE => Some(psionic_qwen35_2b_q8_registry()),
@@ -50,6 +55,25 @@ pub fn openai_codex_subscription() -> BackendProfile {
         timeout_secs: 60,
         attach_mode: ServerAttachMode::AttachToExisting,
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        control_plane: None,
+        psionic_mesh: None,
+    }
+}
+
+#[must_use]
+pub fn psionic_inference_mesh() -> BackendProfile {
+    BackendProfile {
+        name: String::from(PSIONIC_INFERENCE_MESH_PROFILE),
+        kind: BackendKind::OpenAiChatCompletions,
+        base_url: String::from("http://127.0.0.1:8080/v1"),
+        model: String::from(PSIONIC_INFERENCE_MESH_DEFAULT_MODEL),
+        reasoning_level: None,
+        api_key_env: String::from("PROBE_OPENAI_API_KEY"),
+        timeout_secs: 45,
+        attach_mode: ServerAttachMode::AttachToExisting,
+        prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        control_plane: Some(BackendControlPlaneKind::PsionicInferenceMesh),
+        psionic_mesh: None,
     }
 }
 
@@ -132,6 +156,8 @@ pub fn psionic_apple_fm_bridge() -> BackendProfile {
         timeout_secs: 45,
         attach_mode: ServerAttachMode::AttachToExisting,
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        control_plane: None,
+        psionic_mesh: None,
     }
 }
 
@@ -147,6 +173,8 @@ pub fn psionic_apple_fm_oracle() -> BackendProfile {
         timeout_secs: 30,
         attach_mode: ServerAttachMode::AttachToExisting,
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        control_plane: None,
+        psionic_mesh: None,
     }
 }
 
@@ -162,6 +190,8 @@ pub fn psionic_qwen35_2b_q8_registry() -> BackendProfile {
         timeout_secs: 45,
         attach_mode: ServerAttachMode::AttachToExisting,
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        control_plane: None,
+        psionic_mesh: None,
     }
 }
 
@@ -177,6 +207,8 @@ pub fn psionic_qwen35_2b_q8_oracle() -> BackendProfile {
         timeout_secs: 30,
         attach_mode: ServerAttachMode::AttachToExisting,
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        control_plane: None,
+        psionic_mesh: None,
     }
 }
 
@@ -192,6 +224,8 @@ pub fn psionic_qwen35_2b_q8_long_context() -> BackendProfile {
         timeout_secs: 60,
         attach_mode: ServerAttachMode::AttachToExisting,
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
+        control_plane: None,
+        psionic_mesh: None,
     }
 }
 
@@ -227,12 +261,13 @@ mod tests {
         OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL_DEFAULT,
         OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVELS, PSIONIC_APPLE_FM_BRIDGE_PROFILE,
         PSIONIC_APPLE_FM_MODEL, PSIONIC_APPLE_FM_ORACLE_PROFILE,
+        PSIONIC_INFERENCE_MESH_DEFAULT_MODEL, PSIONIC_INFERENCE_MESH_PROFILE,
         PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE, PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE,
         PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
         default_reasoning_level_for_backend, named_backend_profile,
         next_reasoning_level_for_backend, openai_codex_subscription,
         persisted_reasoning_level_for_backend, psionic_apple_fm_bridge, psionic_apple_fm_oracle,
-        psionic_qwen35_2b_q8_long_context, psionic_qwen35_2b_q8_oracle,
+        psionic_inference_mesh, psionic_qwen35_2b_q8_long_context, psionic_qwen35_2b_q8_oracle,
         psionic_qwen35_2b_q8_registry, resolve_apple_fm_bridge_base_url_with,
         resolved_reasoning_level_for_backend, supported_reasoning_levels_for_backend,
     };
@@ -257,6 +292,27 @@ mod tests {
             .expect("codex subscription profile");
         assert_eq!(profile.base_url, DEFAULT_OPENAI_CODEX_BASE_URL);
         assert_eq!(profile.model, OPENAI_CODEX_SUBSCRIPTION_MODEL);
+    }
+
+    #[test]
+    fn psionic_inference_mesh_profile_is_available_by_name() {
+        let profile =
+            named_backend_profile(PSIONIC_INFERENCE_MESH_PROFILE).expect("mesh attach profile");
+        assert_eq!(profile.name, PSIONIC_INFERENCE_MESH_PROFILE);
+        assert_eq!(profile.model, PSIONIC_INFERENCE_MESH_DEFAULT_MODEL);
+        assert_eq!(
+            profile.control_plane,
+            Some(probe_protocol::backend::BackendControlPlaneKind::PsionicInferenceMesh)
+        );
+        assert!(profile.psionic_mesh.is_none());
+    }
+
+    #[test]
+    fn canonical_psionic_inference_mesh_profile_is_stable() {
+        let profile = psionic_inference_mesh();
+        assert_eq!(profile.base_url, "http://127.0.0.1:8080/v1");
+        assert_eq!(profile.api_key_env, "PROBE_OPENAI_API_KEY");
+        assert_eq!(profile.timeout_secs, 45);
     }
 
     #[test]
