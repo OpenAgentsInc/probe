@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use probe_core::backend_profiles::resolved_reasoning_level_for_backend;
 use probe_core::provider::{normalize_openai_assistant_text, normalize_openai_stream_display_text};
@@ -10,9 +10,11 @@ use probe_core::tools::{ToolDeniedAction, ToolLoopConfig};
 use probe_openai_auth::OpenAiCodexAuthStore;
 use probe_protocol::runtime::{RuntimeActivity, RuntimeActivityKind};
 use probe_protocol::session::{
-    PendingToolApproval, TaskFinalReceipt, TaskReceiptDisposition, TaskVerificationCommandStatus,
-    TaskVerificationStatus, TaskWorkspaceSummary, TaskWorkspaceSummaryStatus,
-    ToolApprovalResolution,
+    PendingToolApproval, SessionBranchState, SessionDeliveryState, SessionDeliveryStatus,
+    SessionMcpConnectionStatus, SessionMcpState, SessionWorkspaceBootMode, SessionWorkspaceState,
+    TaskCheckpointStatus, TaskFinalReceipt, TaskReceiptDisposition, TaskRevertibilityStatus,
+    TaskVerificationCommandStatus, TaskVerificationStatus, TaskWorkspaceSummary,
+    TaskWorkspaceSummaryStatus, ToolApprovalResolution, ToolRiskClass,
 };
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -21,12 +23,16 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::bottom_pane::ComposerSubmission;
 use crate::event::UiEvent;
+use crate::failure::classify_runtime_failure;
+use crate::memory::{MemoryScope, ProbeMemoryStack};
 use crate::message::{
     AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
     AppleFmFailureSummary, AppleFmUsageSummary, ProbeRuntimeTurnConfig, SessionUsageSummary,
     UsageCountsSummary,
 };
-use crate::transcript::{ActiveTurn, RetainedTranscript, TranscriptEntry, TranscriptRole};
+use crate::transcript::{
+    ActiveTurn, RetainedTranscript, TranscriptEntry, TranscriptMode, TranscriptRole,
+};
 use crate::widgets::{InfoPanel, ModalCard, TabStrip};
 
 const MAX_EVENT_LOG: usize = 16;
@@ -37,11 +43,28 @@ const PAGE_SCROLL_STEP: u16 = 12;
 pub enum ScreenId {
     Chat,
     Help,
+    StatusOverlay,
+    DoctorOverlay,
+    RecipesOverlay,
+    GitOverlay,
+    BranchOverlay,
+    StageOverlay,
+    CommitOverlay,
+    PushOverlay,
+    PrOverlay,
+    PrCommentsOverlay,
     SetupOverlay,
     ApprovalOverlay,
     PlanModeOverlay,
+    BackgroundModeOverlay,
     ModelPickerOverlay,
     ReasoningPickerOverlay,
+    ReviewModeOverlay,
+    MemoryOverlay,
+    MemoryEditorOverlay,
+    DiffOverlay,
+    CheckpointOverlay,
+    RevertOverlay,
     WorkspaceOverlay,
     ResumeOverlay,
     UsageOverlay,
@@ -58,13 +81,30 @@ impl ScreenId {
         match self {
             Self::Chat => "chat",
             Self::Help => "help modal",
+            Self::StatusOverlay => "status overlay",
+            Self::DoctorOverlay => "doctor overlay",
+            Self::RecipesOverlay => "recipes overlay",
+            Self::GitOverlay => "git overlay",
+            Self::BranchOverlay => "branch overlay",
+            Self::StageOverlay => "stage overlay",
+            Self::CommitOverlay => "commit overlay",
+            Self::PushOverlay => "push overlay",
+            Self::PrOverlay => "pr overlay",
+            Self::PrCommentsOverlay => "pr comments overlay",
             Self::SetupOverlay => "backend overlay",
             Self::ApprovalOverlay => "approval overlay",
             Self::PlanModeOverlay => "plan mode picker",
+            Self::BackgroundModeOverlay => "launch mode picker",
             Self::ModelPickerOverlay => "model picker",
             Self::ReasoningPickerOverlay => "reasoning picker",
+            Self::ReviewModeOverlay => "review mode picker",
+            Self::MemoryOverlay => "memory overlay",
+            Self::MemoryEditorOverlay => "memory editor overlay",
+            Self::DiffOverlay => "diff overlay",
+            Self::CheckpointOverlay => "checkpoint overlay",
+            Self::RevertOverlay => "revert overlay",
             Self::WorkspaceOverlay => "workspace overlay",
-            Self::ResumeOverlay => "resume overlay",
+            Self::ResumeOverlay => "tasks overlay",
             Self::UsageOverlay => "usage overlay",
             Self::McpOverlay => "mcp overlay",
             Self::McpServersOverlay => "mcp servers overlay",
@@ -134,6 +174,9 @@ struct ProbeRuntimeState {
     profile_name: Option<String>,
     model_id: Option<String>,
     cwd: Option<String>,
+    workspace_state: Option<SessionWorkspaceState>,
+    branch_state: Option<SessionBranchState>,
+    delivery_state: Option<SessionDeliveryState>,
     backend_kind: Option<String>,
     activity: Option<RuntimeActivity>,
     round_trip: Option<usize>,
@@ -142,23 +185,34 @@ struct ProbeRuntimeState {
     pending_approvals: Vec<PendingToolApproval>,
     latest_task_workspace_summary: Option<TaskWorkspaceSummary>,
     latest_task_receipt: Option<TaskFinalReceipt>,
+    mcp_state: Option<SessionMcpState>,
     recovery_note: Option<String>,
     usage: SessionUsageSummary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevertAvailability {
+    PendingReview,
+    Exact,
+    Limited,
+    Unavailable,
+}
+
+impl RevertAvailability {
+    fn label(self) -> &'static str {
+        match self {
+            Self::PendingReview => "reject before apply",
+            Self::Exact => "available",
+            Self::Limited => "limited",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AssistantStreamMode {
     Delta,
     Snapshot,
-}
-
-impl AssistantStreamMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Delta => "delta",
-            Self::Snapshot => "snapshot",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -187,8 +241,13 @@ struct AssistantStreamState {
 pub enum ScreenAction {
     None,
     OpenHelp,
+    OpenStatusOverlay,
+    OpenDoctorOverlay,
     OpenSetupOverlay,
     OpenApprovalOverlay,
+    OpenGitOverlay,
+    OpenRecipesOverlay,
+    OpenTasksOverlay,
     OpenMcpAddOverlay,
     OpenMcpServersOverlay,
     CloseModal,
@@ -199,6 +258,12 @@ pub enum ScreenCommand {
     RunAppleFmSetup,
     SetActivePlanMode {
         enabled: bool,
+    },
+    SetActiveLaunchMode {
+        mode_label: String,
+    },
+    SetActiveReviewMode {
+        mode_label: String,
     },
     SelectActiveBackendModel {
         model_id: String,
@@ -218,15 +283,55 @@ pub enum ScreenCommand {
     RemoveMcpServer {
         server_id: String,
     },
+    CreateOrSwitchBranch {
+        repo_root: PathBuf,
+        name: String,
+    },
+    StageCurrentRepo {
+        repo_root: PathBuf,
+    },
+    CommitCurrentRepo {
+        repo_root: PathBuf,
+        message: String,
+    },
+    PushCurrentBranch {
+        repo_root: PathBuf,
+        branch_name: String,
+        set_upstream: bool,
+    },
+    CreateDraftPullRequest {
+        repo_root: PathBuf,
+        title: String,
+        base_branch: String,
+        head_branch: String,
+    },
+    SeedComposerDraft {
+        text: String,
+    },
     OpenMcpProviderCommandOverlay,
-    OpenMcpManualEditorOverlay,
+    OpenMcpManualEditorOverlay {
+        server_id: Option<String>,
+    },
+    OpenMemoryEditor {
+        label: String,
+        path: PathBuf,
+    },
     ImportMcpProviderCommand {
         command: String,
     },
     SaveMcpServer {
+        server_id: Option<String>,
         name: String,
         transport: McpServerTransportDraft,
         target: String,
+    },
+    SaveMemoryFile {
+        label: String,
+        path: PathBuf,
+        body: String,
+    },
+    RevertLastTask {
+        session_id: String,
     },
     ConfirmClearActiveContext,
     ConfirmCompactActiveContext,
@@ -291,11 +396,28 @@ impl ScreenOutcome {
 pub enum ScreenState {
     Chat(ChatScreen),
     Help(HelpScreen),
+    Status(StatusOverlay),
+    Doctor(DoctorOverlay),
+    Recipes(RecipesOverlay),
+    Git(GitOverlay),
+    Branch(BranchOverlay),
+    Stage(StageOverlay),
+    Commit(CommitOverlay),
+    Push(PushOverlay),
+    Pr(PrOverlay),
+    PrComments(PrCommentsOverlay),
     Setup(SetupOverlay),
     Approval(ApprovalOverlay),
     PlanMode(PlanModeOverlay),
+    BackgroundMode(BackgroundModeOverlay),
     ModelPicker(ModelPickerOverlay),
     ReasoningPicker(ReasoningPickerOverlay),
+    ReviewMode(ReviewModeOverlay),
+    Memory(MemoryOverlay),
+    MemoryEditor(MemoryEditorOverlay),
+    Diff(DiffOverlay),
+    Checkpoint(CheckpointOverlay),
+    Revert(RevertOverlay),
     Workspace(WorkspaceOverlay),
     Resume(ResumeOverlay),
     Usage(UsageOverlay),
@@ -312,11 +434,28 @@ impl ScreenState {
         match self {
             Self::Chat(_) => ScreenId::Chat,
             Self::Help(_) => ScreenId::Help,
+            Self::Status(_) => ScreenId::StatusOverlay,
+            Self::Doctor(_) => ScreenId::DoctorOverlay,
+            Self::Recipes(_) => ScreenId::RecipesOverlay,
+            Self::Git(_) => ScreenId::GitOverlay,
+            Self::Branch(_) => ScreenId::BranchOverlay,
+            Self::Stage(_) => ScreenId::StageOverlay,
+            Self::Commit(_) => ScreenId::CommitOverlay,
+            Self::Push(_) => ScreenId::PushOverlay,
+            Self::Pr(_) => ScreenId::PrOverlay,
+            Self::PrComments(_) => ScreenId::PrCommentsOverlay,
             Self::Setup(_) => ScreenId::SetupOverlay,
             Self::Approval(_) => ScreenId::ApprovalOverlay,
             Self::PlanMode(_) => ScreenId::PlanModeOverlay,
+            Self::BackgroundMode(_) => ScreenId::BackgroundModeOverlay,
             Self::ModelPicker(_) => ScreenId::ModelPickerOverlay,
             Self::ReasoningPicker(_) => ScreenId::ReasoningPickerOverlay,
+            Self::ReviewMode(_) => ScreenId::ReviewModeOverlay,
+            Self::Memory(_) => ScreenId::MemoryOverlay,
+            Self::MemoryEditor(_) => ScreenId::MemoryEditorOverlay,
+            Self::Diff(_) => ScreenId::DiffOverlay,
+            Self::Checkpoint(_) => ScreenId::CheckpointOverlay,
+            Self::Revert(_) => ScreenId::RevertOverlay,
             Self::Workspace(_) => ScreenId::WorkspaceOverlay,
             Self::Resume(_) => ScreenId::ResumeOverlay,
             Self::Usage(_) => ScreenId::UsageOverlay,
@@ -341,11 +480,28 @@ impl ScreenState {
         match self {
             Self::Chat(screen) => screen.handle_event(event),
             Self::Help(screen) => screen.handle_event(event),
+            Self::Status(screen) => screen.handle_event(event),
+            Self::Doctor(screen) => screen.handle_event(event),
+            Self::Recipes(screen) => screen.handle_event(event),
+            Self::Git(screen) => screen.handle_event(event),
+            Self::Branch(screen) => screen.handle_event(event),
+            Self::Stage(screen) => screen.handle_event(event),
+            Self::Commit(screen) => screen.handle_event(event),
+            Self::Push(screen) => screen.handle_event(event),
+            Self::Pr(screen) => screen.handle_event(event),
+            Self::PrComments(screen) => screen.handle_event(event),
             Self::Setup(screen) => screen.handle_event(event),
             Self::Approval(screen) => screen.handle_event(event),
             Self::PlanMode(screen) => screen.handle_event(event),
+            Self::BackgroundMode(screen) => screen.handle_event(event),
             Self::ModelPicker(screen) => screen.handle_event(event),
             Self::ReasoningPicker(screen) => screen.handle_event(event),
+            Self::ReviewMode(screen) => screen.handle_event(event),
+            Self::Memory(screen) => screen.handle_event(event),
+            Self::MemoryEditor(screen) => screen.handle_event(event),
+            Self::Diff(screen) => screen.handle_event(event),
+            Self::Checkpoint(screen) => screen.handle_event(event),
+            Self::Revert(screen) => screen.handle_event(event),
             Self::Workspace(screen) => screen.handle_event(event),
             Self::Resume(screen) => screen.handle_event(event),
             Self::Usage(screen) => screen.handle_event(event),
@@ -368,11 +524,28 @@ impl ScreenState {
         match self {
             Self::Chat(screen) => screen.render(frame, area, stack_depth),
             Self::Help(screen) => screen.render(frame, area, stack_depth),
+            Self::Status(screen) => screen.render(frame, area, stack_depth, base_screen),
+            Self::Doctor(screen) => screen.render(frame, area, stack_depth, base_screen),
+            Self::Recipes(screen) => screen.render(frame, area, stack_depth),
+            Self::Git(screen) => screen.render(frame, area, stack_depth, base_screen),
+            Self::Branch(screen) => screen.render(frame, area, stack_depth),
+            Self::Stage(screen) => screen.render(frame, area, stack_depth),
+            Self::Commit(screen) => screen.render(frame, area, stack_depth),
+            Self::Push(screen) => screen.render(frame, area, stack_depth),
+            Self::Pr(screen) => screen.render(frame, area, stack_depth),
+            Self::PrComments(screen) => screen.render(frame, area, stack_depth),
             Self::Setup(screen) => screen.render(frame, area, stack_depth, base_screen),
             Self::Approval(screen) => screen.render(frame, area, stack_depth),
             Self::PlanMode(screen) => screen.render(frame, area, stack_depth),
+            Self::BackgroundMode(screen) => screen.render(frame, area, stack_depth),
             Self::ModelPicker(screen) => screen.render(frame, area, stack_depth),
             Self::ReasoningPicker(screen) => screen.render(frame, area, stack_depth),
+            Self::ReviewMode(screen) => screen.render(frame, area, stack_depth),
+            Self::Memory(screen) => screen.render(frame, area, stack_depth),
+            Self::MemoryEditor(screen) => screen.render(frame, area, stack_depth),
+            Self::Diff(screen) => screen.render(frame, area, stack_depth),
+            Self::Checkpoint(screen) => screen.render(frame, area, stack_depth, base_screen),
+            Self::Revert(screen) => screen.render(frame, area, stack_depth, base_screen),
             Self::Workspace(screen) => screen.render(frame, area, stack_depth),
             Self::Resume(screen) => screen.render(frame, area, stack_depth),
             Self::Usage(screen) => screen.render(frame, area, stack_depth, base_screen),
@@ -389,11 +562,28 @@ impl ScreenState {
         match self {
             Self::Chat(screen) => Some(screen),
             Self::Help(_)
+            | Self::Status(_)
+            | Self::Doctor(_)
+            | Self::Recipes(_)
+            | Self::Git(_)
+            | Self::Branch(_)
+            | Self::Stage(_)
+            | Self::Commit(_)
+            | Self::Push(_)
+            | Self::Pr(_)
+            | Self::PrComments(_)
             | Self::Setup(_)
             | Self::Approval(_)
             | Self::PlanMode(_)
+            | Self::BackgroundMode(_)
             | Self::ModelPicker(_)
             | Self::ReasoningPicker(_)
+            | Self::ReviewMode(_)
+            | Self::Memory(_)
+            | Self::MemoryEditor(_)
+            | Self::Diff(_)
+            | Self::Checkpoint(_)
+            | Self::Revert(_)
             | Self::Workspace(_)
             | Self::Resume(_)
             | Self::Usage(_)
@@ -410,11 +600,28 @@ impl ScreenState {
         match self {
             Self::Chat(screen) => Some(screen),
             Self::Help(_)
+            | Self::Status(_)
+            | Self::Doctor(_)
+            | Self::Recipes(_)
+            | Self::Git(_)
+            | Self::Branch(_)
+            | Self::Stage(_)
+            | Self::Commit(_)
+            | Self::Push(_)
+            | Self::Pr(_)
+            | Self::PrComments(_)
             | Self::Setup(_)
             | Self::Approval(_)
             | Self::PlanMode(_)
+            | Self::BackgroundMode(_)
             | Self::ModelPicker(_)
             | Self::ReasoningPicker(_)
+            | Self::ReviewMode(_)
+            | Self::Memory(_)
+            | Self::MemoryEditor(_)
+            | Self::Diff(_)
+            | Self::Checkpoint(_)
+            | Self::Revert(_)
             | Self::Workspace(_)
             | Self::Resume(_)
             | Self::Usage(_)
@@ -477,6 +684,10 @@ pub struct ChatScreen {
     operator_backend: Option<ServerOperatorSummary>,
     probe_home: Option<PathBuf>,
     operator_mode_label: String,
+    launch_mode_label: String,
+    review_mode_label: String,
+    transcript_mode: TranscriptMode,
+    memory_stack: ProbeMemoryStack,
     carry_forward_summary: Option<String>,
     local_action_notice: Option<String>,
     setup: AppleFmSetupState,
@@ -505,6 +716,10 @@ impl Default for ChatScreen {
             operator_backend: None,
             probe_home: None,
             operator_mode_label: String::from("coding"),
+            launch_mode_label: String::from("foreground"),
+            review_mode_label: String::from("auto-safe"),
+            transcript_mode: TranscriptMode::Conversation,
+            memory_stack: ProbeMemoryStack::default(),
             carry_forward_summary: None,
             local_action_notice: None,
             setup: AppleFmSetupState::default(),
@@ -544,13 +759,36 @@ impl ChatScreen {
     pub fn set_operator_controls(
         &mut self,
         mode_label: impl Into<String>,
+        launch_mode_label: impl Into<String>,
+        review_mode_label: impl Into<String>,
         carry_forward_summary: Option<&str>,
     ) {
         self.operator_mode_label = mode_label.into();
+        self.launch_mode_label = launch_mode_label.into();
+        self.review_mode_label = review_mode_label.into();
         self.carry_forward_summary = carry_forward_summary
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
+    }
+
+    pub fn set_transcript_mode(&mut self, mode: TranscriptMode) {
+        self.transcript_mode = mode;
+    }
+
+    pub fn set_memory_stack(&mut self, stack: ProbeMemoryStack) {
+        self.memory_stack = stack;
+    }
+
+    pub fn set_git_workspace_state(
+        &mut self,
+        workspace_state: Option<SessionWorkspaceState>,
+        branch_state: Option<SessionBranchState>,
+        delivery_state: Option<SessionDeliveryState>,
+    ) {
+        self.runtime.workspace_state = workspace_state;
+        self.runtime.branch_state = branch_state;
+        self.runtime.delivery_state = delivery_state;
     }
 
     pub fn set_local_action_notice(&mut self, notice: Option<String>) {
@@ -565,6 +803,9 @@ impl ChatScreen {
         config: &ProbeRuntimeTurnConfig,
         summary: ServerOperatorSummary,
         mode_label: &str,
+        launch_mode_label: &str,
+        review_mode_label: &str,
+        transcript_mode: TranscriptMode,
         carry_forward_summary: Option<&str>,
         note: impl Into<String>,
     ) {
@@ -579,10 +820,18 @@ impl ChatScreen {
         self.runtime.active_tool = None;
         self.runtime.active_tool_targets.clear();
         self.runtime.pending_approvals.clear();
+        self.runtime.mcp_state = None;
         self.runtime.recovery_note = None;
         self.approval_posture_lines = render_approval_posture_lines(config.tool_loop.as_ref());
         self.operator_backend = Some(summary);
-        self.set_operator_controls(mode_label.to_string(), carry_forward_summary);
+        self.set_operator_controls(
+            mode_label.to_string(),
+            launch_mode_label.to_string(),
+            review_mode_label.to_string(),
+            carry_forward_summary,
+        );
+        self.set_transcript_mode(transcript_mode);
+        self.memory_stack = ProbeMemoryStack::default();
         self.clear_stream();
         self.record_event(note);
     }
@@ -611,6 +860,31 @@ impl ChatScreen {
         self.runtime.session_id.as_deref()
     }
 
+    pub fn latest_task_workspace_summary(&self) -> Option<&TaskWorkspaceSummary> {
+        self.runtime
+            .latest_task_receipt
+            .as_ref()
+            .map(|receipt| &receipt.workspace)
+            .or(self.runtime.latest_task_workspace_summary.as_ref())
+    }
+
+    pub fn latest_task_receipt(&self) -> Option<&TaskFinalReceipt> {
+        self.runtime.latest_task_receipt.as_ref()
+    }
+
+    pub fn memory_stack(&self) -> &ProbeMemoryStack {
+        &self.memory_stack
+    }
+
+    pub fn runtime_mcp_state(&self) -> Option<&SessionMcpState> {
+        self.runtime.mcp_state.as_ref()
+    }
+
+    pub fn can_execute_revert(&self) -> bool {
+        matches!(self.revert_availability(), RevertAvailability::Exact)
+            && self.runtime.session_id.is_some()
+    }
+
     pub fn carries_compacted_context(&self) -> bool {
         self.carry_forward_summary.is_some()
     }
@@ -618,6 +892,7 @@ impl ChatScreen {
     pub fn compact_summary_text(&self) -> String {
         let mut sections = Vec::new();
         sections.push(format!("Mode: {}.", self.operator_mode_label));
+        sections.push(format!("Launch: {}.", self.launch_mode_label));
         if let Some(receipt) = self.runtime.latest_task_receipt.as_ref() {
             sections.push(format!("Latest task receipt: {}", receipt.summary_text));
         } else if let Some(summary) = self.runtime.latest_task_workspace_summary.as_ref() {
@@ -834,24 +1109,23 @@ impl ChatScreen {
             .unwrap_or("pending");
 
         if let Some(stream) = &self.stream {
-            let mode = stream.mode.label();
-            let chars = stream.assistant_text.chars().count();
-            let tool_calls = stream.tool_calls.len();
             let mut parts = vec![
                 format!("backend: {backend}"),
                 format!("target: {target}"),
                 format!("model: {}", preview(model, 28)),
                 format!("activity: {activity}"),
                 format!("round: {}", stream.round_trip),
-                format!("stream: {mode}"),
-                format!("chars: {chars}"),
             ];
-            if tool_calls > 0 {
-                parts.push(format!("tool_deltas: {tool_calls}"));
-            }
-            if let Some(ms) = stream.first_chunk_ms {
-                parts.push(format!("ttft_ms: {ms}"));
-            }
+            let stream_state = if stream.failure.is_some() {
+                "failed"
+            } else if !stream.tool_calls.is_empty() {
+                "planning tool call"
+            } else if stream.assistant_text.trim().is_empty() {
+                "waiting for first reply"
+            } else {
+                "receiving reply"
+            };
+            parts.push(format!("stream: {stream_state}"));
             if let Some(finish_reason) = stream.finish_reason.as_deref() {
                 parts.push(format!("finish: {finish_reason}"));
             }
@@ -1263,8 +1537,9 @@ impl ChatScreen {
                 self.transcript
                     .push_live_entry(runtime_tool_call_entry(tool_name.as_str(), &arguments));
                 self.snap_transcript_to_latest();
-                self.record_worker_event(format!("tool call requested: {tool_name}"));
-                format!("tool call requested: {tool_name}")
+                let display_name = display_runtime_tool_name(tool_name.as_str());
+                self.record_worker_event(format!("tool call requested: {display_name}"));
+                format!("tool call requested: {display_name}")
             }
             RuntimeEvent::ToolExecutionStarted {
                 session_id,
@@ -1296,8 +1571,9 @@ impl ChatScreen {
                     body,
                 ));
                 self.snap_transcript_to_latest();
-                self.record_worker_event(format!("tool execution started: {tool_name}"));
-                format!("tool execution started: {tool_name}")
+                let display_name = display_runtime_tool_name(tool_name.as_str());
+                self.record_worker_event(format!("tool execution started: {display_name}"));
+                format!("tool execution started: {display_name}")
             }
             RuntimeEvent::ToolExecutionCompleted {
                 session_id,
@@ -1566,6 +1842,50 @@ impl ChatScreen {
                 self.record_worker_event(format!("committed {label} row: {title}"));
                 format!("committed {label} row")
             }
+            AppMessage::BackgroundTaskQueued {
+                session_id,
+                title,
+                cwd,
+                status,
+                parent_title,
+            } => {
+                self.clear_stream();
+                self.transcript.clear_active_turn();
+                self.transcript.commit_live_entries();
+                let heading = if parent_title.is_some() {
+                    "Delegated Task"
+                } else {
+                    "Background Task"
+                };
+                let mut body = vec![
+                    format!("Queued `{title}` to run in the background."),
+                    format!("task: {} · status: {status}", short_session_id(&session_id)),
+                    format!("cwd: {cwd}"),
+                ];
+                if let Some(parent_title) = parent_title {
+                    body.push(format!("delegated from: {parent_title}"));
+                    body.push(String::from(
+                        "next: use /tasks to reopen this child task or return to the parent lane.",
+                    ));
+                    self.local_action_notice = Some(String::from("delegated task queued"));
+                } else {
+                    body.push(String::from(
+                        "next: use /tasks to reopen it when you want to check in.",
+                    ));
+                    self.local_action_notice = Some(String::from("background task queued"));
+                }
+                self.transcript.push_entry(TranscriptEntry::new(
+                    TranscriptRole::Status,
+                    heading,
+                    body,
+                ));
+                self.snap_transcript_to_latest();
+                self.record_worker_event(format!(
+                    "queued background task {} ({status})",
+                    short_session_id(&session_id)
+                ));
+                format!("queued background task {}", short_session_id(&session_id))
+            }
             AppMessage::ProbeRuntimeSessionReady {
                 session_id,
                 profile_name,
@@ -1574,6 +1894,7 @@ impl ChatScreen {
                 runtime_activity,
                 latest_task_workspace_summary,
                 latest_task_receipt,
+                mcp_state,
                 recovery_note,
             } => {
                 self.runtime = ProbeRuntimeState {
@@ -1581,6 +1902,9 @@ impl ChatScreen {
                     profile_name: Some(profile_name.clone()),
                     model_id: Some(model_id.clone()),
                     cwd: Some(cwd),
+                    workspace_state: None,
+                    branch_state: None,
+                    delivery_state: None,
                     backend_kind: self.runtime.backend_kind.clone(),
                     activity: runtime_activity.or_else(|| self.runtime.activity.clone()),
                     round_trip: self.runtime.round_trip,
@@ -1589,6 +1913,7 @@ impl ChatScreen {
                     pending_approvals: self.runtime.pending_approvals.clone(),
                     latest_task_workspace_summary,
                     latest_task_receipt,
+                    mcp_state,
                     recovery_note,
                     usage: self.runtime.usage.clone(),
                 };
@@ -1601,6 +1926,22 @@ impl ChatScreen {
                     "runtime session {} ready",
                     short_session_id(session_id.as_str())
                 )
+            }
+            AppMessage::ProbeRuntimeWorkspaceStateUpdated {
+                session_id,
+                workspace_state,
+                branch_state,
+                delivery_state,
+            } => {
+                self.runtime.session_id = Some(session_id.clone());
+                self.runtime.workspace_state = workspace_state;
+                self.runtime.branch_state = branch_state;
+                self.runtime.delivery_state = delivery_state;
+                self.record_worker_event(format!(
+                    "updated git/workspace state for {}",
+                    short_session_id(session_id.as_str())
+                ));
+                String::from("updated git/workspace state")
             }
             AppMessage::SessionUsageUpdated { session_id, usage } => {
                 self.runtime.session_id = Some(session_id);
@@ -1780,6 +2121,14 @@ impl ChatScreen {
                     )
                 }
             }
+            UiEvent::OpenStatusOverlay => ScreenOutcome::with_status(
+                ScreenAction::OpenStatusOverlay,
+                String::from("opened status overlay"),
+            ),
+            UiEvent::OpenDoctorOverlay => ScreenOutcome::with_status(
+                ScreenAction::OpenDoctorOverlay,
+                String::from("opened doctor overlay"),
+            ),
             UiEvent::OpenSetupOverlay => ScreenOutcome::with_status(
                 ScreenAction::OpenSetupOverlay,
                 String::from("opened backend overlay"),
@@ -1787,6 +2136,18 @@ impl ChatScreen {
             UiEvent::OpenApprovalOverlay => ScreenOutcome::with_status(
                 ScreenAction::OpenApprovalOverlay,
                 String::from("opened approval overlay"),
+            ),
+            UiEvent::OpenGitOverlay => ScreenOutcome::with_status(
+                ScreenAction::OpenGitOverlay,
+                String::from("opened git overlay"),
+            ),
+            UiEvent::OpenRecipesOverlay => ScreenOutcome::with_status(
+                ScreenAction::OpenRecipesOverlay,
+                String::from("opened recipes overlay"),
+            ),
+            UiEvent::OpenTasksOverlay => ScreenOutcome::with_status(
+                ScreenAction::OpenTasksOverlay,
+                String::from("opened task list"),
             ),
             UiEvent::OpenHelp => ScreenOutcome::with_status(
                 ScreenAction::OpenHelp,
@@ -1822,12 +2183,19 @@ impl ChatScreen {
 
     fn render_chat_shell(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
         let body = self.render_primary_body();
-        if area.width < 74 {
-            let scroll_y = self.transcript_scroll_y(body.lines.len(), area.height);
+        if area.width < 96 {
+            let compact_height = if area.height >= 16 { 8 } else { 6 };
+            let sections =
+                Layout::vertical([Constraint::Length(compact_height), Constraint::Min(0)])
+                    .spacing(1)
+                    .split(area);
+            InfoPanel::new("Session", self.render_compact_session_panel_body())
+                .render(frame, sections[0]);
+            let scroll_y = self.transcript_scroll_y(body.lines.len(), sections[1].height);
             let title = self.transcript_panel_title();
             InfoPanel::new(title.as_str(), body)
                 .with_scroll(scroll_y)
-                .render(frame, area);
+                .render(frame, sections[1]);
             return;
         }
 
@@ -1849,6 +2217,35 @@ impl ChatScreen {
         let session_title = self.session_panel_title();
         InfoPanel::new(session_title.as_str(), self.render_session_panel_body())
             .render(frame, sections[1]);
+    }
+
+    fn render_compact_session_panel_body(&self) -> Text<'static> {
+        let mut lines = vec![
+            Line::from(format!("activity: {}", self.operator_activity_label())),
+            Line::from(format!("next: {}", self.current_action_hint())),
+            Line::from(self.render_workspace_summary_line()),
+            Line::from(format!("lane: {}", self.active_lane_label())),
+            Line::from(self.render_safety_line()),
+        ];
+        if let Some(notice) = self.local_action_notice.as_deref() {
+            lines.push(Line::from(format!("applied: {notice}")));
+        } else if let Some(line) = self.render_active_tool_targets_line() {
+            lines.push(Line::from(line));
+        } else if let Some(line) = self.render_git_status_line() {
+            lines.push(Line::from(line));
+        }
+        if self.show_launch_line() {
+            lines.push(Line::from(format!("launch: {}", self.launch_mode_label)));
+        } else if self.show_view_line() {
+            lines.push(Line::from(format!(
+                "view: {}",
+                self.transcript_mode.label()
+            )));
+        } else if self.carries_compacted_context() {
+            lines.push(Line::from(String::from("context: compact summary")));
+        }
+        lines.push(Line::from("details: /status · /doctor · /git · /tasks"));
+        Text::from(lines)
     }
 
     fn render_setup_overlay_text(&self, _stack_depth: usize) -> Text<'static> {
@@ -1941,7 +2338,10 @@ impl ChatScreen {
             lines.push(Line::from(format!("round_trip: {round_trip}")));
         }
         if let Some(tool) = self.runtime.active_tool.as_deref() {
-            lines.push(Line::from(format!("active_tool: {tool}")));
+            lines.push(Line::from(format!(
+                "active_tool: {}",
+                display_runtime_tool_name(tool)
+            )));
         }
         if summary.backend_kind == probe_protocol::backend::BackendKind::OpenAiCodexSubscription {
             lines.push(Line::from(""));
@@ -2002,6 +2402,510 @@ impl ChatScreen {
         Text::from(lines)
     }
 
+    fn render_status_overlay_text(
+        &self,
+        configured_mcp_count: usize,
+        enabled_mcp_count: usize,
+        mcp_summary_lines: &[String],
+    ) -> Text<'static> {
+        let usage = &self.runtime.usage.aggregate;
+        let mut lines = vec![
+            Line::from("Inspect the current operator state for the active lane."),
+            Line::from(""),
+            Line::from(format!("lane: {}", self.active_lane_label())),
+            Line::from(format!("activity: {}", self.operator_activity_label())),
+            Line::from(format!("next: {}", self.current_action_hint())),
+            Line::from(""),
+            Line::from(format!(
+                "backend: {}",
+                self.runtime
+                    .backend_kind
+                    .as_deref()
+                    .or_else(|| {
+                        self.operator_backend
+                            .as_ref()
+                            .map(|summary| render_backend_kind(summary.backend_kind))
+                    })
+                    .unwrap_or("pending")
+            )),
+            Line::from(format!(
+                "model: {}",
+                self.runtime
+                    .model_id
+                    .as_deref()
+                    .or_else(|| {
+                        self.operator_backend
+                            .as_ref()
+                            .and_then(|summary| summary.model_id.as_deref())
+                    })
+                    .unwrap_or("pending")
+            )),
+            Line::from(format!("reasoning: {}", self.operator_reasoning_label())),
+            Line::from(format!("target: {}", self.operator_target_label())),
+            Line::from(format!("cwd: {}", self.current_workspace_label())),
+            Line::from(format!("mode: {}", self.operator_mode_label)),
+            Line::from(format!("review: {}", self.review_mode_label)),
+            Line::from(format!("view: {}", self.transcript_mode.label())),
+            Line::from(self.render_memory_line()),
+            Line::from(format!(
+                "mcp: {enabled_mcp_count} enabled / {configured_mcp_count} configured"
+            )),
+        ];
+        if let Some(line) = self.render_git_status_line() {
+            lines.push(Line::from(line));
+        }
+        for line in mcp_summary_lines {
+            lines.push(Line::from(line.clone()));
+        }
+        if let Some(line) = self.render_session_mcp_line() {
+            lines.push(Line::from(line));
+        }
+        if let Some(line) = self.render_git_repo_root_line() {
+            lines.push(Line::from(line));
+        }
+        if let Some(line) = self.render_delivery_status_line() {
+            lines.push(Line::from(line));
+        }
+        if let Some(line) = self.render_workspace_boot_line() {
+            lines.push(Line::from(line));
+        }
+        if let Some(session_id) = self.runtime_session_id() {
+            lines.push(Line::from(format!("session: {}", preview(session_id, 36))));
+        } else {
+            lines.push(Line::from(
+                "session: next turn will attach a runtime session",
+            ));
+        }
+        if self.runtime.usage.turns_with_usage > 0 {
+            lines.push(Line::from(format!(
+                "usage: {} turns, total {}",
+                self.runtime.usage.turns_with_usage,
+                render_usage_value(usage.total_tokens, usage.total_truth.as_deref())
+            )));
+        }
+        if let Some(line) = self.render_memory_issue_line() {
+            lines.push(Line::from(line));
+        }
+        if let Some(line) = self.render_recovery_line() {
+            lines.push(Line::from(line));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "next controls: /doctor · /git · /model · /cwd · /usage · /memory · /mcp",
+        ));
+        lines.push(Line::from("Esc closes."));
+        Text::from(lines)
+    }
+
+    fn render_doctor_overlay_text(
+        &self,
+        configured_mcp_count: usize,
+        enabled_mcp_count: usize,
+        mcp_summary_lines: &[String],
+    ) -> Text<'static> {
+        let mut lines = vec![
+            Line::from("Run a quick health check for the active lane."),
+            Line::from(""),
+            Line::from(format!("lane: {}", self.active_lane_label())),
+            Line::from(""),
+        ];
+
+        if let Some(summary) = self.operator_backend.as_ref() {
+            lines.push(Line::from(format!(
+                "backend: ok - {} via {}",
+                render_backend_kind(summary.backend_kind),
+                summary.endpoint_label()
+            )));
+        } else {
+            lines.push(Line::from(
+                "backend: action - Probe does not have an operator backend summary yet.",
+            ));
+        }
+
+        match self.runtime.cwd.as_deref() {
+            Some(cwd) if Path::new(cwd).is_dir() => {
+                lines.push(Line::from(format!("workspace: ok - {}", cwd)));
+            }
+            Some(cwd) if Path::new(cwd).exists() => {
+                lines.push(Line::from(format!(
+                    "workspace: action - {} exists but is not a directory",
+                    cwd
+                )));
+            }
+            Some(cwd) => {
+                lines.push(Line::from(format!(
+                    "workspace: action - {} does not exist",
+                    cwd
+                )));
+            }
+            None => lines.push(Line::from(
+                "workspace: action - no active workspace is attached yet",
+            )),
+        }
+        lines.push(Line::from(self.git_doctor_line()));
+        if let Some(line) = self.delivery_doctor_line() {
+            lines.push(Line::from(line));
+        }
+        if let Some(line) = self.workspace_boot_doctor_line() {
+            lines.push(Line::from(line));
+        }
+
+        match self.probe_home.as_ref() {
+            Some(path) => lines.push(Line::from(format!("probe_home: ok - {}", path.display()))),
+            None => lines.push(Line::from(
+                "probe_home: action - user memory and persisted integrations are limited",
+            )),
+        }
+
+        if self.memory_stack.first_issue_line().is_some() {
+            lines.push(Line::from(format!(
+                "memory: action - {}",
+                self.memory_stack
+                    .first_issue_line()
+                    .unwrap_or("unknown memory issue")
+            )));
+        } else {
+            lines.push(Line::from(format!(
+                "memory: ok - {}",
+                self.memory_stack.active_label()
+            )));
+        }
+
+        if self.runtime.pending_approvals.is_empty() {
+            lines.push(Line::from("approvals: ok - no pending approvals"));
+        } else if self.has_pending_review_changes() {
+            lines.push(Line::from(format!(
+                "approvals: action - {} proposed change(s) waiting for review",
+                self.runtime.pending_approvals.len()
+            )));
+        } else {
+            lines.push(Line::from(format!(
+                "approvals: action - {} tool approval(s) waiting",
+                self.runtime.pending_approvals.len()
+            )));
+        }
+
+        match self.runtime_session_id() {
+            Some(session_id) => lines.push(Line::from(format!(
+                "session: ok - attached ({})",
+                preview(session_id, 36)
+            ))),
+            None => lines.push(Line::from(
+                "session: info - the next turn will create a runtime session",
+            )),
+        }
+
+        if configured_mcp_count == 0 {
+            lines.push(Line::from(
+                "mcp: info - no saved MCP servers yet; /mcp adds one",
+            ));
+        } else if enabled_mcp_count == 0 {
+            lines.push(Line::from(format!(
+                "mcp: action - {configured_mcp_count} saved, but none are enabled"
+            )));
+        } else {
+            lines.push(Line::from(format!(
+                "mcp: ok - {enabled_mcp_count} enabled / {configured_mcp_count} configured"
+            )));
+        }
+        if let Some(state) = self.runtime.mcp_state.as_ref() {
+            if let Some(error) = state.load_error.as_deref() {
+                lines.push(Line::from(format!(
+                    "mcp runtime: action - {}",
+                    preview(error, 120)
+                )));
+            } else {
+                let connected = state
+                    .servers
+                    .iter()
+                    .filter(|server| {
+                        server.connection_status == Some(SessionMcpConnectionStatus::Connected)
+                    })
+                    .count();
+                let failed = state
+                    .servers
+                    .iter()
+                    .filter(|server| {
+                        server.connection_status == Some(SessionMcpConnectionStatus::Failed)
+                    })
+                    .count();
+                let unsupported = state
+                    .servers
+                    .iter()
+                    .filter(|server| {
+                        server.connection_status == Some(SessionMcpConnectionStatus::Unsupported)
+                    })
+                    .count();
+                let discovered_tools = state
+                    .servers
+                    .iter()
+                    .map(|server| server.discovered_tools.len())
+                    .sum::<usize>();
+                lines.push(Line::from(format!(
+                    "mcp runtime: {} attached, {} connected, {} failed, {} unsupported, {} tool(s) discovered",
+                    state.servers.len(),
+                    connected,
+                    failed,
+                    unsupported,
+                    discovered_tools
+                )));
+            }
+        } else {
+            lines.push(Line::from(
+                "mcp runtime: info - the next runtime session will snapshot enabled MCP entries",
+            ));
+        }
+        for line in mcp_summary_lines {
+            lines.push(Line::from(line.clone()));
+        }
+
+        if self.operator_backend.as_ref().is_some_and(|summary| {
+            summary.backend_kind == probe_protocol::backend::BackendKind::OpenAiCodexSubscription
+        }) {
+            lines.push(Line::from(format!(
+                "codex auth: {}",
+                self.codex_auth_doctor_line()
+            )));
+        }
+
+        let total_tokens = render_usage_value(
+            self.runtime.usage.aggregate.total_tokens,
+            self.runtime.usage.aggregate.total_truth.as_deref(),
+        );
+        if self.runtime.usage.turns_with_usage == 0 {
+            lines.push(Line::from("usage: info - no token usage recorded yet"));
+        } else {
+            lines.push(Line::from(format!(
+                "usage: ok - {} turn(s) recorded, total {}",
+                self.runtime.usage.turns_with_usage, total_tokens
+            )));
+        }
+
+        if let Some(note) = self.runtime.recovery_note.as_deref() {
+            lines.push(Line::from(format!(
+                "recovery: action - {}",
+                compact_recovery_note(note)
+            )));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from("next: /status for the calmer summary, /git for branch details, /backend for target details, /cwd to switch workspace, /memory to adjust rules, /mcp to manage integrations."));
+        lines.push(Line::from("Esc closes."));
+        Text::from(lines)
+    }
+
+    fn render_git_overlay_text(&self) -> Text<'static> {
+        let mut lines = vec![
+            Line::from("Inspect branch, delivery, and workspace boot state for the active lane."),
+            Line::from(""),
+            Line::from(format!("lane: {}", self.active_lane_label())),
+            Line::from(format!("cwd: {}", self.current_workspace_label())),
+        ];
+
+        if let Some(branch_state) = self.runtime.branch_state.as_ref() {
+            lines.push(Line::from(format!(
+                "repo root: {}",
+                branch_state.repo_root.display()
+            )));
+            lines.push(Line::from(format!(
+                "branch: {}",
+                self.git_branch_label(branch_state)
+            )));
+            lines.push(Line::from(format!(
+                "head: {}",
+                preview(branch_state.head_commit.as_str(), 12)
+            )));
+            lines.push(Line::from(format!(
+                "working tree: {}",
+                if branch_state.working_tree_dirty {
+                    "dirty"
+                } else {
+                    "clean"
+                }
+            )));
+            if let Some(upstream_ref) = branch_state.upstream_ref.as_deref() {
+                lines.push(Line::from(format!("upstream: {upstream_ref}")));
+            } else {
+                lines.push(Line::from("upstream: none"));
+            }
+            lines.push(Line::from(format!(
+                "sync: {}",
+                self.git_sync_summary(branch_state)
+            )));
+        } else if self.runtime.session_id.is_some() {
+            lines.push(Line::from(
+                "git: Probe has not detected a git repo for the current workspace.",
+            ));
+        } else {
+            lines.push(Line::from(
+                "git: start a turn to capture branch and delivery state for this lane.",
+            ));
+        }
+
+        if let Some(line) = self.render_delivery_status_line() {
+            lines.push(Line::from(line));
+        }
+        if let Some(workspace_state) = self.runtime.workspace_state.as_ref() {
+            lines.push(Line::from(format!(
+                "workspace boot: {}",
+                self.workspace_boot_mode_label(workspace_state.boot_mode)
+            )));
+            if let Some(execution_host) = workspace_state.execution_host.as_ref() {
+                let host = execution_host
+                    .display_name
+                    .as_deref()
+                    .unwrap_or(execution_host.host_id.as_str());
+                lines.push(Line::from(format!("execution host: {}", preview(host, 48))));
+            }
+            if let Some(note) = workspace_state.provenance_note.as_deref() {
+                lines.push(Line::from(format!("workspace note: {}", preview(note, 88))));
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "next: /branch to create or switch work branches, /stage to stage repo changes, /commit to record staged work, /push to deliver the current branch, /pr to open a draft PR, /status for the calm summary, /doctor for recovery help.",
+        ));
+        lines.push(Line::from("Esc closes."));
+        Text::from(lines)
+    }
+
+    fn render_checkpoint_overlay_text(&self) -> Text<'static> {
+        let mut lines = vec![
+            Line::from("Inspect the latest checkpoint coverage for this lane."),
+            Line::from(""),
+            Line::from(format!("lane: {}", self.active_lane_label())),
+            Line::from(format!("workspace: {}", self.current_workspace_label())),
+            Line::from(self.render_last_task_line()),
+            Line::from(self.render_task_checkpoint_line()),
+            Line::from(self.render_revert_line()),
+            Line::from(""),
+        ];
+
+        if self.has_pending_review_changes() {
+            lines.push(Line::from(
+                "Current changes are still proposed, so no applied-task checkpoint exists yet.",
+            ));
+            lines.push(Line::from(format!(
+                "paths: {}",
+                summarize_inline_paths(
+                    self.pending_review_paths().unwrap_or_default().as_slice(),
+                    4
+                )
+            )));
+            lines.push(Line::from(
+                "next: review /diff, then A applies or R rejects.",
+            ));
+            lines.push(Line::from("Enter or Esc closes."));
+            return Text::from(lines);
+        }
+
+        let Some(summary) = self.latest_task_workspace_summary() else {
+            lines.push(Line::from(
+                "No task checkpoint is available on this lane yet because no recent task receipt was retained.",
+            ));
+            lines.push(Line::from("Enter or Esc closes."));
+            return Text::from(lines);
+        };
+
+        lines.push(Line::from(summary.checkpoint.summary_text.clone()));
+        if !summary.changed_files.is_empty() {
+            lines.push(Line::from(format!(
+                "changed: {}",
+                summarize_inline_paths(summary.changed_files.as_slice(), 4)
+            )));
+        }
+        if !summary.preexisting_dirty_files.is_empty() {
+            lines.push(Line::from(format!(
+                "dirty before: {}",
+                summarize_inline_paths(summary.preexisting_dirty_files.as_slice(), 4)
+            )));
+        }
+        if !summary.outside_tracking_dirty_files.is_empty() {
+            lines.push(Line::from(format!(
+                "dirty now: {}",
+                summarize_inline_paths(summary.outside_tracking_dirty_files.as_slice(), 4)
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!(
+            "restore path: {}",
+            summary.revertibility.summary_text
+        )));
+        lines.push(Line::from("Enter or Esc closes."));
+        Text::from(lines)
+    }
+
+    fn render_revert_overlay_text(&self) -> Text<'static> {
+        let mut lines = vec![
+            Line::from("Inspect how reversible the latest task is on this lane."),
+            Line::from(""),
+            Line::from(format!("lane: {}", self.active_lane_label())),
+            Line::from(format!("workspace: {}", self.current_workspace_label())),
+            Line::from(self.render_last_task_line()),
+            Line::from(self.render_task_checkpoint_line()),
+            Line::from(self.render_revert_line()),
+            Line::from(""),
+        ];
+
+        if self.has_pending_review_changes() {
+            lines.push(Line::from(
+                "There is nothing applied to revert yet because the current write is still waiting for approval.",
+            ));
+            lines.push(Line::from(
+                "next: inspect /diff, then A applies or R rejects.",
+            ));
+            lines.push(Line::from("Enter or Esc closes."));
+            return Text::from(lines);
+        }
+
+        let Some(summary) = self.latest_task_workspace_summary() else {
+            lines.push(Line::from(
+                "No recent applied task is available to revert on this lane yet.",
+            ));
+            lines.push(Line::from("Enter or Esc closes."));
+            return Text::from(lines);
+        };
+
+        if summary.changed_files.is_empty()
+            && summary.status != TaskWorkspaceSummaryStatus::ChangeAccountingLimited
+        {
+            lines.push(Line::from(
+                "No repo edits from the latest task are available to revert.",
+            ));
+            lines.push(Line::from("Enter or Esc closes."));
+            return Text::from(lines);
+        }
+
+        lines.push(Line::from(summary.summary_text.clone()));
+        if !summary.changed_files.is_empty() {
+            lines.push(Line::from(format!(
+                "scope: {}",
+                summarize_inline_paths(summary.changed_files.as_slice(), 4)
+            )));
+        }
+        if let Some(reason) = self
+            .latest_task_receipt()
+            .and_then(|receipt| receipt.uncertainty_reasons.first())
+        {
+            lines.push(Line::from(format!("watch: {}", preview(reason, 120))));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(summary.revertibility.summary_text.clone()));
+        if self.can_execute_revert() {
+            lines.push(Line::from(
+                "next: press A or Enter to restore the latest exact apply_patch task.",
+            ));
+            lines.push(Line::from("A or Enter reverts. Esc closes."));
+        } else {
+            lines.push(Line::from(
+                "For now: use /diff to inspect the task and revert manually in git or your editor if needed.",
+            ));
+            lines.push(Line::from("Enter or Esc closes."));
+        }
+        Text::from(lines)
+    }
+
     fn active_lane_label(&self) -> &str {
         self.lane_label
             .as_deref()
@@ -2026,21 +2930,6 @@ impl ChatScreen {
             .unwrap_or_else(|| String::from("pending"))
     }
 
-    fn operator_endpoint_label(&self) -> String {
-        self.operator_backend
-            .as_ref()
-            .map(ServerOperatorSummary::endpoint_label)
-            .unwrap_or_else(|| String::from("pending"))
-    }
-
-    fn operator_transport_label(&self) -> String {
-        self.operator_backend
-            .as_ref()
-            .map(|summary| compact_target_kind_label(summary.target_kind_label()))
-            .unwrap_or("pending")
-            .to_string()
-    }
-
     fn workspace_label(&self) -> String {
         self.runtime
             .cwd
@@ -2055,10 +2944,29 @@ impl ChatScreen {
 
     fn operator_activity_label(&self) -> String {
         if !self.runtime.pending_approvals.is_empty() {
+            if let Some(paths) = self.pending_review_paths()
+                && !paths.is_empty()
+            {
+                return format!(
+                    "review changes: {}",
+                    summarize_inline_paths(paths.as_slice(), 2)
+                );
+            }
             if let Some(approval) = self.runtime.pending_approvals.first() {
                 return format!("action needed: approve {}", approval.tool_name);
             }
             return String::from("action needed: review approval");
+        }
+
+        if matches!(
+            self.runtime_activity_kind(),
+            Some(RuntimeActivityKind::Failed)
+        ) && let Some(error) = self
+            .stream
+            .as_ref()
+            .and_then(|stream| stream.failure.as_deref())
+        {
+            return classify_runtime_failure(error).title.to_ascii_lowercase();
         }
 
         if let Some(activity) = self.runtime.activity.as_ref() {
@@ -2079,13 +2987,29 @@ impl ChatScreen {
         if self.operator_mode_label == "plan" {
             return String::from("Plan only; no edits");
         }
+        if self.launch_mode_label == "background" {
+            return String::from("Enter queues the next task in background · /tasks reopens it");
+        }
+        if self.launch_mode_label == "delegate" {
+            return String::from(
+                "Enter delegates the next task as a child · /tasks shows parent and child work",
+            );
+        }
+        if let Some(paths) = self.pending_review_paths()
+            && !paths.is_empty()
+        {
+            return format!(
+                "/diff previews {} · A applies · R rejects",
+                summarize_inline_paths(paths.as_slice(), 1)
+            );
+        }
         if !self.runtime.pending_approvals.is_empty()
             || matches!(
                 self.runtime_activity_kind(),
                 Some(RuntimeActivityKind::WaitingForApproval)
             )
         {
-            return String::from("Ctrl+A opens approval; Enter decides");
+            return String::from("Ctrl+A opens approval · Enter decides");
         }
         if matches!(
             self.runtime_activity_kind(),
@@ -2104,6 +3028,16 @@ impl ChatScreen {
             )
         ) {
             return String::from("Working now; PgUp scrolls without losing your place");
+        }
+        if matches!(
+            self.runtime_activity_kind(),
+            Some(RuntimeActivityKind::Failed)
+        ) && let Some(error) = self
+            .stream
+            .as_ref()
+            .and_then(|stream| stream.failure.as_deref())
+        {
+            return stream_failure_summary(error, self.operator_backend.as_ref()).next_step;
         }
         if matches!(
             self.runtime_activity_kind(),
@@ -2141,6 +3075,14 @@ impl ChatScreen {
     }
 
     fn render_task_workspace_lines(&self) -> Vec<String> {
+        if let Some(paths) = self.pending_review_paths()
+            && !paths.is_empty()
+        {
+            return vec![format!(
+                "edits: proposed -> {}",
+                summarize_inline_paths(paths.as_slice(), 2)
+            )];
+        }
         let Some(summary) = self
             .runtime
             .latest_task_receipt
@@ -2164,6 +3106,10 @@ impl ChatScreen {
             TaskWorkspaceSummaryStatus::NoRepoChanges => vec![String::from("edits: none")],
             TaskWorkspaceSummaryStatus::Changed => vec![format!(
                 "edits: {}",
+                summarize_inline_paths(summary.changed_files.as_slice(), 2)
+            )],
+            TaskWorkspaceSummaryStatus::Reverted => vec![format!(
+                "edits: reverted -> {}",
                 summarize_inline_paths(summary.changed_files.as_slice(), 2)
             )],
             TaskWorkspaceSummaryStatus::PartialChangesBeforeFailure if stopped => {
@@ -2220,6 +3166,9 @@ impl ChatScreen {
     }
 
     fn render_task_receipt_lines(&self) -> Vec<String> {
+        if self.has_pending_review_changes() {
+            return vec![String::from("verify: pending apply")];
+        }
         let Some(receipt) = self.runtime.latest_task_receipt.as_ref() else {
             return vec![String::from("verify: none yet")];
         };
@@ -2228,6 +3177,373 @@ impl ChatScreen {
             lines.push(format!("risk: {}", preview(reason, 72)));
         }
         lines
+    }
+
+    fn render_last_task_line(&self) -> String {
+        if self.has_pending_review_changes() {
+            return String::from("last task: proposed");
+        }
+        if let Some(receipt) = self.runtime.latest_task_receipt.as_ref() {
+            let label = match (receipt.disposition, receipt.workspace.status) {
+                (TaskReceiptDisposition::Succeeded, TaskWorkspaceSummaryStatus::NoRepoChanges) => {
+                    "no repo changes"
+                }
+                (TaskReceiptDisposition::Succeeded, TaskWorkspaceSummaryStatus::Changed) => {
+                    "applied"
+                }
+                (TaskReceiptDisposition::Succeeded, TaskWorkspaceSummaryStatus::Reverted) => {
+                    "reverted"
+                }
+                (
+                    TaskReceiptDisposition::Succeeded,
+                    TaskWorkspaceSummaryStatus::PartialChangesBeforeFailure,
+                ) => "partial edits",
+                (
+                    TaskReceiptDisposition::Succeeded,
+                    TaskWorkspaceSummaryStatus::PendingApproval,
+                ) => "waiting approval",
+                (
+                    TaskReceiptDisposition::Succeeded,
+                    TaskWorkspaceSummaryStatus::ChangeAccountingLimited,
+                ) => "limited visibility",
+                (TaskReceiptDisposition::PendingApproval, _) => "waiting approval",
+                (TaskReceiptDisposition::Failed, TaskWorkspaceSummaryStatus::NoRepoChanges) => {
+                    "failed before edits"
+                }
+                (TaskReceiptDisposition::Failed, _) => "partial edits",
+                (TaskReceiptDisposition::Stopped, TaskWorkspaceSummaryStatus::NoRepoChanges) => {
+                    "stopped before edits"
+                }
+                (TaskReceiptDisposition::Stopped, _) => "stopped after edits",
+            };
+            return format!("last task: {label}");
+        }
+        if let Some(summary) = self.runtime.latest_task_workspace_summary.as_ref() {
+            let label = match summary.status {
+                TaskWorkspaceSummaryStatus::NoRepoChanges => "no repo changes",
+                TaskWorkspaceSummaryStatus::Changed => "applied",
+                TaskWorkspaceSummaryStatus::Reverted => "reverted",
+                TaskWorkspaceSummaryStatus::PartialChangesBeforeFailure => "partial edits",
+                TaskWorkspaceSummaryStatus::PendingApproval => "waiting approval",
+                TaskWorkspaceSummaryStatus::ChangeAccountingLimited => "limited visibility",
+            };
+            return format!("last task: {label}");
+        }
+        String::from("last task: none yet")
+    }
+
+    fn render_task_checkpoint_line(&self) -> String {
+        if self.has_pending_review_changes() {
+            return String::from("checkpoint: pending review");
+        }
+        let Some(summary) = self.latest_task_workspace_summary() else {
+            return String::from("checkpoint: none yet");
+        };
+        let label = match summary.checkpoint.status {
+            TaskCheckpointStatus::NotCaptured => {
+                if summary.status == TaskWorkspaceSummaryStatus::NoRepoChanges {
+                    "not needed"
+                } else {
+                    "none"
+                }
+            }
+            TaskCheckpointStatus::Captured => "captured",
+            TaskCheckpointStatus::Limited => "limited",
+        };
+        format!("checkpoint: {label}")
+    }
+
+    fn revert_availability(&self) -> RevertAvailability {
+        if self.has_pending_review_changes() {
+            return RevertAvailability::PendingReview;
+        }
+        let Some(summary) = self.latest_task_workspace_summary() else {
+            return RevertAvailability::Unavailable;
+        };
+        match summary.revertibility.status {
+            TaskRevertibilityStatus::Exact => RevertAvailability::Exact,
+            TaskRevertibilityStatus::Limited => RevertAvailability::Limited,
+            TaskRevertibilityStatus::Unavailable => RevertAvailability::Unavailable,
+        }
+    }
+
+    fn render_revert_line(&self) -> String {
+        format!("revert: {}", self.revert_availability().label())
+    }
+
+    fn git_branch_label(&self, branch_state: &SessionBranchState) -> String {
+        if branch_state.detached_head {
+            format!(
+                "detached @ {}",
+                preview(branch_state.head_commit.as_str(), 12)
+            )
+        } else {
+            branch_state.head_ref.clone()
+        }
+    }
+
+    fn git_sync_summary(&self, branch_state: &SessionBranchState) -> String {
+        let ahead = branch_state.ahead_by.unwrap_or(0);
+        let behind = branch_state.behind_by.unwrap_or(0);
+        match (ahead, behind) {
+            (0, 0) => String::from("up to date"),
+            (ahead, 0) => format!("ahead {ahead}"),
+            (0, behind) => format!("behind {behind}"),
+            (ahead, behind) => format!("ahead {ahead} · behind {behind}"),
+        }
+    }
+
+    fn delivery_status_label(&self, status: SessionDeliveryStatus) -> &'static str {
+        match status {
+            SessionDeliveryStatus::NeedsCommit => "needs commit",
+            SessionDeliveryStatus::LocalOnly => "local only",
+            SessionDeliveryStatus::NeedsPush => "needs push",
+            SessionDeliveryStatus::Synced => "synced",
+            SessionDeliveryStatus::Diverged => "diverged",
+        }
+    }
+
+    fn workspace_boot_mode_label(&self, boot_mode: SessionWorkspaceBootMode) -> &'static str {
+        match boot_mode {
+            SessionWorkspaceBootMode::Fresh => "fresh",
+            SessionWorkspaceBootMode::PreparedBaseline => "prepared baseline",
+            SessionWorkspaceBootMode::SnapshotRestore => "snapshot restore",
+        }
+    }
+
+    fn render_git_status_line(&self) -> Option<String> {
+        if let Some(branch_state) = self.runtime.branch_state.as_ref() {
+            let mut parts = vec![self.git_branch_label(branch_state)];
+            parts.push(String::from(if branch_state.working_tree_dirty {
+                "dirty"
+            } else {
+                "clean"
+            }));
+            if let Some(delivery_state) = self.runtime.delivery_state.as_ref() {
+                parts.push(String::from(
+                    self.delivery_status_label(delivery_state.status),
+                ));
+            }
+            let ahead = branch_state.ahead_by.unwrap_or(0);
+            let behind = branch_state.behind_by.unwrap_or(0);
+            if ahead > 0 {
+                parts.push(format!("ahead {ahead}"));
+            }
+            if behind > 0 {
+                parts.push(format!("behind {behind}"));
+            }
+            return Some(format!("git: {}", parts.join(" · ")));
+        }
+        if self.runtime.workspace_state.is_some() || self.runtime.delivery_state.is_some() {
+            return Some(String::from("git: no repo"));
+        }
+        None
+    }
+
+    fn render_git_repo_root_line(&self) -> Option<String> {
+        self.runtime
+            .branch_state
+            .as_ref()
+            .map(|branch_state| format!("repo: {}", branch_state.repo_root.display()))
+    }
+
+    fn render_delivery_status_line(&self) -> Option<String> {
+        let delivery_state = self.runtime.delivery_state.as_ref()?;
+        let mut line = format!(
+            "delivery: {}",
+            self.delivery_status_label(delivery_state.status)
+        );
+        if let Some(compare_ref) = delivery_state.compare_ref.as_deref() {
+            line.push_str(&format!(" · {}", preview(compare_ref, 42)));
+        } else if let Some(remote) = delivery_state.remote_tracking_ref.as_deref() {
+            line.push_str(&format!(" · {}", preview(remote, 42)));
+        }
+        Some(line)
+    }
+
+    fn render_workspace_boot_line(&self) -> Option<String> {
+        self.runtime
+            .workspace_state
+            .as_ref()
+            .map(|workspace_state| {
+                format!(
+                    "workspace boot: {}",
+                    self.workspace_boot_mode_label(workspace_state.boot_mode)
+                )
+            })
+    }
+
+    fn git_doctor_line(&self) -> String {
+        let Some(branch_state) = self.runtime.branch_state.as_ref() else {
+            if self.runtime.session_id.is_some() {
+                return String::from("git: info - no git repo detected in the current workspace");
+            }
+            return String::from("git: info - start a turn to capture branch state");
+        };
+        let dirty = if branch_state.working_tree_dirty {
+            "dirty working tree"
+        } else {
+            "clean working tree"
+        };
+        format!(
+            "git: ok - {} ({dirty})",
+            self.git_branch_label(branch_state)
+        )
+    }
+
+    fn delivery_doctor_line(&self) -> Option<String> {
+        let delivery_state = self.runtime.delivery_state.as_ref()?;
+        let line = match delivery_state.status {
+            SessionDeliveryStatus::NeedsCommit => {
+                "delivery: action - repo changes need a commit".to_string()
+            }
+            SessionDeliveryStatus::LocalOnly => {
+                "delivery: action - branch has local commits without a tracked remote".to_string()
+            }
+            SessionDeliveryStatus::NeedsPush => {
+                "delivery: action - local commits are ready to push".to_string()
+            }
+            SessionDeliveryStatus::Synced => {
+                "delivery: ok - branch is synced with its tracked remote".to_string()
+            }
+            SessionDeliveryStatus::Diverged => {
+                "delivery: action - local and remote history have diverged".to_string()
+            }
+        };
+        Some(line)
+    }
+
+    fn workspace_boot_doctor_line(&self) -> Option<String> {
+        let workspace_state = self.runtime.workspace_state.as_ref()?;
+        Some(format!(
+            "workspace boot: ok - {}",
+            self.workspace_boot_mode_label(workspace_state.boot_mode)
+        ))
+    }
+
+    fn render_memory_line(&self) -> String {
+        format!("memory: {}", self.memory_stack.active_label())
+    }
+
+    fn workspace_summary_label(&self) -> String {
+        let cwd = self.current_workspace_label();
+        Path::new(cwd.as_str())
+            .file_name()
+            .and_then(|segment| segment.to_str())
+            .filter(|segment| !segment.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or(cwd)
+    }
+
+    fn render_workspace_summary_line(&self) -> String {
+        format!("workspace: {}", self.workspace_summary_label())
+    }
+
+    fn render_safety_line(&self) -> String {
+        if self.has_pending_review_changes()
+            || !self.runtime.pending_approvals.is_empty()
+            || matches!(
+                self.runtime_activity_kind(),
+                Some(RuntimeActivityKind::WaitingForApproval)
+            )
+        {
+            return String::from("safety: approval required");
+        }
+        format!("safety: {}", self.review_mode_label)
+    }
+
+    fn show_lane_line(&self) -> bool {
+        true
+    }
+
+    fn show_git_summary_line(&self) -> bool {
+        self.runtime
+            .branch_state
+            .as_ref()
+            .is_some_and(|branch_state| {
+                branch_state.working_tree_dirty
+                    || branch_state.ahead_by.unwrap_or(0) > 0
+                    || branch_state.behind_by.unwrap_or(0) > 0
+            })
+            || self
+                .runtime
+                .delivery_state
+                .as_ref()
+                .is_some_and(|delivery_state| {
+                    delivery_state.status != SessionDeliveryStatus::Synced
+                })
+    }
+
+    fn show_mode_line(&self) -> bool {
+        self.operator_mode_label != "coding"
+    }
+
+    fn show_launch_line(&self) -> bool {
+        self.launch_mode_label != "foreground"
+    }
+
+    fn show_view_line(&self) -> bool {
+        self.transcript_mode != TranscriptMode::Conversation
+    }
+
+    fn show_memory_line(&self) -> bool {
+        !self.memory_stack.layers.is_empty()
+    }
+
+    fn show_session_mcp_line(&self) -> bool {
+        self.runtime
+            .mcp_state
+            .as_ref()
+            .is_some_and(|state| state.load_error.is_some() || !state.servers.is_empty())
+    }
+
+    fn render_session_mcp_line(&self) -> Option<String> {
+        let state = self.runtime.mcp_state.as_ref()?;
+        if let Some(error) = state.load_error.as_deref() {
+            return Some(format!("mcp session: error - {}", preview(error, 64)));
+        }
+        let connected = state
+            .servers
+            .iter()
+            .filter(|server| {
+                server.connection_status == Some(SessionMcpConnectionStatus::Connected)
+            })
+            .count();
+        let failed = state
+            .servers
+            .iter()
+            .filter(|server| server.connection_status == Some(SessionMcpConnectionStatus::Failed))
+            .count();
+        let discovered_tools = state
+            .servers
+            .iter()
+            .map(|server| server.discovered_tools.len())
+            .sum::<usize>();
+        Some(format!(
+            "mcp session: {} attached · {} connected · {} failed · {} tools",
+            state.servers.len(),
+            connected,
+            failed,
+            discovered_tools
+        ))
+    }
+
+    fn render_memory_issue_line(&self) -> Option<String> {
+        self.memory_stack
+            .first_issue_line()
+            .map(|issue| format!("memory issue: {}", preview(issue, 72)))
+    }
+
+    fn operator_reasoning_label(&self) -> &str {
+        self.operator_backend
+            .as_ref()
+            .and_then(|summary| {
+                summary
+                    .reasoning_level
+                    .as_deref()
+                    .or_else(|| resolved_reasoning_level_for_backend(summary.backend_kind, None))
+            })
+            .unwrap_or("none")
     }
 
     fn render_recovery_line(&self) -> Option<String> {
@@ -2268,30 +3584,62 @@ impl ChatScreen {
         if let Some(notice) = self.local_action_notice.as_deref() {
             lines.push(Line::from(format!("applied: {notice}")));
         }
-        lines.extend([
-            Line::from(format!("lane: {}", self.active_lane_label())),
-            Line::from(format!("target: {}", self.operator_endpoint_label())),
-            Line::from(format!("transport: {}", self.operator_transport_label())),
-            Line::from(format!("cwd: {}", self.workspace_label())),
-        ]);
-        lines.push(Line::from(format!("mode: {}", self.operator_mode_label)));
+        lines.push(Line::from(""));
+        lines.push(Line::from(self.render_workspace_summary_line()));
+        if self.show_lane_line() {
+            lines.push(Line::from(format!("lane: {}", self.active_lane_label())));
+        }
+        if self.show_git_summary_line()
+            && let Some(line) = self.render_git_status_line()
+        {
+            lines.push(Line::from(line));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(self.render_safety_line()));
+        if self.show_mode_line() {
+            lines.push(Line::from(format!("mode: {}", self.operator_mode_label)));
+        }
+        if self.show_launch_line() {
+            lines.push(Line::from(format!("launch: {}", self.launch_mode_label)));
+        }
+        if self.show_view_line() {
+            lines.push(Line::from(format!(
+                "view: {}",
+                self.transcript_mode.label()
+            )));
+        }
+        if self.show_memory_line() {
+            lines.push(Line::from(self.render_memory_line()));
+        }
+        if self.show_session_mcp_line()
+            && let Some(line) = self.render_session_mcp_line()
+        {
+            lines.push(Line::from(line));
+        }
+        if self.has_pending_review_changes()
+            || self.runtime.latest_task_receipt.is_some()
+            || self.runtime.latest_task_workspace_summary.is_some()
+        {
+            lines.push(Line::from(""));
+            lines.push(Line::from(self.render_last_task_line()));
+            lines.push(Line::from(self.render_task_checkpoint_line()));
+            lines.push(Line::from(self.render_revert_line()));
+            lines.extend(
+                self.render_task_workspace_lines()
+                    .into_iter()
+                    .map(Line::from),
+            );
+            lines.extend(self.render_task_receipt_lines().into_iter().map(Line::from));
+        }
+        if let Some(line) = self.render_memory_issue_line() {
+            lines.push(Line::from(line));
+        }
         if self.carries_compacted_context() {
             lines.push(Line::from(String::from("context: compact summary")));
-        } else if self.runtime.session_id.is_none() && self.committed_transcript_entry_count() == 0
-        {
-            lines.push(Line::from(String::from("context: fresh session")));
         }
-        lines.extend(self.approval_posture_lines.iter().cloned().map(Line::from));
         if let Some(line) = self.render_recovery_line() {
             lines.push(Line::from(line));
         }
-        lines.extend(
-            self.render_task_workspace_lines()
-                .into_iter()
-                .map(Line::from),
-        );
-        lines.extend(self.render_task_receipt_lines().into_iter().map(Line::from));
-        lines.push(Line::from("keys: Tab lanes · Ctrl+S backend"));
         Text::from(lines)
     }
 
@@ -2324,7 +3672,7 @@ impl ChatScreen {
             Line::from("- add a focused README note"),
             Line::from("- search for approval handling and summarize it"),
             Line::from(""),
-            Line::from("Keys: Tab lanes · Ctrl+S backend"),
+            Line::from("Keys: F2 status · F4 tasks · Ctrl+G git"),
         ]);
         Text::from(lines)
     }
@@ -2349,7 +3697,7 @@ impl ChatScreen {
                 Line::from("The worker now owns a real session-backed runtime loop."),
             ]);
         }
-        self.transcript.as_conversation_text()
+        self.transcript.as_text_for_mode(self.transcript_mode)
     }
 
     fn render_setup_body(&self) -> Text<'static> {
@@ -2558,6 +3906,23 @@ impl ChatScreen {
         }
     }
 
+    fn codex_auth_doctor_line(&self) -> String {
+        let Some(probe_home) = self.probe_home.as_ref() else {
+            return String::from("action - no probe_home configured for this lane");
+        };
+        let store = OpenAiCodexAuthStore::new(probe_home);
+        match store.status() {
+            Ok(status) if status.authenticated && !status.expired => {
+                String::from("ok - connected and ready")
+            }
+            Ok(status) if status.authenticated => {
+                String::from("action - authenticated but expired")
+            }
+            Ok(_) => String::from("action - not authenticated"),
+            Err(error) => format!("action - {error}"),
+        }
+    }
+
     fn render_phase_label(&self) -> &'static str {
         match self.setup.phase {
             TaskPhase::Idle => "idle",
@@ -2571,6 +3936,9 @@ impl ChatScreen {
     }
 
     fn session_panel_title(&self) -> String {
+        if self.has_pending_review_changes() {
+            return String::from("Review Changes");
+        }
         if !self.runtime.pending_approvals.is_empty() {
             return String::from("Action Needed");
         }
@@ -2632,6 +4000,9 @@ impl ChatScreen {
             return String::from("Start Here");
         }
         if self.transcript_follow_latest || self.transcript_scroll_from_bottom == 0 {
+            if self.has_pending_review_changes() {
+                return String::from("Review Changes");
+            }
             if !self.runtime.pending_approvals.is_empty() {
                 return String::from("Action Needed");
             }
@@ -2656,6 +4027,29 @@ impl ChatScreen {
             };
         }
         format!("Transcript · {} below", self.transcript_scroll_from_bottom)
+    }
+
+    fn has_pending_review_changes(&self) -> bool {
+        self.pending_review_paths()
+            .is_some_and(|paths| !paths.is_empty())
+    }
+
+    fn pending_review_paths(&self) -> Option<Vec<String>> {
+        let approval = self.runtime.pending_approvals.first()?;
+        if let Some(proposed) = approval.proposed_edit.as_ref() {
+            if proposed.changed_files.is_empty() {
+                return None;
+            }
+            return Some(proposed.changed_files.clone());
+        }
+        if approval.tool_name != "apply_patch" {
+            return None;
+        }
+        approval
+            .arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(|path| vec![path.to_string()])
     }
 
     fn sync_transcript_scroll_after_update(&mut self) {
@@ -2750,11 +4144,14 @@ impl HelpScreen {
             Line::from(""),
             Line::from("Enter / Ctrl+J    send / newline"),
             Line::from("Ctrl+A            review approval"),
+            Line::from("Ctrl+G            git workflow"),
             Line::from("Ctrl+R            run Apple FM check"),
             Line::from("Ctrl+O / Ctrl+T   attachment / notes"),
             Line::from(""),
             Line::from("Inspect"),
             Line::from(""),
+            Line::from("F2 / F3           status / doctor"),
+            Line::from("F4 / F5           tasks / recipes"),
             Line::from("Ctrl+S            backend details"),
             Line::from("F1 / Esc          close help"),
             Line::from("Ctrl+C            quit"),
@@ -2823,7 +4220,7 @@ impl ApprovalChoice {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Approve => "approve",
+            Self::Approve => "apply",
             Self::Reject => "reject",
         }
     }
@@ -2833,6 +4230,17 @@ impl ApprovalChoice {
 pub struct ApprovalOverlay {
     selected: ApprovalChoice,
     approval: PendingToolApproval,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ApprovalPreview {
+    title: &'static str,
+    summary: String,
+    files: Vec<String>,
+    preview_label: &'static str,
+    preview_lines: Vec<String>,
+    validation_line: String,
+    primary_action_label: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3048,6 +4456,279 @@ impl PlanModeOverlay {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundModeChoice {
+    Foreground,
+    Background,
+    Delegate,
+}
+
+impl BackgroundModeChoice {
+    fn next(self) -> Self {
+        match self {
+            Self::Foreground => Self::Background,
+            Self::Background => Self::Delegate,
+            Self::Delegate => Self::Foreground,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Foreground => Self::Delegate,
+            Self::Background => Self::Foreground,
+            Self::Delegate => Self::Background,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Foreground => "foreground",
+            Self::Background => "background",
+            Self::Delegate => "delegate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundModeOverlay {
+    current: BackgroundModeChoice,
+    selected: BackgroundModeChoice,
+}
+
+impl BackgroundModeOverlay {
+    pub fn new(current: &str) -> Self {
+        let current = match current {
+            "background" => BackgroundModeChoice::Background,
+            "delegate" => BackgroundModeChoice::Delegate,
+            _ => BackgroundModeChoice::Foreground,
+        };
+        Self {
+            current,
+            selected: current,
+        }
+    }
+
+    pub fn with_selected(current: &str, selected: &str) -> Self {
+        let mut overlay = Self::new(current);
+        overlay.selected = match selected {
+            "background" => BackgroundModeChoice::Background,
+            "delegate" => BackgroundModeChoice::Delegate,
+            _ => BackgroundModeChoice::Foreground,
+        };
+        overlay
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::ComposerHistoryPrevious | UiEvent::PreviousView => {
+                self.selected = self.selected.previous();
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!("selected {} launch mode", self.selected.label()),
+                )
+            }
+            UiEvent::ComposerHistoryNext | UiEvent::NextView => {
+                self.selected = self.selected.next();
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!("selected {} launch mode", self.selected.label()),
+                )
+            }
+            UiEvent::ComposerSubmit => ScreenOutcome::with_command(
+                format!("selected {} launch mode", self.selected.label()),
+                ScreenCommand::SetActiveLaunchMode {
+                    mode_label: self.selected.label().to_string(),
+                },
+            ),
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed background mode picker"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
+        let foreground_marker = if self.selected == BackgroundModeChoice::Foreground {
+            ">"
+        } else {
+            " "
+        };
+        let background_marker = if self.selected == BackgroundModeChoice::Background {
+            ">"
+        } else {
+            " "
+        };
+        let delegate_marker = if self.selected == BackgroundModeChoice::Delegate {
+            ">"
+        } else {
+            " "
+        };
+        let next = match self.selected {
+            BackgroundModeChoice::Foreground => {
+                "Next turns stay on this lane and stream their progress here."
+            }
+            BackgroundModeChoice::Background => {
+                "Next turns start as detached tasks. Probe will hand you back a task receipt and /tasks will reopen it later."
+            }
+            BackgroundModeChoice::Delegate => {
+                "Next turns become child tasks of this lane's current session. Use this when you want a subtask to run in parallel but keep the parent/child relationship visible."
+            }
+        };
+        let content = Paragraph::new(Text::from(vec![
+            Line::from("Choose how the next turn should run on this lane."),
+            Line::from(""),
+            Line::from(format!("current launch: {}", self.current.label())),
+            Line::from(""),
+            Line::from(format!("{foreground_marker} foreground")),
+            Line::from("  best when you want to watch the turn live in this shell"),
+            Line::from(format!("{background_marker} background")),
+            Line::from("  best when you want Probe to queue detached work and hand control back right away"),
+            Line::from(format!("{delegate_marker} delegate")),
+            Line::from("  best when you want a child task linked to the current session"),
+            Line::from(""),
+            Line::from(format!("next: {next}")),
+            Line::from("Use Up/Down to choose. Enter applies. Esc closes."),
+        ]))
+        .wrap(Wrap { trim: false });
+        ModalCard::new("Launch Mode", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewModeChoice {
+    AutoSafe,
+    ReviewRisky,
+    ReviewAll,
+}
+
+impl ReviewModeChoice {
+    fn next(self) -> Self {
+        match self {
+            Self::AutoSafe => Self::ReviewRisky,
+            Self::ReviewRisky => Self::ReviewAll,
+            Self::ReviewAll => Self::AutoSafe,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::AutoSafe => Self::ReviewAll,
+            Self::ReviewRisky => Self::AutoSafe,
+            Self::ReviewAll => Self::ReviewRisky,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::AutoSafe => "auto-safe",
+            Self::ReviewRisky => "review-risky",
+            Self::ReviewAll => "review-all",
+        }
+    }
+
+    fn detail(self) -> &'static str {
+        match self {
+            Self::AutoSafe => {
+                "Fastest path. Probe can apply write-capable tools immediately when its local approval posture allows them."
+            }
+            Self::ReviewRisky => {
+                "Current Probe behavior: write, network, and destructive actions pause for approval before they land."
+            }
+            Self::ReviewAll => {
+                "Strictest current Probe behavior: all write-capable changes pause for approval, even when the task looks routine."
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewModeOverlay {
+    current: ReviewModeChoice,
+    selected: ReviewModeChoice,
+}
+
+impl ReviewModeOverlay {
+    pub fn new(current: &str) -> Self {
+        let current = match current {
+            "review-risky" => ReviewModeChoice::ReviewRisky,
+            "review-all" => ReviewModeChoice::ReviewAll,
+            _ => ReviewModeChoice::AutoSafe,
+        };
+        Self {
+            current,
+            selected: current,
+        }
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::ComposerHistoryPrevious | UiEvent::PreviousView => {
+                self.selected = self.selected.previous();
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!("selected {} review mode", self.selected.label()),
+                )
+            }
+            UiEvent::ComposerHistoryNext | UiEvent::NextView => {
+                self.selected = self.selected.next();
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!("selected {} review mode", self.selected.label()),
+                )
+            }
+            UiEvent::ComposerSubmit => ScreenOutcome::with_command(
+                format!("selected {} review mode", self.selected.label()),
+                ScreenCommand::SetActiveReviewMode {
+                    mode_label: self.selected.label().to_string(),
+                },
+            ),
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed review mode picker"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
+        let mut lines = vec![
+            Line::from("Choose how Probe should treat write-capable work on this lane."),
+            Line::from(""),
+            Line::from(format!("current mode: {}", self.current.label())),
+            Line::from(""),
+        ];
+        for choice in [
+            ReviewModeChoice::AutoSafe,
+            ReviewModeChoice::ReviewRisky,
+            ReviewModeChoice::ReviewAll,
+        ] {
+            let marker = if self.selected == choice { ">" } else { " " };
+            let suffix = if self.current == choice {
+                "  current"
+            } else {
+                ""
+            };
+            lines.push(Line::from(format!("{marker} {}{suffix}", choice.label())));
+            lines.push(Line::from(format!("  {}", choice.detail())));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "Use Up/Down to choose. Enter applies. Esc closes.",
+        ));
+        let content = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        ModalCard::new("Review Mode", content).render(frame, area);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReasoningPickerOverlay {
     backend_label: String,
@@ -3137,6 +4818,802 @@ impl ReasoningPickerOverlay {
         }));
         let content = Paragraph::new(Text::from(lines));
         ModalCard::new("Reasoning", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryMenuEntry {
+    label: String,
+    detail: String,
+    preview_title: String,
+    preview_path: Option<PathBuf>,
+    preview_lines: Vec<String>,
+    command: Option<ScreenCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryOverlay {
+    stack: ProbeMemoryStack,
+    selected: usize,
+    preview_scroll: usize,
+}
+
+impl MemoryOverlay {
+    pub fn new(stack: ProbeMemoryStack) -> Self {
+        Self {
+            stack,
+            selected: 0,
+            preview_scroll: 0,
+        }
+    }
+
+    fn menu_entries(&self) -> Vec<MemoryMenuEntry> {
+        let mut entries = vec![
+            self.scope_entry(MemoryScope::User),
+            self.scope_entry(MemoryScope::Repo),
+            self.scope_entry(MemoryScope::Directory),
+        ];
+        entries.extend(self.stack.layers.iter().map(|layer| {
+            let mut preview_lines = preview_block_lines(layer.body.as_str(), 14);
+            let suffix = if layer.truncated {
+                " (truncated preview)"
+            } else {
+                ""
+            };
+            MemoryMenuEntry {
+                label: format!("Edit loaded layer: {}{}", layer.label, suffix),
+                detail: layer.path.display().to_string(),
+                preview_title: format!("loaded layer preview: {}", layer.label),
+                preview_path: Some(layer.path.clone()),
+                preview_lines: {
+                    if let Some(recovery) = self.recovery_hint_for_layer_path(layer.path.as_path())
+                    {
+                        preview_lines.push(String::new());
+                        preview_lines.push(format!("recovery: {recovery}"));
+                    }
+                    preview_lines
+                },
+                command: Some(ScreenCommand::OpenMemoryEditor {
+                    label: layer.label.clone(),
+                    path: layer.path.clone(),
+                }),
+            }
+        }));
+        entries
+    }
+
+    fn recovery_hint_for_layer_path(&self, path: &Path) -> Option<String> {
+        if self
+            .stack
+            .suggested_user_path
+            .as_ref()
+            .is_some_and(|candidate| candidate == path)
+        {
+            return self.stack.recovery_hint_for_scope(MemoryScope::User);
+        }
+        if self
+            .stack
+            .suggested_repo_path
+            .as_ref()
+            .is_some_and(|candidate| candidate == path)
+        {
+            return self.stack.recovery_hint_for_scope(MemoryScope::Repo);
+        }
+        if self
+            .stack
+            .suggested_directory_path
+            .as_ref()
+            .is_some_and(|candidate| candidate == path)
+        {
+            return self.stack.recovery_hint_for_scope(MemoryScope::Directory);
+        }
+        None
+    }
+
+    fn scope_entry(&self, scope: MemoryScope) -> MemoryMenuEntry {
+        let existing_layer = self.stack.layer_for_scope(scope);
+        let editable_path = self.stack.editable_path_for_scope(scope);
+        let exists =
+            existing_layer.is_some() || editable_path.as_ref().is_some_and(|path| path.exists());
+        let label = if exists {
+            format!("Edit {}", scope.label())
+        } else {
+            format!("Create {}", scope.label())
+        };
+        let detail = editable_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| match scope {
+                MemoryScope::User => {
+                    String::from("Probe needs a probe_home before user memory can be managed here.")
+                }
+                MemoryScope::Repo => {
+                    String::from("Repo memory is only available inside a git workspace.")
+                }
+                MemoryScope::Directory => String::from(
+                    "Folder memory is only available inside a subdirectory of the active repo.",
+                ),
+            });
+        let mut preview_lines = if let Some(layer) = existing_layer {
+            preview_block_lines(layer.body.as_str(), 14)
+        } else if let Some(path) = editable_path.as_ref() {
+            vec![format!(
+                "Probe will create {} at {}.",
+                scope.label(),
+                path.display()
+            )]
+        } else {
+            vec![detail.clone()]
+        };
+        if let Some(recovery) = self.stack.recovery_hint_for_scope(scope) {
+            preview_lines.push(String::new());
+            preview_lines.push(format!("recovery: {recovery}"));
+        }
+        MemoryMenuEntry {
+            label,
+            detail,
+            preview_title: if exists {
+                format!("current {}", scope.label())
+            } else {
+                format!("new {}", scope.label())
+            },
+            preview_path: editable_path.clone(),
+            preview_lines,
+            command: editable_path.map(|path| ScreenCommand::OpenMemoryEditor {
+                label: scope.label().to_string(),
+                path,
+            }),
+        }
+    }
+
+    fn selected_entry(&self) -> Option<MemoryMenuEntry> {
+        let entries = self.menu_entries();
+        entries
+            .get(self.selected.min(entries.len().saturating_sub(1)))
+            .cloned()
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        let entry_count = self.menu_entries().len();
+        match event {
+            UiEvent::ComposerHistoryPrevious | UiEvent::PreviousView => {
+                if entry_count == 0 {
+                    return ScreenOutcome::idle();
+                }
+                if self.selected == 0 {
+                    self.selected = entry_count.saturating_sub(1);
+                } else {
+                    self.selected = self.selected.saturating_sub(1);
+                }
+                self.preview_scroll = 0;
+                let label = self
+                    .selected_entry()
+                    .map(|entry| entry.label)
+                    .unwrap_or_else(|| String::from("memory entry"));
+                ScreenOutcome::with_status(ScreenAction::None, format!("selected {label}"))
+            }
+            UiEvent::ComposerHistoryNext | UiEvent::NextView => {
+                if entry_count == 0 {
+                    return ScreenOutcome::idle();
+                }
+                self.selected = (self.selected + 1) % entry_count;
+                self.preview_scroll = 0;
+                let label = self
+                    .selected_entry()
+                    .map(|entry| entry.label)
+                    .unwrap_or_else(|| String::from("memory entry"));
+                ScreenOutcome::with_status(ScreenAction::None, format!("selected {label}"))
+            }
+            UiEvent::ScrollUp => {
+                self.preview_scroll = self
+                    .preview_scroll
+                    .saturating_sub(LINE_SCROLL_STEP as usize);
+                ScreenOutcome::idle()
+            }
+            UiEvent::ScrollDown => {
+                self.preview_scroll = self
+                    .preview_scroll
+                    .saturating_add(LINE_SCROLL_STEP as usize);
+                ScreenOutcome::idle()
+            }
+            UiEvent::PageUp => {
+                self.preview_scroll = self
+                    .preview_scroll
+                    .saturating_sub(PAGE_SCROLL_STEP as usize);
+                ScreenOutcome::idle()
+            }
+            UiEvent::PageDown => {
+                self.preview_scroll = self
+                    .preview_scroll
+                    .saturating_add(PAGE_SCROLL_STEP as usize);
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerSubmit => {
+                let Some(entry) = self.selected_entry() else {
+                    return ScreenOutcome::with_status(
+                        ScreenAction::None,
+                        String::from("there is no memory entry to open yet"),
+                    );
+                };
+                let Some(command) = entry.command else {
+                    return ScreenOutcome::with_status(ScreenAction::None, entry.detail);
+                };
+                ScreenOutcome::with_command(format!("opening {}", entry.label), command)
+            }
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed memory overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
+        let entries = self.menu_entries();
+        let selected_index = self.selected.min(entries.len().saturating_sub(1));
+        let selected_entry = entries.get(selected_index);
+        let mut lines = vec![
+            Line::from(
+                "Inspect and manage the memory and rules Probe will carry into the next turn.",
+            ),
+            Line::from(
+                "precedence: folder memory overrides repo memory, and repo memory overrides user memory.",
+            ),
+            Line::from(""),
+            Line::from(format!("active memory: {}", self.stack.active_label())),
+        ];
+        if let Some(issue) = self.stack.first_issue_line() {
+            lines.push(Line::from(format!("issue: {}", preview(issue, 120))));
+            lines.push(Line::from(
+                "recovery: open the relevant memory file here and save valid UTF-8 markdown text.",
+            ));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from("actions"));
+        for (index, entry) in entries.iter().take(3).enumerate() {
+            let marker = if index == selected_index { ">" } else { " " };
+            lines.push(Line::from(format!(
+                "{marker} {}",
+                preview(entry.label.as_str(), 100)
+            )));
+            lines.push(Line::from(format!(
+                "    {}",
+                preview(entry.detail.as_str(), 110)
+            )));
+        }
+
+        if entries.len() > 3 {
+            lines.push(Line::from(""));
+            lines.push(Line::from("loaded layers"));
+            for (offset, entry) in entries.iter().enumerate().skip(3) {
+                let marker = if offset == selected_index { ">" } else { " " };
+                lines.push(Line::from(format!(
+                    "{marker} {}",
+                    preview(entry.label.as_str(), 100)
+                )));
+            }
+        }
+
+        let reserved_rows = entries.len().min(9) + 11;
+        let visible_body_lines =
+            usize::from(area.height.saturating_sub(reserved_rows as u16)).max(6);
+        if let Some(entry) = selected_entry {
+            let total_lines = entry.preview_lines.len();
+            let start = self
+                .preview_scroll
+                .min(total_lines.saturating_sub(visible_body_lines));
+            let end = (start + visible_body_lines).min(total_lines);
+            lines.push(Line::from(""));
+            lines.push(Line::from(entry.preview_title.clone()));
+            if let Some(path) = entry.preview_path.as_ref() {
+                lines.push(Line::from(format!("path: {}", path.display())));
+            }
+            if total_lines > visible_body_lines {
+                lines.push(Line::from(format!(
+                    "scroll: {}-{} of {}",
+                    start + 1,
+                    end,
+                    total_lines
+                )));
+            }
+            lines.push(Line::from(""));
+            if entry.preview_lines.is_empty() {
+                lines.push(Line::from("[no preview available]"));
+            } else {
+                for line in entry.preview_lines[start..end].iter() {
+                    lines.push(Line::from(line.clone()));
+                }
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "Use Up/Down to choose an action or layer. Enter opens it. PgUp/PgDn scroll. Esc closes.",
+        ));
+
+        let content = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        ModalCard::new("Memory", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryEditorOverlay {
+    label: String,
+    path: PathBuf,
+    body: String,
+    cursor: usize,
+    scroll: usize,
+    existed: bool,
+    load_note: Option<String>,
+}
+
+impl MemoryEditorOverlay {
+    pub fn new(
+        label: impl Into<String>,
+        path: PathBuf,
+        body: String,
+        existed: bool,
+        load_note: Option<String>,
+    ) -> Self {
+        let cursor = body.len();
+        Self {
+            label: label.into(),
+            path,
+            body,
+            cursor,
+            scroll: 0,
+            existed,
+            load_note,
+        }
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::ComposerInsert(ch) => {
+                self.body.insert(self.cursor, ch);
+                self.cursor += ch.len_utf8();
+                self.ensure_cursor_visible();
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerPaste(payload) => {
+                self.body.insert_str(self.cursor, payload.as_str());
+                self.cursor += payload.len();
+                self.ensure_cursor_visible();
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!(
+                        "pasted {} chars into {}",
+                        payload.chars().count(),
+                        self.label
+                    ),
+                )
+            }
+            UiEvent::ComposerNewline => {
+                self.body.insert(self.cursor, '\n');
+                self.cursor += 1;
+                self.ensure_cursor_visible();
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerBackspace => {
+                if let Some(previous) = previous_char_boundary(self.body.as_str(), self.cursor) {
+                    self.body.drain(previous..self.cursor);
+                    self.cursor = previous;
+                    self.ensure_cursor_visible();
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerDelete => {
+                if let Some(next) = next_char_boundary(self.body.as_str(), self.cursor) {
+                    self.body.drain(self.cursor..next);
+                    self.ensure_cursor_visible();
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveLeft => {
+                if let Some(previous) = previous_char_boundary(self.body.as_str(), self.cursor) {
+                    self.cursor = previous;
+                    self.ensure_cursor_visible();
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveRight => {
+                if let Some(next) = next_char_boundary(self.body.as_str(), self.cursor) {
+                    self.cursor = next;
+                    self.ensure_cursor_visible();
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveHome => {
+                self.cursor = line_start(self.body.as_str(), self.cursor);
+                self.ensure_cursor_visible();
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveEnd => {
+                self.cursor = line_end(self.body.as_str(), self.cursor);
+                self.ensure_cursor_visible();
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerHistoryPrevious | UiEvent::PreviousView => {
+                self.cursor = move_cursor_vertical(self.body.as_str(), self.cursor, -1);
+                self.ensure_cursor_visible();
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerHistoryNext | UiEvent::NextView => {
+                self.cursor = move_cursor_vertical(self.body.as_str(), self.cursor, 1);
+                self.ensure_cursor_visible();
+                ScreenOutcome::idle()
+            }
+            UiEvent::PageUp => {
+                self.scroll = self.scroll.saturating_sub(PAGE_SCROLL_STEP as usize);
+                ScreenOutcome::idle()
+            }
+            UiEvent::PageDown => {
+                self.scroll = self.scroll.saturating_add(PAGE_SCROLL_STEP as usize);
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerSubmit => {
+                if self.body.trim().is_empty() {
+                    return ScreenOutcome::with_status(
+                        ScreenAction::None,
+                        String::from("memory files should not be empty; add text or Esc to cancel"),
+                    );
+                }
+                ScreenOutcome::with_action_and_command(
+                    ScreenAction::CloseModal,
+                    format!("saved {}", self.label),
+                    ScreenCommand::SaveMemoryFile {
+                        label: self.label.clone(),
+                        path: self.path.clone(),
+                        body: self.body.clone(),
+                    },
+                )
+            }
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                format!("dismissed {}", self.label),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn ensure_cursor_visible(&mut self) {
+        let cursor_line = cursor_line_index(self.body.as_str(), self.cursor);
+        if cursor_line < self.scroll {
+            self.scroll = cursor_line;
+        }
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
+        let mut lines = vec![
+            Line::from(if self.existed {
+                "Edit this memory file from inside Probe."
+            } else {
+                "Create this memory file from inside Probe."
+            }),
+            Line::from(format!("target: {}", self.label)),
+            Line::from(format!("path: {}", self.path.display())),
+            Line::from(format!(
+                "mode: {}",
+                if self.existed {
+                    "editing existing file"
+                } else {
+                    "creating a new file"
+                }
+            )),
+        ];
+        if let Some(note) = self.load_note.as_ref() {
+            lines.push(Line::from(format!("note: {note}")));
+        }
+        lines.push(Line::from(
+            "Type to edit. Ctrl+J inserts a newline. Left/Right/Home/End move. Up/Down move lines. Enter saves.",
+        ));
+
+        let rendered_lines = render_editor_lines(self.body.as_str(), self.cursor);
+        let reserved_rows = 8;
+        let visible_lines = usize::from(area.height.saturating_sub(reserved_rows)).max(8);
+        let cursor_line = cursor_line_index(self.body.as_str(), self.cursor);
+        let mut start = self
+            .scroll
+            .min(rendered_lines.len().saturating_sub(visible_lines));
+        if cursor_line < start {
+            start = cursor_line;
+        } else if cursor_line >= start + visible_lines {
+            start = cursor_line.saturating_sub(visible_lines.saturating_sub(1));
+        }
+        let end = (start + visible_lines).min(rendered_lines.len());
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!(
+            "editor: lines {}-{} of {}",
+            start + 1,
+            end,
+            rendered_lines.len()
+        )));
+        lines.push(Line::from(""));
+        for line in rendered_lines[start..end].iter() {
+            lines.push(Line::from(line.clone()));
+        }
+
+        let content = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        ModalCard::new("Memory Editor", content).render(frame, area);
+    }
+}
+
+fn preview_block_lines(body: &str, max_lines: usize) -> Vec<String> {
+    let mut lines = body.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    if lines.is_empty() {
+        return vec![String::from("[empty]")];
+    }
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        lines.push(String::from("..."));
+    }
+    lines
+}
+
+fn previous_char_boundary(value: &str, cursor: usize) -> Option<usize> {
+    value[..cursor]
+        .char_indices()
+        .last()
+        .map(|(index, _)| index)
+}
+
+fn next_char_boundary(value: &str, cursor: usize) -> Option<usize> {
+    value[cursor..]
+        .char_indices()
+        .nth(1)
+        .map(|(offset, _)| cursor + offset)
+        .or_else(|| (cursor < value.len()).then_some(value.len()))
+}
+
+fn line_start(value: &str, cursor: usize) -> usize {
+    value[..cursor]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0)
+}
+
+fn line_end(value: &str, cursor: usize) -> usize {
+    value[cursor..]
+        .find('\n')
+        .map(|offset| cursor + offset)
+        .unwrap_or(value.len())
+}
+
+fn cursor_line_index(value: &str, cursor: usize) -> usize {
+    value[..cursor].chars().filter(|ch| *ch == '\n').count()
+}
+
+fn move_cursor_vertical(value: &str, cursor: usize, direction: isize) -> usize {
+    let current_start = line_start(value, cursor);
+    let current_column = value[current_start..cursor].chars().count();
+    if direction < 0 {
+        if current_start == 0 {
+            return cursor;
+        }
+        let previous_line_end = current_start.saturating_sub(1);
+        let previous_line_start = line_start(value, previous_line_end);
+        return nth_char_boundary(value, previous_line_start, current_column)
+            .min(previous_line_end);
+    }
+    let current_end = line_end(value, cursor);
+    if current_end == value.len() {
+        return cursor;
+    }
+    let next_line_start = current_end + 1;
+    let next_line_end = line_end(value, next_line_start);
+    nth_char_boundary(value, next_line_start, current_column).min(next_line_end)
+}
+
+fn nth_char_boundary(value: &str, start: usize, column: usize) -> usize {
+    value[start..]
+        .char_indices()
+        .nth(column)
+        .map(|(offset, _)| start + offset)
+        .unwrap_or_else(|| line_end(value, start))
+}
+
+fn render_editor_lines(value: &str, cursor: usize) -> Vec<String> {
+    let mut rendered = Vec::new();
+    let mut line_start_index = 0usize;
+    for (index, line) in value.split('\n').enumerate() {
+        let cursor_in_line = cursor >= line_start_index && cursor <= line_start_index + line.len();
+        let rendered_line = if cursor_in_line {
+            let column = value[line_start_index..cursor].chars().count();
+            insert_visual_cursor(line, column)
+        } else {
+            line.to_string()
+        };
+        rendered.push(format!("{:>3}: {}", index + 1, rendered_line));
+        line_start_index += line.len() + 1;
+    }
+    if rendered.is_empty() {
+        rendered.push(String::from("  1: |"));
+    }
+    rendered
+}
+
+fn insert_visual_cursor(line: &str, column: usize) -> String {
+    let mut output = String::new();
+    let mut inserted = false;
+    for (index, ch) in line.chars().enumerate() {
+        if index == column {
+            output.push('|');
+            inserted = true;
+        }
+        output.push(ch);
+    }
+    if !inserted {
+        output.push('|');
+    }
+    output
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDiffFileView {
+    pub path: String,
+    pub diff_lines: Vec<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffOverlay {
+    title: String,
+    summary_lines: Vec<String>,
+    files: Vec<TaskDiffFileView>,
+    selected: usize,
+    diff_scroll: usize,
+}
+
+impl DiffOverlay {
+    pub fn new(
+        title: impl Into<String>,
+        summary_lines: Vec<String>,
+        files: Vec<TaskDiffFileView>,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            summary_lines,
+            files,
+            selected: 0,
+            diff_scroll: 0,
+        }
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::ComposerHistoryPrevious | UiEvent::PreviousView => {
+                if self.files.is_empty() {
+                    return ScreenOutcome::idle();
+                }
+                if self.selected == 0 {
+                    self.selected = self.files.len().saturating_sub(1);
+                } else {
+                    self.selected = self.selected.saturating_sub(1);
+                }
+                self.diff_scroll = 0;
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!("selected diff {}", self.files[self.selected].path),
+                )
+            }
+            UiEvent::ComposerHistoryNext | UiEvent::NextView => {
+                if self.files.is_empty() {
+                    return ScreenOutcome::idle();
+                }
+                self.selected = (self.selected + 1) % self.files.len();
+                self.diff_scroll = 0;
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!("selected diff {}", self.files[self.selected].path),
+                )
+            }
+            UiEvent::ScrollUp => {
+                self.diff_scroll = self.diff_scroll.saturating_sub(LINE_SCROLL_STEP as usize);
+                ScreenOutcome::idle()
+            }
+            UiEvent::ScrollDown => {
+                self.diff_scroll = self.diff_scroll.saturating_add(LINE_SCROLL_STEP as usize);
+                ScreenOutcome::idle()
+            }
+            UiEvent::PageUp => {
+                self.diff_scroll = self.diff_scroll.saturating_sub(PAGE_SCROLL_STEP as usize);
+                ScreenOutcome::idle()
+            }
+            UiEvent::PageDown => {
+                self.diff_scroll = self.diff_scroll.saturating_add(PAGE_SCROLL_STEP as usize);
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerSubmit => {
+                self.diff_scroll = 0;
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    String::from("reset diff preview to the top"),
+                )
+            }
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed diff overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
+        let mut lines = self
+            .summary_lines
+            .iter()
+            .cloned()
+            .map(Line::from)
+            .collect::<Vec<_>>();
+        if self.files.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from("No diff is available for the active lane yet."));
+            lines.push(Line::from("Esc closes."));
+            let content = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+            ModalCard::new(self.title.as_str(), content).render(frame, area);
+            return;
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from("files"));
+        for (index, file) in self.files.iter().enumerate() {
+            let marker = if index == self.selected { ">" } else { " " };
+            lines.push(Line::from(format!("{marker} {}", file.path)));
+        }
+
+        let selected = &self.files[self.selected];
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!("diff preview: {}", selected.path)));
+        if selected.truncated {
+            lines.push(Line::from(
+                "preview: truncated to keep this overlay readable",
+            ));
+        }
+
+        let reserved_rows = self.files.len().min(6) + self.summary_lines.len() + 8;
+        let visible_diff_lines =
+            usize::from(area.height.saturating_sub(reserved_rows as u16)).max(6);
+        let total_lines = selected.diff_lines.len();
+        let start = self
+            .diff_scroll
+            .min(total_lines.saturating_sub(visible_diff_lines));
+        let end = (start + visible_diff_lines).min(total_lines);
+
+        if total_lines > visible_diff_lines {
+            lines.push(Line::from(format!(
+                "scroll: {}-{} of {}",
+                start + 1,
+                end,
+                total_lines
+            )));
+        }
+
+        if selected.diff_lines.is_empty() {
+            lines.push(Line::from(
+                "No git diff output is available for this file right now.",
+            ));
+        } else {
+            for line in selected.diff_lines[start..end].iter().cloned() {
+                lines.push(Line::from(line));
+            }
+        }
+
+        let content = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        ModalCard::new(self.title.as_str(), content).render(frame, area);
     }
 }
 
@@ -3247,7 +5724,9 @@ pub struct ResumeSessionView {
     pub title: String,
     pub backend: String,
     pub cwd: String,
-    pub turns: u64,
+    pub status: String,
+    pub detail_lines: Vec<String>,
+    pub next_hint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3294,12 +5773,12 @@ impl ResumeOverlay {
                 let Some(session) = self.sessions.get(self.selected) else {
                     return ScreenOutcome::with_status(
                         ScreenAction::None,
-                        String::from("there are no saved sessions to resume"),
+                        String::from("there are no detached tasks to reopen"),
                     );
                 };
                 ScreenOutcome::with_action_and_command(
                     ScreenAction::CloseModal,
-                    format!("resuming {}", session.title),
+                    format!("reopening {}", session.title),
                     ScreenCommand::ResumeDetachedSession {
                         session_id: session.id.clone(),
                     },
@@ -3307,7 +5786,7 @@ impl ResumeOverlay {
             }
             UiEvent::Dismiss => ScreenOutcome::with_status(
                 ScreenAction::CloseModal,
-                String::from("dismissed resume picker"),
+                String::from("dismissed task list"),
             ),
             UiEvent::OpenHelp => ScreenOutcome::with_status(
                 ScreenAction::OpenHelp,
@@ -3319,37 +5798,39 @@ impl ResumeOverlay {
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
         let mut lines = vec![
-            Line::from("Resume a previous Probe session from this Probe home."),
-            Line::from("Use Up/Down to choose. Enter attaches. Esc closes."),
+            Line::from("Inspect detached Probe tasks and reopen one on the matching lane."),
+            Line::from("Use Up/Down to choose. Enter reopens it. Esc closes."),
             Line::from(""),
-            Line::from(format!("saved sessions: {}", self.sessions.len())),
+            Line::from(format!("tasks discovered: {}", self.sessions.len())),
             Line::from(""),
         ];
         if self.sessions.is_empty() {
-            lines.push(Line::from("No saved sessions yet."));
+            lines.push(Line::from(
+                "No detached tasks were found for this Probe home.",
+            ));
         } else {
             for (index, session) in self.sessions.iter().enumerate() {
                 let marker = if index == self.selected { ">" } else { " " };
                 lines.push(Line::from(format!(
                     "{marker} {}  {}",
-                    session.title, session.backend
+                    session.title, session.status
                 )));
             }
             if let Some(session) = self.sessions.get(self.selected) {
                 lines.push(Line::from(""));
                 lines.push(Line::from(format!("selected: {}", session.title)));
-                lines.push(Line::from(format!("  session: {}", session.id)));
+                lines.push(Line::from(format!("  task: {}", session.id)));
                 lines.push(Line::from(format!("  backend: {}", session.backend)));
                 lines.push(Line::from(format!("  cwd: {}", session.cwd)));
-                lines.push(Line::from(format!("  turns: {}", session.turns)));
+                for line in session.detail_lines.iter().take(5) {
+                    lines.push(Line::from(format!("  {}", line)));
+                }
                 lines.push(Line::from(""));
-                lines.push(Line::from(
-                    "next: Enter attaches this session to the matching lane.",
-                ));
+                lines.push(Line::from(session.next_hint.clone()));
             }
         }
         let content = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
-        ModalCard::new("Resume", content).render(frame, area);
+        ModalCard::new("Tasks", content).render(frame, area);
     }
 }
 
@@ -3388,6 +5869,1333 @@ impl UsageOverlay {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusOverlay {
+    configured_mcp_count: usize,
+    enabled_mcp_count: usize,
+    mcp_summary_lines: Vec<String>,
+}
+
+impl StatusOverlay {
+    pub fn new(
+        configured_mcp_count: usize,
+        enabled_mcp_count: usize,
+        mcp_summary_lines: Vec<String>,
+    ) -> Self {
+        Self {
+            configured_mcp_count,
+            enabled_mcp_count,
+            mcp_summary_lines,
+        }
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed status overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        _stack_depth: usize,
+        base_screen: &ChatScreen,
+    ) {
+        let content = Paragraph::new(base_screen.render_status_overlay_text(
+            self.configured_mcp_count,
+            self.enabled_mcp_count,
+            self.mcp_summary_lines.as_slice(),
+        ))
+        .wrap(Wrap { trim: false });
+        ModalCard::new("Status", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorOverlay {
+    configured_mcp_count: usize,
+    enabled_mcp_count: usize,
+    mcp_summary_lines: Vec<String>,
+}
+
+impl DoctorOverlay {
+    pub fn new(
+        configured_mcp_count: usize,
+        enabled_mcp_count: usize,
+        mcp_summary_lines: Vec<String>,
+    ) -> Self {
+        Self {
+            configured_mcp_count,
+            enabled_mcp_count,
+            mcp_summary_lines,
+        }
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed doctor overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        _stack_depth: usize,
+        base_screen: &ChatScreen,
+    ) {
+        let content = Paragraph::new(base_screen.render_doctor_overlay_text(
+            self.configured_mcp_count,
+            self.enabled_mcp_count,
+            self.mcp_summary_lines.as_slice(),
+        ))
+        .wrap(Wrap { trim: false });
+        ModalCard::new("Doctor", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecipeChoice {
+    ReviewRiskyEdit,
+    ShipCurrentWork,
+    ConvertMcpRecipe,
+    DelegateBackgroundTask,
+    WorkFromPrFeedback,
+}
+
+impl RecipeChoice {
+    const ALL: [Self; 5] = [
+        Self::ReviewRiskyEdit,
+        Self::ShipCurrentWork,
+        Self::ConvertMcpRecipe,
+        Self::DelegateBackgroundTask,
+        Self::WorkFromPrFeedback,
+    ];
+
+    fn previous(self) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or(0);
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
+    fn next(self) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ReviewRiskyEdit => "Review a risky edit",
+            Self::ShipCurrentWork => "Ship current work",
+            Self::ConvertMcpRecipe => "Convert an MCP recipe",
+            Self::DelegateBackgroundTask => "Delegate a background task",
+            Self::WorkFromPrFeedback => "Work from PR feedback",
+        }
+    }
+
+    const fn summary(self) -> &'static str {
+        match self {
+            Self::ReviewRiskyEdit => {
+                "Set review-first editing before you ask Probe to change code."
+            }
+            Self::ShipCurrentWork => {
+                "Move from local changes to a pushed draft PR without leaving Probe."
+            }
+            Self::ConvertMcpRecipe => "Turn a saved provider recipe into a runnable MCP server.",
+            Self::DelegateBackgroundTask => "Queue child work without giving up the current lane.",
+            Self::WorkFromPrFeedback => {
+                "Pull GitHub review feedback into the composer for the next fix."
+            }
+        }
+    }
+
+    fn steps(self) -> [&'static str; 4] {
+        match self {
+            Self::ReviewRiskyEdit => [
+                "Run /review_mode and choose review-risky or review-all.",
+                "Ask Probe for the edit you want.",
+                "Use /diff to inspect the proposed patch.",
+                "Approve with A or reject with R before anything lands.",
+            ],
+            Self::ShipCurrentWork => [
+                "Run /git to sanity-check branch and dirty state.",
+                "Use /stage to collect the current repo changes.",
+                "Use /commit, /push, and /pr to ship the branch.",
+                "Use /pr_comments later to pull review feedback back in.",
+            ],
+            Self::ConvertMcpRecipe => [
+                "Open /mcp and enter Saved MCP servers.",
+                "Select the saved recipe entry and press Enter.",
+                "Review the suggested runtime command or paste a better one.",
+                "Save it, then start a turn to test runtime attachment.",
+            ],
+            Self::DelegateBackgroundTask => [
+                "Run /delegate to switch the lane into child-task launch mode.",
+                "Submit the prompt you want Probe to work on in the background.",
+                "Use /tasks to reopen the child task later.",
+                "Return to the parent lane while the child keeps running.",
+            ],
+            Self::WorkFromPrFeedback => [
+                "Run /pr_comments on the branch that owns the PR.",
+                "Use Up/Down to choose the review item you want to address.",
+                "Press Enter to load that feedback into the composer.",
+                "Edit, validate, and ship the follow-up change from there.",
+            ],
+        }
+    }
+
+    const fn starter_command(self) -> &'static str {
+        match self {
+            Self::ReviewRiskyEdit => "/review_mode",
+            Self::ShipCurrentWork => "/git",
+            Self::ConvertMcpRecipe => "/mcp",
+            Self::DelegateBackgroundTask => "/delegate",
+            Self::WorkFromPrFeedback => "/pr_comments",
+        }
+    }
+
+    fn load_status(self) -> String {
+        format!("loaded {} into the composer", self.starter_command())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipesOverlay {
+    selected: RecipeChoice,
+}
+
+impl RecipesOverlay {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            selected: RecipeChoice::ReviewRiskyEdit,
+        }
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::ComposerHistoryPrevious | UiEvent::PreviousView => {
+                self.selected = self.selected.previous();
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!("selected {}", self.selected.label()),
+                )
+            }
+            UiEvent::ComposerHistoryNext | UiEvent::NextView => {
+                self.selected = self.selected.next();
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!("selected {}", self.selected.label()),
+                )
+            }
+            UiEvent::ComposerSubmit => ScreenOutcome::with_action_and_command(
+                ScreenAction::CloseModal,
+                self.selected.load_status(),
+                ScreenCommand::SeedComposerDraft {
+                    text: String::from(self.selected.starter_command()),
+                },
+            ),
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed recipes overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
+        let mut lines = vec![
+            Line::from(
+                "Use a guided workflow when you know the job but not the exact command path.",
+            ),
+            Line::from(
+                "Up/Down chooses a workflow. Enter loads the first step into the composer. Esc returns.",
+            ),
+            Line::from(""),
+            Line::from(format!("recipes available: {}", RecipeChoice::ALL.len())),
+            Line::from(""),
+        ];
+        for choice in RecipeChoice::ALL {
+            let marker = if choice == self.selected { ">" } else { " " };
+            lines.push(Line::from(format!("{marker} {}", choice.label())));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!("selected: {}", self.selected.label())));
+        lines.push(Line::from(format!("  {}", self.selected.summary())));
+        lines.push(Line::from("  steps:"));
+        for step in self.selected.steps() {
+            lines.push(Line::from(format!("    - {step}")));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!(
+            "next: Enter loads `{}` into the composer.",
+            self.selected.starter_command()
+        )));
+        let content = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        ModalCard::new("Recipes", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitOverlay;
+
+impl GitOverlay {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed git overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        _stack_depth: usize,
+        base_screen: &ChatScreen,
+    ) {
+        let content =
+            Paragraph::new(base_screen.render_git_overlay_text()).wrap(Wrap { trim: false });
+        ModalCard::new("Git", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchOverlay {
+    repo_root: Option<PathBuf>,
+    current_branch: String,
+    message: String,
+    cursor: usize,
+    replace_message_on_edit: bool,
+    working_tree_dirty: bool,
+}
+
+impl BranchOverlay {
+    pub fn new(
+        repo_root: Option<PathBuf>,
+        current_branch: impl Into<String>,
+        message: String,
+        working_tree_dirty: bool,
+    ) -> Self {
+        let cursor = message.len();
+        Self {
+            repo_root,
+            current_branch: current_branch.into(),
+            message,
+            cursor,
+            replace_message_on_edit: true,
+            working_tree_dirty,
+        }
+    }
+
+    fn can_apply(&self) -> bool {
+        self.repo_root.is_some()
+    }
+
+    fn replace_or_insert(&mut self, payload: &str) {
+        if self.replace_message_on_edit {
+            self.message.clear();
+            self.cursor = 0;
+            self.replace_message_on_edit = false;
+        }
+        self.message.insert_str(self.cursor, payload);
+        self.cursor += payload.len();
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::ComposerInsert(ch) => {
+                let mut payload = String::new();
+                payload.push(ch);
+                self.replace_or_insert(payload.as_str());
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerPaste(payload) => {
+                self.replace_or_insert(payload.as_str());
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!("pasted {} chars into branch name", payload.chars().count()),
+                )
+            }
+            UiEvent::ComposerBackspace => {
+                self.replace_message_on_edit = false;
+                if let Some(previous) = previous_char_boundary(self.message.as_str(), self.cursor) {
+                    self.message.drain(previous..self.cursor);
+                    self.cursor = previous;
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerDelete => {
+                self.replace_message_on_edit = false;
+                if let Some(next) = next_char_boundary(self.message.as_str(), self.cursor) {
+                    self.message.drain(self.cursor..next);
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveLeft => {
+                self.replace_message_on_edit = false;
+                if let Some(previous) = previous_char_boundary(self.message.as_str(), self.cursor) {
+                    self.cursor = previous;
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveRight => {
+                self.replace_message_on_edit = false;
+                if let Some(next) = next_char_boundary(self.message.as_str(), self.cursor) {
+                    self.cursor = next;
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveHome => {
+                self.replace_message_on_edit = false;
+                self.cursor = 0;
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveEnd => {
+                self.replace_message_on_edit = false;
+                self.cursor = self.message.len();
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerNewline => ScreenOutcome::with_status(
+                ScreenAction::None,
+                String::from("branch names are single-line here; Enter applies"),
+            ),
+            UiEvent::ComposerSubmit => {
+                if !self.can_apply() {
+                    return ScreenOutcome::with_status(
+                        ScreenAction::None,
+                        String::from("Probe did not detect a git repo for the current workspace"),
+                    );
+                }
+                if self.message.trim().is_empty() {
+                    return ScreenOutcome::with_status(
+                        ScreenAction::None,
+                        String::from("enter a branch name before you continue"),
+                    );
+                }
+                ScreenOutcome::with_action_and_command(
+                    ScreenAction::CloseModal,
+                    format!("branch ready: {}", self.message.trim()),
+                    ScreenCommand::CreateOrSwitchBranch {
+                        repo_root: self.repo_root.clone().expect("checked in can_apply"),
+                        name: self.message.trim().to_string(),
+                    },
+                )
+            }
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed branch overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
+        let mut lines = vec![
+            Line::from("Create a new branch or switch to an existing branch for this workspace."),
+            Line::from(""),
+            Line::from(format!("current branch: {}", self.current_branch)),
+            Line::from(format!(
+                "repo: {}",
+                self.repo_root
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| String::from("none detected"))
+            )),
+            Line::from(format!(
+                "working tree: {}",
+                if self.working_tree_dirty {
+                    "dirty"
+                } else {
+                    "clean"
+                }
+            )),
+            Line::from(""),
+        ];
+        if self.can_apply() {
+            lines.push(Line::from("branch name:"));
+            lines.push(Line::from(self.message.clone()));
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "Enter switches to this branch. Probe creates it first if it does not already exist.",
+            ));
+            if self.working_tree_dirty {
+                lines.push(Line::from(
+                    "Your current repo changes stay with you when Probe creates a new branch from here.",
+                ));
+            }
+        } else {
+            lines.push(Line::from(
+                "Probe cannot manage branches here because this workspace is not inside a git repo.",
+            ));
+        }
+        lines.push(Line::from("Esc closes."));
+        let content = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        ModalCard::new("Branch", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageOverlay {
+    repo_root: Option<PathBuf>,
+    branch_label: String,
+    staged_count: usize,
+    unstaged_count: usize,
+    untracked_count: usize,
+    preview_paths: Vec<String>,
+}
+
+impl StageOverlay {
+    pub fn new(
+        repo_root: Option<PathBuf>,
+        branch_label: impl Into<String>,
+        staged_count: usize,
+        unstaged_count: usize,
+        untracked_count: usize,
+        preview_paths: Vec<String>,
+    ) -> Self {
+        Self {
+            repo_root,
+            branch_label: branch_label.into(),
+            staged_count,
+            unstaged_count,
+            untracked_count,
+            preview_paths,
+        }
+    }
+
+    fn can_stage(&self) -> bool {
+        self.repo_root.is_some() && (self.unstaged_count > 0 || self.untracked_count > 0)
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::ComposerSubmit => {
+                if let Some(repo_root) = self.repo_root.as_ref()
+                    && self.can_stage()
+                {
+                    return ScreenOutcome::with_action_and_command(
+                        ScreenAction::CloseModal,
+                        String::from("staged current repo changes"),
+                        ScreenCommand::StageCurrentRepo {
+                            repo_root: repo_root.clone(),
+                        },
+                    );
+                }
+                let status = if self.repo_root.is_none() {
+                    String::from("Probe did not detect a git repo for the current workspace")
+                } else if self.staged_count > 0 {
+                    String::from("all current changes are already staged; /commit is ready")
+                } else {
+                    String::from("there are no repo changes to stage right now")
+                };
+                ScreenOutcome::with_status(ScreenAction::None, status)
+            }
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed stage overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
+        let mut lines = vec![
+            Line::from("Stage the current repo changes for the active workspace."),
+            Line::from(""),
+            Line::from(format!("branch: {}", self.branch_label)),
+            Line::from(format!(
+                "repo: {}",
+                self.repo_root
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| String::from("none detected"))
+            )),
+            Line::from(format!(
+                "current: {} staged · {} unstaged · {} untracked",
+                self.staged_count, self.unstaged_count, self.untracked_count
+            )),
+        ];
+        if !self.preview_paths.is_empty() {
+            lines.push(Line::from(format!(
+                "paths: {}",
+                summarize_inline_paths(self.preview_paths.as_slice(), 4)
+            )));
+        }
+        lines.push(Line::from(""));
+        if self.can_stage() {
+            lines.push(Line::from(
+                "Enter stages all current repo changes, including tracked edits and untracked files.",
+            ));
+        } else if self.repo_root.is_none() {
+            lines.push(Line::from(
+                "Probe cannot stage here because this workspace is not inside a git repo.",
+            ));
+        } else if self.staged_count > 0 {
+            lines.push(Line::from(
+                "Everything is already staged. Use /commit when you are ready to record it.",
+            ));
+        } else {
+            lines.push(Line::from("There are no repo changes to stage right now."));
+        }
+        lines.push(Line::from("Esc closes."));
+        let content = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        ModalCard::new("Stage Changes", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitOverlay {
+    repo_root: Option<PathBuf>,
+    branch_label: String,
+    staged_count: usize,
+    unstaged_count: usize,
+    untracked_count: usize,
+    preview_paths: Vec<String>,
+    message: String,
+    cursor: usize,
+    replace_message_on_edit: bool,
+}
+
+impl CommitOverlay {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        repo_root: Option<PathBuf>,
+        branch_label: impl Into<String>,
+        staged_count: usize,
+        unstaged_count: usize,
+        untracked_count: usize,
+        preview_paths: Vec<String>,
+        message: String,
+    ) -> Self {
+        let cursor = message.len();
+        Self {
+            repo_root,
+            branch_label: branch_label.into(),
+            staged_count,
+            unstaged_count,
+            untracked_count,
+            preview_paths,
+            message,
+            cursor,
+            replace_message_on_edit: true,
+        }
+    }
+
+    fn can_commit(&self) -> bool {
+        self.repo_root.is_some() && self.staged_count > 0
+    }
+
+    fn replace_or_insert(&mut self, payload: &str) {
+        if self.replace_message_on_edit {
+            self.message.clear();
+            self.cursor = 0;
+            self.replace_message_on_edit = false;
+        }
+        self.message.insert_str(self.cursor, payload);
+        self.cursor += payload.len();
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::ComposerInsert(ch) => {
+                let mut payload = String::new();
+                payload.push(ch);
+                self.replace_or_insert(payload.as_str());
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerPaste(payload) => {
+                self.replace_or_insert(payload.as_str());
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!(
+                        "pasted {} chars into commit message",
+                        payload.chars().count()
+                    ),
+                )
+            }
+            UiEvent::ComposerBackspace => {
+                self.replace_message_on_edit = false;
+                if let Some(previous) = previous_char_boundary(self.message.as_str(), self.cursor) {
+                    self.message.drain(previous..self.cursor);
+                    self.cursor = previous;
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerDelete => {
+                self.replace_message_on_edit = false;
+                if let Some(next) = next_char_boundary(self.message.as_str(), self.cursor) {
+                    self.message.drain(self.cursor..next);
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveLeft => {
+                self.replace_message_on_edit = false;
+                if let Some(previous) = previous_char_boundary(self.message.as_str(), self.cursor) {
+                    self.cursor = previous;
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveRight => {
+                self.replace_message_on_edit = false;
+                if let Some(next) = next_char_boundary(self.message.as_str(), self.cursor) {
+                    self.cursor = next;
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveHome => {
+                self.replace_message_on_edit = false;
+                self.cursor = 0;
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveEnd => {
+                self.replace_message_on_edit = false;
+                self.cursor = self.message.len();
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerNewline => ScreenOutcome::with_status(
+                ScreenAction::None,
+                String::from("commit messages are single-line here; Enter commits"),
+            ),
+            UiEvent::ComposerSubmit => {
+                if !self.can_commit() {
+                    let status = if self.repo_root.is_none() {
+                        String::from("Probe did not detect a git repo for the current workspace")
+                    } else if self.unstaged_count > 0 || self.untracked_count > 0 {
+                        String::from("stage the repo changes first, then commit them")
+                    } else {
+                        String::from("there are no staged repo changes to commit")
+                    };
+                    return ScreenOutcome::with_status(ScreenAction::None, status);
+                }
+                if self.message.trim().is_empty() {
+                    return ScreenOutcome::with_status(
+                        ScreenAction::None,
+                        String::from("enter a commit message before you commit"),
+                    );
+                }
+                ScreenOutcome::with_action_and_command(
+                    ScreenAction::CloseModal,
+                    format!("committing on {}", self.branch_label),
+                    ScreenCommand::CommitCurrentRepo {
+                        repo_root: self.repo_root.clone().expect("checked in can_commit"),
+                        message: self.message.trim().to_string(),
+                    },
+                )
+            }
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed commit overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
+        let mut lines = vec![
+            Line::from("Create a git commit for the current staged repo changes."),
+            Line::from(""),
+            Line::from(format!("branch: {}", self.branch_label)),
+            Line::from(format!(
+                "repo: {}",
+                self.repo_root
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| String::from("none detected"))
+            )),
+            Line::from(format!(
+                "current: {} staged · {} unstaged · {} untracked",
+                self.staged_count, self.unstaged_count, self.untracked_count
+            )),
+        ];
+        if !self.preview_paths.is_empty() {
+            lines.push(Line::from(format!(
+                "staged paths: {}",
+                summarize_inline_paths(self.preview_paths.as_slice(), 4)
+            )));
+        }
+        lines.push(Line::from(""));
+        if self.can_commit() {
+            lines.push(Line::from("commit message:"));
+            lines.push(Line::from(self.message.clone()));
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "Enter commits with this message. Esc closes without committing.",
+            ));
+        } else if self.repo_root.is_none() {
+            lines.push(Line::from(
+                "Probe cannot commit here because this workspace is not inside a git repo.",
+            ));
+        } else if self.unstaged_count > 0 || self.untracked_count > 0 {
+            lines.push(Line::from(
+                "Stage the current repo changes first. Use /stage, then come back to /commit.",
+            ));
+        } else {
+            lines.push(Line::from(
+                "There are no staged changes to commit right now.",
+            ));
+        }
+        let content = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        ModalCard::new("Commit Changes", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushOverlay {
+    repo_root: Option<PathBuf>,
+    branch_label: String,
+    remote_label: String,
+    upstream_label: String,
+    ahead_by: Option<u64>,
+    behind_by: Option<u64>,
+    working_tree_dirty: bool,
+    can_push: bool,
+    set_upstream: bool,
+    blocked_reason: String,
+}
+
+impl PushOverlay {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        repo_root: Option<PathBuf>,
+        branch_label: impl Into<String>,
+        remote_label: impl Into<String>,
+        upstream_label: impl Into<String>,
+        ahead_by: Option<u64>,
+        behind_by: Option<u64>,
+        working_tree_dirty: bool,
+        can_push: bool,
+        set_upstream: bool,
+        blocked_reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            repo_root,
+            branch_label: branch_label.into(),
+            remote_label: remote_label.into(),
+            upstream_label: upstream_label.into(),
+            ahead_by,
+            behind_by,
+            working_tree_dirty,
+            can_push,
+            set_upstream,
+            blocked_reason: blocked_reason.into(),
+        }
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::ComposerSubmit if self.can_push => ScreenOutcome::with_action_and_command(
+                ScreenAction::CloseModal,
+                format!("push ready: {}", self.branch_label),
+                ScreenCommand::PushCurrentBranch {
+                    repo_root: self.repo_root.clone().expect("checked in can_push"),
+                    branch_name: self.branch_label.clone(),
+                    set_upstream: self.set_upstream,
+                },
+            ),
+            UiEvent::ComposerSubmit => {
+                ScreenOutcome::with_status(ScreenAction::None, self.blocked_reason.clone())
+            }
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed push overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
+        let mut lines = vec![
+            Line::from("Push the current branch without leaving Probe."),
+            Line::from(""),
+            Line::from(format!("branch: {}", self.branch_label)),
+            Line::from(format!(
+                "repo: {}",
+                self.repo_root
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| String::from("none detected"))
+            )),
+            Line::from(format!("remote: {}", self.remote_label)),
+            Line::from(format!("upstream: {}", self.upstream_label)),
+            Line::from(format!(
+                "sync: ahead {} · behind {}",
+                self.ahead_by.unwrap_or(0),
+                self.behind_by.unwrap_or(0)
+            )),
+            Line::from(format!(
+                "working tree: {}",
+                if self.working_tree_dirty {
+                    "dirty"
+                } else {
+                    "clean"
+                }
+            )),
+            Line::from(""),
+        ];
+        if self.can_push {
+            if self.set_upstream {
+                lines.push(Line::from(format!(
+                    "Enter pushes {} and sets upstream on {}.",
+                    self.branch_label, self.remote_label
+                )));
+            } else {
+                lines.push(Line::from(format!(
+                    "Enter pushes {} to its tracked remote.",
+                    self.branch_label
+                )));
+            }
+            if self.working_tree_dirty {
+                lines.push(Line::from(
+                    "Uncommitted workspace changes stay local; Probe only pushes committed work.",
+                ));
+            }
+        } else {
+            lines.push(Line::from(self.blocked_reason.clone()));
+        }
+        lines.push(Line::from("Esc closes."));
+        let content = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        ModalCard::new("Push Branch", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrOverlay {
+    repo_root: Option<PathBuf>,
+    head_branch: String,
+    base_branch: String,
+    remote_label: String,
+    upstream_label: String,
+    title: String,
+    cursor: usize,
+    replace_title_on_edit: bool,
+    can_create: bool,
+    blocked_reason: String,
+}
+
+impl PrOverlay {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        repo_root: Option<PathBuf>,
+        head_branch: impl Into<String>,
+        base_branch: impl Into<String>,
+        remote_label: impl Into<String>,
+        upstream_label: impl Into<String>,
+        title: String,
+        can_create: bool,
+        blocked_reason: impl Into<String>,
+    ) -> Self {
+        let cursor = title.len();
+        Self {
+            repo_root,
+            head_branch: head_branch.into(),
+            base_branch: base_branch.into(),
+            remote_label: remote_label.into(),
+            upstream_label: upstream_label.into(),
+            title,
+            cursor,
+            replace_title_on_edit: true,
+            can_create,
+            blocked_reason: blocked_reason.into(),
+        }
+    }
+
+    fn replace_or_insert(&mut self, payload: &str) {
+        if self.replace_title_on_edit {
+            self.title.clear();
+            self.cursor = 0;
+            self.replace_title_on_edit = false;
+        }
+        self.title.insert_str(self.cursor, payload);
+        self.cursor += payload.len();
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::ComposerInsert(ch) => {
+                let mut payload = String::new();
+                payload.push(ch);
+                self.replace_or_insert(payload.as_str());
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerPaste(payload) => {
+                self.replace_or_insert(payload.as_str());
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!("pasted {} chars into PR title", payload.chars().count()),
+                )
+            }
+            UiEvent::ComposerBackspace => {
+                self.replace_title_on_edit = false;
+                if let Some(previous) = previous_char_boundary(self.title.as_str(), self.cursor) {
+                    self.title.drain(previous..self.cursor);
+                    self.cursor = previous;
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerDelete => {
+                self.replace_title_on_edit = false;
+                if let Some(next) = next_char_boundary(self.title.as_str(), self.cursor) {
+                    self.title.drain(self.cursor..next);
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveLeft => {
+                self.replace_title_on_edit = false;
+                if let Some(previous) = previous_char_boundary(self.title.as_str(), self.cursor) {
+                    self.cursor = previous;
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveRight => {
+                self.replace_title_on_edit = false;
+                if let Some(next) = next_char_boundary(self.title.as_str(), self.cursor) {
+                    self.cursor = next;
+                }
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveHome => {
+                self.replace_title_on_edit = false;
+                self.cursor = 0;
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerMoveEnd => {
+                self.replace_title_on_edit = false;
+                self.cursor = self.title.len();
+                ScreenOutcome::idle()
+            }
+            UiEvent::ComposerNewline => ScreenOutcome::with_status(
+                ScreenAction::None,
+                String::from("PR titles are single-line here; Enter creates the draft PR"),
+            ),
+            UiEvent::ComposerSubmit if !self.can_create => {
+                ScreenOutcome::with_status(ScreenAction::None, self.blocked_reason.clone())
+            }
+            UiEvent::ComposerSubmit if self.title.trim().is_empty() => ScreenOutcome::with_status(
+                ScreenAction::None,
+                String::from("enter a PR title before you continue"),
+            ),
+            UiEvent::ComposerSubmit => ScreenOutcome::with_action_and_command(
+                ScreenAction::CloseModal,
+                format!("draft PR ready: {}", self.title.trim()),
+                ScreenCommand::CreateDraftPullRequest {
+                    repo_root: self.repo_root.clone().expect("checked in can_create"),
+                    title: self.title.trim().to_string(),
+                    base_branch: self.base_branch.clone(),
+                    head_branch: self.head_branch.clone(),
+                },
+            ),
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed PR overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
+        let mut lines = vec![
+            Line::from("Create a draft pull request from the current branch."),
+            Line::from(""),
+            Line::from(format!("head branch: {}", self.head_branch)),
+            Line::from(format!("base branch: {}", self.base_branch)),
+            Line::from(format!("remote: {}", self.remote_label)),
+            Line::from(format!("upstream: {}", self.upstream_label)),
+            Line::from(format!(
+                "repo: {}",
+                self.repo_root
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| String::from("none detected"))
+            )),
+            Line::from(""),
+        ];
+        if self.can_create {
+            lines.push(Line::from("draft PR title:"));
+            lines.push(Line::from(self.title.clone()));
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "Enter creates a draft PR with this title. Esc closes without creating it.",
+            ));
+        } else {
+            lines.push(Line::from(self.blocked_reason.clone()));
+        }
+        let content = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        ModalCard::new("Create Draft PR", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrFeedbackItemView {
+    pub label: String,
+    pub preview: String,
+    pub detail_lines: Vec<String>,
+    pub seed_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrCommentsOverlay {
+    summary_lines: Vec<String>,
+    items: Vec<PrFeedbackItemView>,
+    selected: usize,
+}
+
+impl PrCommentsOverlay {
+    pub fn new(summary_lines: Vec<String>, items: Vec<PrFeedbackItemView>) -> Self {
+        Self {
+            summary_lines,
+            items,
+            selected: 0,
+        }
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::ComposerHistoryPrevious | UiEvent::PreviousView if !self.items.is_empty() => {
+                if self.selected == 0 {
+                    self.selected = self.items.len().saturating_sub(1);
+                } else {
+                    self.selected = self.selected.saturating_sub(1);
+                }
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!("selected {}", self.items[self.selected].label),
+                )
+            }
+            UiEvent::ComposerHistoryNext | UiEvent::NextView if !self.items.is_empty() => {
+                self.selected = (self.selected + 1) % self.items.len();
+                ScreenOutcome::with_status(
+                    ScreenAction::None,
+                    format!("selected {}", self.items[self.selected].label),
+                )
+            }
+            UiEvent::ComposerSubmit => {
+                if let Some(item) = self.items.get(self.selected) {
+                    ScreenOutcome::with_action_and_command(
+                        ScreenAction::CloseModal,
+                        format!("loaded {} into the composer", item.label),
+                        ScreenCommand::SeedComposerDraft {
+                            text: item.seed_text.clone(),
+                        },
+                    )
+                } else {
+                    ScreenOutcome::with_status(
+                        ScreenAction::CloseModal,
+                        String::from("dismissed PR comments overlay"),
+                    )
+                }
+            }
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed PR comments overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
+        let mut lines = vec![
+            Line::from("Inspect the current PR feedback for this branch."),
+            if self.items.is_empty() {
+                Line::from("Enter or Esc closes. Use /pr_comments again to refresh later.")
+            } else {
+                Line::from(
+                    "Up/Down choose a feedback item. Enter loads it into the composer. Esc returns.",
+                )
+            },
+            Line::from(""),
+        ];
+        lines.extend(self.summary_lines.iter().cloned().map(Line::from));
+        if !self.items.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!("feedback items: {}", self.items.len())));
+            lines.push(Line::from(""));
+            for (index, item) in self.items.iter().enumerate() {
+                let marker = if index == self.selected { ">" } else { " " };
+                lines.push(Line::from(format!(
+                    "{marker} {}  {}",
+                    item.label, item.preview
+                )));
+            }
+            if let Some(item) = self.items.get(self.selected) {
+                lines.push(Line::from(""));
+                lines.push(Line::from(format!("selected: {}", item.label)));
+                for line in item.detail_lines.iter().take(6) {
+                    lines.push(Line::from(format!("  {line}")));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(
+                    "next: Enter loads this feedback into the composer as the next coding task.",
+                ));
+            }
+        }
+        let content = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        ModalCard::new("PR Comments", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointOverlay;
+
+impl CheckpointOverlay {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::ComposerSubmit | UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed checkpoint overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        _stack_depth: usize,
+        base_screen: &ChatScreen,
+    ) {
+        let content =
+            Paragraph::new(base_screen.render_checkpoint_overlay_text()).wrap(Wrap { trim: false });
+        ModalCard::new("Checkpoint", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevertOverlay {
+    can_execute: bool,
+    session_id: Option<String>,
+    blocked_status: String,
+}
+
+impl RevertOverlay {
+    pub fn new(can_execute: bool, session_id: Option<String>, blocked_status: String) -> Self {
+        Self {
+            can_execute,
+            session_id,
+            blocked_status,
+        }
+    }
+
+    fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
+        match event {
+            UiEvent::ComposerInsert('a') | UiEvent::ComposerInsert('A') if self.can_execute => {
+                ScreenOutcome::with_action_and_command(
+                    ScreenAction::CloseModal,
+                    String::from("queued revert for the latest task"),
+                    ScreenCommand::RevertLastTask {
+                        session_id: self.session_id.clone().unwrap_or_default(),
+                    },
+                )
+            }
+            UiEvent::ComposerInsert('a') | UiEvent::ComposerInsert('A') => {
+                ScreenOutcome::with_status(ScreenAction::None, self.blocked_status.clone())
+            }
+            UiEvent::ComposerSubmit if self.can_execute => ScreenOutcome::with_action_and_command(
+                ScreenAction::CloseModal,
+                String::from("queued revert for the latest task"),
+                ScreenCommand::RevertLastTask {
+                    session_id: self.session_id.clone().unwrap_or_default(),
+                },
+            ),
+            UiEvent::ComposerSubmit => {
+                ScreenOutcome::with_status(ScreenAction::None, self.blocked_status.clone())
+            }
+            UiEvent::Dismiss => ScreenOutcome::with_status(
+                ScreenAction::CloseModal,
+                String::from("dismissed revert overlay"),
+            ),
+            UiEvent::OpenHelp => ScreenOutcome::with_status(
+                ScreenAction::OpenHelp,
+                String::from("opened help modal"),
+            ),
+            _ => ScreenOutcome::idle(),
+        }
+    }
+
+    fn render(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        _stack_depth: usize,
+        base_screen: &ChatScreen,
+    ) {
+        let content =
+            Paragraph::new(base_screen.render_revert_overlay_text()).wrap(Wrap { trim: false });
+        ModalCard::new("Revert Last Task", content).render(frame, area);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntegrationCardView {
     pub label: String,
     pub status: String,
@@ -3407,6 +7215,8 @@ pub struct ManagedMcpServerView {
     pub detail_lines: Vec<String>,
     pub toggle_server_id: String,
     pub remove_server_id: String,
+    pub edit_server_id: Option<String>,
+    pub enter_hint: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3567,13 +7377,14 @@ impl McpOverlay {
             Line::from(
                 "Up/Down choose a card. Enter runs the selected action. A opens add flow. Esc returns.",
             ),
-            Line::from(""),
         ];
         lines.push(Line::from(format!(
             "saved MCP servers: {} configured, {} enabled",
             self.configured_count, self.enabled_count
         )));
-        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "legend: saved recipe = not runnable yet · ready after next turn = enabled manual runtime server · connected now = live in this session",
+        ));
         for (index, card) in self.cards.iter().enumerate() {
             let marker = if index == self.selected { ">" } else { " " };
             lines.push(Line::from(format!(
@@ -3582,12 +7393,10 @@ impl McpOverlay {
             )));
         }
         if let Some(card) = self.cards.get(self.selected) {
-            lines.push(Line::from(""));
             lines.push(Line::from(format!("selected: {}", card.label)));
-            for line in &card.detail_lines {
+            for line in card.detail_lines.iter().take(2) {
                 lines.push(Line::from(format!("  {line}")));
             }
-            lines.push(Line::from(""));
             lines.push(Line::from(format!("next: {}", card.next_step)));
         }
         let content = Paragraph::new(Text::from(lines));
@@ -3708,10 +7517,30 @@ impl McpServersOverlay {
                     },
                 )
             }
-            UiEvent::ComposerSubmit => ScreenOutcome::with_status(
-                ScreenAction::None,
-                String::from("use E to enable, D to disable, or R to remove the selected MCP"),
-            ),
+            UiEvent::ComposerSubmit => {
+                let Some(server) = self.servers.get(self.selected) else {
+                    return ScreenOutcome::with_status(
+                        ScreenAction::None,
+                        String::from("there are no saved MCP servers to open"),
+                    );
+                };
+                if let Some(server_id) = server.edit_server_id.clone() {
+                    ScreenOutcome::with_action_and_command(
+                        ScreenAction::CloseModal,
+                        format!("opened MCP setup for {}", server.label),
+                        ScreenCommand::OpenMcpManualEditorOverlay {
+                            server_id: Some(server_id),
+                        },
+                    )
+                } else {
+                    ScreenOutcome::with_status(
+                        ScreenAction::None,
+                        String::from(
+                            "use E to enable, D to disable, or R to remove the selected MCP",
+                        ),
+                    )
+                }
+            }
             UiEvent::Dismiss => ScreenOutcome::with_status(
                 ScreenAction::CloseModal,
                 String::from("dismissed saved MCP servers"),
@@ -3728,7 +7557,7 @@ impl McpServersOverlay {
         let mut lines = vec![
             Line::from("Manage the MCP servers saved in this Probe home."),
             Line::from(
-                "Up/Down choose a server. E enables. D disables. R removes. A adds. Esc returns.",
+                "Up/Down choose a server. Enter opens setup. E enables. D disables. R removes. A adds. Esc returns.",
             ),
             Line::from(""),
             Line::from(format!("saved MCP servers: {}", self.servers.len())),
@@ -3749,16 +7578,11 @@ impl McpServersOverlay {
             if let Some(server) = self.servers.get(self.selected) {
                 lines.push(Line::from(""));
                 lines.push(Line::from(format!("selected: {}", server.label)));
-                for line in &server.detail_lines {
+                for line in server.detail_lines.iter().take(6) {
                     lines.push(Line::from(format!("  {line}")));
                 }
                 lines.push(Line::from(""));
-                let next = if server.enabled {
-                    "next: D disables this server. R removes it."
-                } else {
-                    "next: E enables this server. R removes it."
-                };
-                lines.push(Line::from(next));
+                lines.push(Line::from(server.enter_hint.clone()));
             }
         }
         let content = Paragraph::new(Text::from(lines));
@@ -3832,7 +7656,7 @@ impl McpAddOverlay {
                 McpAddChoice::ManualSetup => ScreenOutcome::with_action_and_command(
                     ScreenAction::CloseModal,
                     String::from("opened manual MCP setup"),
-                    ScreenCommand::OpenMcpManualEditorOverlay,
+                    ScreenCommand::OpenMcpManualEditorOverlay { server_id: None },
                 ),
             },
             UiEvent::Dismiss => ScreenOutcome::with_status(
@@ -4009,21 +7833,65 @@ impl McpEditorField {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpEditorOverlay {
+    server_id: Option<String>,
     selected: McpEditorField,
     name: String,
     transport: McpServerTransportDraft,
     target: String,
+    replace_target_on_edit: bool,
     provider_command: Option<String>,
+    provider_hint: Option<String>,
+    recommended_target: Option<String>,
+    recommendation_note: Option<String>,
 }
 
 impl McpEditorOverlay {
     pub fn new() -> Self {
         Self {
+            server_id: None,
             selected: McpEditorField::Name,
             name: String::new(),
             transport: McpServerTransportDraft::Stdio,
             target: String::new(),
+            replace_target_on_edit: false,
             provider_command: None,
+            provider_hint: None,
+            recommended_target: None,
+            recommendation_note: None,
+        }
+    }
+
+    pub fn seeded(
+        server_id: Option<String>,
+        name: String,
+        transport: McpServerTransportDraft,
+        target: String,
+        provider_command: Option<String>,
+        provider_hint: Option<String>,
+        recommended_target: Option<String>,
+        recommendation_note: Option<String>,
+    ) -> Self {
+        let use_recommended_target = target.trim().is_empty() && recommended_target.is_some();
+        let target = if use_recommended_target {
+            recommended_target.clone().unwrap_or_default()
+        } else {
+            target
+        };
+        Self {
+            server_id,
+            selected: if provider_command.is_some() {
+                McpEditorField::Target
+            } else {
+                McpEditorField::Name
+            },
+            name,
+            transport,
+            target,
+            replace_target_on_edit: use_recommended_target,
+            provider_command,
+            provider_hint,
+            recommended_target,
+            recommendation_note,
         }
     }
 
@@ -4046,7 +7914,13 @@ impl McpEditorOverlay {
             UiEvent::ComposerInsert(ch) => {
                 match self.selected {
                     McpEditorField::Name => self.name.push(ch),
-                    McpEditorField::Target => self.target.push(ch),
+                    McpEditorField::Target => {
+                        if self.replace_target_on_edit {
+                            self.target.clear();
+                            self.replace_target_on_edit = false;
+                        }
+                        self.target.push(ch);
+                    }
                     McpEditorField::Transport => {
                         if matches!(ch, 'h' | 'H') {
                             self.transport = McpServerTransportDraft::Http;
@@ -4060,7 +7934,13 @@ impl McpEditorOverlay {
             UiEvent::ComposerPaste(payload) => {
                 match self.selected {
                     McpEditorField::Name => self.name.push_str(payload.as_str()),
-                    McpEditorField::Target => self.target.push_str(payload.as_str()),
+                    McpEditorField::Target => {
+                        if self.replace_target_on_edit {
+                            self.target.clear();
+                            self.replace_target_on_edit = false;
+                        }
+                        self.target.push_str(payload.as_str());
+                    }
                     McpEditorField::Transport => {}
                 }
                 ScreenOutcome::idle()
@@ -4071,6 +7951,10 @@ impl McpEditorOverlay {
                         self.name.pop();
                     }
                     McpEditorField::Target => {
+                        if self.replace_target_on_edit {
+                            self.target.clear();
+                            self.replace_target_on_edit = false;
+                        }
                         self.target.pop();
                     }
                     McpEditorField::Transport => {}
@@ -4094,6 +7978,7 @@ impl McpEditorOverlay {
                     ScreenAction::CloseModal,
                     format!("saved MCP server {}", self.name.trim()),
                     ScreenCommand::SaveMcpServer {
+                        server_id: self.server_id.clone(),
                         name: self.name.trim().to_string(),
                         transport: self.transport,
                         target: self.target.trim().to_string(),
@@ -4143,16 +8028,35 @@ impl McpEditorOverlay {
             McpServerTransportDraft::Http => "URL, e.g. http://127.0.0.1:8787/mcp",
         };
         let mut lines = vec![
-            Line::from("Add a manual MCP integration entry."),
-            Line::from("This path is for when you know the final launch command or MCP URL."),
+            Line::from(if self.provider_command.is_some() {
+                "Complete runtime setup so this saved recipe becomes a runnable MCP server."
+            } else {
+                "Add or edit a manual MCP runtime server."
+            }),
+            Line::from(if self.provider_command.is_some() {
+                "Probe saved the provider docs command, but it still needs a real runtime launch command."
+            } else {
+                "Use this when you know the final launch command or MCP URL."
+            }),
             Line::from("Tab or Up/Down changes fields. Enter saves. Esc cancels."),
             Line::from(""),
         ];
         if let Some(command) = &self.provider_command {
+            if let Some(provider_hint) = &self.provider_hint {
+                lines.push(Line::from(format!("provider: {provider_hint}")));
+            }
             lines.push(Line::from("provider command reference:"));
             lines.push(Line::from(format!("  {command}")));
+            if let Some(recommended_target) = &self.recommended_target {
+                lines.push(Line::from(format!(
+                    "recommended runtime command: {recommended_target}"
+                )));
+            }
+            if let Some(note) = &self.recommendation_note {
+                lines.push(Line::from(note.clone()));
+            }
             lines.push(Line::from(
-                "Probe cannot import provider setup commands automatically yet, so enter the final launch command or URL below.",
+                "Review the recommended runtime command below, then save or adjust it.",
             ));
             lines.push(Line::from(""));
         }
@@ -4171,10 +8075,22 @@ impl McpEditorOverlay {
         lines.push(Line::from(""));
         lines.push(Line::from(format!("launch help: {target_hint}")));
         lines.push(Line::from(
-            "saved entries are registry state only until generic MCP runtime support lands.",
+            if matches!(self.transport, McpServerTransportDraft::Stdio) {
+                "Probe can run connected manual stdio MCP servers during turns."
+            } else {
+                "HTTP MCP entries are saved, but runtime mounting is still limited in Probe today."
+            },
         ));
         let content = Paragraph::new(Text::from(lines));
-        ModalCard::new("Manual MCP Setup", content).render(frame, area);
+        ModalCard::new(
+            if self.provider_command.is_some() {
+                "Convert MCP Recipe"
+            } else {
+                "Manual MCP Setup"
+            },
+            content,
+        )
+        .render(frame, area);
     }
 }
 
@@ -4290,6 +8206,28 @@ impl ApprovalOverlay {
 
     fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
         match event {
+            UiEvent::ComposerInsert('a') | UiEvent::ComposerInsert('A') => {
+                ScreenOutcome::with_action_and_command(
+                    ScreenAction::CloseModal,
+                    format!("queued apply for pending tool {}", self.approval.tool_name),
+                    ScreenCommand::ResolvePendingToolApproval {
+                        session_id: self.approval.session_id.as_str().to_string(),
+                        call_id: self.approval.tool_call_id.clone(),
+                        resolution: ToolApprovalResolution::Approved,
+                    },
+                )
+            }
+            UiEvent::ComposerInsert('r') | UiEvent::ComposerInsert('R') => {
+                ScreenOutcome::with_action_and_command(
+                    ScreenAction::CloseModal,
+                    format!("queued reject for pending tool {}", self.approval.tool_name),
+                    ScreenCommand::ResolvePendingToolApproval {
+                        session_id: self.approval.session_id.as_str().to_string(),
+                        call_id: self.approval.tool_call_id.clone(),
+                        resolution: ToolApprovalResolution::Rejected,
+                    },
+                )
+            }
             UiEvent::NextView => {
                 self.selected = self.selected.next();
                 ScreenOutcome::with_status(
@@ -4333,6 +8271,7 @@ impl ApprovalOverlay {
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
+        let review = approval_preview(&self.approval);
         let approve_marker = if self.selected == ApprovalChoice::Approve {
             ">"
         } else {
@@ -4344,9 +8283,16 @@ impl ApprovalOverlay {
             " "
         };
         let mut lines = vec![
-            Line::from("Review this tool request."),
+            Line::from(if review.title == "Review Changes" {
+                "Review these proposed changes before they land."
+            } else {
+                "Review this tool request."
+            }),
             Line::from(""),
-            Line::from(format!("tool: {}", self.approval.tool_name)),
+            Line::from(format!(
+                "tool: {}",
+                display_runtime_tool_name(self.approval.tool_name.as_str())
+            )),
             Line::from(format!(
                 "call: {}",
                 preview(self.approval.tool_call_id.as_str(), 24)
@@ -4367,21 +8313,199 @@ impl ApprovalOverlay {
                     .unwrap_or("pending operator decision")
             )),
             Line::from(""),
-            Line::from("preview"),
+            Line::from(format!("summary: {}", review.summary)),
         ];
-        for line in compact_json_lines(&self.approval.arguments, 5) {
+        if !review.files.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from("files"));
+            for path in review.files {
+                lines.push(Line::from(format!("  {path}")));
+            }
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(review.preview_label));
+        for line in review.preview_lines {
             lines.push(Line::from(format!("  {line}")));
         }
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!(
+            "validation: {}",
+            review.validation_line
+        )));
         lines.extend([
             Line::from(""),
-            Line::from(format!("{approve_marker} Approve")),
+            Line::from(format!("{approve_marker} {}", review.primary_action_label)),
             Line::from(format!("{reject_marker} Reject")),
             Line::from(""),
-            Line::from("Tab changes selection. Enter decides. Esc closes."),
+            Line::from("A applies. R rejects. Tab changes selection. Enter decides. Esc closes."),
             Line::from(format!("stack depth: {stack_depth}")),
         ]);
-        let content = Paragraph::new(Text::from(lines));
-        ModalCard::new("Approval", content).render(frame, area);
+        let content = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        ModalCard::new(review.title, content).render(frame, area);
+    }
+}
+
+fn approval_preview(approval: &PendingToolApproval) -> ApprovalPreview {
+    if let Some(proposed) = approval.proposed_edit.as_ref() {
+        return ApprovalPreview {
+            title: "Review Changes",
+            summary: proposed.summary_text.clone(),
+            files: proposed.changed_files.clone(),
+            preview_label: "proposed patch",
+            preview_lines: if proposed.preview_lines.is_empty() {
+                vec![String::from("[no text preview available]")]
+            } else {
+                proposed.preview_lines.clone()
+            },
+            validation_line: proposed
+                .validation_hint
+                .clone()
+                .unwrap_or_else(|| String::from("not available until the paused turn resumes")),
+            primary_action_label: "Apply",
+        };
+    }
+    if approval.tool_name == "apply_patch" {
+        let path = approval
+            .arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("workspace file")
+            .to_string();
+        let old_text = approval
+            .arguments
+            .get("old_text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let new_text = approval
+            .arguments
+            .get("new_text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let summary = if old_text.trim().is_empty() && !new_text.trim().is_empty() {
+            format!("Probe wants to create or replace `{path}` before the turn resumes.")
+        } else if !old_text.trim().is_empty() && new_text.trim().is_empty() {
+            format!("Probe wants to remove text from `{path}` before the turn resumes.")
+        } else {
+            format!("Probe wants to update `{path}` before the turn resumes.")
+        };
+        return ApprovalPreview {
+            title: "Review Changes",
+            summary,
+            files: vec![path],
+            preview_label: "proposed patch",
+            preview_lines: proposed_patch_preview_lines(old_text, new_text),
+            validation_line: String::from("not available until the paused turn resumes"),
+            primary_action_label: "Apply",
+        };
+    }
+
+    let preview_lines = if approval.tool_name == "shell" {
+        approval
+            .arguments
+            .get("command")
+            .map(render_shell_command_preview_lines)
+            .filter(|lines| !lines.is_empty())
+            .unwrap_or_else(|| compact_json_lines(&approval.arguments, 6))
+    } else {
+        compact_json_lines(&approval.arguments, 6)
+    };
+
+    let files = approval_overlay_paths(approval);
+    let summary = if approval.risk_class == ToolRiskClass::Write {
+        if files.is_empty() {
+            format!(
+                "Probe wants approval before `{}` changes the workspace.",
+                approval.tool_name
+            )
+        } else {
+            format!(
+                "Probe wants approval before `{}` touches {}.",
+                approval.tool_name,
+                summarize_inline_paths(files.as_slice(), 2)
+            )
+        }
+    } else {
+        format!(
+            "Probe wants approval before `{}` continues.",
+            approval.tool_name
+        )
+    };
+
+    ApprovalPreview {
+        title: if approval.risk_class == ToolRiskClass::Write {
+            "Review Changes"
+        } else {
+            "Approval"
+        },
+        summary,
+        files,
+        preview_label: if approval.tool_name == "shell" {
+            "command preview"
+        } else {
+            "request preview"
+        },
+        preview_lines,
+        validation_line: String::from("not available until the paused turn resumes"),
+        primary_action_label: if approval.risk_class == ToolRiskClass::Write {
+            "Apply"
+        } else {
+            "Approve"
+        },
+    }
+}
+
+fn approval_overlay_paths(approval: &PendingToolApproval) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(path) = approval
+        .arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+    {
+        append_unique_path(&mut paths, path);
+    }
+    paths
+}
+
+fn render_shell_command_preview_lines(value: &serde_json::Value) -> Vec<String> {
+    if let Some(command) = value.as_array() {
+        let joined = command
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !joined.is_empty() {
+            return vec![preview(joined.as_str(), 96)];
+        }
+    }
+    if let Some(command) = value.as_str() {
+        return vec![preview(command, 96)];
+    }
+    Vec::new()
+}
+
+fn proposed_patch_preview_lines(old_text: &str, new_text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line in compact_text_lines(old_text, 4) {
+        lines.push(format!("- {}", display_patch_line(line.as_str())));
+    }
+    for line in compact_text_lines(new_text, 4) {
+        lines.push(format!("+ {}", display_patch_line(line.as_str())));
+    }
+    if lines.is_empty() {
+        lines.push(String::from("[no text preview available]"));
+    }
+    if lines.len() > 10 {
+        lines.truncate(10);
+        lines.push(String::from("..."));
+    }
+    lines
+}
+
+fn display_patch_line(line: &str) -> String {
+    if line.is_empty() {
+        String::from("[blank]")
+    } else {
+        preview(line, 96)
     }
 }
 
@@ -4396,6 +8520,10 @@ fn render_stream_active_turn(
     let is_waiting =
         display_text.is_empty() && stream.tool_calls.is_empty() && stream.failure.is_none();
     let mut body = Vec::new();
+    let failure_summary = stream
+        .failure
+        .as_deref()
+        .map(|error| stream_failure_summary(error, operator_backend));
     if let Some(error) = stream.failure.as_deref() {
         body.push(format!("lane: {lane_label}"));
         if let Some(backend_kind) = stream.backend_kind.as_deref() {
@@ -4408,8 +8536,16 @@ fn render_stream_active_turn(
                 summary.target_kind_label()
             ));
         }
-        body.push(format!("detail: {error}"));
-        body.push(format!("next: {action_hint}"));
+        if let Some(summary) = failure_summary.as_ref() {
+            body.push(summary.summary.clone());
+            if let Some(detail) = summary.detail.as_deref() {
+                body.push(format!("detail: {detail}"));
+            }
+            body.push(format!("next: {}", summary.next_step));
+        } else {
+            body.push(format!("detail: {error}"));
+            body.push(format!("next: {action_hint}"));
+        }
     }
 
     if !stream.tool_calls.is_empty() {
@@ -4417,13 +8553,13 @@ fn render_stream_active_turn(
             body.push(format!(
                 "{} {}",
                 tool.tool_index + 1,
-                tool.tool_name.as_deref().unwrap_or("unknown")
+                tool.tool_name
+                    .as_deref()
+                    .map(display_runtime_tool_name)
+                    .unwrap_or_else(|| String::from("unknown"))
             ));
-            if let Some(call_id) = tool.call_id.as_deref() {
-                body.push(format!("call: {}", preview(call_id, 48)));
-            }
-            if !tool.arguments.is_empty() {
-                body.push(format!("args: {}", tool.arguments));
+            if let Some(arguments) = summarize_stream_tool_arguments(tool.arguments.as_str()) {
+                body.push(format!("args: {arguments}"));
             }
         }
     }
@@ -4446,7 +8582,9 @@ fn render_stream_active_turn(
             .map(|activity| runtime_activity_title(Some(activity), "Waiting for Reply"))
             .unwrap_or("Waiting for Reply")
     } else if stream.failure.is_some() {
-        "Backend Request Failed"
+        failure_summary
+            .as_ref()
+            .map_or("Backend Request Failed", |summary| summary.title)
     } else if display_text.is_empty() && !stream.tool_calls.is_empty() {
         activity
             .map(|activity| runtime_activity_title(Some(activity), "Streaming Tool Call"))
@@ -4457,11 +8595,49 @@ fn render_stream_active_turn(
     ActiveTurn::new(role, title, body)
 }
 
+fn stream_failure_summary(
+    error: &str,
+    operator_backend: Option<&ServerOperatorSummary>,
+) -> crate::failure::RuntimeFailureSummary {
+    let mut summary = classify_runtime_failure(error);
+    if summary.title == "Backend Unavailable"
+        && operator_backend.is_some_and(|backend| {
+            backend.endpoint_label().contains("127.0.0.1")
+                || backend.endpoint_label().contains("localhost")
+                || backend.target_kind_label() == "localhost"
+                || backend.target_kind_label() == "loopback_or_ssh_forward"
+        })
+    {
+        summary.next_step = String::from("Start the local backend, or switch lanes with Tab");
+    }
+    summary
+}
+
+fn summarize_stream_tool_arguments(arguments: &str) -> Option<String> {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Some(preview(runtime_tool_argument_summary(&value).as_str(), 72));
+    }
+    let has_signal = trimmed
+        .chars()
+        .any(|character| character.is_ascii_alphanumeric() || "/._-".contains(character));
+    if !has_signal {
+        return None;
+    }
+    Some(preview(trimmed, 72))
+}
+
 fn action_needed_label(label: &str) -> String {
     if label.starts_with("action needed: ") {
         label.to_string()
     } else if let Some(tool_name) = label.strip_prefix("waiting for approval: ") {
-        format!("action needed: approve {tool_name}")
+        format!(
+            "action needed: approve {}",
+            display_runtime_tool_name(tool_name)
+        )
     } else {
         String::from("action needed: review approval")
     }
@@ -4556,6 +8732,32 @@ fn runtime_activity_title<'a>(activity: Option<&'a RuntimeActivity>, fallback: &
     }
 }
 
+fn display_runtime_tool_name(tool_name: &str) -> String {
+    let Some(rest) = tool_name.strip_prefix("mcp__") else {
+        return tool_name.to_string();
+    };
+    let mut parts = rest.splitn(2, "__");
+    let Some(server) = parts.next() else {
+        return tool_name.to_string();
+    };
+    let Some(tool) = parts.next() else {
+        return tool_name.to_string();
+    };
+    format!(
+        "MCP {} · {}",
+        display_mcp_server_segment(server),
+        display_mcp_tool_segment(tool)
+    )
+}
+
+fn display_mcp_server_segment(value: &str) -> String {
+    value.replace('_', "-")
+}
+
+fn display_mcp_tool_segment(value: &str) -> String {
+    value.replace('_', "/")
+}
+
 impl AppleFmUsageSummary {
     fn render_lines(&self) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
@@ -4636,7 +8838,7 @@ fn runtime_tool_body_lines(
 
 fn runtime_tool_call_entry(tool_name: &str, arguments: &serde_json::Value) -> TranscriptEntry {
     TranscriptEntry::tool_call(
-        tool_name.to_string(),
+        display_runtime_tool_name(tool_name),
         vec![runtime_tool_argument_summary(arguments)],
     )
 }
@@ -4647,16 +8849,16 @@ fn runtime_tool_result_entry(
 ) -> TranscriptEntry {
     match tool.tool_execution.policy_decision {
         probe_protocol::session::ToolPolicyDecision::Paused => TranscriptEntry::approval_pending(
-            tool.name.clone(),
+            display_runtime_tool_name(tool.name.as_str()),
             runtime_tool_body_lines(round_trip, tool),
         ),
         probe_protocol::session::ToolPolicyDecision::Refused => TranscriptEntry::tool_refused(
-            tool.name.clone(),
+            display_runtime_tool_name(tool.name.as_str()),
             runtime_tool_body_lines(round_trip, tool),
         ),
         probe_protocol::session::ToolPolicyDecision::AutoAllow
         | probe_protocol::session::ToolPolicyDecision::Approved => TranscriptEntry::tool_result(
-            tool.name.clone(),
+            display_runtime_tool_name(tool.name.as_str()),
             runtime_tool_body_lines(round_trip, tool),
         ),
     }
@@ -4770,6 +8972,24 @@ fn compact_runtime_tool_output_lines(tool: &probe_core::tools::ExecutedToolCall)
 }
 
 fn structured_runtime_tool_output_lines(value: &serde_json::Value) -> Option<Vec<String>> {
+    if let (Some(server_name), Some(tool_name)) = (
+        value.get("server_name").and_then(serde_json::Value::as_str),
+        value.get("tool").and_then(serde_json::Value::as_str),
+    ) {
+        let mut lines = vec![format!("MCP {server_name} · {tool_name}")];
+        if let Some(result) = value.get("result") {
+            if let Some(content) = result.get("content").and_then(serde_json::Value::as_array) {
+                for item in content {
+                    if let Some(text) = item.get("text").and_then(serde_json::Value::as_str) {
+                        lines.extend(split_text_lines(text));
+                    }
+                }
+            }
+        }
+        if lines.len() > 1 {
+            return Some(lines);
+        }
+    }
     if let Some(path) = value.get("path").and_then(serde_json::Value::as_str) {
         let start_line = value.get("start_line").and_then(serde_json::Value::as_u64);
         let end_line = value.get("end_line").and_then(serde_json::Value::as_u64);
@@ -4836,6 +9056,11 @@ fn compact_runtime_policy_reason(reason: Option<&str>, tool_name: &str) -> Strin
     let value = reason.unwrap_or(fallback);
     let prefix = format!("tool `{tool_name}` requires ");
     if let Some(stripped) = value.strip_prefix(prefix.as_str()) {
+        return stripped.to_string();
+    }
+    let display_name = display_runtime_tool_name(tool_name);
+    let display_prefix = format!("tool `{display_name}` requires ");
+    if let Some(stripped) = value.strip_prefix(display_prefix.as_str()) {
         return stripped.to_string();
     }
     if value == "tool execution blocked by local approval policy" {
@@ -4910,15 +9135,6 @@ fn render_backend_kind(value: probe_protocol::backend::BackendKind) -> &'static 
             "openai_codex_subscription"
         }
         probe_protocol::backend::BackendKind::AppleFmBridge => "apple_fm_bridge",
-    }
-}
-
-fn compact_target_kind_label(value: &str) -> &'static str {
-    match value {
-        "loopback_or_ssh_forward" => "loopback/ssh",
-        "remote_https" => "remote_https",
-        "localhost" => "localhost",
-        _ => "custom",
     }
 }
 

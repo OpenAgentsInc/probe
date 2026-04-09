@@ -6,8 +6,8 @@ expression: snapshot
 
 
 
-           ┌─ Approval ─────────────────────────────────────────────┐
-           │ Review this tool request.                              │
+           ┌─ Review Changes ───────────────────────────────────────┐
+           │ Review these proposed changes before they land.        │
            │                                                        │
            │ tool: apply_patch                                      │
            │ call: call_patch_1                                     │
@@ -15,10 +15,10 @@ expression: snapshot
            │ turns: 1 -> 2                                          │
            │ why: tool `apply_patch` requires write approval        │
            │                                                        │
-           │ preview                                                │
-           │   {                                                    │
-           │     "new_text": "probe",                               │
-           │     "old_text": "world",                               │
-           │     "path": "hello.txt"                                │
-           │   }                                                    │
+           │ summary: Probe wants to update `hello.txt` before the  │
+           │ turn resumes.                                          │
+           │                                                        │
+           │ files                                                  │
+           │   hello.txt                                            │
+           │                                                        │
            └────────────────────────────────────────────────────────┘

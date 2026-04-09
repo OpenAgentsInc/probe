@@ -8,7 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_protocol::runtime::{RuntimeActivity, RuntimeActivityKind};
 use probe_protocol::session::{
-    BackendTurnReceipt, CacheSignal, PendingToolApproval, SessionBackendTarget,
+    BackendTurnReceipt, CacheSignal, PendingToolApproval, ProposedToolEdit, SessionBackendTarget,
     SessionHarnessProfile, SessionId, SessionMetadata, SessionTurn, ToolApprovalResolution,
     ToolRiskClass, TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnObservability,
 };
@@ -1104,6 +1104,10 @@ impl ProbeRuntime {
         let mut executed_tool_calls = 0_usize;
         let mut tool_results = Vec::new();
         let max_round_trips = tool_loop.max_model_round_trips;
+        let runtime_registry = tool_loop
+            .registry
+            .clone()
+            .with_session_mcp_tools(session.mcp_state.as_ref());
 
         for round_trip in 1..=max_round_trips {
             let next_user_prompt = pending_user_prompt.as_ref().cloned();
@@ -1136,7 +1140,7 @@ impl ProbeRuntime {
                     openai_tool_loop_response_with_callback(
                         &profile,
                         messages.clone(),
-                        tool_loop.registry.declared_tools(),
+                        runtime_registry.declared_tools(),
                         tool_loop.tool_choice.to_provider_choice(),
                         Some(tool_loop.parallel_tool_calls),
                         OpenAiRequestContext {
@@ -1149,7 +1153,7 @@ impl ProbeRuntime {
                     openai_tool_loop_response_with_context(
                         &profile,
                         messages.clone(),
-                        tool_loop.registry.declared_tools(),
+                        runtime_registry.declared_tools(),
                         tool_loop.tool_choice.to_provider_choice(),
                         Some(tool_loop.parallel_tool_calls),
                         OpenAiRequestContext {
@@ -1223,7 +1227,7 @@ impl ProbeRuntime {
                 )?;
                 let session_id = session.id.clone();
                 let event_sink_for_tools = event_sink.clone();
-                let executed = tool_loop.registry.execute_batch_with_observer(
+                let executed = runtime_registry.execute_batch_with_observer(
                     &execution_context,
                     tool_calls.as_slice(),
                     &tool_loop.approval,
@@ -1333,19 +1337,20 @@ impl ProbeRuntime {
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
         let prompt_text = prompt.clone().unwrap_or_default();
         let transcript = self.replay_apple_fm_transcript(&session)?;
+        let runtime_registry = tool_loop
+            .registry
+            .clone()
+            .with_session_mcp_tools(session.mcp_state.as_ref());
         let execution_context =
             self.build_tool_execution_context(&session, &tool_loop, prompt.as_deref())?;
         let recorder = Arc::new(Mutex::new(AppleFmToolLoopRecorder::new(
             session.id.clone(),
-            tool_loop
-                .registry
-                .execution_session(&execution_context, &tool_loop.approval),
+            runtime_registry.execution_session(&execution_context, &tool_loop.approval),
             tool_loop.max_model_round_trips,
             event_sink.clone(),
         )));
         let callback_recorder = Arc::clone(&recorder);
-        let tool_definitions = tool_loop
-            .registry
+        let tool_definitions = runtime_registry
             .declared_tools()
             .into_iter()
             .map(
@@ -1766,6 +1771,7 @@ impl ProbeRuntime {
                 tool_call_turn_index,
                 paused_result_turn_index,
                 requested_at_ms: now_ms(),
+                proposed_edit: proposed_tool_edit(tool),
                 resolved_at_ms: None,
                 resolution: None,
             })
@@ -1784,9 +1790,12 @@ impl ProbeRuntime {
         event_sink: Option<&Arc<dyn RuntimeEventSink>>,
     ) -> Result<ExecutedToolCall, RuntimeError> {
         let execution_context = self.build_tool_execution_context(session, tool_loop, None)?;
-        let mut execution_session = tool_loop
+        let runtime_registry = tool_loop
             .registry
-            .execution_session(&execution_context, &tool_loop.approval);
+            .clone()
+            .with_session_mcp_tools(session.mcp_state.as_ref());
+        let mut execution_session =
+            runtime_registry.execution_session(&execution_context, &tool_loop.approval);
         let mut observer = |call_id: &str, tool_name: &str, _arguments: &Value, risk_class| {
             emit_runtime_event(
                 event_sink,
@@ -2268,6 +2277,72 @@ impl ProbeRuntime {
     }
 }
 
+fn proposed_tool_edit(tool: &ExecutedToolCall) -> Option<ProposedToolEdit> {
+    if tool.name != "apply_patch" {
+        return None;
+    }
+    let path = tool
+        .arguments
+        .get("path")
+        .and_then(Value::as_str)?
+        .to_string();
+    let old_text = tool
+        .arguments
+        .get("old_text")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let new_text = tool
+        .arguments
+        .get("new_text")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    let summary_text = if old_text.trim().is_empty() && !new_text.trim().is_empty() {
+        format!("Probe wants to create or replace `{path}` before the turn resumes.")
+    } else if !old_text.trim().is_empty() && new_text.trim().is_empty() {
+        format!("Probe wants to remove text from `{path}` before the turn resumes.")
+    } else {
+        format!("Probe wants to update `{path}` before the turn resumes.")
+    };
+
+    Some(ProposedToolEdit {
+        changed_files: vec![path],
+        summary_text,
+        preview_lines: proposed_apply_patch_preview_lines(old_text, new_text),
+        validation_hint: Some(String::from("not available until the paused turn resumes")),
+    })
+}
+
+fn proposed_apply_patch_preview_lines(old_text: &str, new_text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let old_lines = compact_patch_preview_lines(old_text, '-', 4);
+    let new_lines = compact_patch_preview_lines(new_text, '+', 4);
+    lines.extend(old_lines);
+    lines.extend(new_lines);
+    if lines.is_empty() {
+        lines.push(String::from("[no text preview available]"));
+    }
+    lines
+}
+
+fn compact_patch_preview_lines(value: &str, marker: char, max_lines: usize) -> Vec<String> {
+    let mut lines = value
+        .split('\n')
+        .map(|line| {
+            if line.is_empty() {
+                format!("{marker} [blank]")
+            } else {
+                format!("{marker} {line}")
+            }
+        })
+        .collect::<Vec<_>>();
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        lines.push(String::from("..."));
+    }
+    lines
+}
+
 impl AppleFmToolLoopRecorder {
     fn new(
         session_id: SessionId,
@@ -2448,18 +2523,24 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
     use crate::backend_profiles::{psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry};
+    use crate::session_store::NewSession;
     use crate::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig};
     use probe_protocol::runtime::RuntimeActivityKind;
     use probe_protocol::session::{
-        CacheSignal, SessionHarnessProfile, ToolApprovalResolution, ToolApprovalState,
-        ToolPolicyDecision, TranscriptItemKind, UsageTruth,
+        CacheSignal, SessionBackendTarget, SessionHarnessProfile, SessionMcpConnectionStatus,
+        SessionMcpServer, SessionMcpServerSource, SessionMcpServerTransport, SessionMcpState,
+        SessionMcpTool, ToolApprovalResolution, ToolApprovalState, ToolPolicyDecision,
+        TranscriptItemKind, UsageTruth,
     };
     use probe_test_support::{
         FakeAppleFmServer, FakeHttpRequest, FakeHttpResponse, FakeOpenAiServer,
@@ -2507,6 +2588,69 @@ mod tests {
                 .expect("runtime event collector lock")
                 .clone()
         }
+    }
+
+    #[cfg(unix)]
+    fn write_fake_mcp_call_server(path: &std::path::Path) {
+        let script = r#"#!/usr/bin/env python3
+import json
+import sys
+
+def read_message():
+    content_length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        if line.lower().startswith(b"content-length:"):
+            content_length = int(line.split(b":", 1)[1].strip())
+    if content_length is None:
+        return None
+    body = sys.stdin.buffer.read(content_length)
+    return json.loads(body.decode("utf-8"))
+
+def send_message(message):
+    body = json.dumps(message).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8"))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        send_message({
+            "jsonrpc": "2.0",
+            "id": message.get("id"),
+            "result": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "fake-mcp", "version": "1.0.0"}
+            }
+        })
+    elif method == "tools/call":
+        params = message.get("params", {})
+        send_message({
+            "jsonrpc": "2.0",
+            "id": message.get("id"),
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"read {params.get('arguments', {}).get('path', '')}"
+                    }
+                ]
+            }
+        })
+"#;
+        fs::write(path, script).expect("write fake mcp script");
+        let mut permissions = fs::metadata(path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("set execute permissions");
     }
 
     #[test]
@@ -3795,6 +3939,160 @@ mod tests {
             ToolApprovalState::NotRequired
         );
         assert_eq!(transcript[2].turn.items[0].text, "README inspected.");
+
+        handle.join().expect("server thread should exit cleanly");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_loop_mounts_connected_stdio_mcp_tools_end_to_end() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let address = listener.local_addr().expect("listener addr");
+        let handle = thread::spawn(move || {
+            let mcp_tool_name = "mcp__filesystem__filesystem_read";
+            for step in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept connection");
+                let mut buffer = [0_u8; 8192];
+                let bytes = stream.read(&mut buffer).expect("read request");
+                let request_body = String::from_utf8_lossy(&buffer[..bytes]);
+                if step == 0 {
+                    assert!(request_body.contains(mcp_tool_name), "{request_body}");
+                    assert!(
+                        request_body.contains("External MCP tool from server `Filesystem`"),
+                        "{request_body}"
+                    );
+                } else {
+                    assert!(request_body.contains(mcp_tool_name), "{request_body}");
+                    assert!(request_body.contains("server_name"), "{request_body}");
+                    assert!(request_body.contains("filesystem/read"), "{request_body}");
+                    assert!(request_body.contains("read README.md"), "{request_body}");
+                }
+                let body = if step == 0 {
+                    serde_json::json!({
+                        "id": "chatcmpl_tool_required",
+                        "model": "qwen3.5-2b-q8_0-registry.gguf",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_mcp_read_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": mcp_tool_name,
+                                                "arguments": "{\"path\":\"README.md\"}"
+                                            }
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls"
+                            }
+                        ]
+                    })
+                } else {
+                    serde_json::json!({
+                        "id": "chatcmpl_tool_final",
+                        "model": "qwen3.5-2b-q8_0-registry.gguf",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "MCP read complete."
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ]
+                    })
+                }
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        fs::write(temp.path().join("README.md"), "# Probe\n").expect("write readme");
+        let script_path = temp.path().join("fake_mcp.py");
+        write_fake_mcp_call_server(&script_path);
+
+        let runtime = ProbeRuntime::new(temp.path().join(".probe"));
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = format!("http://{address}/v1");
+
+        let session = runtime
+            .session_store()
+            .create_session_with(
+                NewSession::new("mcp tool loop", temp.path())
+                    .with_backend(SessionBackendTarget::from_profile(&profile))
+                    .with_mcp_state(Some(SessionMcpState {
+                        load_error: None,
+                        servers: vec![SessionMcpServer {
+                            id: String::from("filesystem"),
+                            name: String::from("Filesystem"),
+                            enabled: true,
+                            source: SessionMcpServerSource::ManualLaunch,
+                            transport: Some(SessionMcpServerTransport::Stdio),
+                            target: Some(format!("python3 {}", script_path.display())),
+                            provider_setup_command: None,
+                            provider_hint: None,
+                            client_hint: None,
+                            connection_status: Some(SessionMcpConnectionStatus::Connected),
+                            connection_note: Some(String::from(
+                                "Attached at session start and discovered 1 tool(s).",
+                            )),
+                            discovered_tools: vec![SessionMcpTool {
+                                name: String::from("filesystem/read"),
+                                description: Some(String::from("Read a file from disk.")),
+                                input_schema: Some(json!({
+                                    "type": "object",
+                                    "properties": {
+                                        "path": { "type": "string" }
+                                    },
+                                    "required": ["path"]
+                                })),
+                            }],
+                        }],
+                    })),
+            )
+            .expect("create session");
+
+        let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Required, false);
+        tool_loop.approval = ToolApprovalConfig {
+            allow_write_tools: false,
+            allow_network_shell: true,
+            allow_destructive_shell: false,
+            denied_action: ToolDeniedAction::Refuse,
+        };
+        let outcome = runtime
+            .continue_plain_text_session(PlainTextResumeRequest {
+                session_id: session.id,
+                profile,
+                prompt: String::from("Use the MCP filesystem tool to read README.md."),
+                tool_loop: Some(tool_loop),
+            })
+            .expect("tool loop should succeed");
+
+        assert_eq!(outcome.assistant_text, "MCP read complete.");
+        assert_eq!(outcome.executed_tool_calls, 1);
+        assert_eq!(
+            outcome.tool_results[0].name,
+            "mcp__filesystem__filesystem_read"
+        );
+        assert_eq!(outcome.tool_results[0].output["server_name"], "Filesystem");
+        assert_eq!(outcome.tool_results[0].output["tool"], "filesystem/read");
+        assert_eq!(
+            outcome.tool_results[0].output["result"]["content"][0]["text"],
+            "read README.md"
+        );
 
         handle.join().expect("server thread should exit cleanly");
     }

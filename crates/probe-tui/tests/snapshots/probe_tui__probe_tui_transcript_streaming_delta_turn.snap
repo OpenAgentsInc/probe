@@ -11,15 +11,15 @@ expression: snapshot
 │   Inspect README and summarize Probe.                             │ │ next: Working now; PgUp    │
 │                                                                   │ │ scrolls without losing     │
 │ [active assistant] Probe                                          │ │ your place                 │
-│   Probe owns the coding-agent runtime, including sessions, tools, │ │ lane: Qwen                 │
-│ approvals, and transcripts.                                       │ │ target: 127.0.0.1:8080     │
-│                                                                   │ │ transport: loopback/ssh    │
-│                                                                   │ │ cwd: /tmp/probe-workspace  │
-│                                                                   │ │ mode: coding               │
-│                                                                   │ │ tools: on                  │
-│                                                                   │ │ approvals:                 │
-│                                                                   │ │ write/network/destructive  │
-│                                                                   │ │ auto                       │
+│   Probe owns the coding-agent runtime, including sessions, tools, │ │                            │
+│ approvals, and transcripts.                                       │ │ workspace: probe-workspace │
+│                                                                   │ │ lane: Qwen                 │
+│                                                                   │ │                            │
+│                                                                   │ │ safety: auto-safe          │
+│                                                                   │ │ memory: repo/AGENTS        │
+│                                                                   │ │                            │
+│                                                                   │ │                            │
+│                                                                   │ │                            │
 └───────────────────────────────────────────────────────────────────┘ └────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐

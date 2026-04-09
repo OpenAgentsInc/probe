@@ -7,8 +7,13 @@ pub enum UiEvent {
     ToggleBody,
     RunBackgroundTask,
     OpenHelp,
+    OpenStatusOverlay,
+    OpenDoctorOverlay,
     OpenSetupOverlay,
     OpenApprovalOverlay,
+    OpenGitOverlay,
+    OpenRecipesOverlay,
+    OpenTasksOverlay,
     ScrollUp,
     ScrollDown,
     PageUp,
@@ -43,6 +48,10 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
         KeyCode::BackTab => Some(UiEvent::PreviousView),
         KeyCode::Esc => Some(UiEvent::Dismiss),
         KeyCode::F(1) => Some(UiEvent::OpenHelp),
+        KeyCode::F(2) => Some(UiEvent::OpenStatusOverlay),
+        KeyCode::F(3) => Some(UiEvent::OpenDoctorOverlay),
+        KeyCode::F(4) => Some(UiEvent::OpenTasksOverlay),
+        KeyCode::F(5) => Some(UiEvent::OpenRecipesOverlay),
         KeyCode::PageUp => Some(UiEvent::PageUp),
         KeyCode::PageDown => Some(UiEvent::PageDown),
         KeyCode::Enter if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -61,6 +70,9 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
             Some(UiEvent::OpenApprovalOverlay)
         }
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => Some(UiEvent::Quit),
+        KeyCode::Char('g') if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiEvent::OpenGitOverlay)
+        }
         KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::ComposerAddAttachment)
         }
@@ -94,5 +106,39 @@ pub fn event_from_mouse(mouse: MouseEvent) -> Option<UiEvent> {
         MouseEventKind::ScrollUp => Some(UiEvent::ScrollUp),
         MouseEventKind::ScrollDown => Some(UiEvent::ScrollDown),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UiEvent, event_from_key};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn function_keys_map_to_operator_overlays() {
+        assert_eq!(
+            event_from_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+            Some(UiEvent::OpenStatusOverlay)
+        );
+        assert_eq!(
+            event_from_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE)),
+            Some(UiEvent::OpenDoctorOverlay)
+        );
+        assert_eq!(
+            event_from_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)),
+            Some(UiEvent::OpenTasksOverlay)
+        );
+        assert_eq!(
+            event_from_key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
+            Some(UiEvent::OpenRecipesOverlay)
+        );
+    }
+
+    #[test]
+    fn ctrl_g_opens_git_overlay() {
+        assert_eq!(
+            event_from_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            Some(UiEvent::OpenGitOverlay)
+        );
     }
 }

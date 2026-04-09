@@ -7,10 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use probe_protocol::session::{
     BackendTurnReceipt, ItemId, PendingToolApproval, SessionBackendTarget, SessionChildLink,
-    SessionHarnessProfile, SessionId, SessionIndex, SessionMetadata, SessionMountRef,
-    SessionParentLink, SessionRuntimeOwner, SessionState, SessionTurn, SessionWorkspaceState,
-    TimestampMs, ToolApprovalResolution, ToolExecutionRecord, TranscriptEvent, TranscriptItem,
-    TranscriptItemKind, TurnId, TurnObservability,
+    SessionHarnessProfile, SessionId, SessionIndex, SessionMcpState, SessionMetadata,
+    SessionMountRef, SessionParentLink, SessionRuntimeOwner, SessionState, SessionTurn,
+    SessionWorkspaceState, TimestampMs, ToolApprovalResolution, ToolExecutionRecord,
+    TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnId, TurnObservability,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -125,6 +125,7 @@ pub struct NewSession {
     pub runtime_owner: Option<SessionRuntimeOwner>,
     pub workspace_state: Option<SessionWorkspaceState>,
     pub mounted_refs: Vec<SessionMountRef>,
+    pub mcp_state: Option<SessionMcpState>,
     pub parent_link: Option<SessionParentLink>,
 }
 
@@ -140,6 +141,7 @@ impl NewSession {
             runtime_owner: None,
             workspace_state: None,
             mounted_refs: Vec::new(),
+            mcp_state: None,
             parent_link: None,
         }
     }
@@ -177,6 +179,12 @@ impl NewSession {
     #[must_use]
     pub fn with_mounted_refs(mut self, mounted_refs: Vec<SessionMountRef>) -> Self {
         self.mounted_refs = mounted_refs;
+        self
+    }
+
+    #[must_use]
+    pub fn with_mcp_state(mut self, mcp_state: Option<SessionMcpState>) -> Self {
+        self.mcp_state = mcp_state;
         self
     }
 
@@ -250,6 +258,7 @@ impl FilesystemSessionStore {
             controller_lease: None,
             latest_task_workspace_summary: None,
             latest_task_receipt: None,
+            mcp_state: session.mcp_state,
             transcript_path,
             parent_link: session.parent_link,
             child_links: Vec::new(),
@@ -879,6 +888,7 @@ mod tests {
                 tool_call_turn_index: 0,
                 paused_result_turn_index: 1,
                 requested_at_ms: 1,
+                proposed_edit: None,
                 resolved_at_ms: None,
                 resolution: None,
             },
@@ -892,6 +902,7 @@ mod tests {
                 tool_call_turn_index: 0,
                 paused_result_turn_index: 1,
                 requested_at_ms: 2,
+                proposed_edit: None,
                 resolved_at_ms: Some(3),
                 resolution: Some(ToolApprovalResolution::Rejected),
             },
@@ -934,6 +945,7 @@ mod tests {
                     tool_call_turn_index: 0,
                     paused_result_turn_index: 1,
                     requested_at_ms: 1,
+                    proposed_edit: None,
                     resolved_at_ms: None,
                     resolution: None,
                 }],

@@ -14,6 +14,7 @@ fn tui_runtime_suite_renders_runtime_progress_inside_the_transcript() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
@@ -62,6 +63,7 @@ fn tui_runtime_suite_renders_backend_failures_without_raw_json_noise() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::ProbeRuntimeEvent {

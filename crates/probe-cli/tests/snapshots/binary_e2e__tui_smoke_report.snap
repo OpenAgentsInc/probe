@@ -3,7 +3,7 @@ source: crates/probe-cli/tests/binary_e2e.rs
 expression: report
 ---
 {
-  "final_render": "┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ Codex │ Qwen │ Apple FM │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ ┌─ Transcript ──────────────────────────────────────────────────────────────────────┐ ┌─ Session ──────────────────────┐ │ [user] You │ │ activity: completed │ │ hello │ │ next: Ask for the next change │ │ │ │ or a follow-up │ │ [assistant] Probe │ │ lane: Qwen │ │ Probe inspected README.md through the real runtime. │ │ target: 127.0.0.1:<port> │ │ │ │ transport: loopback/ssh │ │ │ │ cwd: │ │ │ │ …00gn/T/.tmpHxuUQO/workspace │ │ │ │ mode: coding │ │ │ │ tools: on │ │ │ │ approvals: │ │ │ │ write/network/destructive auto │ │ │ │ edits: none │ │ │ │ verify: not run │ │ │ │ keys: Tab lanes · Ctrl+S │ │ │ │ backend │ │ │ │ │ └───────────────────────────────────────────────────────────────────────────────────┘ └────────────────────────────────┘ ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ status: pending approvals cleared | backend: openai_chat_completions | target: 127.0.0.1:<port> | model: tiny-qwen35 │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ ┌─ Composer ───────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ cmd: plain | hist: 1 │ │ Type a Probe message. Enter submits. Ctrl+J inserts a newline. │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
+  "final_render": "┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ Codex │ Qwen │ Apple FM │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ ┌─ Transcript ──────────────────────────────────────────────────────────────────────┐ ┌─ Session ──────────────────────┐ │ [user] You │ │ activity: completed │ │ hello │ │ next: Ask for the next change │ │ │ │ or a follow-up │ │ [assistant] Probe │ │ │ │ Probe inspected README.md through the real runtime. │ │ workspace: workspace │ │ │ │ lane: Qwen │ │ │ │ │ │ │ │ safety: auto-safe │ │ │ │ │ │ │ │ last task: no repo changes │ │ │ │ checkpoint: not needed │ │ │ │ revert: unavailable │ │ │ │ edits: none │ │ │ │ verify: not run │ │ │ │ │ │ │ │ │ │ │ │ │ └───────────────────────────────────────────────────────────────────────────────────┘ └────────────────────────────────┘ ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ status: pending approvals cleared | backend: openai_chat_completions | target: 127.0.0.1:<port> | model: tiny-qwen35 │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ ┌─ Composer ───────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ cmd: plain | hist: 1 │ │ Type a Probe message. Enter submits. Ctrl+J inserts a newline. │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
   "last_status": "pending approvals cleared",
   "recent_events": [
     "queued Probe runtime turn: hello",
@@ -25,6 +25,7 @@ expression: report
     "committed assistant row: Probe",
     "committed tool result row: read_file",
     "committed tool call row: read_file",
+    "updated git/workspace state for <session-id>",
     "runtime session ready: <session-id> via psionic-qwen35-2b-q8-registry",
     "activity updated: completed",
     "assistant turn committed",
@@ -34,7 +35,6 @@ expression: report
     "tool execution started: read_file",
     "activity updated: reading README.md",
     "tool call requested: read_file",
-    "activity updated: waiting for backend",
-    "model request started: round 1"
+    "activity updated: waiting for backend"
   ]
 }

@@ -417,7 +417,12 @@ pub fn write_apple_fm_attach_server_config(
 pub fn normalize_test_paths(value: &str, environment: &ProbeTestEnvironment) -> String {
     let temp_root = environment.temp_root().display().to_string();
     let replaced = normalize_workspace_path(value.replace(temp_root.as_str(), "$TEST_ROOT"));
-    normalize_loopback_ports(normalize_session_path_segments(replaced.as_str()).as_str())
+    normalize_loopback_ports(
+        normalize_temp_workspace_suffix(
+            normalize_session_path_segments(replaced.as_str()).as_str(),
+        )
+        .as_str(),
+    )
 }
 
 pub fn normalize_exec_stderr_for_snapshot(raw: &str, environment: &ProbeTestEnvironment) -> String {
@@ -764,6 +769,24 @@ fn normalize_session_path_segments(value: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+fn normalize_temp_workspace_suffix(value: &str) -> String {
+    let mut normalized = String::new();
+    let mut rest = value;
+    let marker = "/.tmp";
+    let tail = "/workspace";
+    while let Some(start) = rest.find(marker) {
+        let after_marker = &rest[start + marker.len()..];
+        let Some(end_rel) = after_marker.find(tail) else {
+            break;
+        };
+        normalized.push_str(&rest[..start]);
+        normalized.push_str("/.tmp<id>/workspace");
+        rest = &after_marker[end_rel + tail.len()..];
+    }
+    normalized.push_str(rest);
+    normalized
 }
 
 fn normalize_session_words(value: &str) -> String {

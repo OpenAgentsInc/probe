@@ -11,15 +11,15 @@ expression: snapshot
 │   Reply with the next honest proof target.                        │ │ next: Working now; PgUp    │
 │                                                                   │ │ scrolls without losing     │
 │ [active assistant] Probe                                          │ │ your place                 │
-│   Stream remote Qwen tokens into the retained transcript.         │ │ lane: Qwen                 │
-│                                                                   │ │ target: 127.0.0.1:8080     │
-│                                                                   │ │ transport: loopback/ssh    │
-│                                                                   │ │ cwd: /tmp/probe-workspace  │
-│                                                                   │ │ mode: coding               │
-│                                                                   │ │ tools: on                  │
-│                                                                   │ │ approvals:                 │
-│                                                                   │ │ write/network/destructive  │
-│                                                                   │ │ auto                       │
+│   Stream remote Qwen tokens into the retained transcript.         │ │                            │
+│                                                                   │ │ workspace: probe-workspace │
+│                                                                   │ │ lane: Qwen                 │
+│                                                                   │ │                            │
+│                                                                   │ │ safety: auto-safe          │
+│                                                                   │ │ memory: repo/AGENTS        │
+│                                                                   │ │                            │
+│                                                                   │ │                            │
+│                                                                   │ │                            │
 └───────────────────────────────────────────────────────────────────┘ └────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐

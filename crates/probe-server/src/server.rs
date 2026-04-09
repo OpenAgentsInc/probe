@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::fs;
-use std::io::{self, BufRead, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -36,9 +36,9 @@ use probe_protocol::runtime::{
     PublishSessionMeshPluginOfferRequest, PublishSessionMeshPluginOfferResponse, QueueTurnResponse,
     QueuedTurnStatus, ReadDetachedSessionLogRequest, ReadDetachedSessionLogResponse,
     RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope,
-    RuntimeActivity, RuntimeCapabilities, RuntimeProgressEvent, RuntimeProtocolError,
-    RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage, ServerEvent,
-    ServerMessage, SessionLookupRequest, SessionSnapshot, ShutdownResponse,
+    RevertLastTaskResponse, RuntimeActivity, RuntimeCapabilities, RuntimeProgressEvent,
+    RuntimeProtocolError, RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage,
+    ServerEvent, ServerMessage, SessionLookupRequest, SessionSnapshot, ShutdownResponse,
     SpawnChildSessionRequest, SpawnChildSessionResponse, StartSessionRequest, ToolApprovalRecipe,
     ToolCallResult, ToolChoice, ToolDeniedAction, ToolLongContextRecipe, ToolLoopRecipe,
     ToolOracleRecipe, ToolSetKind, TransportKind, TurnAuthor, TurnCompleted, TurnPaused,
@@ -53,13 +53,16 @@ use probe_protocol::session::{
     SessionHostedAuthReceipt, SessionHostedCheckoutKind, SessionHostedCheckoutReceipt,
     SessionHostedCleanupReceipt, SessionHostedCleanupStatus, SessionHostedCostReceipt,
     SessionHostedLifecycleEvent, SessionHostedReceipts, SessionHostedWorkerReceipt, SessionId,
-    SessionInitiator, SessionMeshCoordinationEntry, SessionMeshCoordinationKind,
-    SessionMeshCoordinationMode, SessionMeshCoordinationStatus, SessionMeshCoordinationVisibility,
-    SessionMeshPluginOffer, SessionMeshPluginTool, SessionMetadata, SessionMountKind,
-    SessionMountRef, SessionParentLink, SessionParticipant, SessionPreparedBaselineRef,
-    SessionPreparedBaselineStatus, SessionRuntimeOwner, SessionRuntimeOwnerKind,
-    SessionSummaryArtifact, SessionSummaryArtifactRef, SessionWorkspaceBootMode,
-    SessionWorkspaceSnapshotRef, SessionWorkspaceState, TaskFinalReceipt, TaskReceiptDisposition,
+    SessionInitiator, SessionMcpConnectionStatus, SessionMcpServer, SessionMcpServerSource,
+    SessionMcpServerTransport, SessionMcpState, SessionMcpTool, SessionMeshCoordinationEntry,
+    SessionMeshCoordinationKind, SessionMeshCoordinationMode, SessionMeshCoordinationStatus,
+    SessionMeshCoordinationVisibility, SessionMeshPluginOffer, SessionMeshPluginTool,
+    SessionMetadata, SessionMountKind, SessionMountRef, SessionParentLink, SessionParticipant,
+    SessionPreparedBaselineRef, SessionPreparedBaselineStatus, SessionRuntimeOwner,
+    SessionRuntimeOwnerKind, SessionSummaryArtifact, SessionSummaryArtifactRef,
+    SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef, SessionWorkspaceState,
+    TaskCheckpointStatus, TaskCheckpointSummary, TaskDiffPreview, TaskFinalReceipt,
+    TaskReceiptDisposition, TaskRevertibilityStatus, TaskRevertibilitySummary,
     TaskVerificationCommandStatus, TaskVerificationCommandSummary, TaskVerificationStatus,
     TaskWorkspaceSummary, TaskWorkspaceSummaryStatus, ToolPolicyDecision, ToolRiskClass,
     TranscriptEvent, TranscriptItem, TranscriptItemKind, UsageMeasurement, UsageTruth,
@@ -76,6 +79,52 @@ use crate::turn_control::{SessionTurnControlState, StoredTurnControlRecord, now_
 
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
+
+const MCP_REGISTRY_RELATIVE_PATH: &str = "mcp/servers.json";
+const MCP_STDIO_STARTUP_TIMEOUT: Duration = Duration::from_millis(1200);
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+struct StoredMcpRegistryFile {
+    #[serde(default)]
+    servers: Vec<StoredMcpServerRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredMcpServerSource {
+    ManualLaunch,
+    ProviderCommandRecipe,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredMcpServerTransport {
+    Stdio,
+    Http,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+struct StoredMcpServerRecord {
+    id: String,
+    name: String,
+    enabled: bool,
+    #[serde(default = "default_stored_mcp_source")]
+    source: StoredMcpServerSource,
+    #[serde(default)]
+    transport: Option<StoredMcpServerTransport>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    provider_setup_command: Option<String>,
+    #[serde(default)]
+    provider_hint: Option<String>,
+    #[serde(default)]
+    client_hint: Option<String>,
+}
+
+fn default_stored_mcp_source() -> StoredMcpServerSource {
+    StoredMcpServerSource::ManualLaunch
+}
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 
@@ -2202,6 +2251,18 @@ impl ProbeServerConnection {
                 self.spawn_resolve_pending_approval(request_id, request)?;
                 Ok(RequestHandlingOutcome::Continue)
             }
+            RuntimeRequest::RevertLastTask(request) => {
+                match self.revert_last_task(request.session_id, request.author.as_ref()) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::RevertLastTask(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
             RuntimeRequest::Shutdown => {
                 let active_turns = self.active_turn_count();
                 let accepted = active_turns == 0;
@@ -2246,6 +2307,9 @@ impl ProbeServerConnection {
             &self.core.runtime_owner,
             workspace_state,
         );
+        let mcp_state = Some(load_session_mcp_state(
+            self.core.runtime.session_store().root(),
+        ));
         let mounted_refs = validate_session_mounts(mounted_refs)?;
         let session = self
             .core
@@ -2258,6 +2322,7 @@ impl ProbeServerConnection {
                     .with_backend(SessionBackendTarget::from_profile(&profile))
                     .with_runtime_owner(Some(self.core.runtime_owner.clone()))
                     .with_workspace_state(workspace_state)
+                    .with_mcp_state(mcp_state)
                     .with_mounted_refs(mounted_refs),
             )
             .map_err(session_store_error_to_protocol)?;
@@ -2310,6 +2375,7 @@ impl ProbeServerConnection {
             .as_ref()
             .map(session_initiator_from_turn_author);
         let workspace_state = parent.workspace_state.clone();
+        let mcp_state = parent.mcp_state.clone();
         let mounted_refs = parent.mounted_refs.clone();
         let child = self
             .core
@@ -2322,6 +2388,7 @@ impl ProbeServerConnection {
                     .with_backend(SessionBackendTarget::from_profile(&request.profile))
                     .with_runtime_owner(Some(self.core.runtime_owner.clone()))
                     .with_workspace_state(workspace_state)
+                    .with_mcp_state(mcp_state)
                     .with_mounted_refs(mounted_refs)
                     .with_parent_link(Some(SessionParentLink {
                         session_id: request.parent_session_id.clone(),
@@ -2401,6 +2468,49 @@ impl ProbeServerConnection {
         }
         approvals.sort_by(|left, right| right.requested_at_ms.cmp(&left.requested_at_ms));
         Ok(approvals)
+    }
+
+    fn revert_last_task(
+        &self,
+        session_id: SessionId,
+        author: Option<&TurnAuthor>,
+    ) -> Result<RevertLastTaskResponse, RuntimeProtocolError> {
+        self.core
+            .ensure_detached_session_registered_by_id(&session_id)?;
+        self.prepare_turn_authority(&session_id, author, "revert last task")?;
+        let turns = self.core.turn_control.inspect_session_turns(&session_id)?;
+        if turns.active_turn.is_some() {
+            return Err(protocol_error(
+                "turn_in_progress",
+                String::from(
+                    "finish the active turn before asking Probe to revert the latest task",
+                ),
+            ));
+        }
+        if !turns.queued_turns.is_empty() {
+            return Err(protocol_error(
+                "queued_turns_pending",
+                String::from(
+                    "clear or run queued turns before asking Probe to revert the latest task",
+                ),
+            ));
+        }
+
+        let reverted_files = revert_latest_task_in_session(&self.core.runtime, &session_id)?;
+        let session = self.session_snapshot(&session_id)?;
+        let message = if reverted_files.is_empty() {
+            String::from("Probe completed the requested revert.")
+        } else {
+            format!(
+                "Probe reverted the latest task in {}.",
+                summarize_task_paths(reverted_files.as_slice(), 6)
+            )
+        };
+        Ok(RevertLastTaskResponse {
+            session,
+            reverted_files,
+            message,
+        })
     }
 
     fn inspect_session_turns(
@@ -2846,6 +2956,470 @@ fn persist_latest_task_receipt_from_pending_baseline(
     persist_latest_task_receipt(runtime, session_id, &baseline, disposition).map(Some)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RevertPatchOperation {
+    path: String,
+    old_text: String,
+    new_text: String,
+    replace_all: bool,
+    create_if_missing: bool,
+}
+
+fn revert_latest_task_in_session(
+    runtime: &ProbeRuntime,
+    session_id: &SessionId,
+) -> Result<Vec<String>, RuntimeProtocolError> {
+    let metadata = runtime
+        .session_store()
+        .read_metadata(session_id)
+        .map_err(session_store_error_to_protocol)?;
+    let Some(summary) = metadata.latest_task_workspace_summary.as_ref() else {
+        return Err(protocol_error(
+            "revert_unavailable",
+            String::from("no recent applied task is available to revert on this lane yet"),
+        ));
+    };
+    if summary.status == TaskWorkspaceSummaryStatus::PendingApproval {
+        return Err(protocol_error(
+            "revert_pending_approval",
+            String::from(
+                "the latest task is still pending approval, so there is nothing applied to revert yet",
+            ),
+        ));
+    }
+    if summary.revertibility.status != TaskRevertibilityStatus::Exact {
+        return Err(protocol_error(
+            "revert_not_safe",
+            summary.revertibility.summary_text.clone(),
+        ));
+    }
+
+    let transcript = runtime
+        .session_store()
+        .read_transcript(session_id)
+        .map_err(session_store_error_to_protocol)?;
+    let operations = collect_revert_patch_operations(
+        transcript.as_slice(),
+        summary.task_start_turn_index,
+        summary.changed_files.as_slice(),
+    )?;
+    let repo_root = summary
+        .repo_root
+        .clone()
+        .or_else(|| resolve_git_repo_root(metadata.cwd.as_path()));
+    let dirty_before_revert = dirty_worktree_paths(metadata.cwd.as_path(), repo_root.as_deref());
+    let reverted_files =
+        apply_revert_patch_operations(metadata.cwd.as_path(), operations.as_slice())?;
+    let revert_turn = runtime
+        .session_store()
+        .append_turn(
+            session_id,
+            &[NewItem::new(
+                probe_protocol::session::TranscriptItemKind::Note,
+                format!(
+                    "Probe reverted the latest task in {}.",
+                    summarize_task_paths(reverted_files.as_slice(), 6)
+                ),
+            )],
+        )
+        .map_err(session_store_error_to_protocol)?;
+    let dirty_after_revert = dirty_worktree_paths(metadata.cwd.as_path(), repo_root.as_deref());
+    let outside_tracking_dirty_files = dirty_files_outside_tool_tracking(
+        dirty_after_revert.as_slice(),
+        dirty_before_revert.as_slice(),
+        reverted_files.as_slice(),
+    );
+    let workspace = build_reverted_task_workspace_summary(
+        revert_turn.index,
+        repo_root,
+        dirty_before_revert,
+        reverted_files.clone(),
+        outside_tracking_dirty_files,
+    );
+    let receipt = build_reverted_task_receipt(&workspace);
+    let mut refreshed = runtime
+        .session_store()
+        .read_metadata(session_id)
+        .map_err(session_store_error_to_protocol)?;
+    refreshed.latest_task_workspace_summary = Some(workspace);
+    refreshed.latest_task_receipt = Some(receipt);
+    runtime
+        .session_store()
+        .replace_metadata(refreshed)
+        .map_err(session_store_error_to_protocol)?;
+    Ok(reverted_files)
+}
+
+fn collect_revert_patch_operations(
+    transcript: &[TranscriptEvent],
+    task_start_turn_index: u64,
+    changed_files: &[String],
+) -> Result<Vec<RevertPatchOperation>, RuntimeProtocolError> {
+    let mut apply_patch_calls = BTreeMap::<String, serde_json::Value>::new();
+    let mut operations = Vec::new();
+
+    for event in transcript
+        .iter()
+        .filter(|event| event.turn.index >= task_start_turn_index)
+    {
+        for item in &event.turn.items {
+            if item.kind == TranscriptItemKind::ToolCall
+                && item.name.as_deref() == Some("apply_patch")
+                && let (Some(call_id), Some(arguments)) =
+                    (item.tool_call_id.as_ref(), item.arguments.as_ref())
+            {
+                apply_patch_calls.insert(call_id.clone(), arguments.clone());
+                continue;
+            }
+
+            if item.kind != TranscriptItemKind::ToolResult || !tool_result_applied(item) {
+                continue;
+            }
+            let Some(tool_execution) = item.tool_execution.as_ref() else {
+                continue;
+            };
+            if !matches!(
+                tool_execution.risk_class,
+                ToolRiskClass::Write | ToolRiskClass::Network | ToolRiskClass::Destructive
+            ) {
+                continue;
+            }
+
+            let Some(tool_name) = item.name.as_deref() else {
+                return Err(protocol_error(
+                    "revert_missing_tool_name",
+                    String::from(
+                        "the latest task includes an applied tool result without a tool name, so Probe cannot restore it safely",
+                    ),
+                ));
+            };
+            if tool_name != "apply_patch" {
+                return Err(protocol_error(
+                    "revert_not_supported",
+                    format!(
+                        "the latest task includes applied `{tool_name}` work, so Probe cannot promise an exact automated revert yet"
+                    ),
+                ));
+            }
+
+            let Some(call_id) = item.tool_call_id.as_ref() else {
+                return Err(protocol_error(
+                    "revert_missing_call_id",
+                    String::from("Probe could not find the apply_patch call id needed for revert"),
+                ));
+            };
+            let Some(arguments) = apply_patch_calls.get(call_id) else {
+                return Err(protocol_error(
+                    "revert_missing_arguments",
+                    String::from(
+                        "Probe could not find the recorded apply_patch arguments needed for revert",
+                    ),
+                ));
+            };
+            operations.push(parse_revert_patch_operation(arguments, changed_files)?);
+        }
+    }
+
+    if operations.is_empty() {
+        return Err(protocol_error(
+            "revert_unavailable",
+            String::from(
+                "the latest task does not contain an exact apply_patch history Probe can restore yet",
+            ),
+        ));
+    }
+
+    Ok(operations)
+}
+
+fn parse_revert_patch_operation(
+    arguments: &serde_json::Value,
+    changed_files: &[String],
+) -> Result<RevertPatchOperation, RuntimeProtocolError> {
+    let path = arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            protocol_error(
+                "revert_invalid_arguments",
+                String::from("Probe recorded an apply_patch call without a valid path"),
+            )
+        })?;
+    let old_text = arguments
+        .get("old_text")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            protocol_error(
+                "revert_invalid_arguments",
+                String::from("Probe recorded an apply_patch call without old_text"),
+            )
+        })?;
+    let new_text = arguments
+        .get("new_text")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            protocol_error(
+                "revert_invalid_arguments",
+                String::from("Probe recorded an apply_patch call without new_text"),
+            )
+        })?;
+    let replace_all = arguments
+        .get("replace_all")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let create_if_missing = arguments
+        .get("create_if_missing")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    if replace_all {
+        return Err(protocol_error(
+            "revert_not_supported",
+            format!(
+                "Probe cannot safely auto-revert `{path}` yet because the original apply_patch used replace_all"
+            ),
+        ));
+    }
+    if !changed_files.iter().any(|candidate| candidate == path) {
+        return Err(protocol_error(
+            "revert_scope_mismatch",
+            format!(
+                "Probe recorded a reversible patch for `{path}`, but that path was not retained in the latest task summary"
+            ),
+        ));
+    }
+
+    Ok(RevertPatchOperation {
+        path: path.to_string(),
+        old_text: old_text.to_string(),
+        new_text: new_text.to_string(),
+        replace_all,
+        create_if_missing,
+    })
+}
+
+fn apply_revert_patch_operations(
+    cwd: &Path,
+    operations: &[RevertPatchOperation],
+) -> Result<Vec<String>, RuntimeProtocolError> {
+    let mut reverted_files = Vec::new();
+    for operation in operations.iter().rev() {
+        let resolved = resolve_revert_workspace_path(cwd, operation.path.as_str())?;
+        if operation.old_text.is_empty() && operation.create_if_missing {
+            let current = fs::read_to_string(&resolved).map_err(|error| {
+                protocol_error(
+                    "revert_read_failed",
+                    format!(
+                        "failed to read `{}` while restoring the latest task: {error}",
+                        operation.path
+                    ),
+                )
+            })?;
+            if current != operation.new_text {
+                return Err(protocol_error(
+                    "revert_conflict",
+                    format!(
+                        "Probe cannot safely delete `{}` because the file no longer matches the contents it created",
+                        operation.path
+                    ),
+                ));
+            }
+            fs::remove_file(&resolved).map_err(|error| {
+                protocol_error(
+                    "revert_write_failed",
+                    format!(
+                        "failed to remove `{}` while restoring the latest task: {error}",
+                        operation.path
+                    ),
+                )
+            })?;
+        } else if operation.old_text.is_empty() {
+            let current = fs::read_to_string(&resolved).map_err(|error| {
+                protocol_error(
+                    "revert_read_failed",
+                    format!(
+                        "failed to read `{}` while restoring the latest task: {error}",
+                        operation.path
+                    ),
+                )
+            })?;
+            if current != operation.new_text {
+                return Err(protocol_error(
+                    "revert_conflict",
+                    format!(
+                        "Probe cannot safely restore `{}` because the file no longer matches the text it wrote",
+                        operation.path
+                    ),
+                ));
+            }
+            fs::write(&resolved, "").map_err(|error| {
+                protocol_error(
+                    "revert_write_failed",
+                    format!(
+                        "failed to restore `{}` to its previous empty contents: {error}",
+                        operation.path
+                    ),
+                )
+            })?;
+        } else {
+            let current = fs::read_to_string(&resolved).map_err(|error| {
+                protocol_error(
+                    "revert_read_failed",
+                    format!(
+                        "failed to read `{}` while restoring the latest task: {error}",
+                        operation.path
+                    ),
+                )
+            })?;
+            let occurrences = current.matches(operation.new_text.as_str()).count();
+            if occurrences != 1 {
+                return Err(protocol_error(
+                    "revert_conflict",
+                    format!(
+                        "Probe cannot safely restore `{}` because the expected patched text is no longer present exactly once",
+                        operation.path
+                    ),
+                ));
+            }
+            let restored =
+                current.replacen(operation.new_text.as_str(), operation.old_text.as_str(), 1);
+            fs::write(&resolved, restored).map_err(|error| {
+                protocol_error(
+                    "revert_write_failed",
+                    format!(
+                        "failed to write the restored contents for `{}`: {error}",
+                        operation.path
+                    ),
+                )
+            })?;
+        }
+        push_unique_path(&mut reverted_files, operation.path.as_str());
+    }
+    Ok(reverted_files)
+}
+
+fn resolve_revert_workspace_path(
+    base: &Path,
+    requested_path: &str,
+) -> Result<PathBuf, RuntimeProtocolError> {
+    if requested_path.trim().is_empty() {
+        return Err(protocol_error(
+            "revert_invalid_path",
+            String::from("Probe cannot revert a task with an empty recorded path"),
+        ));
+    }
+    let base_dir = if base.is_absolute() {
+        base.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(base)
+    };
+    let mut resolved = base_dir.clone();
+    for component in Path::new(requested_path).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => resolved.push(part),
+            std::path::Component::ParentDir => {
+                if resolved == base_dir {
+                    return Err(protocol_error(
+                        "revert_invalid_path",
+                        format!("path `{requested_path}` escapes the session cwd"),
+                    ));
+                }
+                resolved.pop();
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(protocol_error(
+                    "revert_invalid_path",
+                    format!("path `{requested_path}` must stay relative to the session cwd"),
+                ));
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+fn build_reverted_task_workspace_summary(
+    task_start_turn_index: u64,
+    repo_root: Option<PathBuf>,
+    preexisting_dirty_files: Vec<String>,
+    changed_files: Vec<String>,
+    outside_tracking_dirty_files: Vec<String>,
+) -> TaskWorkspaceSummary {
+    let checkpoint_status = if outside_tracking_dirty_files.is_empty() {
+        TaskCheckpointStatus::Captured
+    } else {
+        TaskCheckpointStatus::Limited
+    };
+    let checkpoint_summary = match checkpoint_status {
+        TaskCheckpointStatus::Captured => format!(
+            "Probe restored the previous contents for {} using the latest task's recorded patch history.",
+            summarize_task_paths(changed_files.as_slice(), 6)
+        ),
+        TaskCheckpointStatus::Limited => format!(
+            "Probe restored {} but observed additional dirty files during the revert, so manual review is still recommended.",
+            summarize_task_paths(changed_files.as_slice(), 6)
+        ),
+        TaskCheckpointStatus::NotCaptured => String::new(),
+    };
+    TaskWorkspaceSummary {
+        task_start_turn_index,
+        status: TaskWorkspaceSummaryStatus::Reverted,
+        changed_files: changed_files.clone(),
+        touched_but_unchanged_files: Vec::new(),
+        preexisting_dirty_files,
+        outside_tracking_dirty_files,
+        repo_root,
+        change_accounting_limited: false,
+        checkpoint: TaskCheckpointSummary {
+            status: checkpoint_status,
+            summary_text: checkpoint_summary,
+        },
+        revertibility: TaskRevertibilitySummary {
+            status: TaskRevertibilityStatus::Unavailable,
+            summary_text: String::from(
+                "The latest task already represents a completed revert, so there is nothing newer for Probe to auto-restore right now.",
+            ),
+        },
+        diff_previews: Vec::new(),
+        summary_text: format!(
+            "This task reverted the previous task in {}.",
+            summarize_task_paths(changed_files.as_slice(), 6)
+        ),
+    }
+}
+
+fn build_reverted_task_receipt(workspace: &TaskWorkspaceSummary) -> TaskFinalReceipt {
+    let mut uncertainty_reasons = Vec::new();
+    if !workspace.outside_tracking_dirty_files.is_empty() {
+        uncertainty_reasons.push(format!(
+            "Additional dirty files were still present after the revert: {}.",
+            summarize_task_paths(workspace.outside_tracking_dirty_files.as_slice(), 3)
+        ));
+    }
+    TaskFinalReceipt {
+        disposition: TaskReceiptDisposition::Succeeded,
+        workspace: workspace.clone(),
+        verification_status: TaskVerificationStatus::NotRun,
+        verification_commands: Vec::new(),
+        uncertainty_reasons: uncertainty_reasons.clone(),
+        summary_text: if uncertainty_reasons.is_empty() {
+            format!(
+                "Reverted the latest task in {}. No validation command was observed after the restore.",
+                summarize_task_paths(workspace.changed_files.as_slice(), 6)
+            )
+        } else {
+            format!(
+                "Reverted the latest task in {}. No validation command was observed after the restore. Remaining uncertainty: {}.",
+                summarize_task_paths(workspace.changed_files.as_slice(), 6),
+                summarize_task_paths(uncertainty_reasons.as_slice(), 2)
+            )
+        },
+    }
+}
+
 fn build_task_workspace_summary(
     transcript: &[TranscriptEvent],
     baseline: &TaskWorkspaceBaseline,
@@ -2902,6 +3476,13 @@ fn build_task_workspace_summary(
         changed_files.is_empty(),
         change_accounting_limited,
     );
+    let checkpoint = build_task_checkpoint_summary(
+        status,
+        baseline,
+        changed_files.as_slice(),
+        outside_tracking_dirty_files.as_slice(),
+        change_accounting_limited,
+    );
     let summary_text = task_workspace_summary_text(
         status,
         changed_files.as_slice(),
@@ -2910,6 +3491,17 @@ fn build_task_workspace_summary(
         outside_tracking_dirty_files.as_slice(),
         change_accounting_limited,
     );
+    let revertibility = build_task_revertibility_summary(
+        transcript,
+        baseline.task_start_turn_index,
+        status,
+        &checkpoint,
+        changed_files.as_slice(),
+        outside_tracking_dirty_files.as_slice(),
+        change_accounting_limited,
+    );
+    let diff_previews =
+        build_task_diff_previews(baseline.repo_root.as_deref(), changed_files.as_slice());
 
     TaskWorkspaceSummary {
         task_start_turn_index: baseline.task_start_turn_index,
@@ -2920,7 +3512,330 @@ fn build_task_workspace_summary(
         outside_tracking_dirty_files,
         repo_root: baseline.repo_root.clone(),
         change_accounting_limited,
+        checkpoint,
+        revertibility,
+        diff_previews,
         summary_text,
+    }
+}
+
+fn build_task_diff_previews(
+    repo_root: Option<&Path>,
+    changed_files: &[String],
+) -> Vec<TaskDiffPreview> {
+    let Some(repo_root) = repo_root else {
+        return Vec::new();
+    };
+    changed_files
+        .iter()
+        .filter_map(|path| build_task_diff_preview(repo_root, path))
+        .collect()
+}
+
+fn build_task_diff_preview(repo_root: &Path, path: &str) -> Option<TaskDiffPreview> {
+    let mut diff_text = git_diff_for_path(repo_root, path);
+    if diff_text.trim().is_empty() {
+        diff_text = git_diff_for_untracked_path(repo_root, path).unwrap_or_default();
+    }
+    if diff_text.trim().is_empty() {
+        return None;
+    }
+    let mut diff_lines = diff_text.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    let truncated = diff_lines.len() > 180;
+    if truncated {
+        diff_lines.truncate(180);
+    }
+    Some(TaskDiffPreview {
+        path: path.to_string(),
+        diff_lines,
+        truncated,
+    })
+}
+
+fn git_diff_for_path(repo_root: &Path, path: &str) -> String {
+    run_git_output(repo_root, &["diff", "--", path]).unwrap_or_default()
+}
+
+fn git_diff_for_untracked_path(repo_root: &Path, path: &str) -> Option<String> {
+    let absolute_path = repo_root.join(path);
+    if !absolute_path.exists() {
+        return None;
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("diff")
+        .arg("--no-index")
+        .arg("--")
+        .arg("/dev/null")
+        .arg(&absolute_path)
+        .output()
+        .ok()?;
+    if !output.status.success() && output.stdout.is_empty() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).into_owned();
+    (!value.trim().is_empty()).then_some(value)
+}
+
+fn build_task_checkpoint_summary(
+    status: TaskWorkspaceSummaryStatus,
+    baseline: &TaskWorkspaceBaseline,
+    changed_files: &[String],
+    outside_tracking_dirty_files: &[String],
+    change_accounting_limited: bool,
+) -> TaskCheckpointSummary {
+    let status = resolve_task_checkpoint_status(
+        status,
+        baseline.repo_root.is_some(),
+        changed_files.is_empty(),
+        outside_tracking_dirty_files.is_empty(),
+        change_accounting_limited,
+    );
+    TaskCheckpointSummary {
+        status,
+        summary_text: task_checkpoint_summary_text(
+            status,
+            changed_files,
+            outside_tracking_dirty_files,
+        ),
+    }
+}
+
+fn resolve_task_checkpoint_status(
+    workspace_status: TaskWorkspaceSummaryStatus,
+    repo_root_available: bool,
+    changed_files_empty: bool,
+    outside_tracking_dirty_files_empty: bool,
+    change_accounting_limited: bool,
+) -> TaskCheckpointStatus {
+    if changed_files_empty {
+        return if workspace_status == TaskWorkspaceSummaryStatus::ChangeAccountingLimited {
+            TaskCheckpointStatus::Limited
+        } else {
+            TaskCheckpointStatus::NotCaptured
+        };
+    }
+    if !repo_root_available || change_accounting_limited || !outside_tracking_dirty_files_empty {
+        TaskCheckpointStatus::Limited
+    } else {
+        TaskCheckpointStatus::Captured
+    }
+}
+
+fn task_checkpoint_summary_text(
+    status: TaskCheckpointStatus,
+    changed_files: &[String],
+    outside_tracking_dirty_files: &[String],
+) -> String {
+    match status {
+        TaskCheckpointStatus::NotCaptured => {
+            String::from("No pre-edit checkpoint was needed because no repo changes landed.")
+        }
+        TaskCheckpointStatus::Captured => format!(
+            "Probe captured a pre-edit checkpoint before changes landed in {}.",
+            summarize_task_paths(changed_files, 6)
+        ),
+        TaskCheckpointStatus::Limited => {
+            if changed_files.is_empty() {
+                String::from(
+                    "Probe observed write-capable work but cannot confirm a complete pre-edit checkpoint for this task.",
+                )
+            } else if outside_tracking_dirty_files.is_empty() {
+                format!(
+                    "Probe captured only a limited pre-edit checkpoint for changes in {}.",
+                    summarize_task_paths(changed_files, 6)
+                )
+            } else {
+                format!(
+                    "Probe captured only a limited pre-edit checkpoint for {} because additional dirty files appeared outside tracked tool results: {}.",
+                    summarize_task_paths(changed_files, 6),
+                    summarize_task_paths(outside_tracking_dirty_files, 6)
+                )
+            }
+        }
+    }
+}
+
+fn build_task_revertibility_summary(
+    transcript: &[TranscriptEvent],
+    task_start_turn_index: u64,
+    status: TaskWorkspaceSummaryStatus,
+    checkpoint: &TaskCheckpointSummary,
+    changed_files: &[String],
+    outside_tracking_dirty_files: &[String],
+    change_accounting_limited: bool,
+) -> TaskRevertibilitySummary {
+    let revert_blocker =
+        detect_revert_support_blocker(transcript, task_start_turn_index, changed_files);
+    let mut status = resolve_task_revertibility_status(
+        status,
+        checkpoint.status,
+        changed_files.is_empty(),
+        outside_tracking_dirty_files.is_empty(),
+        change_accounting_limited,
+    );
+    if revert_blocker.is_some() && !changed_files.is_empty() {
+        status = TaskRevertibilityStatus::Limited;
+    }
+    TaskRevertibilitySummary {
+        status,
+        summary_text: revert_blocker.unwrap_or_else(|| {
+            task_revertibility_summary_text(status, changed_files, outside_tracking_dirty_files)
+        }),
+    }
+}
+
+fn detect_revert_support_blocker(
+    transcript: &[TranscriptEvent],
+    task_start_turn_index: u64,
+    changed_files: &[String],
+) -> Option<String> {
+    let mut apply_patch_calls = BTreeMap::<String, serde_json::Value>::new();
+    for event in transcript
+        .iter()
+        .filter(|event| event.turn.index >= task_start_turn_index)
+    {
+        for item in &event.turn.items {
+            if item.kind == TranscriptItemKind::ToolCall
+                && item.name.as_deref() == Some("apply_patch")
+                && let (Some(call_id), Some(arguments)) =
+                    (item.tool_call_id.as_ref(), item.arguments.as_ref())
+            {
+                apply_patch_calls.insert(call_id.clone(), arguments.clone());
+                continue;
+            }
+
+            if item.kind != TranscriptItemKind::ToolResult || !tool_result_applied(item) {
+                continue;
+            }
+            let Some(tool_execution) = item.tool_execution.as_ref() else {
+                continue;
+            };
+            if !matches!(
+                tool_execution.risk_class,
+                ToolRiskClass::Write | ToolRiskClass::Network | ToolRiskClass::Destructive
+            ) {
+                continue;
+            }
+            let Some(tool_name) = item.name.as_deref() else {
+                return Some(String::from(
+                    "Probe is missing the tool name for part of the latest task, so auto-revert is not safe yet.",
+                ));
+            };
+            if tool_name != "apply_patch" {
+                return Some(format!(
+                    "The latest task used `{tool_name}`, so Probe cannot auto-revert it safely yet."
+                ));
+            }
+            let Some(call_id) = item.tool_call_id.as_ref() else {
+                return Some(String::from(
+                    "Probe is missing the apply_patch call id needed for auto-revert.",
+                ));
+            };
+            let Some(arguments) = apply_patch_calls.get(call_id) else {
+                return Some(String::from(
+                    "Probe is missing the recorded apply_patch arguments needed for auto-revert.",
+                ));
+            };
+            let path = arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("[unknown path]");
+            let replace_all = arguments
+                .get("replace_all")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if replace_all {
+                return Some(format!(
+                    "The latest task edited `{path}` with replace_all, so Probe will not auto-revert it yet."
+                ));
+            }
+            if !changed_files.iter().any(|candidate| candidate == path) {
+                return Some(format!(
+                    "Probe's latest task summary is missing `{path}`, so auto-revert is not safe yet."
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn resolve_task_revertibility_status(
+    workspace_status: TaskWorkspaceSummaryStatus,
+    checkpoint_status: TaskCheckpointStatus,
+    changed_files_empty: bool,
+    outside_tracking_dirty_files_empty: bool,
+    change_accounting_limited: bool,
+) -> TaskRevertibilityStatus {
+    if matches!(
+        workspace_status,
+        TaskWorkspaceSummaryStatus::NoRepoChanges
+            | TaskWorkspaceSummaryStatus::PendingApproval
+            | TaskWorkspaceSummaryStatus::Reverted
+    ) {
+        return TaskRevertibilityStatus::Unavailable;
+    }
+    if matches!(
+        workspace_status,
+        TaskWorkspaceSummaryStatus::ChangeAccountingLimited
+    ) || change_accounting_limited
+    {
+        return TaskRevertibilityStatus::Limited;
+    }
+    if changed_files_empty {
+        return TaskRevertibilityStatus::Unavailable;
+    }
+    match checkpoint_status {
+        TaskCheckpointStatus::Captured if outside_tracking_dirty_files_empty => {
+            TaskRevertibilityStatus::Exact
+        }
+        TaskCheckpointStatus::Captured | TaskCheckpointStatus::Limited => {
+            TaskRevertibilityStatus::Limited
+        }
+        TaskCheckpointStatus::NotCaptured => TaskRevertibilityStatus::Unavailable,
+    }
+}
+
+fn task_revertibility_summary_text(
+    status: TaskRevertibilityStatus,
+    changed_files: &[String],
+    outside_tracking_dirty_files: &[String],
+) -> String {
+    match status {
+        TaskRevertibilityStatus::Unavailable => {
+            if changed_files.is_empty() {
+                String::from(
+                    "No applied repo changes are currently available for automated revert.",
+                )
+            } else {
+                String::from(
+                    "Probe does not currently have enough checkpoint coverage to promise a safe automated revert for this task.",
+                )
+            }
+        }
+        TaskRevertibilityStatus::Exact => format!(
+            "Probe has enough checkpoint coverage to attempt an exact restore for {}.",
+            summarize_task_paths(changed_files, 6)
+        ),
+        TaskRevertibilityStatus::Limited => {
+            if changed_files.is_empty() {
+                String::from(
+                    "Probe observed write-capable work but can only offer limited revert guidance, so manual review is still required.",
+                )
+            } else if outside_tracking_dirty_files.is_empty() {
+                format!(
+                    "Probe may be able to help revert {} later, but checkpoint coverage is limited and manual review is still required.",
+                    summarize_task_paths(changed_files, 6)
+                )
+            } else {
+                format!(
+                    "Probe may be able to help revert {}, but additional dirty files appeared outside tracked tool results: {}. Manual review is still required.",
+                    summarize_task_paths(changed_files, 6),
+                    summarize_task_paths(outside_tracking_dirty_files, 6)
+                )
+            }
+        }
     }
 }
 
@@ -2965,6 +3880,7 @@ fn resolve_task_workspace_summary_status(
                 TaskWorkspaceSummaryStatus::Changed
             }
         }
+        TaskWorkspaceSummaryStatus::Reverted => TaskWorkspaceSummaryStatus::Reverted,
         TaskWorkspaceSummaryStatus::NoRepoChanges
         | TaskWorkspaceSummaryStatus::ChangeAccountingLimited => requested_status,
     }
@@ -2985,6 +3901,10 @@ fn task_workspace_summary_text(
         TaskWorkspaceSummaryStatus::Changed => format!(
             "This task changed {} file(s): {}.",
             changed_files.len(),
+            summarize_task_paths(changed_files, 6)
+        ),
+        TaskWorkspaceSummaryStatus::Reverted => format!(
+            "This task reverted the previous task in {}.",
             summarize_task_paths(changed_files, 6)
         ),
         TaskWorkspaceSummaryStatus::PartialChangesBeforeFailure => format!(
@@ -3174,6 +4094,11 @@ fn task_receipt_uncertainty_reasons(
             summarize_task_paths(workspace.outside_tracking_dirty_files.as_slice(), 3)
         ));
     }
+    if workspace.checkpoint.status == TaskCheckpointStatus::Limited {
+        reasons.push(String::from(
+            "Probe's pre-edit checkpoint coverage for this task is limited, so any later revert flow may require manual review.",
+        ));
+    }
     if workspace.change_accounting_limited {
         reasons.push(String::from(
             "Changed-file accounting is limited because write-capable shell commands ran without file-level tracking.",
@@ -3263,6 +4188,7 @@ fn task_receipt_workspace_sentence(
                 "Task was stopped after write-capable shell work, but Probe cannot confirm whether repo changes landed.",
             )
         }
+        (_, TaskWorkspaceSummaryStatus::Reverted) => workspace.summary_text.clone(),
         (TaskReceiptDisposition::Stopped, _) => {
             if workspace.changed_files.is_empty() {
                 String::from("Task was stopped before repo changes landed.")
@@ -5660,6 +6586,402 @@ fn resolve_workspace_state(
     Some(workspace_state)
 }
 
+fn load_session_mcp_state(probe_home: &Path) -> SessionMcpState {
+    let path = probe_home.join(MCP_REGISTRY_RELATIVE_PATH);
+    if !path.exists() {
+        return SessionMcpState::default();
+    }
+    match fs::read_to_string(&path) {
+        Ok(body) => match serde_json::from_str::<StoredMcpRegistryFile>(&body) {
+            Ok(registry) => SessionMcpState {
+                load_error: None,
+                servers: registry
+                    .servers
+                    .into_iter()
+                    .filter(|server| server.enabled)
+                    .map(session_mcp_server_from_record)
+                    .collect(),
+            },
+            Err(error) => SessionMcpState {
+                load_error: Some(format!(
+                    "Probe could not read {}: {}",
+                    path.display(),
+                    error
+                )),
+                servers: Vec::new(),
+            },
+        },
+        Err(error) => SessionMcpState {
+            load_error: Some(format!(
+                "Probe could not read {}: {}",
+                path.display(),
+                error
+            )),
+            servers: Vec::new(),
+        },
+    }
+}
+
+fn session_mcp_server_from_record(server: StoredMcpServerRecord) -> SessionMcpServer {
+    let mut snapshot = SessionMcpServer {
+        id: server.id,
+        name: server.name,
+        enabled: server.enabled,
+        source: match server.source {
+            StoredMcpServerSource::ManualLaunch => SessionMcpServerSource::ManualLaunch,
+            StoredMcpServerSource::ProviderCommandRecipe => {
+                SessionMcpServerSource::ProviderCommandRecipe
+            }
+        },
+        transport: server.transport.as_ref().map(|transport| match transport {
+            StoredMcpServerTransport::Stdio => SessionMcpServerTransport::Stdio,
+            StoredMcpServerTransport::Http => SessionMcpServerTransport::Http,
+        }),
+        target: server.target.clone(),
+        provider_setup_command: server.provider_setup_command.clone(),
+        provider_hint: server.provider_hint.clone(),
+        client_hint: server.client_hint.clone(),
+        connection_status: None,
+        connection_note: None,
+        discovered_tools: Vec::new(),
+    };
+
+    match (
+        &server.source,
+        server.transport.as_ref(),
+        server.target.as_deref(),
+    ) {
+        (
+            StoredMcpServerSource::ManualLaunch,
+            Some(StoredMcpServerTransport::Stdio),
+            Some(target),
+        ) => {
+            let (status, note, tools) = inspect_stdio_mcp_server(target);
+            snapshot.connection_status = Some(status);
+            snapshot.connection_note = note;
+            snapshot.discovered_tools = tools;
+        }
+        (StoredMcpServerSource::ManualLaunch, Some(StoredMcpServerTransport::Http), Some(_)) => {
+            snapshot.connection_status = Some(SessionMcpConnectionStatus::Unsupported);
+            snapshot.connection_note = Some(String::from(
+                "HTTP MCP mounting is not implemented yet; this entry will not attach until that transport ships.",
+            ));
+        }
+        (StoredMcpServerSource::ProviderCommandRecipe, _, _) => {
+            snapshot.connection_status = Some(SessionMcpConnectionStatus::Unsupported);
+            snapshot.connection_note = Some(String::from(
+                "Provider-command recipes are saved, but Probe cannot launch them as runtime MCP servers yet.",
+            ));
+        }
+        (StoredMcpServerSource::ManualLaunch, _, _) => {
+            snapshot.connection_status = Some(SessionMcpConnectionStatus::Failed);
+            snapshot.connection_note = Some(String::from(
+                "This MCP entry is missing the launch details Probe needs to attach it.",
+            ));
+        }
+    }
+
+    snapshot
+}
+
+fn inspect_stdio_mcp_server(
+    target: &str,
+) -> (
+    SessionMcpConnectionStatus,
+    Option<String>,
+    Vec<SessionMcpTool>,
+) {
+    let mut child = match Command::new("/bin/sh")
+        .arg("-lc")
+        .arg(target)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return (
+                SessionMcpConnectionStatus::Failed,
+                Some(format!(
+                    "Probe could not launch the stdio MCP server: {error}"
+                )),
+                Vec::new(),
+            );
+        }
+    };
+
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return (
+            SessionMcpConnectionStatus::Failed,
+            Some(String::from(
+                "Probe launched the stdio MCP server, but stdin was unavailable.",
+            )),
+            Vec::new(),
+        );
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return (
+            SessionMcpConnectionStatus::Failed,
+            Some(String::from(
+                "Probe launched the stdio MCP server, but stdout was unavailable.",
+            )),
+            Vec::new(),
+        );
+    };
+
+    let (tx, rx) = mpsc::channel::<Result<serde_json::Value, String>>();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            match read_mcp_framed_message(&mut reader) {
+                Ok(Some(message)) => {
+                    if tx.send(Ok(message)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = tx.send(Err(error.to_string()));
+                    break;
+                }
+            }
+        }
+    });
+
+    if let Err(error) = write_mcp_framed_message(
+        &mut stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "probe",
+                    "version": "0.1.0"
+                }
+            }
+        }),
+    ) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return (
+            SessionMcpConnectionStatus::Failed,
+            Some(format!(
+                "Probe could not send the MCP initialize request: {error}"
+            )),
+            Vec::new(),
+        );
+    }
+
+    let initialize = match rx.recv_timeout(MCP_STDIO_STARTUP_TIMEOUT) {
+        Ok(Ok(message)) => message,
+        Ok(Err(error)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return (
+                SessionMcpConnectionStatus::Failed,
+                Some(format!(
+                    "Probe could not read the MCP initialize response: {error}"
+                )),
+                Vec::new(),
+            );
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return (
+                SessionMcpConnectionStatus::Failed,
+                Some(String::from(
+                    "The stdio MCP server did not answer Probe's initialize request in time.",
+                )),
+                Vec::new(),
+            );
+        }
+    };
+
+    if let Some(error) = initialize.get("error") {
+        let _ = child.kill();
+        let _ = child.wait();
+        return (
+            SessionMcpConnectionStatus::Failed,
+            Some(format!(
+                "The stdio MCP server rejected initialization: {}",
+                compact_json_value(error)
+            )),
+            Vec::new(),
+        );
+    }
+
+    let _ = write_mcp_framed_message(
+        &mut stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+    );
+    if let Err(error) = write_mcp_framed_message(
+        &mut stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }),
+    ) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return (
+            SessionMcpConnectionStatus::Failed,
+            Some(format!(
+                "Probe initialized the MCP server, but tools/list failed to send: {error}"
+            )),
+            Vec::new(),
+        );
+    }
+
+    let tools_message = match rx.recv_timeout(MCP_STDIO_STARTUP_TIMEOUT) {
+        Ok(Ok(message)) => message,
+        Ok(Err(error)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return (
+                SessionMcpConnectionStatus::Failed,
+                Some(format!(
+                    "Probe could not read the MCP tool inventory response: {error}"
+                )),
+                Vec::new(),
+            );
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return (
+                SessionMcpConnectionStatus::Failed,
+                Some(String::from(
+                    "The stdio MCP server initialized, but Probe did not receive a tools/list response in time.",
+                )),
+                Vec::new(),
+            );
+        }
+    };
+
+    let tools = if let Some(error) = tools_message.get("error") {
+        let _ = child.kill();
+        let _ = child.wait();
+        return (
+            SessionMcpConnectionStatus::Failed,
+            Some(format!(
+                "The MCP server answered initialize, but tools/list failed: {}",
+                compact_json_value(error)
+            )),
+            Vec::new(),
+        );
+    } else {
+        extract_mcp_tools_from_message(&tools_message)
+    };
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    (
+        SessionMcpConnectionStatus::Connected,
+        Some(format!(
+            "Attached at session start and discovered {} tool(s).",
+            tools.len()
+        )),
+        tools,
+    )
+}
+
+fn write_mcp_framed_message(
+    writer: &mut impl Write,
+    message: &serde_json::Value,
+) -> io::Result<()> {
+    let body = serde_json::to_vec(message)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
+    writer.write_all(&body)?;
+    writer.flush()
+}
+
+fn read_mcp_framed_message(reader: &mut impl BufRead) -> io::Result<Option<serde_json::Value>> {
+    let mut content_length = None;
+    loop {
+        let mut line = String::new();
+        let bytes = reader.read_line(&mut line)?;
+        if bytes == 0 {
+            return if content_length.is_some() {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unexpected EOF while reading MCP frame headers",
+                ))
+            } else {
+                Ok(None)
+            };
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("Content-Length:") {
+            let parsed = rest.trim().parse::<usize>().map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid MCP content length: {error}"),
+                )
+            })?;
+            content_length = Some(parsed);
+        }
+    }
+
+    let Some(content_length) = content_length else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing Content-Length header in MCP frame",
+        ));
+    };
+    let mut body = vec![0_u8; content_length];
+    reader.read_exact(&mut body)?;
+    serde_json::from_slice(&body)
+        .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn extract_mcp_tools_from_message(message: &serde_json::Value) -> Vec<SessionMcpTool> {
+    message
+        .get("result")
+        .and_then(|result| result.get("tools"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| {
+            let name = tool.get("name")?.as_str()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some(SessionMcpTool {
+                name: name.to_string(),
+                description: tool
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                input_schema: tool.get("inputSchema").cloned(),
+            })
+        })
+        .collect()
+}
+
+fn compact_json_value(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| String::from("unavailable error payload"))
+}
+
 fn validate_session_mounts(
     mounted_refs: Vec<SessionMountRef>,
 ) -> Result<Vec<SessionMountRef>, RuntimeProtocolError> {
@@ -6666,21 +7988,28 @@ fn runtime_error_to_protocol(error: RuntimeError) -> RuntimeProtocolError {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
 
+    use probe_core::session_store::{NewItem, NewSession};
     use probe_protocol::backend::{BackendKind, PrefixCacheMode, ServerAttachMode};
     use probe_protocol::runtime::{ToolApprovalRecipe, ToolChoice, ToolDeniedAction};
     use probe_protocol::session::{
-        ItemId, SessionId, SessionTurn, TaskReceiptDisposition, TaskVerificationStatus,
+        ItemId, SessionId, SessionTurn, TaskCheckpointStatus, TaskCheckpointSummary,
+        TaskFinalReceipt, TaskReceiptDisposition, TaskRevertibilityStatus,
+        TaskRevertibilitySummary, TaskVerificationStatus, TaskWorkspaceSummary,
         TaskWorkspaceSummaryStatus, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision,
         ToolRiskClass, TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnId,
     };
+    use serde_json::json;
 
     use super::{
         ProbeServerCore, ProbeToolChoice, TaskWorkspaceBaseline, ToolLoopRecipe, ToolSetKind,
         approval_from_recipe, build_task_final_receipt, build_task_workspace_summary,
-        dirty_worktree_paths, normalize_session_title, resolve_git_repo_root,
-        tool_choice_from_recipe, tool_loop_from_recipe,
+        dirty_worktree_paths, load_session_mcp_state, normalize_session_title,
+        resolve_git_repo_root, revert_latest_task_in_session, tool_choice_from_recipe,
+        tool_loop_from_recipe,
     };
     use tempfile::tempdir;
 
@@ -6779,6 +8108,54 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn write_fake_stdio_mcp_server_script(path: &Path, tools: &[(&str, &str)]) {
+        let initialize_body = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {"tools": {}},
+                "serverInfo": {
+                    "name": "fake-mcp",
+                    "version": "1.0.0"
+                }
+            }
+        }))
+        .expect("serialize initialize body");
+        let tools_body = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "tools": tools
+                    .iter()
+                    .map(|(name, description)| json!({
+                        "name": name,
+                        "description": description,
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string" }
+                            }
+                        }
+                    }))
+                    .collect::<Vec<_>>()
+            }
+        }))
+        .expect("serialize tools body");
+        let script = format!(
+            "#!/bin/sh\ncat >/dev/null &\nprintf 'Content-Length: %s\\r\\n\\r\\n%s' '{init_len}' '{init_body}'\nprintf 'Content-Length: %s\\r\\n\\r\\n%s' '{tools_len}' '{tools_body}'\nsleep 1\n",
+            init_len = initialize_body.len(),
+            init_body = initialize_body,
+            tools_len = tools_body.len(),
+            tools_body = tools_body,
+        );
+        fs::write(path, script).expect("write fake mcp server script");
+        let mut permissions = fs::metadata(path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("set execute permissions");
+    }
+
     #[test]
     fn session_titles_fall_back_when_blank() {
         assert_eq!(normalize_session_title(None), "Probe Session");
@@ -6841,6 +8218,96 @@ mod tests {
     fn server_constructs_with_detected_runtime() {
         let runtime = probe_core::runtime::ProbeRuntime::new("/tmp/probe-server-test");
         let _server = ProbeServerCore::new(runtime);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_session_mcp_state_snapshots_enabled_entries() {
+        let temp = tempdir().expect("tempdir");
+        let probe_home = temp.path().join("probe-home");
+        fs::create_dir_all(probe_home.join("mcp")).expect("create mcp dir");
+        #[cfg(unix)]
+        let server_script = temp.path().join("fake-mcp-server.sh");
+        #[cfg(unix)]
+        write_fake_stdio_mcp_server_script(
+            &server_script,
+            &[
+                ("filesystem/read", "Read files"),
+                ("filesystem/list", "List files"),
+            ],
+        );
+        fs::write(
+            probe_home.join("mcp/servers.json"),
+            serde_json::to_string_pretty(&json!({
+                "servers": [
+                    {
+                        "id": "filesystem",
+                        "name": "Filesystem",
+                        "enabled": true,
+                        "source": "manual_launch",
+                        "transport": "stdio",
+                        "target": format!("{}", server_script.display())
+                    },
+                    {
+                        "id": "disabled-recipe",
+                        "name": "Disabled Recipe",
+                        "enabled": false,
+                        "source": "provider_command_recipe",
+                        "provider_setup_command": "pnpm dlx shadcn@latest mcp init --client codex",
+                        "client_hint": "codex"
+                    }
+                ]
+            }))
+            .expect("serialize registry"),
+        )
+        .expect("write registry");
+
+        let mcp_state = load_session_mcp_state(&probe_home);
+        assert!(mcp_state.load_error.is_none());
+        assert_eq!(mcp_state.servers.len(), 1);
+        assert_eq!(mcp_state.servers[0].id, "filesystem");
+        assert_eq!(mcp_state.servers[0].name, "Filesystem");
+        assert_eq!(
+            mcp_state.servers[0].connection_status,
+            Some(probe_protocol::session::SessionMcpConnectionStatus::Connected)
+        );
+        assert_eq!(
+            mcp_state.servers[0].transport,
+            Some(probe_protocol::session::SessionMcpServerTransport::Stdio)
+        );
+        assert_eq!(mcp_state.servers[0].discovered_tools.len(), 2);
+        assert_eq!(
+            mcp_state.servers[0].discovered_tools[0].name,
+            "filesystem/read"
+        );
+        assert_eq!(
+            mcp_state.servers[0].discovered_tools[0].input_schema,
+            Some(json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                }
+            }))
+        );
+        assert_eq!(
+            mcp_state.servers[0].discovered_tools[1].name,
+            "filesystem/list"
+        );
+    }
+
+    #[test]
+    fn load_session_mcp_state_surfaces_malformed_registry_errors() {
+        let temp = tempdir().expect("tempdir");
+        let probe_home = temp.path().join("probe-home");
+        fs::create_dir_all(probe_home.join("mcp")).expect("create mcp dir");
+        fs::write(probe_home.join("mcp/servers.json"), "{ not valid json")
+            .expect("write malformed registry");
+
+        let mcp_state = load_session_mcp_state(&probe_home);
+        assert!(mcp_state.servers.is_empty());
+        let error = mcp_state.load_error.expect("load error should be present");
+        assert!(error.contains("Probe could not read"), "{error}");
+        assert!(error.contains("servers.json"), "{error}");
     }
 
     #[test]
@@ -6930,6 +8397,11 @@ mod tests {
             vec![String::from("Cargo.toml")]
         );
         assert!(summary.outside_tracking_dirty_files.is_empty());
+        assert_eq!(summary.checkpoint.status, TaskCheckpointStatus::Captured);
+        assert_eq!(
+            summary.revertibility.status,
+            TaskRevertibilityStatus::Limited
+        );
         assert!(
             summary
                 .summary_text
@@ -6944,6 +8416,73 @@ mod tests {
             summary
                 .summary_text
                 .contains("Dirty before task start: Cargo.toml.")
+        );
+    }
+
+    #[test]
+    fn task_workspace_summary_captures_diff_previews_from_git_state() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path();
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .arg("-c")
+            .arg("user.name=Probe")
+            .arg("-c")
+            .arg("user.email=probe@example.com")
+            .arg("commit")
+            .arg("--allow-empty")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo)
+            .output()
+            .expect("git commit");
+        std::fs::create_dir_all(repo.join("src")).expect("src dir");
+        std::fs::write(
+            repo.join("src/lib.rs"),
+            "pub fn greeting() -> &'static str {\n    \"hello from probe\"\n}\n",
+        )
+        .expect("write changed file");
+
+        let baseline = TaskWorkspaceBaseline {
+            task_start_turn_index: 3,
+            repo_root: Some(repo.to_path_buf()),
+            preexisting_dirty_files: Vec::new(),
+        };
+        let transcript = vec![tool_result_event(
+            3,
+            "apply_patch",
+            ToolRiskClass::Write,
+            &["src/lib.rs"],
+            &["src/lib.rs"],
+        )];
+
+        let summary = build_task_workspace_summary(
+            transcript.as_slice(),
+            &baseline,
+            TaskWorkspaceSummaryStatus::Changed,
+            &[],
+        );
+
+        assert_eq!(summary.diff_previews.len(), 1);
+        let preview = &summary.diff_previews[0];
+        assert_eq!(preview.path, "src/lib.rs");
+        assert!(!preview.truncated);
+        assert!(
+            preview
+                .diff_lines
+                .iter()
+                .any(|line| line.contains("src/lib.rs"))
+        );
+        assert!(preview.diff_lines.iter().any(|line| line.contains("+++")));
+        assert!(
+            preview
+                .diff_lines
+                .iter()
+                .any(|line| line == "+pub fn greeting() -> &'static str {")
         );
     }
 
@@ -6975,6 +8514,11 @@ mod tests {
         );
         assert!(summary.changed_files.is_empty());
         assert!(summary.change_accounting_limited);
+        assert_eq!(summary.checkpoint.status, TaskCheckpointStatus::Limited);
+        assert_eq!(
+            summary.revertibility.status,
+            TaskRevertibilityStatus::Limited
+        );
         assert!(
             summary
                 .summary_text
@@ -7010,6 +8554,11 @@ mod tests {
         assert_eq!(summary.status, TaskWorkspaceSummaryStatus::NoRepoChanges);
         assert!(summary.changed_files.is_empty());
         assert!(summary.touched_but_unchanged_files.is_empty());
+        assert_eq!(summary.checkpoint.status, TaskCheckpointStatus::NotCaptured);
+        assert_eq!(
+            summary.revertibility.status,
+            TaskRevertibilityStatus::Unavailable
+        );
         assert_eq!(
             summary.summary_text,
             "No repo changes were made by this task."
@@ -7046,9 +8595,381 @@ mod tests {
             summary.outside_tracking_dirty_files,
             vec![String::from("generated/schema.json")]
         );
+        assert_eq!(summary.checkpoint.status, TaskCheckpointStatus::Limited);
+        assert_eq!(
+            summary.revertibility.status,
+            TaskRevertibilityStatus::Limited
+        );
         assert!(summary.summary_text.contains(
             "Additional dirty files appeared during the task outside tracked tool results: generated/schema.json."
         ));
+    }
+
+    #[test]
+    fn task_workspace_summary_marks_created_files_as_exactly_revertable_when_tracked() {
+        let baseline = TaskWorkspaceBaseline {
+            task_start_turn_index: 4,
+            repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
+            preexisting_dirty_files: Vec::new(),
+        };
+        let transcript = vec![
+            TranscriptEvent {
+                session_id: SessionId::new("sess_test"),
+                turn: SessionTurn {
+                    id: TurnId(4),
+                    index: 4,
+                    started_at_ms: 4,
+                    completed_at_ms: Some(4),
+                    observability: None,
+                    backend_receipt: None,
+                    items: vec![TranscriptItem {
+                        id: ItemId::new("item_create_call"),
+                        turn_id: TurnId(4),
+                        sequence: 0,
+                        kind: TranscriptItemKind::ToolCall,
+                        text: String::from(
+                            r##"{"path":"example.md","old_text":"","new_text":"# Example\n","create_if_missing":true}"##,
+                        ),
+                        name: Some(String::from("apply_patch")),
+                        tool_call_id: Some(String::from("call_create")),
+                        arguments: Some(json!({
+                            "path": "example.md",
+                            "old_text": "",
+                            "new_text": "# Example\n",
+                            "create_if_missing": true
+                        })),
+                        tool_execution: None,
+                    }],
+                },
+            },
+            tool_result_event(
+                5,
+                "apply_patch",
+                ToolRiskClass::Write,
+                &["example.md"],
+                &["example.md"],
+            ),
+        ];
+
+        let mut transcript = transcript;
+        transcript[1].turn.items[0].tool_call_id = Some(String::from("call_create"));
+
+        let summary = build_task_workspace_summary(
+            transcript.as_slice(),
+            &baseline,
+            TaskWorkspaceSummaryStatus::Changed,
+            &[],
+        );
+
+        assert_eq!(summary.revertibility.status, TaskRevertibilityStatus::Exact);
+        assert!(
+            summary
+                .revertibility
+                .summary_text
+                .contains("Probe has enough checkpoint coverage"),
+            "{}",
+            summary.revertibility.summary_text
+        );
+    }
+
+    #[test]
+    fn revert_latest_task_in_session_restores_exact_apply_patch_edits() {
+        let temp = tempdir().expect("tempdir");
+        let probe_home = temp.path().join("probe-home");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("src")).expect("workspace layout");
+        let file_path = workspace.join("src/lib.rs");
+        std::fs::write(&file_path, "hello probe\n").expect("write patched file");
+
+        let runtime = probe_core::runtime::ProbeRuntime::new(&probe_home);
+        let session = runtime
+            .session_store()
+            .create_session_with(NewSession::new("revert test", &workspace))
+            .expect("create session");
+        runtime
+            .session_store()
+            .append_turn(
+                &session.id,
+                &[NewItem::tool_call(
+                    "apply_patch",
+                    "call_patch_1",
+                    json!({
+                        "path": "src/lib.rs",
+                        "old_text": "hello world\n",
+                        "new_text": "hello probe\n",
+                    }),
+                )],
+            )
+            .expect("append tool call");
+        runtime
+            .session_store()
+            .append_turn(
+                &session.id,
+                &[NewItem::tool_result(
+                    "apply_patch",
+                    "call_patch_1",
+                    r#"{"ok":true}"#,
+                    ToolExecutionRecord {
+                        risk_class: ToolRiskClass::Write,
+                        policy_decision: ToolPolicyDecision::Approved,
+                        approval_state: ToolApprovalState::Approved,
+                        command: None,
+                        exit_code: Some(0),
+                        timed_out: None,
+                        truncated: None,
+                        bytes_returned: None,
+                        files_touched: vec![String::from("src/lib.rs")],
+                        files_changed: vec![String::from("src/lib.rs")],
+                        reason: None,
+                    },
+                )],
+            )
+            .expect("append tool result");
+
+        let mut metadata = runtime
+            .session_store()
+            .read_metadata(&session.id)
+            .expect("read metadata");
+        let workspace_summary = TaskWorkspaceSummary {
+            task_start_turn_index: 0,
+            status: TaskWorkspaceSummaryStatus::Changed,
+            changed_files: vec![String::from("src/lib.rs")],
+            touched_but_unchanged_files: Vec::new(),
+            preexisting_dirty_files: Vec::new(),
+            outside_tracking_dirty_files: Vec::new(),
+            repo_root: Some(workspace.clone()),
+            change_accounting_limited: false,
+            checkpoint: TaskCheckpointSummary {
+                status: TaskCheckpointStatus::Captured,
+                summary_text: String::from("checkpoint captured"),
+            },
+            revertibility: TaskRevertibilitySummary {
+                status: TaskRevertibilityStatus::Exact,
+                summary_text: String::from("exact restore available"),
+            },
+            diff_previews: Vec::new(),
+            summary_text: String::from("This task changed 1 file(s): src/lib.rs."),
+        };
+        metadata.latest_task_workspace_summary = Some(workspace_summary.clone());
+        metadata.latest_task_receipt = Some(TaskFinalReceipt {
+            disposition: TaskReceiptDisposition::Succeeded,
+            workspace: workspace_summary,
+            verification_status: TaskVerificationStatus::NotRun,
+            verification_commands: Vec::new(),
+            uncertainty_reasons: Vec::new(),
+            summary_text: String::from("applied src/lib.rs"),
+        });
+        runtime
+            .session_store()
+            .replace_metadata(metadata)
+            .expect("store metadata");
+
+        let reverted_files =
+            revert_latest_task_in_session(&runtime, &session.id).expect("revert latest task");
+
+        assert_eq!(reverted_files, vec![String::from("src/lib.rs")]);
+        assert_eq!(
+            std::fs::read_to_string(&file_path).expect("read restored file"),
+            "hello world\n"
+        );
+        let updated = runtime
+            .session_store()
+            .read_metadata(&session.id)
+            .expect("read updated metadata");
+        let receipt = updated
+            .latest_task_receipt
+            .expect("revert task receipt should exist");
+        assert_eq!(
+            receipt.workspace.status,
+            TaskWorkspaceSummaryStatus::Reverted
+        );
+        assert!(receipt.summary_text.contains("Reverted the latest task"));
+    }
+
+    #[test]
+    fn revert_latest_task_in_session_removes_exact_created_files() {
+        let temp = tempdir().expect("tempdir");
+        let probe_home = temp.path().join("probe-home");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace layout");
+        let file_path = workspace.join("notes.md");
+        std::fs::write(&file_path, "# Placeholder\n").expect("write created file");
+
+        let runtime = probe_core::runtime::ProbeRuntime::new(&probe_home);
+        let session = runtime
+            .session_store()
+            .create_session_with(NewSession::new("revert test", &workspace))
+            .expect("create session");
+        runtime
+            .session_store()
+            .append_turn(
+                &session.id,
+                &[NewItem::tool_call(
+                    "apply_patch",
+                    "call_patch_create",
+                    json!({
+                        "path": "notes.md",
+                        "old_text": "",
+                        "new_text": "# Placeholder\n",
+                        "create_if_missing": true,
+                    }),
+                )],
+            )
+            .expect("append tool call");
+        runtime
+            .session_store()
+            .append_turn(
+                &session.id,
+                &[NewItem::tool_result(
+                    "apply_patch",
+                    "call_patch_create",
+                    r#"{"ok":true}"#,
+                    ToolExecutionRecord {
+                        risk_class: ToolRiskClass::Write,
+                        policy_decision: ToolPolicyDecision::Approved,
+                        approval_state: ToolApprovalState::Approved,
+                        command: None,
+                        exit_code: Some(0),
+                        timed_out: None,
+                        truncated: None,
+                        bytes_returned: None,
+                        files_touched: vec![String::from("notes.md")],
+                        files_changed: vec![String::from("notes.md")],
+                        reason: None,
+                    },
+                )],
+            )
+            .expect("append tool result");
+
+        let mut metadata = runtime
+            .session_store()
+            .read_metadata(&session.id)
+            .expect("read metadata");
+        metadata.latest_task_workspace_summary = Some(TaskWorkspaceSummary {
+            task_start_turn_index: 0,
+            status: TaskWorkspaceSummaryStatus::Changed,
+            changed_files: vec![String::from("notes.md")],
+            touched_but_unchanged_files: Vec::new(),
+            preexisting_dirty_files: Vec::new(),
+            outside_tracking_dirty_files: Vec::new(),
+            repo_root: Some(workspace.clone()),
+            change_accounting_limited: false,
+            checkpoint: TaskCheckpointSummary {
+                status: TaskCheckpointStatus::Captured,
+                summary_text: String::from("checkpoint captured"),
+            },
+            revertibility: TaskRevertibilitySummary {
+                status: TaskRevertibilityStatus::Exact,
+                summary_text: String::from("exact restore available"),
+            },
+            diff_previews: Vec::new(),
+            summary_text: String::from("This task changed 1 file(s): notes.md."),
+        });
+        runtime
+            .session_store()
+            .replace_metadata(metadata)
+            .expect("store metadata");
+
+        let reverted_files =
+            revert_latest_task_in_session(&runtime, &session.id).expect("revert latest task");
+        assert_eq!(reverted_files, vec![String::from("notes.md")]);
+        assert!(!file_path.exists(), "created file should be removed");
+    }
+
+    #[test]
+    fn revert_latest_task_blocks_when_created_file_changed_after_probe_wrote_it() {
+        let temp = tempdir().expect("tempdir");
+        let probe_home = temp.path().join("probe-home");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace layout");
+        let file_path = workspace.join("notes.md");
+        std::fs::write(&file_path, "# Placeholder\nedited later\n").expect("write changed file");
+
+        let runtime = probe_core::runtime::ProbeRuntime::new(&probe_home);
+        let session = runtime
+            .session_store()
+            .create_session_with(NewSession::new("revert test", &workspace))
+            .expect("create session");
+        runtime
+            .session_store()
+            .append_turn(
+                &session.id,
+                &[NewItem::tool_call(
+                    "apply_patch",
+                    "call_patch_create",
+                    json!({
+                        "path": "notes.md",
+                        "old_text": "",
+                        "new_text": "# Placeholder\n",
+                        "create_if_missing": true,
+                    }),
+                )],
+            )
+            .expect("append tool call");
+        runtime
+            .session_store()
+            .append_turn(
+                &session.id,
+                &[NewItem::tool_result(
+                    "apply_patch",
+                    "call_patch_create",
+                    r#"{"ok":true}"#,
+                    ToolExecutionRecord {
+                        risk_class: ToolRiskClass::Write,
+                        policy_decision: ToolPolicyDecision::Approved,
+                        approval_state: ToolApprovalState::Approved,
+                        command: None,
+                        exit_code: Some(0),
+                        timed_out: None,
+                        truncated: None,
+                        bytes_returned: None,
+                        files_touched: vec![String::from("notes.md")],
+                        files_changed: vec![String::from("notes.md")],
+                        reason: None,
+                    },
+                )],
+            )
+            .expect("append tool result");
+
+        let mut metadata = runtime
+            .session_store()
+            .read_metadata(&session.id)
+            .expect("read metadata");
+        metadata.latest_task_workspace_summary = Some(TaskWorkspaceSummary {
+            task_start_turn_index: 0,
+            status: TaskWorkspaceSummaryStatus::Changed,
+            changed_files: vec![String::from("notes.md")],
+            touched_but_unchanged_files: Vec::new(),
+            preexisting_dirty_files: Vec::new(),
+            outside_tracking_dirty_files: Vec::new(),
+            repo_root: Some(workspace.clone()),
+            change_accounting_limited: false,
+            checkpoint: TaskCheckpointSummary {
+                status: TaskCheckpointStatus::Captured,
+                summary_text: String::from("checkpoint captured"),
+            },
+            revertibility: TaskRevertibilitySummary {
+                status: TaskRevertibilityStatus::Exact,
+                summary_text: String::from("exact restore available"),
+            },
+            diff_previews: Vec::new(),
+            summary_text: String::from("This task changed 1 file(s): notes.md."),
+        });
+        runtime
+            .session_store()
+            .replace_metadata(metadata)
+            .expect("store metadata");
+
+        let error = revert_latest_task_in_session(&runtime, &session.id)
+            .expect_err("changed created file revert should fail");
+        assert_eq!(error.code, "revert_conflict");
+        assert!(
+            error
+                .message
+                .contains("file no longer matches the contents it created"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]
@@ -7124,6 +9045,12 @@ mod tests {
                 |reason| reason.contains("Edits landed without an observed validation command")
             )
         );
+        assert!(
+            receipt
+                .uncertainty_reasons
+                .iter()
+                .all(|reason| !reason.contains("checkpoint coverage for this task is limited"))
+        );
     }
 
     #[test]
@@ -7167,6 +9094,12 @@ mod tests {
                 .uncertainty_reasons
                 .iter()
                 .any(|reason| reason.contains("stopped before completion"))
+        );
+        assert!(
+            receipt
+                .uncertainty_reasons
+                .iter()
+                .all(|reason| !reason.contains("checkpoint coverage for this task is limited"))
         );
         assert!(!receipt.summary_text.contains("failed before"));
     }

@@ -2,6 +2,22 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptMode {
+    Conversation,
+    Trace,
+}
+
+impl TranscriptMode {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Conversation => "conversation",
+            Self::Trace => "trace",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscriptRole {
     System,
     Status,
@@ -288,6 +304,14 @@ impl RetainedTranscript {
 
         Text::from(lines)
     }
+
+    #[must_use]
+    pub fn as_text_for_mode(&self, mode: TranscriptMode) -> Text<'static> {
+        match mode {
+            TranscriptMode::Conversation => self.as_conversation_text(),
+            TranscriptMode::Trace => self.as_text(),
+        }
+    }
 }
 
 fn append_entry_lines(lines: &mut Vec<Line<'static>>, entries: &[TranscriptEntry]) {
@@ -527,11 +551,24 @@ fn active_turn_styles(role: TranscriptRole) -> TranscriptVisualStyles {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActiveTurn, RetainedTranscript, TranscriptEntry, TranscriptRole};
+    use super::{ActiveTurn, RetainedTranscript, TranscriptEntry, TranscriptMode, TranscriptRole};
 
     fn lines_to_plain_text(transcript: &RetainedTranscript) -> String {
         transcript
             .as_text()
+            .lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn lines_for_mode_to_plain_text(
+        transcript: &RetainedTranscript,
+        mode: TranscriptMode,
+    ) -> String {
+        transcript
+            .as_text_for_mode(mode)
             .lines
             .iter()
             .map(|line| line.to_string())
@@ -588,5 +625,46 @@ mod tests {
         assert!(rendered.contains("[tool call] read_file"));
         assert!(rendered.contains("[tool result] read_file"));
         assert!(rendered.contains("[active tool] Running Tool: list_files"));
+    }
+
+    #[test]
+    fn transcript_modes_switch_between_conversation_and_trace_views() {
+        let mut transcript = RetainedTranscript::new();
+        transcript.push_entry(TranscriptEntry::new(
+            TranscriptRole::User,
+            "You",
+            vec![String::from("please inspect the README")],
+        ));
+        transcript.push_entry(TranscriptEntry::tool_call(
+            "read_file",
+            vec![String::from("README.md")],
+        ));
+        transcript.push_entry(TranscriptEntry::tool_result(
+            "read_file",
+            vec![String::from("README.md:1-5")],
+        ));
+        transcript.push_entry(TranscriptEntry::new(
+            TranscriptRole::Assistant,
+            "Probe",
+            vec![String::from(
+                "I checked the README and found the note you asked about.",
+            )],
+        ));
+
+        let conversation = lines_for_mode_to_plain_text(&transcript, TranscriptMode::Conversation);
+        assert!(conversation.contains("[user] You"));
+        assert!(conversation.contains("[assistant] Probe"));
+        assert!(
+            !conversation.contains("[tool call] read_file"),
+            "{conversation}"
+        );
+        assert!(
+            !conversation.contains("[tool result] read_file"),
+            "{conversation}"
+        );
+
+        let trace = lines_for_mode_to_plain_text(&transcript, TranscriptMode::Trace);
+        assert!(trace.contains("[tool call] read_file"), "{trace}");
+        assert!(trace.contains("[tool result] read_file"), "{trace}");
     }
 }

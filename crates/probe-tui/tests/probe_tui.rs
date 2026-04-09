@@ -75,6 +75,7 @@ fn approval_overlay_snapshot_is_stable() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::PendingToolApprovalsUpdated {
@@ -93,6 +94,7 @@ fn approval_overlay_snapshot_is_stable() {
             tool_call_turn_index: 1,
             paused_result_turn_index: 2,
             requested_at_ms: 1,
+            proposed_edit: None,
             resolved_at_ms: None,
             resolution: None,
         }],
@@ -113,6 +115,7 @@ fn transcript_running_turn_snapshot_is_stable() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
@@ -147,6 +150,7 @@ fn completed_tool_turn_renders_compact_output_text() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::ProbeRuntimeEvent {
@@ -200,6 +204,7 @@ fn transcript_streaming_delta_turn_snapshot_is_stable() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
@@ -246,6 +251,7 @@ fn streaming_message_envelope_stays_condensed_until_plain_text_is_visible() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::AssistantStreamStarted {
@@ -288,6 +294,7 @@ fn manual_scroll_pauses_stream_follow_until_return_to_bottom() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
@@ -341,6 +348,7 @@ fn model_request_placeholder_stays_on_one_line_until_stream_events_arrive() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::ProbeRuntimeEvent {
@@ -369,6 +377,7 @@ fn transcript_streaming_snapshot_turn_snapshot_is_stable() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
@@ -405,6 +414,7 @@ fn transcript_committed_turn_snapshot_is_stable() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
@@ -463,6 +473,7 @@ fn completed_shell_tool_turn_does_not_repeat_command_in_result_body() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::ProbeRuntimeEvent {
@@ -525,6 +536,7 @@ fn stream_failure_keeps_partial_output_visible() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::AssistantStreamStarted {
@@ -546,9 +558,9 @@ fn stream_failure_keeps_partial_output_visible() {
     });
 
     let rendered = app.render_to_string(120, 30);
-    assert!(rendered.contains("Backend Request Failed"));
+    assert!(rendered.contains("Backend Unavailable"));
     assert!(rendered.contains("Probe had started answering before"));
-    assert!(rendered.contains("transport connection dropped"));
+    assert!(rendered.contains("Probe could not reach the active backend."));
 }
 
 #[test]
@@ -562,6 +574,7 @@ fn streamed_tool_call_deltas_render_before_authoritative_tool_row() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::AssistantStreamStarted {
@@ -585,6 +598,7 @@ fn streamed_tool_call_deltas_render_before_authoritative_tool_row() {
     assert!(rendered.contains("Planning Tool Call"));
     assert!(rendered.contains("read_file"));
     assert!(rendered.contains("README.md"));
+    assert!(!rendered.contains("call_readme_1"));
 }
 
 #[test]
@@ -598,6 +612,7 @@ fn committed_transcript_replaces_live_stream_cell() {
         runtime_activity: None,
         latest_task_workspace_summary: None,
         latest_task_receipt: None,
+        mcp_state: None,
         recovery_note: None,
     });
     app.apply_message(AppMessage::AssistantStreamStarted {

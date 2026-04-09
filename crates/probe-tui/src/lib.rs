@@ -1,6 +1,8 @@
 mod app;
 mod bottom_pane;
 mod event;
+mod failure;
+mod memory;
 mod message;
 mod screens;
 mod transcript;

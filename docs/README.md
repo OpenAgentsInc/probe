@@ -296,3 +296,24 @@ This folder holds technical planning docs for the Probe runtime.
   - tracked plan for making MCP onboarding in Probe feel like standard
     provider-doc workflows, with provider-command-first setup, advanced manual
     fallback, saved recipes, import adapters, and eventual runtime wiring
+- `85-best-in-class-coding-agent-gap-plan.md`
+  - repo audit plus market comparison against Claude Code, Codex, Cursor,
+    Windsurf, Aider, Gemini CLI, Goose, and related tools, distilled into a
+    priority-ranked Probe gap list focused on world-class coding-agent UX
+- `86-best-in-class-coding-agent-delivery-roadmap.md`
+  - delivery-oriented roadmap for turning the gap analysis into complete,
+    confidence-building Probe user journeys rather than isolated features
+- `87-phase1-reversibility-and-review-first-spec.md`
+  - implementation-ready spec for the first major best-in-class Probe UX phase,
+    including checkpoints, review-first apply, diff inspection, revert flows,
+    transcript mode separation, data model changes, and acceptance coverage
+- `88-mcp-runtime-usability-plan.md`
+  - focused plan for closing the gap between saved MCP recipes and actually
+    usable MCP integrations, including clearer lifecycle language, recipe-to-
+    runtime conversion, MCP doctor flows, provider adapters, and turn-time MCP
+    visibility
+- `89-session-rail-ui-refactor-plan.md`
+  - focused plan for turning the Probe TUI side rail from a verbose operator
+    dump into a calmer, grouped, high-signal summary that promotes current
+    state and next-step guidance while moving default configuration detail into
+    deeper overlays

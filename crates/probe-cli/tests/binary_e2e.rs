@@ -1,6 +1,7 @@
 use assert_cmd::prelude::*;
 use insta::{assert_json_snapshot, assert_snapshot};
 use probe_client::{ProbeClient, ProbeClientConfig, ProbeClientTransportConfig};
+use probe_core::backend_profiles::PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE;
 use probe_core::runtime::{PlainTextResumeRequest, ProbeRuntime};
 use probe_core::tools::{ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLoopConfig};
 use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
@@ -13,6 +14,7 @@ use probe_test_support::{
 };
 use serde_json::{Value, json};
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -20,6 +22,103 @@ use std::thread;
 use std::time::Duration;
 
 const TEST_MODEL: &str = "tiny-qwen35";
+
+fn write_fake_stdio_mcp_server_script(path: &Path) {
+    let script = r#"#!/usr/bin/env python3
+import json
+import sys
+
+def read_message():
+    content_length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        if line.lower().startswith(b"content-length:"):
+            content_length = int(line.split(b":", 1)[1].strip())
+    if content_length is None:
+        return None
+    body = sys.stdin.buffer.read(content_length)
+    return json.loads(body.decode("utf-8"))
+
+def send_message(message):
+    body = json.dumps(message).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8"))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        send_message({
+            "jsonrpc": "2.0",
+            "id": message.get("id"),
+            "result": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "fake-mcp", "version": "1.0.0"}
+            }
+        })
+    elif method == "tools/list":
+        send_message({
+            "jsonrpc": "2.0",
+            "id": message.get("id"),
+            "result": {
+                "tools": [{
+                    "name": "filesystem/read",
+                    "description": "Read a file from disk.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"}
+                        },
+                        "required": ["path"]
+                    }
+                }]
+            }
+        })
+    elif method == "tools/call":
+        params = message.get("params", {})
+        send_message({
+            "jsonrpc": "2.0",
+            "id": message.get("id"),
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": f"read {params.get('arguments', {}).get('path', '')}"
+                }]
+            }
+        })
+"#;
+    std::fs::write(path, script).expect("write fake mcp server script");
+    let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("set execute permissions");
+}
+
+fn write_manual_stdio_mcp_registry(environment: &ProbeTestEnvironment, script_path: &Path) {
+    std::fs::create_dir_all(environment.probe_home().join("mcp")).expect("create mcp dir");
+    std::fs::write(
+        environment.probe_home().join("mcp/servers.json"),
+        serde_json::to_string_pretty(&json!({
+            "servers": [{
+                "id": "filesystem",
+                "name": "Filesystem",
+                "enabled": true,
+                "source": "manual_launch",
+                "transport": "stdio",
+                "target": format!("python3 {}", script_path.display())
+            }]
+        }))
+        .expect("serialize mcp registry"),
+    )
+    .expect("write mcp registry");
+}
 
 #[test]
 fn chat_process_can_create_and_resume_a_session_from_stdin() {
@@ -340,6 +439,87 @@ fn tui_process_smoke_drives_a_real_background_turn() {
     assert!(requests[0].contains("GET /v1/models HTTP/1.1"));
     assert!(requests[1].contains("read_file"));
     assert!(requests[2].contains("Probe acceptance fixture"));
+}
+
+#[test]
+fn exec_process_can_execute_connected_mcp_tool() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let mcp_script = environment.temp_root().join("fake_stdio_mcp.py");
+    write_fake_stdio_mcp_server_script(mcp_script.as_path());
+    write_manual_stdio_mcp_registry(&environment, mcp_script.as_path());
+
+    let server = probe_test_support::FakeOpenAiServer::from_json_responses(vec![
+        models_response(),
+        json!({
+            "id": "chatcmpl_probe_tui_mcp_tool_1",
+            "model": TEST_MODEL,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_mcp_read_1",
+                        "type": "function",
+                        "function": {
+                            "name": "mcp__filesystem__filesystem_read",
+                            "arguments": "{\"path\":\"README.md\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }),
+        json!({
+            "id": "chatcmpl_probe_tui_mcp_final_1",
+            "model": TEST_MODEL,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Probe used the MCP filesystem tool and read README.md."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 30,
+                "completion_tokens": 10,
+                "total_tokens": 40
+            }
+        }),
+    ]);
+    write_openai_attach_server_config(&environment, &server, TEST_MODEL);
+
+    let output = probe_cli_command()
+        .args([
+            "exec",
+            "--profile",
+            PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
+            "--probe-home",
+            environment.probe_home().to_str().expect("probe home utf-8"),
+            "--cwd",
+            environment.workspace().to_str().expect("workspace utf-8"),
+            "--tool-set",
+            "coding_bootstrap",
+            "--tool-choice",
+            "required",
+            "--approve-network-shell",
+            "use the MCP filesystem tool to read README.md",
+        ])
+        .output()
+        .expect("run probe exec with MCP");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("Probe used the MCP filesystem tool and read README.md."));
+    assert!(stderr.contains("tool_calls executed=1"));
+    assert!(stderr.contains("tool_policy auto_allowed=0 approved=1 refused=0 paused=0"));
+
+    let requests = server.finish();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].contains("GET /v1/models HTTP/1.1"));
+    assert!(requests[1].contains("mcp__filesystem__filesystem_read"));
+    assert!(requests[2].contains("read README.md"));
 }
 
 #[test]

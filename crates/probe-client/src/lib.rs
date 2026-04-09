@@ -25,14 +25,14 @@ use probe_protocol::runtime::{
     ListSessionsResponse, PostSessionMeshCoordinationRequest, PostSessionMeshCoordinationResponse,
     PublishSessionMeshPluginOfferRequest, PublishSessionMeshPluginOfferResponse, QueueTurnResponse,
     ReadDetachedSessionLogRequest, ReadDetachedSessionLogResponse, RequestEnvelope,
-    ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope, RuntimeProgressEvent,
-    RuntimeProtocolError, RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage,
-    ServerEvent, ServerMessage, SessionLookupRequest, SessionSnapshot, SpawnChildSessionRequest,
-    SpawnChildSessionResponse, StartSessionRequest, ToolApprovalRecipe, ToolCallResult, ToolChoice,
-    ToolDeniedAction as ProtocolDeniedAction, ToolLongContextRecipe, ToolLoopRecipe,
-    ToolOracleRecipe, ToolSetKind, TurnAuthor, TurnCompleted, TurnPaused, TurnRequest,
-    TurnResponse, UpdateSessionControllerRequest, UpdateSessionControllerResponse,
-    WatchDetachedSessionRequest, WatchDetachedSessionResponse,
+    ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope, RevertLastTaskResponse,
+    RuntimeProgressEvent, RuntimeProtocolError, RuntimeRequest, RuntimeResponse,
+    RuntimeToolCallDelta, RuntimeUsage, ServerEvent, ServerMessage, SessionLookupRequest,
+    SessionSnapshot, SpawnChildSessionRequest, SpawnChildSessionResponse, StartSessionRequest,
+    ToolApprovalRecipe, ToolCallResult, ToolChoice, ToolDeniedAction as ProtocolDeniedAction,
+    ToolLongContextRecipe, ToolLoopRecipe, ToolOracleRecipe, ToolSetKind, TurnAuthor,
+    TurnCompleted, TurnPaused, TurnRequest, TurnResponse, UpdateSessionControllerRequest,
+    UpdateSessionControllerResponse, WatchDetachedSessionRequest, WatchDetachedSessionResponse,
 };
 use probe_protocol::session::{
     PendingToolApproval, SessionControllerAction, SessionId, SessionMetadata, UsageMeasurement,
@@ -463,6 +463,24 @@ impl ProbeClient {
             }),
             other => Err(ProbeClientError::UnexpectedServerMessage(format!(
                 "expected resolve_pending_approval response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub fn revert_last_task(
+        &mut self,
+        session_id: &SessionId,
+    ) -> Result<RevertLastTaskResponse, ProbeClientError> {
+        match self.send_request(
+            RuntimeRequest::RevertLastTask(probe_protocol::runtime::RevertLastTaskRequest {
+                session_id: session_id.clone(),
+                author: Some(self.turn_author()),
+            }),
+            None,
+        )? {
+            RuntimeResponse::RevertLastTask(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected revert_last_task response, got {other:?}"
             ))),
         }
     }

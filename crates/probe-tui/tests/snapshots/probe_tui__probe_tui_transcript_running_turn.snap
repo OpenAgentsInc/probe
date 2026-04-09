@@ -6,17 +6,17 @@ expression: snapshot
 │  Codex │ Qwen │ Apple FM                                                     │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌─ Working ─────────────────────────────────────────┐ ┌─ Working ──────────────┐
-│ [user] You                                        │ │ activity: planning     │
-│   Summarize what Probe owns.                      │ │ tool call              │
-│                                                   │ │ next: Working now;     │
-│ [tool call] read_file                             │ │ PgUp scrolls without   │
-│   README.md                                       │ │ losing your place      │
-│                                                   │ │ lane: Qwen             │
-│                                                   │ │ target: 127.0.0.1:8080 │
-│                                                   │ │ transport:             │
-│                                                   │ │ loopback/ssh           │
-└───────────────────────────────────────────────────┘ └────────────────────────┘
+┌─ Session ────────────────────────────────────────────────────────────────────┐
+│ activity: planning tool call                                                 │
+│ next: Working now; PgUp scrolls without losing your place                    │
+│ workspace: probe-workspace                                                   │
+│ lane: Qwen                                                                   │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌─ Working ────────────────────────────────────────────────────────────────────┐
+│ [tool call] read_file                                                        │
+│   README.md                                                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ status: tool call requested: read_file | backend: openai_chat_completions |  │

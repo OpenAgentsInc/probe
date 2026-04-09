@@ -1,13 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 use probe_protocol::backend::BackendProfile;
 use probe_protocol::session::{
+    SessionMcpConnectionStatus, SessionMcpServerSource, SessionMcpServerTransport, SessionMcpState,
     ToolApprovalResolution, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision,
     ToolRiskClass,
 };
@@ -31,6 +35,8 @@ const SHELL_MAX_OUTPUT_CHARS: usize = 4_000;
 const TOOL_MODEL_TEXT_MAX_CHARS: usize = 3_000;
 const LONG_CONTEXT_DEFAULT_MAX_LINES_PER_FILE: u64 = 160;
 const LONG_CONTEXT_DEFAULT_MAX_EVIDENCE_FILES: usize = 6;
+const MCP_STDIO_STARTUP_TIMEOUT: Duration = Duration::from_millis(1_200);
+const MCP_STDIO_TOOL_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub type ToolHandler = fn(
     &ToolExecutionContext,
@@ -44,9 +50,23 @@ enum RegisteredToolRisk {
 }
 
 #[derive(Clone, Debug)]
+struct RegisteredMcpTool {
+    server_id: String,
+    server_name: String,
+    original_name: String,
+    target: String,
+}
+
+#[derive(Clone, Debug)]
+enum RegisteredToolHandler {
+    BuiltIn(ToolHandler),
+    ExternalMcp(RegisteredMcpTool),
+}
+
+#[derive(Clone, Debug)]
 struct RegisteredTool {
     definition: ChatToolDefinition,
-    handler: ToolHandler,
+    handler: RegisteredToolHandler,
     risk: RegisteredToolRisk,
 }
 
@@ -551,6 +571,64 @@ impl ToolRegistry {
     }
 
     #[must_use]
+    pub fn with_session_mcp_tools(mut self, mcp_state: Option<&SessionMcpState>) -> Self {
+        let Some(mcp_state) = mcp_state else {
+            return self;
+        };
+        for server in &mcp_state.servers {
+            if !server.enabled
+                || server.source != SessionMcpServerSource::ManualLaunch
+                || server.transport != Some(SessionMcpServerTransport::Stdio)
+                || server.connection_status != Some(SessionMcpConnectionStatus::Connected)
+            {
+                continue;
+            }
+            let Some(target) = server.target.as_ref() else {
+                continue;
+            };
+            for tool in &server.discovered_tools {
+                let alias = external_mcp_tool_name(server.id.as_str(), tool.name.as_str());
+                let description = match tool.description.as_deref() {
+                    Some(value) if !value.trim().is_empty() => format!(
+                        "{}\n\nExternal MCP tool from server `{}` (`{}`).",
+                        value.trim(),
+                        server.name,
+                        server.id
+                    ),
+                    _ => format!(
+                        "Call the external MCP tool `{}` from server `{}` (`{}`).",
+                        tool.name, server.name, server.id
+                    ),
+                };
+                let parameters = Some(tool.input_schema.clone().unwrap_or_else(|| {
+                    serde_json::json!({
+                        "type": "object",
+                        "additionalProperties": true
+                    })
+                }));
+                self.tools.insert(
+                    alias.clone(),
+                    RegisteredTool {
+                        definition: ChatToolDefinition {
+                            name: alias,
+                            description: Some(description),
+                            parameters,
+                        },
+                        handler: RegisteredToolHandler::ExternalMcp(RegisteredMcpTool {
+                            server_id: server.id.clone(),
+                            server_name: server.name.clone(),
+                            original_name: tool.name.clone(),
+                            target: target.clone(),
+                        }),
+                        risk: RegisteredToolRisk::Fixed(ToolRiskClass::Network),
+                    },
+                );
+            }
+        }
+        self
+    }
+
+    #[must_use]
     fn register(
         mut self,
         name: String,
@@ -567,7 +645,7 @@ impl ToolRegistry {
                     description,
                     parameters,
                 },
-                handler,
+                handler: RegisteredToolHandler::BuiltIn(handler),
                 risk,
             },
         );
@@ -630,6 +708,51 @@ impl ToolRegistry {
             .map(|tool_call| session.execute_openai_tool_call_with_observer(tool_call, observer))
             .collect()
     }
+}
+
+#[must_use]
+pub(crate) fn external_mcp_tool_name(server_id: &str, tool_name: &str) -> String {
+    let sanitized_server = sanitize_external_tool_segment(server_id);
+    let sanitized_tool = sanitize_external_tool_segment(tool_name);
+    let candidate = format!("mcp__{sanitized_server}__{sanitized_tool}");
+    if candidate.len() <= 64 {
+        return candidate;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    server_id.hash(&mut hasher);
+    tool_name.hash(&mut hasher);
+    let digest = format!("{:08x}", hasher.finish() as u32);
+    let short_server = truncate_tool_segment(&sanitized_server, 18);
+    let short_tool = truncate_tool_segment(&sanitized_tool, 24);
+    format!("mcp__{short_server}__{short_tool}_{digest}")
+}
+
+fn sanitize_external_tool_segment(value: &str) -> String {
+    let mut output = String::new();
+    let mut previous_was_separator = false;
+    for ch in value.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() { ch } else { '_' };
+        if mapped == '_' {
+            if !previous_was_separator {
+                output.push(mapped);
+            }
+            previous_was_separator = true;
+        } else {
+            output.push(mapped.to_ascii_lowercase());
+            previous_was_separator = false;
+        }
+    }
+    let trimmed = output.trim_matches('_');
+    if trimmed.is_empty() {
+        String::from("tool")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn truncate_tool_segment(value: &str, max_len: usize) -> String {
+    value.chars().take(max_len).collect()
 }
 
 impl ToolExecutionSession {
@@ -817,7 +940,13 @@ impl ToolExecutionSession {
             ToolPolicyDecision::AutoAllow | ToolPolicyDecision::Approved
         ) {
             observer(call_id.as_str(), name.as_str(), &arguments, risk_class);
-            (tool.handler)(&self.context, &arguments).unwrap_or_else(|error| {
+            match &tool.handler {
+                RegisteredToolHandler::BuiltIn(handler) => handler(&self.context, &arguments),
+                RegisteredToolHandler::ExternalMcp(binding) => {
+                    invoke_external_mcp_tool(&self.context, binding, &arguments)
+                }
+            }
+            .unwrap_or_else(|error| {
                 ToolInvocationOutcome::new(serde_json::json!({ "error": error.to_string() }))
             })
         } else {
@@ -868,6 +997,260 @@ impl ToolExecutionSession {
             },
         }
     }
+}
+
+fn invoke_external_mcp_tool(
+    context: &ToolExecutionContext,
+    binding: &RegisteredMcpTool,
+    arguments: &serde_json::Value,
+) -> Result<ToolInvocationOutcome, ToolInvocationError> {
+    let mut child = Command::new("/bin/sh")
+        .arg("-lc")
+        .arg(binding.target.as_str())
+        .current_dir(context.base_dir())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            ToolInvocationError::ExecutionFailed(format!(
+                "failed to launch MCP server `{}` for tool `{}`: {error}",
+                binding.server_name, binding.original_name
+            ))
+        })?;
+
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(ToolInvocationError::ExecutionFailed(format!(
+            "MCP server `{}` launched without stdin",
+            binding.server_name
+        )));
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(ToolInvocationError::ExecutionFailed(format!(
+            "MCP server `{}` launched without stdout",
+            binding.server_name
+        )));
+    };
+
+    let (tx, rx) = mpsc::channel::<Result<serde_json::Value, String>>();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            match read_mcp_framed_message(&mut reader) {
+                Ok(Some(message)) => {
+                    if tx.send(Ok(message)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = tx.send(Err(error.to_string()));
+                    break;
+                }
+            }
+        }
+    });
+
+    write_mcp_framed_message(
+        &mut stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "probe",
+                    "version": "0.1.0"
+                }
+            }
+        }),
+    )
+    .map_err(|error| {
+        let _ = child.kill();
+        let _ = child.wait();
+        ToolInvocationError::ExecutionFailed(format!(
+            "failed to send MCP initialize request to `{}`: {error}",
+            binding.server_name
+        ))
+    })?;
+
+    let initialize = recv_mcp_response(&rx, 1, MCP_STDIO_STARTUP_TIMEOUT).map_err(|error| {
+        let _ = child.kill();
+        let _ = child.wait();
+        ToolInvocationError::ExecutionFailed(format!(
+            "failed to initialize MCP server `{}`: {error}",
+            binding.server_name
+        ))
+    })?;
+    if let Some(error) = initialize.get("error") {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(ToolInvocationError::ExecutionFailed(format!(
+            "MCP server `{}` rejected initialization: {}",
+            binding.server_name,
+            compact_json_value(error)
+        )));
+    }
+
+    let _ = write_mcp_framed_message(
+        &mut stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+    );
+    write_mcp_framed_message(
+        &mut stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": binding.original_name,
+                "arguments": arguments,
+            }
+        }),
+    )
+    .map_err(|error| {
+        let _ = child.kill();
+        let _ = child.wait();
+        ToolInvocationError::ExecutionFailed(format!(
+            "failed to send MCP tool call `{}` to `{}`: {error}",
+            binding.original_name, binding.server_name
+        ))
+    })?;
+
+    let response = recv_mcp_response(&rx, 2, MCP_STDIO_TOOL_TIMEOUT).map_err(|error| {
+        let _ = child.kill();
+        let _ = child.wait();
+        ToolInvocationError::ExecutionFailed(format!(
+            "failed to receive MCP tool result for `{}` from `{}`: {error}",
+            binding.original_name, binding.server_name
+        ))
+    })?;
+    let _ = child.kill();
+    let _ = child.wait_timeout(Duration::from_millis(250));
+    let _ = child.wait();
+
+    if let Some(error) = response.get("error") {
+        return Err(ToolInvocationError::ExecutionFailed(format!(
+            "MCP tool `{}` on `{}` failed: {}",
+            binding.original_name,
+            binding.server_name,
+            compact_json_value(error)
+        )));
+    }
+
+    let result = response
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let bytes_returned = serde_json::to_vec(&result)
+        .ok()
+        .map(|value| value.len() as u64);
+    Ok(ToolInvocationOutcome {
+        output: serde_json::json!({
+            "server_id": binding.server_id,
+            "server_name": binding.server_name,
+            "tool": binding.original_name,
+            "result": result,
+        }),
+        command: Some(binding.target.clone()),
+        exit_code: Some(0),
+        timed_out: Some(false),
+        truncated: Some(false),
+        bytes_returned,
+        files_touched: Vec::new(),
+        files_changed: Vec::new(),
+    })
+}
+
+fn recv_mcp_response(
+    rx: &mpsc::Receiver<Result<serde_json::Value, String>>,
+    expected_id: u64,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let started = std::time::Instant::now();
+    loop {
+        let remaining = timeout
+            .checked_sub(started.elapsed())
+            .ok_or_else(|| String::from("timed out waiting for MCP response"))?;
+        let message = match rx.recv_timeout(remaining) {
+            Ok(Ok(message)) => message,
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Err(String::from("timed out waiting for MCP response")),
+        };
+        if message
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|id| id == expected_id)
+        {
+            return Ok(message);
+        }
+    }
+}
+
+fn write_mcp_framed_message(
+    writer: &mut impl Write,
+    message: &serde_json::Value,
+) -> io::Result<()> {
+    let body = serde_json::to_vec(message)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
+    writer.write_all(&body)?;
+    writer.flush()
+}
+
+fn read_mcp_framed_message(reader: &mut impl BufRead) -> io::Result<Option<serde_json::Value>> {
+    let mut content_length = None;
+    loop {
+        let mut line = String::new();
+        let bytes = reader.read_line(&mut line)?;
+        if bytes == 0 {
+            return if content_length.is_some() {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unexpected EOF while reading MCP frame headers",
+                ))
+            } else {
+                Ok(None)
+            };
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("Content-Length:") {
+            content_length = Some(rest.trim().parse::<usize>().map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid MCP content length: {error}"),
+                )
+            })?);
+        }
+    }
+
+    let Some(content_length) = content_length else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing Content-Length header in MCP frame",
+        ));
+    };
+    let mut body = vec![0_u8; content_length];
+    reader.read_exact(&mut body)?;
+    serde_json::from_slice(&body)
+        .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn compact_json_value(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| String::from("unavailable error payload"))
 }
 
 fn read_file(
@@ -1827,13 +2210,27 @@ fn evaluate_tool_policy(
         ToolRiskClass::Write if approval.allow_write_tools => (
             ToolPolicyDecision::Approved,
             ToolApprovalState::Approved,
-            Some(format!("tool `{tool_name}` was approved for write access")),
+            Some(format!(
+                "tool `{}` was approved for {}",
+                display_policy_tool_name(tool_name),
+                if tool_name.starts_with("mcp__") {
+                    "MCP access"
+                } else {
+                    "write access"
+                }
+            )),
         ),
         ToolRiskClass::Network if approval.allow_network_shell => (
             ToolPolicyDecision::Approved,
             ToolApprovalState::Approved,
             Some(format!(
-                "tool `{tool_name}` was approved for network access"
+                "tool `{}` was approved for {}",
+                display_policy_tool_name(tool_name),
+                if tool_name.starts_with("mcp__") {
+                    "MCP access"
+                } else {
+                    "network access"
+                }
             )),
         ),
         ToolRiskClass::Destructive if approval.allow_destructive_shell => (
@@ -1854,7 +2251,15 @@ fn denied_by_policy(
     tool_name: &str,
     class_name: &str,
 ) -> (ToolPolicyDecision, ToolApprovalState, Option<String>) {
-    let reason = Some(format!("tool `{tool_name}` requires {class_name} approval"));
+    let approval_label = if tool_name.starts_with("mcp__") && class_name == "network" {
+        "MCP"
+    } else {
+        class_name
+    };
+    let reason = Some(format!(
+        "tool `{}` requires {approval_label} approval",
+        display_policy_tool_name(tool_name)
+    ));
     match approval.denied_action {
         ToolDeniedAction::Refuse => (
             ToolPolicyDecision::Refused,
@@ -1867,6 +2272,19 @@ fn denied_by_policy(
             reason,
         ),
     }
+}
+
+fn display_policy_tool_name(tool_name: &str) -> String {
+    if let Some(rest) = tool_name.strip_prefix("mcp__") {
+        if let Some((server, tool)) = rest.split_once("__") {
+            return format!(
+                "MCP {} · {}",
+                server.replace('_', "-"),
+                tool.replace('_', "/")
+            );
+        }
+    }
+    tool_name.to_string()
 }
 
 fn denied_tool_invocation(

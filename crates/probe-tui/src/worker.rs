@@ -14,15 +14,18 @@ use probe_core::runtime::{
 use probe_protocol::runtime::{
     DetachedSessionEventPayload, DetachedSessionStatus, InspectDetachedSessionResponse,
     QueuedTurnStatus, RuntimeActivity, RuntimeActivityKind, RuntimeProgressEvent,
+    SpawnChildSessionRequest, StartSessionRequest,
 };
 use probe_protocol::session::{
-    SessionId, SessionMetadata, ToolApprovalResolution, ToolPolicyDecision, TranscriptEvent,
-    TranscriptItem, TranscriptItemKind, TurnObservability, UsageTruth,
+    SessionBranchState, SessionDeliveryState, SessionId, SessionMetadata, SessionWorkspaceState,
+    ToolApprovalResolution, ToolPolicyDecision, TranscriptEvent, TranscriptItem,
+    TranscriptItemKind, TurnObservability, UsageTruth,
 };
 use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError};
 use psionic_apple_fm::AppleFmSystemLanguageModelAvailability;
 use serde_json::Value;
 
+use crate::failure::runtime_failure_transcript_entry;
 use crate::message::{
     AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
     AppleFmFailureSummary, AppleFmUsageSummary, BackgroundTaskRequest, ProbeRuntimeTurnConfig,
@@ -141,6 +144,14 @@ fn run_request(
         BackgroundTaskRequest::AttachProbeRuntimeSession { session_id, config } => {
             run_attach_probe_runtime_session(session_id, config, message_tx, state)
         }
+        BackgroundTaskRequest::BackgroundProbeRuntimeTurn { prompt, config } => {
+            run_background_probe_runtime_turn(prompt, config, message_tx)
+        }
+        BackgroundTaskRequest::DelegatedProbeRuntimeTurn {
+            parent_session_id,
+            prompt,
+            config,
+        } => run_delegated_probe_runtime_turn(parent_session_id, prompt, config, message_tx),
         BackgroundTaskRequest::ProbeRuntimeTurn { prompt, config } => {
             run_probe_runtime_turn(prompt, config, message_tx, state)
         }
@@ -152,7 +163,16 @@ fn run_request(
         } => run_pending_tool_approval_resolution(
             session_id, call_id, resolution, config, message_tx, state,
         ),
+        BackgroundTaskRequest::RevertLastTask { session_id, config } => {
+            run_revert_last_task(session_id, config, message_tx, state)
+        }
     }
+}
+
+fn send_runtime_error(message_tx: &Sender<AppMessage>, error: impl AsRef<str>) {
+    let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
+        entry: runtime_failure_transcript_entry(error.as_ref()),
+    });
 }
 
 fn run_attach_probe_runtime_session(
@@ -164,13 +184,7 @@ fn run_attach_probe_runtime_session(
     let mut client = match resolve_probe_client(config.probe_home.clone()) {
         Ok(client) => client,
         Err(error) => {
-            let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                entry: TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Runtime Error",
-                    vec![error.to_string()],
-                ),
-            });
+            send_runtime_error(message_tx, error.to_string());
             return;
         }
     };
@@ -178,13 +192,7 @@ fn run_attach_probe_runtime_session(
     let response = match client.inspect_detached_session(&SessionId::new(session_id.clone())) {
         Ok(response) => response,
         Err(error) => {
-            let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                entry: TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Runtime Error",
-                    vec![error.to_string()],
-                ),
-            });
+            send_runtime_error(message_tx, error.to_string());
             return;
         }
     };
@@ -196,6 +204,17 @@ fn run_attach_probe_runtime_session(
         &config,
         recovered_runtime_activity(&mut client, &response),
         response.summary.recovery_note.clone(),
+    )
+    .is_err()
+    {
+        return;
+    }
+    if emit_session_workspace_state(
+        message_tx,
+        &response.session.session.id,
+        response.session.session.workspace_state.clone(),
+        response.session.branch_state.clone(),
+        response.session.delivery_state.clone(),
     )
     .is_err()
     {
@@ -244,13 +263,7 @@ fn run_probe_runtime_turn(
     let mut client = match resolve_probe_client(config.probe_home.clone()) {
         Ok(client) => client,
         Err(error) => {
-            let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                entry: TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Runtime Error",
-                    vec![error.to_string()],
-                ),
-            });
+            send_runtime_error(message_tx, error.to_string());
             return;
         }
     };
@@ -298,6 +311,11 @@ fn run_probe_runtime_turn(
             if emit_session_ready(message_tx, &outcome.session, &config, None, None).is_err() {
                 return;
             }
+            if emit_inspected_session_workspace_state(message_tx, &mut client, &outcome.session.id)
+                .is_err()
+            {
+                return;
+            }
             if emit_transcript_delta(
                 message_tx,
                 client.read_transcript(&outcome.session.id),
@@ -330,19 +348,19 @@ fn run_probe_runtime_turn(
                     .as_ref()
                     .map(|session| session.session_id.clone())
             }) else {
-                let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                    entry: TranscriptEntry::new(
-                        TranscriptRole::Status,
-                        "Runtime Error",
-                        vec![error.to_string()],
-                    ),
-                });
+                send_runtime_error(message_tx, error.to_string());
                 return;
             };
 
             let metadata = client.read_metadata(&session_id).ok();
             if let Some(metadata) = metadata.as_ref()
                 && emit_session_ready(message_tx, metadata, &config, None, None).is_err()
+            {
+                return;
+            }
+            if metadata.is_some()
+                && emit_inspected_session_workspace_state(message_tx, &mut client, &session_id)
+                    .is_err()
             {
                 return;
             }
@@ -375,14 +393,122 @@ fn run_probe_runtime_turn(
                 ));
             }
             if had_no_new_turns {
-                let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                    entry: TranscriptEntry::new(
-                        TranscriptRole::Status,
-                        "Runtime Error",
-                        vec![error.to_string()],
-                    ),
-                });
+                send_runtime_error(message_tx, error.to_string());
             }
+        }
+    }
+}
+
+fn run_background_probe_runtime_turn(
+    prompt: String,
+    config: ProbeRuntimeTurnConfig,
+    message_tx: &Sender<AppMessage>,
+) {
+    let mut client = match resolve_probe_client(config.probe_home.clone()) {
+        Ok(client) => client,
+        Err(error) => {
+            send_runtime_error(message_tx, error.to_string());
+            return;
+        }
+    };
+
+    let title = background_task_title(prompt.as_str());
+    let session = match client.start_session(StartSessionRequest {
+        title: Some(title.clone()),
+        cwd: config.cwd.clone(),
+        profile: config.profile.clone(),
+        system_prompt: config.system_prompt.clone(),
+        harness_profile: config.harness_profile.clone(),
+        workspace_state: None,
+        mounted_refs: Vec::new(),
+    }) {
+        Ok(session) => session,
+        Err(error) => {
+            send_runtime_error(message_tx, error.to_string());
+            return;
+        }
+    };
+
+    match client.queue_plain_text_session_turn(PlainTextResumeRequest {
+        session_id: session.session.id.clone(),
+        profile: config.profile.clone(),
+        prompt,
+        tool_loop: config.tool_loop.clone(),
+    }) {
+        Ok(response) => {
+            let _ = message_tx.send(AppMessage::BackgroundTaskQueued {
+                session_id: session.session.id.as_str().to_string(),
+                title: session.session.title.clone(),
+                cwd: session.session.cwd.display().to_string(),
+                status: queued_turn_status_label(response.turn.status).to_string(),
+                parent_title: None,
+            });
+        }
+        Err(error) => {
+            send_runtime_error(message_tx, error.to_string());
+        }
+    }
+}
+
+fn run_delegated_probe_runtime_turn(
+    parent_session_id: String,
+    prompt: String,
+    config: ProbeRuntimeTurnConfig,
+    message_tx: &Sender<AppMessage>,
+) {
+    let mut client = match resolve_probe_client(config.probe_home.clone()) {
+        Ok(client) => client,
+        Err(error) => {
+            send_runtime_error(message_tx, error.to_string());
+            return;
+        }
+    };
+
+    let parent_snapshot =
+        match client.inspect_detached_session(&SessionId::new(parent_session_id.clone())) {
+            Ok(response) => response.session,
+            Err(error) => {
+                send_runtime_error(message_tx, error.to_string());
+                return;
+            }
+        };
+    let title = background_task_title(prompt.as_str());
+    let child = match client.spawn_child_session(SpawnChildSessionRequest {
+        parent_session_id: parent_snapshot.session.id.clone(),
+        profile: config.profile.clone(),
+        title: Some(title.clone()),
+        cwd: Some(config.cwd.clone()),
+        system_prompt: config.system_prompt.clone(),
+        harness_profile: config.harness_profile.clone(),
+        parent_turn_id: None,
+        parent_turn_index: None,
+        author: None,
+        purpose: Some(String::from("delegated background task")),
+    }) {
+        Ok(child) => child,
+        Err(error) => {
+            send_runtime_error(message_tx, error.to_string());
+            return;
+        }
+    };
+
+    match client.queue_plain_text_session_turn(PlainTextResumeRequest {
+        session_id: child.session.session.id.clone(),
+        profile: config.profile.clone(),
+        prompt,
+        tool_loop: config.tool_loop.clone(),
+    }) {
+        Ok(response) => {
+            let _ = message_tx.send(AppMessage::BackgroundTaskQueued {
+                session_id: child.session.session.id.as_str().to_string(),
+                title: child.session.session.title.clone(),
+                cwd: child.session.session.cwd.display().to_string(),
+                status: queued_turn_status_label(response.turn.status).to_string(),
+                parent_title: Some(parent_snapshot.session.title.clone()),
+            });
+        }
+        Err(error) => {
+            send_runtime_error(message_tx, error.to_string());
         }
     }
 }
@@ -398,13 +524,7 @@ fn run_pending_tool_approval_resolution(
     let mut client = match resolve_probe_client(config.probe_home.clone()) {
         Ok(client) => client,
         Err(error) => {
-            let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                entry: TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Runtime Error",
-                    vec![error.to_string()],
-                ),
-            });
+            send_runtime_error(message_tx, error.to_string());
             return;
         }
     };
@@ -413,28 +533,20 @@ fn run_pending_tool_approval_resolution(
         .read_metadata(&SessionId::new(session_id.clone()))
         .map(|metadata| metadata.id)
     else {
-        let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-            entry: TranscriptEntry::new(
-                TranscriptRole::Status,
-                "Runtime Error",
-                vec![format!("runtime session `{session_id}` was not found")],
-            ),
-        });
+        send_runtime_error(
+            message_tx,
+            format!("runtime session `{session_id}` was not found"),
+        );
         return;
     };
 
     let tool_loop = match config.tool_loop.clone() {
         Some(tool_loop) => tool_loop,
         None => {
-            let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                entry: TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Runtime Error",
-                    vec![String::from(
-                        "pending approval resolution requires an active tool loop config",
-                    )],
-                ),
-            });
+            send_runtime_error(
+                message_tx,
+                "pending approval resolution requires an active tool loop config",
+            );
             return;
         }
     };
@@ -461,6 +573,10 @@ fn run_pending_tool_approval_resolution(
             pending_approvals,
         }) => {
             if emit_session_ready(message_tx, &session, &config, None, None).is_err() {
+                return;
+            }
+            if emit_inspected_session_workspace_state(message_tx, &mut client, &session.id).is_err()
+            {
                 return;
             }
             if emit_transcript_delta(
@@ -494,6 +610,11 @@ fn run_pending_tool_approval_resolution(
             if emit_session_ready(message_tx, &outcome.session, &config, None, None).is_err() {
                 return;
             }
+            if emit_inspected_session_workspace_state(message_tx, &mut client, &outcome.session.id)
+                .is_err()
+            {
+                return;
+            }
             if emit_transcript_delta(
                 message_tx,
                 client.read_transcript(&outcome.session.id),
@@ -517,13 +638,75 @@ fn run_pending_tool_approval_resolution(
         }
         Err(error) => {
             let _ = emit_pending_tool_approvals(message_tx, &mut client, &session_id);
-            let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                entry: TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Runtime Error",
-                    vec![error.to_string()],
-                ),
-            });
+            send_runtime_error(message_tx, error.to_string());
+        }
+    }
+}
+
+fn run_revert_last_task(
+    session_id: String,
+    config: ProbeRuntimeTurnConfig,
+    message_tx: &Sender<AppMessage>,
+    state: &mut WorkerState,
+) {
+    let mut client = match resolve_probe_client(config.probe_home.clone()) {
+        Ok(client) => client,
+        Err(error) => {
+            send_runtime_error(message_tx, error.to_string());
+            return;
+        }
+    };
+
+    let session_id = SessionId::new(session_id);
+    let previous_turns = state.rendered_turns_for_session(&session_id);
+    match client.revert_last_task(&session_id) {
+        Ok(response) => {
+            if emit_session_ready(message_tx, &response.session.session, &config, None, None)
+                .is_err()
+            {
+                return;
+            }
+            if emit_session_workspace_state(
+                message_tx,
+                &response.session.session.id,
+                response.session.session.workspace_state.clone(),
+                response.session.branch_state.clone(),
+                response.session.delivery_state.clone(),
+            )
+            .is_err()
+            {
+                return;
+            }
+            if emit_transcript_delta(
+                message_tx,
+                Ok(response.session.transcript.clone()),
+                previous_turns,
+            )
+            .is_err()
+            {
+                return;
+            }
+            if emit_session_usage(message_tx, &session_id, &response.session.transcript).is_err() {
+                return;
+            }
+            if message_tx
+                .send(AppMessage::PendingToolApprovalsUpdated {
+                    session_id: session_id.as_str().to_string(),
+                    approvals: response.session.pending_approvals.clone(),
+                })
+                .is_err()
+            {
+                return;
+            }
+            state.upsert_runtime_session(ProbeRuntimeSessionState::from_metadata(
+                &response.session.session,
+                &config,
+                response.session.transcript.len(),
+            ));
+        }
+        Err(error) => {
+            let _ = emit_pending_tool_approvals(message_tx, &mut client, &session_id);
+            send_runtime_error(message_tx, error.to_string());
         }
     }
 }
@@ -614,7 +797,42 @@ fn emit_session_ready(
             runtime_activity,
             latest_task_workspace_summary: metadata.latest_task_workspace_summary.clone(),
             latest_task_receipt: metadata.latest_task_receipt.clone(),
+            mcp_state: metadata.mcp_state.clone(),
             recovery_note,
+        })
+        .map_err(|_| ())
+}
+
+fn emit_inspected_session_workspace_state(
+    message_tx: &Sender<AppMessage>,
+    client: &mut ProbeClient,
+    session_id: &SessionId,
+) -> Result<(), ()> {
+    let Ok(response) = client.inspect_detached_session(session_id) else {
+        return Ok(());
+    };
+    emit_session_workspace_state(
+        message_tx,
+        &response.session.session.id,
+        response.session.session.workspace_state.clone(),
+        response.session.branch_state.clone(),
+        response.session.delivery_state.clone(),
+    )
+}
+
+fn emit_session_workspace_state(
+    message_tx: &Sender<AppMessage>,
+    session_id: &SessionId,
+    workspace_state: Option<SessionWorkspaceState>,
+    branch_state: Option<SessionBranchState>,
+    delivery_state: Option<SessionDeliveryState>,
+) -> Result<(), ()> {
+    message_tx
+        .send(AppMessage::ProbeRuntimeWorkspaceStateUpdated {
+            session_id: session_id.as_str().to_string(),
+            workspace_state,
+            branch_state,
+            delivery_state,
         })
         .map_err(|_| ())
 }
@@ -1337,8 +1555,8 @@ fn split_body_lines(value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProbeRuntimeSessionState, WorkerState, detached_terminal_activity, tool_call_lines,
-        tool_result_lines,
+        ProbeRuntimeSessionState, WorkerState, background_task_title, detached_terminal_activity,
+        queued_turn_status_label, tool_call_lines, tool_result_lines,
     };
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
     use probe_protocol::runtime::{QueuedTurnStatus, RuntimeActivityKind};
@@ -1546,6 +1764,21 @@ mod tests {
         assert_eq!(activity.kind, RuntimeActivityKind::Stopped);
         assert_eq!(activity.label, "stopped");
     }
+
+    #[test]
+    fn queued_turn_status_labels_background_running_state_clearly() {
+        assert_eq!(queued_turn_status_label(QueuedTurnStatus::Queued), "queued");
+        assert_eq!(
+            queued_turn_status_label(QueuedTurnStatus::Running),
+            "running now"
+        );
+    }
+
+    #[test]
+    fn background_task_title_uses_first_non_empty_line() {
+        let title = background_task_title("\n\nInvestigate approval handling in worker.rs\nmore");
+        assert_eq!(title, "Investigate approval handling in worker.rs");
+    }
 }
 
 fn client_error_session_id(error: &ProbeClientError) -> Option<SessionId> {
@@ -1564,6 +1797,36 @@ fn client_error_session_id(error: &ProbeClientError) -> Option<SessionId> {
         | ProbeClientError::UnexpectedServerMessage(_)
         | ProbeClientError::UnsupportedToolSet(_)
         | ProbeClientError::ShutdownRejected { .. } => None,
+    }
+}
+
+fn queued_turn_status_label(status: QueuedTurnStatus) -> &'static str {
+    match status {
+        QueuedTurnStatus::Queued => "queued",
+        QueuedTurnStatus::Running => "running now",
+        QueuedTurnStatus::Completed => "completed",
+        QueuedTurnStatus::Failed => "failed",
+        QueuedTurnStatus::Cancelled => "cancelled",
+        QueuedTurnStatus::TimedOut => "timed out",
+    }
+}
+
+fn background_task_title(prompt: &str) -> String {
+    let first_line = prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("Probe background task");
+    let compact = first_line
+        .chars()
+        .take(56)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if compact.is_empty() {
+        String::from("Probe background task")
+    } else {
+        compact
     }
 }
 

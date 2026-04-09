@@ -5,7 +5,8 @@ use probe_core::tools::ToolLoopConfig;
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_protocol::runtime::RuntimeActivity;
 use probe_protocol::session::{
-    PendingToolApproval, SessionHarnessProfile, TaskFinalReceipt, TaskWorkspaceSummary,
+    PendingToolApproval, SessionBranchState, SessionDeliveryState, SessionHarnessProfile,
+    SessionMcpState, SessionWorkspaceState, TaskFinalReceipt, TaskWorkspaceSummary,
     ToolApprovalResolution,
 };
 
@@ -20,6 +21,15 @@ pub enum BackgroundTaskRequest {
         session_id: String,
         config: ProbeRuntimeTurnConfig,
     },
+    BackgroundProbeRuntimeTurn {
+        prompt: String,
+        config: ProbeRuntimeTurnConfig,
+    },
+    DelegatedProbeRuntimeTurn {
+        parent_session_id: String,
+        prompt: String,
+        config: ProbeRuntimeTurnConfig,
+    },
     ProbeRuntimeTurn {
         prompt: String,
         config: ProbeRuntimeTurnConfig,
@@ -28,6 +38,10 @@ pub enum BackgroundTaskRequest {
         session_id: String,
         call_id: String,
         resolution: ToolApprovalResolution,
+        config: ProbeRuntimeTurnConfig,
+    },
+    RevertLastTask {
+        session_id: String,
         config: ProbeRuntimeTurnConfig,
     },
 }
@@ -58,6 +72,30 @@ impl BackgroundTaskRequest {
     }
 
     #[must_use]
+    pub fn background_probe_runtime_turn(
+        prompt: impl Into<String>,
+        config: ProbeRuntimeTurnConfig,
+    ) -> Self {
+        Self::BackgroundProbeRuntimeTurn {
+            prompt: prompt.into(),
+            config,
+        }
+    }
+
+    #[must_use]
+    pub fn delegated_probe_runtime_turn(
+        parent_session_id: impl Into<String>,
+        prompt: impl Into<String>,
+        config: ProbeRuntimeTurnConfig,
+    ) -> Self {
+        Self::DelegatedProbeRuntimeTurn {
+            parent_session_id: parent_session_id.into(),
+            prompt: prompt.into(),
+            config,
+        }
+    }
+
+    #[must_use]
     pub fn resolve_pending_tool_approval(
         session_id: impl Into<String>,
         call_id: impl Into<String>,
@@ -73,12 +111,23 @@ impl BackgroundTaskRequest {
     }
 
     #[must_use]
+    pub fn revert_last_task(session_id: impl Into<String>, config: ProbeRuntimeTurnConfig) -> Self {
+        Self::RevertLastTask {
+            session_id: session_id.into(),
+            config,
+        }
+    }
+
+    #[must_use]
     pub fn setup_backend(&self) -> Option<AppleFmBackendSummary> {
         match self {
             Self::AppleFmSetup { profile } => Some(AppleFmBackendSummary::from_profile(profile)),
             Self::AttachProbeRuntimeSession { .. }
+            | Self::BackgroundProbeRuntimeTurn { .. }
+            | Self::DelegatedProbeRuntimeTurn { .. }
             | Self::ProbeRuntimeTurn { .. }
-            | Self::ResolvePendingToolApproval { .. } => None,
+            | Self::ResolvePendingToolApproval { .. }
+            | Self::RevertLastTask { .. } => None,
         }
     }
 
@@ -87,8 +136,11 @@ impl BackgroundTaskRequest {
         match self {
             Self::AppleFmSetup { .. } => "Apple FM setup check",
             Self::AttachProbeRuntimeSession { .. } => "Probe runtime attach",
+            Self::BackgroundProbeRuntimeTurn { .. } => "background task launch",
+            Self::DelegatedProbeRuntimeTurn { .. } => "delegated child task launch",
             Self::ProbeRuntimeTurn { .. } => "Probe runtime turn",
             Self::ResolvePendingToolApproval { .. } => "pending approval decision",
+            Self::RevertLastTask { .. } => "revert last task",
         }
     }
 }
@@ -230,6 +282,13 @@ pub enum AppMessage {
     TranscriptEntryCommitted {
         entry: TranscriptEntry,
     },
+    BackgroundTaskQueued {
+        session_id: String,
+        title: String,
+        cwd: String,
+        status: String,
+        parent_title: Option<String>,
+    },
     ProbeRuntimeSessionReady {
         session_id: String,
         profile_name: String,
@@ -238,7 +297,14 @@ pub enum AppMessage {
         runtime_activity: Option<RuntimeActivity>,
         latest_task_workspace_summary: Option<TaskWorkspaceSummary>,
         latest_task_receipt: Option<TaskFinalReceipt>,
+        mcp_state: Option<SessionMcpState>,
         recovery_note: Option<String>,
+    },
+    ProbeRuntimeWorkspaceStateUpdated {
+        session_id: String,
+        workspace_state: Option<SessionWorkspaceState>,
+        branch_state: Option<SessionBranchState>,
+        delivery_state: Option<SessionDeliveryState>,
     },
     SessionUsageUpdated {
         session_id: String,

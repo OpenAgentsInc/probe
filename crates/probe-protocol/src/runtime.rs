@@ -387,6 +387,21 @@ pub struct ResolvePendingApprovalRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevertLastTaskRequest {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<TurnAuthor>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevertLastTaskResponse {
+    pub session: SessionSnapshot,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reverted_files: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListPendingApprovalsRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
@@ -880,6 +895,7 @@ pub enum RuntimeRequest {
     CancelQueuedTurn(CancelQueuedTurnRequest),
     ListPendingApprovals(ListPendingApprovalsRequest),
     ResolvePendingApproval(ResolvePendingApprovalRequest),
+    RevertLastTask(RevertLastTaskRequest),
     Shutdown,
 }
 
@@ -910,6 +926,7 @@ pub enum RuntimeResponse {
     CancelQueuedTurn(CancelQueuedTurnResponse),
     ListPendingApprovals(ListPendingApprovalsResponse),
     ResolvePendingApproval(ResolvePendingApprovalResponse),
+    RevertLastTask(RevertLastTaskResponse),
     Shutdown(ShutdownResponse),
 }
 

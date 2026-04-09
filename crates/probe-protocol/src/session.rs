@@ -200,6 +200,17 @@ pub struct ToolExecutionRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposedToolEdit {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_files: Vec<String>,
+    pub summary_text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preview_lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_hint: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingToolApproval {
     pub session_id: SessionId,
     pub tool_call_id: String,
@@ -211,6 +222,8 @@ pub struct PendingToolApproval {
     pub tool_call_turn_index: u64,
     pub paused_result_turn_index: u64,
     pub requested_at_ms: TimestampMs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_edit: Option<ProposedToolEdit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_at_ms: Option<TimestampMs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -834,9 +847,53 @@ pub struct SessionDeliveryState {
 pub enum TaskWorkspaceSummaryStatus {
     NoRepoChanges,
     Changed,
+    Reverted,
     PartialChangesBeforeFailure,
     PendingApproval,
     ChangeAccountingLimited,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCheckpointStatus {
+    #[default]
+    NotCaptured,
+    Captured,
+    Limited,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskCheckpointSummary {
+    #[serde(default)]
+    pub status: TaskCheckpointStatus,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary_text: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskRevertibilityStatus {
+    #[default]
+    Unavailable,
+    Exact,
+    Limited,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRevertibilitySummary {
+    #[serde(default)]
+    pub status: TaskRevertibilityStatus,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary_text: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskDiffPreview {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diff_lines: Vec<String>,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -855,6 +912,12 @@ pub struct TaskWorkspaceSummary {
     pub repo_root: Option<PathBuf>,
     #[serde(default)]
     pub change_accounting_limited: bool,
+    #[serde(default)]
+    pub checkpoint: TaskCheckpointSummary,
+    #[serde(default)]
+    pub revertibility: TaskRevertibilitySummary,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diff_previews: Vec<TaskDiffPreview>,
     pub summary_text: String,
 }
 
@@ -1043,11 +1106,76 @@ pub struct SessionMetadata {
     pub latest_task_workspace_summary: Option<TaskWorkspaceSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_task_receipt: Option<TaskFinalReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_state: Option<SessionMcpState>,
     pub transcript_path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_link: Option<SessionParentLink>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_links: Vec<SessionChildLink>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMcpServerSource {
+    ManualLaunch,
+    ProviderCommandRecipe,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMcpServerTransport {
+    Stdio,
+    Http,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMcpConnectionStatus {
+    Connected,
+    Failed,
+    Unsupported,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMcpTool {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMcpServer {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub source: SessionMcpServerSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<SessionMcpServerTransport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_setup_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_status: Option<SessionMcpConnectionStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discovered_tools: Vec<SessionMcpTool>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMcpState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<SessionMcpServer>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

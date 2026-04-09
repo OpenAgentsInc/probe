@@ -3539,6 +3539,19 @@ mod tests {
                 outside_tracking_dirty_files: Vec::new(),
                 repo_root: None,
                 change_accounting_limited: false,
+                checkpoint: probe_protocol::session::TaskCheckpointSummary {
+                    status: probe_protocol::session::TaskCheckpointStatus::Captured,
+                    summary_text: String::from(
+                        "Probe captured a pre-edit checkpoint before changes landed in src/lib.rs.",
+                    ),
+                },
+                revertibility: probe_protocol::session::TaskRevertibilitySummary {
+                    status: probe_protocol::session::TaskRevertibilityStatus::Exact,
+                    summary_text: String::from(
+                        "Probe has enough checkpoint coverage to attempt an exact restore for src/lib.rs.",
+                    ),
+                },
+                diff_previews: Vec::new(),
                 summary_text: String::from("This task changed 1 file(s): src/lib.rs."),
             },
             verification_status: TaskVerificationStatus::Passed,

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,6 +12,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use probe_client::{ProbeClient, ProbeClientConfig, ProbeClientTransportConfig};
 use probe_core::backend_profiles::{
     named_backend_profile, next_reasoning_level_for_backend, openai_codex_subscription,
     persisted_reasoning_level_for_backend, psionic_apple_fm_bridge, psionic_inference_mesh,
@@ -23,7 +25,12 @@ use probe_core::session_store::FilesystemSessionStore;
 use probe_core::tools::{ProbeToolChoice, ToolApprovalConfig, ToolLoopConfig};
 use probe_openai_auth::OpenAiCodexAuthStore;
 use probe_protocol::backend::{BackendKind, BackendProfile};
-use probe_protocol::session::SessionMetadata;
+use probe_protocol::runtime::{DetachedSessionRecoveryState, DetachedSessionStatus};
+use probe_protocol::session::{
+    PendingToolApproval, SessionBranchState, SessionDeliveryArtifact, SessionDeliveryState,
+    SessionDeliveryStatus, SessionMcpConnectionStatus, SessionMetadata, SessionWorkspaceBootMode,
+    SessionWorkspaceState, TaskWorkspaceSummary,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout};
@@ -32,14 +39,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::bottom_pane::{BottomPane, BottomPaneState};
 use crate::event::{UiEvent, event_from_key, event_from_mouse};
+use crate::memory::{ProbeMemoryStack, load_probe_memory_stack};
 use crate::message::{AppMessage, BackgroundTaskRequest, ProbeRuntimeTurnConfig};
 use crate::screens::{
-    ActiveTab, ApprovalOverlay, ChatScreen, ConfirmationKind, ConfirmationOverlay, HelpScreen,
-    IntegrationCardView, ManagedMcpServerView, McpAddOverlay, McpEditorOverlay, McpOverlay,
-    McpProviderCommandOverlay, McpServerTransportDraft, McpServersOverlay, ModelPickerOverlay,
-    PlanModeOverlay, ReasoningPickerOverlay, ResumeOverlay, ResumeSessionView, ScreenAction,
-    ScreenCommand, ScreenId, ScreenState, SetupOverlay, TaskPhase, UsageOverlay, WorkspaceOverlay,
+    ActiveTab, ApprovalOverlay, BackgroundModeOverlay, BranchOverlay, ChatScreen,
+    CheckpointOverlay, CommitOverlay, ConfirmationKind, ConfirmationOverlay, DiffOverlay,
+    DoctorOverlay, GitOverlay, HelpScreen, IntegrationCardView, ManagedMcpServerView,
+    McpAddOverlay, McpEditorOverlay, McpOverlay, McpProviderCommandOverlay,
+    McpServerTransportDraft, McpServersOverlay, MemoryEditorOverlay, MemoryOverlay,
+    ModelPickerOverlay, PlanModeOverlay, PrCommentsOverlay, PrFeedbackItemView, PrOverlay,
+    PushOverlay, ReasoningPickerOverlay, RecipesOverlay, ResumeOverlay, ResumeSessionView,
+    RevertOverlay, ReviewModeOverlay, ScreenAction, ScreenCommand, ScreenId, ScreenState,
+    SetupOverlay, StageOverlay, StatusOverlay, TaskDiffFileView, TaskPhase, UsageOverlay,
+    WorkspaceOverlay,
 };
+use crate::transcript::TranscriptMode;
 use crate::worker::BackgroundWorker;
 
 const TICK_RATE: Duration = Duration::from_millis(33);
@@ -64,14 +78,95 @@ impl LaneOperatorMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaneLaunchMode {
+    Foreground,
+    Background,
+    Delegate,
+}
+
+impl LaneLaunchMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Foreground => "foreground",
+            Self::Background => "background",
+            Self::Delegate => "delegate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaneReviewMode {
+    AutoSafe,
+    ReviewRisky,
+    ReviewAll,
+}
+
+impl LaneReviewMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::AutoSafe => "auto-safe",
+            Self::ReviewRisky => "review-risky",
+            Self::ReviewAll => "review-all",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct BackendLaneConfig {
     label: String,
     chat_runtime: ProbeRuntimeTurnConfig,
     operator_backend: ServerOperatorSummary,
     mode: LaneOperatorMode,
+    launch_mode: LaneLaunchMode,
+    review_mode: LaneReviewMode,
+    transcript_mode: TranscriptMode,
+    memory_stack: ProbeMemoryStack,
     carry_forward_summary: Option<String>,
     session_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPrReviewSummary {
+    number: u64,
+    title: String,
+    url: String,
+    #[serde(default)]
+    review_decision: Option<String>,
+    #[serde(default)]
+    is_draft: bool,
+    head_ref_name: String,
+    base_ref_name: String,
+    #[serde(default)]
+    comments: Vec<GhPrComment>,
+    #[serde(default)]
+    reviews: Vec<GhPrReview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPrComment {
+    #[serde(default)]
+    author: Option<GhActor>,
+    #[serde(default)]
+    body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPrReview {
+    #[serde(default)]
+    author: Option<GhActor>,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct GhActor {
+    login: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,8 +219,8 @@ impl McpServerTransport {
 impl McpServerSource {
     fn label(&self) -> &'static str {
         match self {
-            Self::ManualLaunch => "manual launch",
-            Self::ProviderCommandRecipe => "provider recipe",
+            Self::ManualLaunch => "manual runtime server",
+            Self::ProviderCommandRecipe => "saved recipe",
         }
     }
 }
@@ -275,6 +370,8 @@ impl AppShell {
             cwd,
             profile,
             LaneOperatorMode::Coding,
+            LaneReviewMode::AutoSafe,
+            None,
             None,
             0,
         )
@@ -337,33 +434,33 @@ impl AppShell {
         self.poll_background_messages();
         if matches!(event, UiEvent::PasteSystemClipboard) {
             match self.active_screen_id() {
-                ScreenId::McpProviderCommandOverlay | ScreenId::McpEditorOverlay => {
-                    match read_system_clipboard_text() {
-                        Ok(text) if text.is_empty() => {
-                            self.last_status = String::from("system clipboard is empty");
-                        }
-                        Ok(text) => {
-                            let pasted_chars = text.chars().count();
-                            let outcome = self
-                                .screens
-                                .last_mut()
-                                .expect("app shell always keeps one screen")
-                                .handle_event(UiEvent::ComposerPaste(text));
-                            if let Some(status) = outcome.status {
-                                self.last_status = status;
-                            } else {
-                                self.last_status =
-                                    format!("pasted {pasted_chars} chars from system clipboard");
-                            }
-                        }
-                        Err(error) => {
-                            self.last_status = error;
+                ScreenId::McpProviderCommandOverlay
+                | ScreenId::McpEditorOverlay
+                | ScreenId::MemoryEditorOverlay => match read_system_clipboard_text() {
+                    Ok(text) if text.is_empty() => {
+                        self.last_status = String::from("system clipboard is empty");
+                    }
+                    Ok(text) => {
+                        let pasted_chars = text.chars().count();
+                        let outcome = self
+                            .screens
+                            .last_mut()
+                            .expect("app shell always keeps one screen")
+                            .handle_event(UiEvent::ComposerPaste(text));
+                        if let Some(status) = outcome.status {
+                            self.last_status = status;
+                        } else {
+                            self.last_status =
+                                format!("pasted {pasted_chars} chars from system clipboard");
                         }
                     }
-                }
+                    Err(error) => {
+                        self.last_status = error;
+                    }
+                },
                 _ => {
                     self.last_status = String::from(
-                        "system clipboard paste is only available in editable MCP fields",
+                        "system clipboard paste is only available in editable setup fields",
                     );
                 }
             }
@@ -386,6 +483,14 @@ impl AppShell {
                     self.switch_backend(self.base_screen().active_tab().previous());
                     self.poll_background_messages();
                     return;
+                }
+                UiEvent::Dismiss => {
+                    let pane_state = self.bottom_pane_state();
+                    if self.bottom_pane.dismiss_slash_palette(&pane_state) {
+                        self.last_status = String::from("closed command list");
+                        self.poll_background_messages();
+                        return;
+                    }
                 }
                 _ => {}
             }
@@ -418,7 +523,10 @@ impl AppShell {
                         self.poll_background_messages();
                         return;
                     }
-                    if self.base_screen().has_pending_tool_approvals() {
+                    let launch_mode = self.backend_lanes[self.active_backend_index].launch_mode;
+                    if launch_mode != LaneLaunchMode::Background
+                        && self.base_screen().has_pending_tool_approvals()
+                    {
                         self.base_screen_mut().record_event(
                             "blocked new turn while a tool approval is still pending",
                         );
@@ -427,20 +535,66 @@ impl AppShell {
                         self.poll_background_messages();
                         return;
                     }
+                    self.refresh_lane_memory_state(self.active_backend_index);
                     let preview = submission_preview(&submitted, 48);
                     self.base_screen_mut().submit_user_turn(&submitted);
-                    self.base_screen_mut()
-                        .record_event(format!("queued Probe runtime turn: {preview}"));
-                    self.last_status = format!(
-                        "submitted chat turn ({} chars)",
-                        submitted.text.chars().count()
-                    );
-                    if let Err(error) =
-                        self.submit_background_task(BackgroundTaskRequest::probe_runtime_turn(
+                    if launch_mode == LaneLaunchMode::Delegate
+                        && self.base_screen().runtime_session_id().is_none()
+                    {
+                        self.base_screen_mut().record_event(
+                            "blocked delegated task because this lane does not have a parent session yet",
+                        );
+                        self.last_status = String::from(
+                            "start one normal turn on this lane before you delegate child tasks",
+                        );
+                        self.poll_background_messages();
+                        return;
+                    }
+                    self.last_status = if launch_mode == LaneLaunchMode::Background {
+                        format!(
+                            "queued background task launch ({} chars)",
+                            submitted.text.chars().count()
+                        )
+                    } else if launch_mode == LaneLaunchMode::Delegate {
+                        format!(
+                            "queued delegated child task ({} chars)",
+                            submitted.text.chars().count()
+                        )
+                    } else {
+                        format!(
+                            "submitted chat turn ({} chars)",
+                            submitted.text.chars().count()
+                        )
+                    };
+                    let request = if launch_mode == LaneLaunchMode::Background {
+                        self.base_screen_mut()
+                            .record_event(format!("queued background task: {preview}"));
+                        BackgroundTaskRequest::background_probe_runtime_turn(
                             submitted.text.clone(),
                             self.active_chat_runtime().clone(),
-                        ))
-                    {
+                        )
+                    } else if launch_mode == LaneLaunchMode::Delegate {
+                        let parent_session_id = self
+                            .base_screen()
+                            .runtime_session_id()
+                            .map(str::to_owned)
+                            .unwrap_or_default();
+                        self.base_screen_mut()
+                            .record_event(format!("queued delegated child task: {preview}"));
+                        BackgroundTaskRequest::delegated_probe_runtime_turn(
+                            parent_session_id,
+                            submitted.text.clone(),
+                            self.active_chat_runtime().clone(),
+                        )
+                    } else {
+                        self.base_screen_mut()
+                            .record_event(format!("queued Probe runtime turn: {preview}"));
+                        BackgroundTaskRequest::probe_runtime_turn(
+                            submitted.text.clone(),
+                            self.active_chat_runtime().clone(),
+                        )
+                    };
+                    if let Err(error) = self.submit_background_task(request) {
                         self.last_status = error;
                     }
                 }
@@ -464,11 +618,26 @@ impl AppShell {
                     ScreenAction::OpenHelp => {
                         self.open_help_overlay();
                     }
+                    ScreenAction::OpenStatusOverlay => {
+                        self.open_status_overlay();
+                    }
+                    ScreenAction::OpenDoctorOverlay => {
+                        self.open_doctor_overlay();
+                    }
                     ScreenAction::OpenSetupOverlay => {
                         self.open_backend_overlay();
                     }
                     ScreenAction::OpenApprovalOverlay => {
                         self.open_approval_overlay();
+                    }
+                    ScreenAction::OpenGitOverlay => {
+                        self.open_git_overlay();
+                    }
+                    ScreenAction::OpenRecipesOverlay => {
+                        self.open_recipes_overlay();
+                    }
+                    ScreenAction::OpenTasksOverlay => {
+                        self.open_resume_overlay();
                     }
                     ScreenAction::OpenMcpAddOverlay => {
                         self.base_screen_mut()
@@ -520,6 +689,38 @@ impl AppShell {
                                 self.screens.pop();
                                 self.base_screen_mut()
                                     .record_event("plan mode picker released focus");
+                            }
+                        }
+                        ScreenCommand::SetActiveLaunchMode { mode_label } => {
+                            let mode = match mode_label.as_str() {
+                                "background" => LaneLaunchMode::Background,
+                                "delegate" => LaneLaunchMode::Delegate,
+                                _ => LaneLaunchMode::Foreground,
+                            };
+                            if let Err(error) = self.apply_active_launch_mode(mode) {
+                                self.last_status = error;
+                            } else if self.active_screen_id() == ScreenId::BackgroundModeOverlay
+                                && self.screens.len() > 1
+                            {
+                                self.screens.pop();
+                                self.base_screen_mut()
+                                    .record_event("background mode picker released focus");
+                            }
+                        }
+                        ScreenCommand::SetActiveReviewMode { mode_label } => {
+                            let mode = match mode_label.as_str() {
+                                "review-risky" => LaneReviewMode::ReviewRisky,
+                                "review-all" => LaneReviewMode::ReviewAll,
+                                _ => LaneReviewMode::AutoSafe,
+                            };
+                            if let Err(error) = self.apply_active_review_mode(mode) {
+                                self.last_status = error;
+                            } else if self.active_screen_id() == ScreenId::ReviewModeOverlay
+                                && self.screens.len() > 1
+                            {
+                                self.screens.pop();
+                                self.base_screen_mut()
+                                    .record_event("review mode picker released focus");
                             }
                         }
                         ScreenCommand::ResolvePendingToolApproval {
@@ -592,6 +793,54 @@ impl AppShell {
                                 self.last_status = error;
                             }
                         }
+                        ScreenCommand::CreateOrSwitchBranch { repo_root, name } => {
+                            if let Err(error) = self.create_or_switch_branch(repo_root, name) {
+                                self.last_status = error;
+                            }
+                        }
+                        ScreenCommand::StageCurrentRepo { repo_root } => {
+                            if let Err(error) = self.stage_current_repo(repo_root) {
+                                self.last_status = error;
+                            }
+                        }
+                        ScreenCommand::CommitCurrentRepo { repo_root, message } => {
+                            if let Err(error) = self.commit_current_repo(repo_root, message) {
+                                self.last_status = error;
+                            }
+                        }
+                        ScreenCommand::PushCurrentBranch {
+                            repo_root,
+                            branch_name,
+                            set_upstream,
+                        } => {
+                            if let Err(error) =
+                                self.push_current_branch(repo_root, branch_name, set_upstream)
+                            {
+                                self.last_status = error;
+                            }
+                        }
+                        ScreenCommand::CreateDraftPullRequest {
+                            repo_root,
+                            title,
+                            base_branch,
+                            head_branch,
+                        } => {
+                            if let Err(error) = self.create_draft_pull_request(
+                                repo_root,
+                                title,
+                                base_branch,
+                                head_branch,
+                            ) {
+                                self.last_status = error;
+                            }
+                        }
+                        ScreenCommand::SeedComposerDraft { text } => {
+                            self.bottom_pane.replace_draft(text);
+                            self.base_screen_mut()
+                                .record_event("loaded a guided next step into the composer");
+                            self.base_screen_mut()
+                                .set_local_action_notice(Some(String::from("next step ready")));
+                        }
                         ScreenCommand::OpenMcpProviderCommandOverlay => {
                             self.base_screen_mut()
                                 .record_event("MCP provider command overlay took focus");
@@ -599,11 +848,15 @@ impl AppShell {
                                 McpProviderCommandOverlay::new(),
                             ));
                         }
-                        ScreenCommand::OpenMcpManualEditorOverlay => {
-                            self.base_screen_mut()
-                                .record_event("manual MCP setup overlay took focus");
-                            self.screens
-                                .push(ScreenState::McpEditor(McpEditorOverlay::new()));
+                        ScreenCommand::OpenMcpManualEditorOverlay { server_id } => {
+                            if let Err(error) = self.open_mcp_manual_editor_overlay(server_id) {
+                                self.last_status = error;
+                            }
+                        }
+                        ScreenCommand::OpenMemoryEditor { label, path } => {
+                            if let Err(error) = self.open_memory_editor(label, path) {
+                                self.last_status = error;
+                            }
                         }
                         ScreenCommand::ImportMcpProviderCommand { command } => {
                             if let Err(error) = self.import_mcp_provider_command(command) {
@@ -611,12 +864,48 @@ impl AppShell {
                             }
                         }
                         ScreenCommand::SaveMcpServer {
+                            server_id,
                             name,
                             transport,
                             target,
                         } => {
-                            if let Err(error) = self.save_mcp_server(name, transport, target) {
+                            if let Err(error) =
+                                self.save_mcp_server(server_id, name, transport, target)
+                            {
                                 self.last_status = error;
+                            }
+                        }
+                        ScreenCommand::SaveMemoryFile { label, path, body } => {
+                            if let Err(error) = self.save_memory_file(label, path, body) {
+                                self.last_status = error;
+                            }
+                        }
+                        ScreenCommand::RevertLastTask { session_id } => {
+                            if !self.base_screen().can_execute_revert() {
+                                self.last_status = String::from(
+                                    "latest task is not yet safe to revert automatically",
+                                );
+                            } else {
+                                let session_id = if session_id.is_empty() {
+                                    self.base_screen()
+                                        .runtime_session_id()
+                                        .map(str::to_owned)
+                                        .unwrap_or_default()
+                                } else {
+                                    session_id
+                                };
+                                if session_id.is_empty() {
+                                    self.last_status = String::from(
+                                        "no runtime session is attached on this lane yet",
+                                    );
+                                } else if let Err(error) = self.submit_background_task(
+                                    BackgroundTaskRequest::revert_last_task(
+                                        session_id,
+                                        self.active_chat_runtime().clone(),
+                                    ),
+                                ) {
+                                    self.last_status = error;
+                                }
                             }
                         }
                         ScreenCommand::ConfirmClearActiveContext => {
@@ -695,7 +984,7 @@ impl AppShell {
 
         let sections = Layout::vertical([
             Constraint::Min(0),
-            Constraint::Length(self.bottom_pane.desired_height(&pane_state)),
+            Constraint::Length(self.bottom_pane.desired_height(area.width, &pane_state)),
         ])
         .spacing(1)
         .split(area);
@@ -757,6 +1046,61 @@ impl AppShell {
             ScreenId::Help => {
                 return BottomPaneState::Disabled(String::from("Help owns focus. Esc closes it."));
             }
+            ScreenId::StatusOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Status owns focus. Esc returns to chat.",
+                ));
+            }
+            ScreenId::DoctorOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Doctor owns focus. Esc returns to chat.",
+                ));
+            }
+            ScreenId::RecipesOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Recipes owns focus. Up/Down chooses a workflow, Enter loads the first step, and Esc returns.",
+                ));
+            }
+            ScreenId::BackgroundModeOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Launch mode picker owns focus. Up/Down choose, Enter applies, and Esc returns.",
+                ));
+            }
+            ScreenId::GitOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Git overlay owns focus. Esc returns to chat.",
+                ));
+            }
+            ScreenId::BranchOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Branch overlay owns focus. Type a branch name, Enter applies, and Esc returns.",
+                ));
+            }
+            ScreenId::StageOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Stage overlay owns focus. Enter stages current repo changes, and Esc returns.",
+                ));
+            }
+            ScreenId::CommitOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Commit overlay owns focus. Type a message, Enter commits, and Esc returns.",
+                ));
+            }
+            ScreenId::PushOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Push overlay owns focus. Enter pushes the current branch, and Esc returns.",
+                ));
+            }
+            ScreenId::PrOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "PR overlay owns focus. Type a title, Enter creates the draft PR, and Esc returns.",
+                ));
+            }
+            ScreenId::PrCommentsOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "PR comments owns focus. Up/Down choose feedback when available, Enter loads it, and Esc returns.",
+                ));
+            }
             ScreenId::SetupOverlay => {
                 return BottomPaneState::Disabled(String::from(
                     "Backend details own focus. Esc returns to chat.",
@@ -782,6 +1126,36 @@ impl AppShell {
                     "Reasoning picker owns focus. Up/Down choose and Enter applies.",
                 ));
             }
+            ScreenId::ReviewModeOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Review mode picker owns focus. Up/Down choose and Enter applies.",
+                ));
+            }
+            ScreenId::MemoryOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Memory overlay owns focus. Up/Down choose a layer, PgUp/PgDn scroll, and Esc returns.",
+                ));
+            }
+            ScreenId::MemoryEditorOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Memory editor owns focus. Type to edit, Ctrl+J inserts a newline, and Enter saves.",
+                ));
+            }
+            ScreenId::DiffOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Diff overlay owns focus. Up/Down choose a file, PgUp/PgDn scroll the diff, and Esc returns.",
+                ));
+            }
+            ScreenId::CheckpointOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Checkpoint overlay owns focus. Enter or Esc returns to chat.",
+                ));
+            }
+            ScreenId::RevertOverlay => {
+                return BottomPaneState::Disabled(String::from(
+                    "Revert overlay owns focus. A or Enter reverts when available, and Esc returns to chat.",
+                ));
+            }
             ScreenId::WorkspaceOverlay => {
                 return BottomPaneState::Disabled(String::from(
                     "Workspace picker owns focus. Paste or type a path, Enter applies, and Esc returns.",
@@ -789,7 +1163,7 @@ impl AppShell {
             }
             ScreenId::ResumeOverlay => {
                 return BottomPaneState::Disabled(String::from(
-                    "Resume picker owns focus. Up/Down choose, Enter attaches, and Esc returns.",
+                    "Task list owns focus. Up/Down choose, Enter reopens, and Esc returns.",
                 ));
             }
             ScreenId::UsageOverlay => {
@@ -804,7 +1178,7 @@ impl AppShell {
             }
             ScreenId::McpServersOverlay => {
                 return BottomPaneState::Disabled(String::from(
-                    "Saved MCP servers own focus. Up/Down choose, E enables, D disables, R removes, A adds, and Esc returns.",
+                    "Saved MCP servers own focus. Up/Down choose, Enter edits setup, E enables, D disables, R removes, A adds, and Esc returns.",
                 ));
             }
             ScreenId::McpAddOverlay => {
@@ -819,7 +1193,7 @@ impl AppShell {
             }
             ScreenId::McpEditorOverlay => {
                 return BottomPaneState::Disabled(String::from(
-                    "Manual MCP setup owns focus. Type values, Tab changes fields, and Enter saves.",
+                    "MCP setup owns focus. Type values, Tab changes fields, and Enter saves.",
                 ));
             }
             ScreenId::ConfirmationOverlay => {
@@ -931,9 +1305,35 @@ impl AppShell {
 
         self.persist_active_chat_lane();
         self.active_backend_index = active_tab.index();
+        self.refresh_lane_memory_state(self.active_backend_index);
         let lane = self.backend_lanes[self.active_backend_index].clone();
         self.restore_chat_lane(self.active_backend_index, active_tab);
         self.last_status = format!("active backend: {}", lane.label);
+    }
+
+    fn refresh_lane_memory_state(&mut self, lane_index: usize) {
+        {
+            let lane = &mut self.backend_lanes[lane_index];
+            rebuild_lane_runtime(lane);
+            lane.operator_backend = operator_summary_from_profile(&lane.chat_runtime.profile);
+        }
+        let memory_stack = self.backend_lanes[lane_index].memory_stack.clone();
+        self.chat_lanes[lane_index].set_memory_stack(memory_stack.clone());
+        if lane_index == self.active_backend_index {
+            self.base_screen_mut().set_memory_stack(memory_stack);
+        }
+        self.refresh_memory_overlay_instances();
+    }
+
+    fn refresh_memory_overlay_instances(&mut self) {
+        let active_stack = self.backend_lanes[self.active_backend_index]
+            .memory_stack
+            .clone();
+        for screen in self.screens.iter_mut() {
+            if let ScreenState::Memory(memory) = screen {
+                *memory = MemoryOverlay::new(active_stack.clone());
+            }
+        }
     }
 
     fn cycle_codex_reasoning_level(&mut self) -> bool {
@@ -993,6 +1393,46 @@ impl AppShell {
                 self.open_help_overlay();
                 true
             }
+            Some("status") => {
+                self.open_status_overlay();
+                true
+            }
+            Some("doctor") => {
+                self.open_doctor_overlay();
+                true
+            }
+            Some("recipes") => {
+                self.open_recipes_overlay();
+                true
+            }
+            Some("git") => {
+                self.open_git_overlay();
+                true
+            }
+            Some("branch") => {
+                self.open_branch_overlay();
+                true
+            }
+            Some("stage") => {
+                self.open_stage_overlay();
+                true
+            }
+            Some("commit") => {
+                self.open_commit_overlay();
+                true
+            }
+            Some("push") => {
+                self.open_push_overlay();
+                true
+            }
+            Some("pr") => {
+                self.open_pr_overlay();
+                true
+            }
+            Some("pr_comments") => {
+                self.open_pr_comments_overlay();
+                true
+            }
             Some("backend") => {
                 self.open_backend_overlay();
                 true
@@ -1001,12 +1441,28 @@ impl AppShell {
                 self.open_model_picker();
                 true
             }
+            Some("memory") => {
+                self.open_memory_overlay();
+                true
+            }
             Some("reasoning") => {
                 self.open_reasoning_picker();
                 true
             }
             Some("plan") => {
                 self.open_plan_mode_overlay();
+                true
+            }
+            Some("review_mode") => {
+                self.open_review_mode_overlay();
+                true
+            }
+            Some("background") => {
+                self.open_launch_mode_overlay(None);
+                true
+            }
+            Some("delegate") => {
+                self.open_launch_mode_overlay(Some(LaneLaunchMode::Delegate));
                 true
             }
             Some("cwd") => {
@@ -1025,6 +1481,18 @@ impl AppShell {
                 self.open_usage_overlay();
                 true
             }
+            Some("diff") => {
+                self.open_diff_overlay();
+                true
+            }
+            Some("checkpoint") => {
+                self.open_checkpoint_overlay();
+                true
+            }
+            Some("revert") => {
+                self.open_revert_overlay();
+                true
+            }
             Some("mcp") => {
                 self.open_mcp_overlay();
                 true
@@ -1035,6 +1503,18 @@ impl AppShell {
             }
             Some("compact") => {
                 self.open_confirmation_overlay(ConfirmationKind::CompactContext);
+                true
+            }
+            Some("conversation") => {
+                self.apply_active_transcript_mode(TranscriptMode::Conversation);
+                true
+            }
+            Some("trace") => {
+                self.apply_active_transcript_mode(TranscriptMode::Trace);
+                true
+            }
+            Some("tasks") => {
+                self.open_resume_overlay();
                 true
             }
             Some("resume") => {
@@ -1050,6 +1530,331 @@ impl AppShell {
         self.last_status = String::from("opened help modal");
         if self.active_screen_id() != ScreenId::Help {
             self.screens.push(ScreenState::Help(HelpScreen::new()));
+        }
+    }
+
+    fn open_status_overlay(&mut self) {
+        let (configured_count, enabled_count) = self.mcp_server_counts();
+        let mcp_summary_lines = self.status_overlay_mcp_summary_lines();
+        self.base_screen_mut()
+            .record_event("status overlay took focus");
+        self.last_status = String::from("opened status overlay");
+        let overlay = StatusOverlay::new(configured_count, enabled_count, mcp_summary_lines);
+        if self.active_screen_id() == ScreenId::StatusOverlay {
+            if let Some(ScreenState::Status(screen)) = self.screens.last_mut() {
+                *screen = overlay;
+            }
+        } else {
+            self.screens.push(ScreenState::Status(overlay));
+        }
+    }
+
+    fn open_launch_mode_overlay(&mut self, selected: Option<LaneLaunchMode>) {
+        self.base_screen_mut()
+            .record_event("launch mode picker took focus");
+        self.last_status = String::from("opened launch mode picker");
+        let current = self.backend_lanes[self.active_backend_index].launch_mode;
+        let mut overlay = BackgroundModeOverlay::new(current.label());
+        if let Some(selected) = selected {
+            overlay = BackgroundModeOverlay::with_selected(current.label(), selected.label());
+        }
+        if self.active_screen_id() == ScreenId::BackgroundModeOverlay {
+            if let Some(ScreenState::BackgroundMode(screen)) = self.screens.last_mut() {
+                *screen = overlay;
+            }
+        } else {
+            self.screens.push(ScreenState::BackgroundMode(overlay));
+        }
+    }
+
+    fn open_doctor_overlay(&mut self) {
+        let (configured_count, enabled_count) = self.mcp_server_counts();
+        let mcp_summary_lines = self.doctor_overlay_mcp_summary_lines();
+        self.base_screen_mut()
+            .record_event("doctor overlay took focus");
+        self.last_status = String::from("opened doctor overlay");
+        let overlay = DoctorOverlay::new(configured_count, enabled_count, mcp_summary_lines);
+        if self.active_screen_id() == ScreenId::DoctorOverlay {
+            if let Some(ScreenState::Doctor(screen)) = self.screens.last_mut() {
+                *screen = overlay;
+            }
+        } else {
+            self.screens.push(ScreenState::Doctor(overlay));
+        }
+    }
+
+    fn open_recipes_overlay(&mut self) {
+        self.base_screen_mut()
+            .record_event("recipes overlay took focus");
+        self.last_status = String::from("opened recipes overlay");
+        if self.active_screen_id() == ScreenId::RecipesOverlay {
+            if let Some(ScreenState::Recipes(screen)) = self.screens.last_mut() {
+                *screen = RecipesOverlay::new();
+            }
+        } else {
+            self.screens
+                .push(ScreenState::Recipes(RecipesOverlay::new()));
+        }
+    }
+
+    fn open_git_overlay(&mut self) {
+        self.base_screen_mut()
+            .record_event("git overlay took focus");
+        self.last_status = String::from("opened git overlay");
+        if self.active_screen_id() == ScreenId::GitOverlay {
+            if let Some(ScreenState::Git(screen)) = self.screens.last_mut() {
+                *screen = GitOverlay::new();
+            }
+        } else {
+            self.screens.push(ScreenState::Git(GitOverlay::new()));
+        }
+    }
+
+    fn open_branch_overlay(&mut self) {
+        if let Some(reason) = self.active_git_mutation_block_reason("change branches") {
+            self.base_screen_mut().record_event(reason.clone());
+            self.last_status = reason;
+            return;
+        }
+        let summary = git_repo_status_summary(self.active_chat_runtime().cwd.as_path());
+        let branch_label = summary
+            .as_ref()
+            .map(|summary| summary.branch_label.clone())
+            .unwrap_or_else(|| String::from("no repo"));
+        let suggested = summary
+            .as_ref()
+            .map(suggested_branch_name)
+            .unwrap_or_else(|| String::from("codex/probe-task"));
+        let overlay = BranchOverlay::new(
+            summary.as_ref().map(|summary| summary.repo_root.clone()),
+            branch_label,
+            suggested,
+            summary.as_ref().is_some_and(|summary| {
+                summary.unstaged_count > 0
+                    || summary.untracked_count > 0
+                    || summary.staged_count > 0
+            }),
+        );
+        self.base_screen_mut()
+            .record_event("branch overlay took focus");
+        self.last_status = String::from("opened branch overlay");
+        if self.active_screen_id() == ScreenId::BranchOverlay {
+            if let Some(ScreenState::Branch(screen)) = self.screens.last_mut() {
+                *screen = overlay;
+            }
+        } else {
+            self.screens.push(ScreenState::Branch(overlay));
+        }
+    }
+
+    fn open_stage_overlay(&mut self) {
+        if let Some(reason) = self.active_git_mutation_block_reason("stage repo changes") {
+            self.base_screen_mut().record_event(reason.clone());
+            self.last_status = reason;
+            return;
+        }
+        let summary = git_repo_status_summary(self.active_chat_runtime().cwd.as_path());
+        let overlay = StageOverlay::new(
+            summary.as_ref().map(|summary| summary.repo_root.clone()),
+            summary
+                .as_ref()
+                .map(|summary| summary.branch_label.clone())
+                .unwrap_or_else(|| String::from("no repo")),
+            summary.as_ref().map_or(0, |summary| summary.staged_count),
+            summary.as_ref().map_or(0, |summary| summary.unstaged_count),
+            summary
+                .as_ref()
+                .map_or(0, |summary| summary.untracked_count),
+            summary
+                .as_ref()
+                .map(|summary| summary.preview_paths.clone())
+                .unwrap_or_default(),
+        );
+        self.base_screen_mut()
+            .record_event("stage overlay took focus");
+        self.last_status = String::from("opened stage overlay");
+        if self.active_screen_id() == ScreenId::StageOverlay {
+            if let Some(ScreenState::Stage(screen)) = self.screens.last_mut() {
+                *screen = overlay;
+            }
+        } else {
+            self.screens.push(ScreenState::Stage(overlay));
+        }
+    }
+
+    fn open_commit_overlay(&mut self) {
+        if let Some(reason) = self.active_git_mutation_block_reason("commit repo changes") {
+            self.base_screen_mut().record_event(reason.clone());
+            self.last_status = reason;
+            return;
+        }
+        let summary = git_repo_status_summary(self.active_chat_runtime().cwd.as_path());
+        let suggested_message = summary
+            .as_ref()
+            .map(suggested_commit_message)
+            .unwrap_or_else(|| String::from("Update repo changes"));
+        let overlay = CommitOverlay::new(
+            summary.as_ref().map(|summary| summary.repo_root.clone()),
+            summary
+                .as_ref()
+                .map(|summary| summary.branch_label.clone())
+                .unwrap_or_else(|| String::from("no repo")),
+            summary.as_ref().map_or(0, |summary| summary.staged_count),
+            summary.as_ref().map_or(0, |summary| summary.unstaged_count),
+            summary
+                .as_ref()
+                .map_or(0, |summary| summary.untracked_count),
+            summary
+                .as_ref()
+                .map(|summary| summary.staged_preview_paths())
+                .unwrap_or_default(),
+            suggested_message,
+        );
+        self.base_screen_mut()
+            .record_event("commit overlay took focus");
+        self.last_status = String::from("opened commit overlay");
+        if self.active_screen_id() == ScreenId::CommitOverlay {
+            if let Some(ScreenState::Commit(screen)) = self.screens.last_mut() {
+                *screen = overlay;
+            }
+        } else {
+            self.screens.push(ScreenState::Commit(overlay));
+        }
+    }
+
+    fn open_push_overlay(&mut self) {
+        if let Some(reason) = self.active_git_mutation_block_reason("push the current branch") {
+            self.base_screen_mut().record_event(reason.clone());
+            self.last_status = reason;
+            return;
+        }
+        let branch_state = session_branch_state_local(self.active_chat_runtime().cwd.as_path());
+        let repo_root = branch_state.as_ref().map(|state| state.repo_root.clone());
+        let branch_label = branch_state
+            .as_ref()
+            .map(|state| state.head_ref.clone())
+            .unwrap_or_else(|| String::from("no repo"));
+        let remote_name = branch_state
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .upstream_ref
+                    .as_ref()
+                    .and_then(|value| value.split('/').next().map(str::to_owned))
+                    .or_else(|| git_default_remote_name(state.repo_root.as_path()))
+            })
+            .unwrap_or_else(|| String::from("none"));
+        let upstream_label = branch_state
+            .as_ref()
+            .and_then(|state| state.upstream_ref.clone())
+            .unwrap_or_else(|| String::from("none"));
+        let (can_push, set_upstream, blocked_reason) =
+            branch_state.as_ref().map(push_overlay_state).unwrap_or((
+                false,
+                false,
+                String::from("Probe could not detect a git repo for the current workspace"),
+            ));
+        let overlay = PushOverlay::new(
+            repo_root,
+            branch_label,
+            remote_name,
+            upstream_label,
+            branch_state.as_ref().and_then(|state| state.ahead_by),
+            branch_state.as_ref().and_then(|state| state.behind_by),
+            branch_state
+                .as_ref()
+                .is_some_and(|state| state.working_tree_dirty),
+            can_push,
+            set_upstream,
+            blocked_reason,
+        );
+        self.base_screen_mut()
+            .record_event("push overlay took focus");
+        self.last_status = String::from("opened push overlay");
+        if self.active_screen_id() == ScreenId::PushOverlay {
+            if let Some(ScreenState::Push(screen)) = self.screens.last_mut() {
+                *screen = overlay;
+            }
+        } else {
+            self.screens.push(ScreenState::Push(overlay));
+        }
+    }
+
+    fn open_pr_overlay(&mut self) {
+        if let Some(reason) = self.active_git_mutation_block_reason("create a pull request") {
+            self.base_screen_mut().record_event(reason.clone());
+            self.last_status = reason;
+            return;
+        }
+        let branch_state = session_branch_state_local(self.active_chat_runtime().cwd.as_path());
+        let repo_root = branch_state.as_ref().map(|state| state.repo_root.clone());
+        let head_branch = branch_state
+            .as_ref()
+            .map(|state| state.head_ref.clone())
+            .unwrap_or_else(|| String::from("no repo"));
+        let remote_name = branch_state
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .upstream_ref
+                    .as_ref()
+                    .and_then(|value| value.split('/').next().map(str::to_owned))
+                    .or_else(|| git_default_remote_name(state.repo_root.as_path()))
+            })
+            .unwrap_or_else(|| String::from("none"));
+        let base_branch = branch_state
+            .as_ref()
+            .and_then(|state| {
+                git_remote_default_branch(state.repo_root.as_path(), remote_name.as_str())
+            })
+            .unwrap_or_else(|| String::from("main"));
+        let upstream_label = branch_state
+            .as_ref()
+            .and_then(|state| state.upstream_ref.clone())
+            .unwrap_or_else(|| String::from("none"));
+        let (can_create, blocked_reason) = branch_state
+            .as_ref()
+            .map(|state| pr_overlay_state(state, base_branch.as_str()))
+            .unwrap_or((
+                false,
+                String::from("Probe could not detect a git repo for the current workspace"),
+            ));
+        let title = branch_state
+            .as_ref()
+            .map(|state| suggested_pr_title(state.repo_root.as_path(), state.head_ref.as_str()))
+            .unwrap_or_else(|| String::from("Open draft PR"));
+        let overlay = PrOverlay::new(
+            repo_root,
+            head_branch,
+            base_branch,
+            remote_name,
+            upstream_label,
+            title,
+            can_create,
+            blocked_reason,
+        );
+        self.base_screen_mut().record_event("PR overlay took focus");
+        self.last_status = String::from("opened PR overlay");
+        if self.active_screen_id() == ScreenId::PrOverlay {
+            if let Some(ScreenState::Pr(screen)) = self.screens.last_mut() {
+                *screen = overlay;
+            }
+        } else {
+            self.screens.push(ScreenState::Pr(overlay));
+        }
+    }
+
+    fn open_pr_comments_overlay(&mut self) {
+        let overlay = build_pr_comments_overlay(self.active_chat_runtime().cwd.as_path());
+        self.base_screen_mut()
+            .record_event("PR comments overlay took focus");
+        self.last_status = String::from("opened PR comments overlay");
+        if self.active_screen_id() == ScreenId::PrCommentsOverlay {
+            if let Some(ScreenState::PrComments(screen)) = self.screens.last_mut() {
+                *screen = overlay;
+            }
+        } else {
+            self.screens.push(ScreenState::PrComments(overlay));
         }
     }
 
@@ -1197,9 +2002,8 @@ impl AppShell {
                 return;
             }
         };
-        self.base_screen_mut()
-            .record_event("opened resume session picker");
-        self.last_status = String::from("choose a session to resume");
+        self.base_screen_mut().record_event("opened task list");
+        self.last_status = String::from("choose a task to reopen");
         if self.active_screen_id() == ScreenId::ResumeOverlay {
             if let Some(ScreenState::Resume(screen)) = self.screens.last_mut() {
                 *screen = ResumeOverlay::new(sessions);
@@ -1340,6 +2144,109 @@ impl AppShell {
         }
     }
 
+    fn open_memory_overlay(&mut self) {
+        self.refresh_lane_memory_state(self.active_backend_index);
+        self.base_screen_mut()
+            .record_event("memory overlay took focus");
+        self.last_status = String::from("opened memory overlay");
+        let overlay = MemoryOverlay::new(self.base_screen().memory_stack().clone());
+        if self.active_screen_id() == ScreenId::MemoryOverlay {
+            if let Some(ScreenState::Memory(screen)) = self.screens.last_mut() {
+                *screen = overlay;
+            }
+        } else {
+            self.screens.push(ScreenState::Memory(overlay));
+        }
+    }
+
+    fn open_memory_editor(&mut self, label: String, path: PathBuf) -> Result<(), String> {
+        let (body, existed, load_note) = load_memory_editor_seed(path.as_path());
+        self.base_screen_mut()
+            .record_event(format!("memory editor took focus for {label}"));
+        self.last_status = format!("editing {label}");
+        let overlay = MemoryEditorOverlay::new(label, path, body, existed, load_note);
+        self.screens.push(ScreenState::MemoryEditor(overlay));
+        Ok(())
+    }
+
+    fn open_diff_overlay(&mut self) {
+        let lane_label = self.backend_lanes[self.active_backend_index].label.clone();
+        if let Some(approval) = self.base_screen().current_pending_tool_approval().cloned()
+            && let Some(overlay) =
+                build_pending_approval_diff_overlay(lane_label.as_str(), &approval)
+        {
+            self.base_screen_mut().record_event(format!(
+                "proposed diff overlay took focus for {}",
+                lane_label
+            ));
+            self.last_status = String::from("opened proposed diff overlay");
+            if self.active_screen_id() == ScreenId::DiffOverlay {
+                if let Some(ScreenState::Diff(screen)) = self.screens.last_mut() {
+                    *screen = overlay;
+                }
+            } else {
+                self.screens.push(ScreenState::Diff(overlay));
+            }
+            return;
+        }
+
+        let Some(workspace) = self.base_screen().latest_task_workspace_summary().cloned() else {
+            let reason = String::from("there is no proposed or applied diff to inspect yet");
+            self.base_screen_mut().record_event(reason.clone());
+            self.last_status = reason;
+            return;
+        };
+        if workspace.changed_files.is_empty() {
+            let reason = String::from("there is no proposed or applied diff to inspect yet");
+            self.base_screen_mut().record_event(reason.clone());
+            self.last_status = reason;
+            return;
+        }
+
+        let overlay = build_diff_overlay(lane_label.as_str(), &workspace);
+        self.base_screen_mut()
+            .record_event(format!("diff overlay took focus for {}", lane_label));
+        self.last_status = String::from("opened diff overlay");
+        if self.active_screen_id() == ScreenId::DiffOverlay {
+            if let Some(ScreenState::Diff(screen)) = self.screens.last_mut() {
+                *screen = overlay;
+            }
+        } else {
+            self.screens.push(ScreenState::Diff(overlay));
+        }
+    }
+
+    fn open_checkpoint_overlay(&mut self) {
+        self.base_screen_mut()
+            .record_event("checkpoint overlay took focus");
+        self.last_status = String::from("opened checkpoint overlay");
+        if self.active_screen_id() != ScreenId::CheckpointOverlay {
+            self.screens
+                .push(ScreenState::Checkpoint(CheckpointOverlay::new()));
+        }
+    }
+
+    fn open_revert_overlay(&mut self) {
+        self.base_screen_mut()
+            .record_event("revert overlay took focus");
+        self.last_status = String::from("opened revert overlay");
+        if self.active_screen_id() != ScreenId::RevertOverlay {
+            let blocked_status = self
+                .base_screen()
+                .latest_task_workspace_summary()
+                .map(|summary| summary.revertibility.summary_text.clone())
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or_else(|| {
+                    String::from("latest task is not yet safe to revert automatically")
+                });
+            self.screens.push(ScreenState::Revert(RevertOverlay::new(
+                self.base_screen().can_execute_revert(),
+                self.base_screen().runtime_session_id().map(str::to_owned),
+                blocked_status,
+            )));
+        }
+    }
+
     fn open_mcp_overlay(&mut self) {
         self.base_screen_mut()
             .record_event("MCP overlay took focus");
@@ -1352,6 +2259,40 @@ impl AppShell {
                 enabled_count,
             )));
         }
+    }
+
+    fn open_mcp_manual_editor_overlay(&mut self, server_id: Option<String>) -> Result<(), String> {
+        let overlay = if let Some(server_id) = server_id {
+            let Some(server) = self
+                .mcp_registry
+                .servers
+                .iter()
+                .find(|server| server.id == server_id)
+            else {
+                return Err(String::from("that MCP server no longer exists"));
+            };
+            let recommended_target = recommended_runtime_target(server.provider_hint.as_deref());
+            let recommendation_note = provider_runtime_guidance(server.provider_hint.as_deref());
+            McpEditorOverlay::seeded(
+                Some(server.id.clone()),
+                server.name.clone(),
+                match server.transport.as_ref() {
+                    Some(McpServerTransport::Http) => McpServerTransportDraft::Http,
+                    _ => McpServerTransportDraft::Stdio,
+                },
+                server.target.clone().unwrap_or_default(),
+                server.provider_setup_command.clone(),
+                server.provider_hint.clone(),
+                recommended_target,
+                recommendation_note,
+            )
+        } else {
+            McpEditorOverlay::new()
+        };
+        self.base_screen_mut()
+            .record_event("manual MCP setup overlay took focus");
+        self.screens.push(ScreenState::McpEditor(overlay));
+        Ok(())
     }
 
     fn open_confirmation_overlay(&mut self, kind: ConfirmationKind) {
@@ -1425,6 +2366,56 @@ impl AppShell {
             )));
     }
 
+    fn open_review_mode_overlay(&mut self) {
+        if let Some(reason) = self.active_runtime_reconfig_block_reason("change review mode") {
+            self.base_screen_mut().record_event(reason.clone());
+            self.last_status = reason;
+            return;
+        }
+        let current = self.backend_lanes[self.active_backend_index]
+            .review_mode
+            .label()
+            .to_string();
+        self.base_screen_mut()
+            .record_event("review mode picker took focus");
+        self.last_status = String::from("choose review mode for this lane");
+        if self.active_screen_id() == ScreenId::ReviewModeOverlay {
+            if let Some(ScreenState::ReviewMode(screen)) = self.screens.last_mut() {
+                *screen = ReviewModeOverlay::new(current.as_str());
+            }
+            return;
+        }
+        self.screens
+            .push(ScreenState::ReviewMode(ReviewModeOverlay::new(
+                current.as_str(),
+            )));
+    }
+
+    fn apply_active_launch_mode(&mut self, mode: LaneLaunchMode) -> Result<(), String> {
+        let lane_index = self.active_backend_index;
+        if self.backend_lanes[lane_index].launch_mode == mode {
+            self.base_screen_mut()
+                .record_event(format!("launch mode unchanged: {}", mode.label()));
+            self.last_status = format!("launch mode: {}", mode.label());
+            return Ok(());
+        }
+        self.backend_lanes[lane_index].launch_mode = mode;
+        let refreshed = build_chat_lane(
+            &self.backend_lanes,
+            lane_index,
+            ActiveTab::from_index(self.active_backend_index),
+        );
+        self.chat_lanes[lane_index] = refreshed.clone();
+        self.screens[0] = ScreenState::Chat(refreshed);
+        self.sync_backend_selector();
+        self.base_screen_mut()
+            .record_event(format!("launch mode set to {}", mode.label()));
+        self.base_screen_mut()
+            .set_local_action_notice(Some(format!("{} turns on", mode.label())));
+        self.last_status = format!("launch mode: {}", mode.label());
+        Ok(())
+    }
+
     fn apply_active_plan_mode(&mut self, enabled: bool) -> Result<(), String> {
         if let Some(reason) = self.active_runtime_reconfig_block_reason("change plan mode") {
             self.base_screen_mut().record_event(reason.clone());
@@ -1461,6 +2452,35 @@ impl AppShell {
         self.base_screen_mut()
             .set_local_action_notice(Some(format!("{} mode on", new_mode.label())));
         self.last_status = format!("mode: {}", new_mode.label());
+        Ok(())
+    }
+
+    fn apply_active_review_mode(&mut self, mode: LaneReviewMode) -> Result<(), String> {
+        if let Some(reason) = self.active_runtime_reconfig_block_reason("change review mode") {
+            self.base_screen_mut().record_event(reason.clone());
+            return Err(reason);
+        }
+        let lane_index = self.active_backend_index;
+        if self.backend_lanes[lane_index].review_mode == mode {
+            self.base_screen_mut()
+                .record_event(format!("review mode unchanged: {}", mode.label()));
+            self.last_status = format!("review mode: {}", mode.label());
+            return Ok(());
+        }
+        {
+            let lane = &mut self.backend_lanes[lane_index];
+            lane.review_mode = mode;
+            lane.session_generation = lane.session_generation.saturating_add(1);
+            rebuild_lane_runtime(lane);
+            lane.operator_backend = operator_summary_from_profile(&lane.chat_runtime.profile);
+        }
+        self.refresh_active_lane_after_runtime_change(format!(
+            "review mode set to {}; next turn uses the updated approval posture",
+            mode.label()
+        ));
+        self.base_screen_mut()
+            .set_local_action_notice(Some(format!("review: {}", mode.label())));
+        self.last_status = format!("review mode: {}", mode.label());
         Ok(())
     }
 
@@ -1525,10 +2545,39 @@ impl AppShell {
         Ok(())
     }
 
+    fn apply_active_transcript_mode(&mut self, mode: TranscriptMode) {
+        let lane_index = self.active_backend_index;
+        if self.backend_lanes[lane_index].transcript_mode == mode {
+            self.base_screen_mut()
+                .record_event(format!("view unchanged: {}", mode.label()));
+            self.base_screen_mut()
+                .set_local_action_notice(Some(format!("{} view on", mode.label())));
+            self.last_status = format!("view: {}", mode.label());
+            return;
+        }
+
+        self.backend_lanes[lane_index].transcript_mode = mode;
+        self.chat_lanes[lane_index].set_transcript_mode(mode);
+        self.chat_lanes[lane_index]
+            .set_local_action_notice(Some(format!("{} view on", mode.label())));
+        self.base_screen_mut().set_transcript_mode(mode);
+        self.base_screen_mut()
+            .set_local_action_notice(Some(format!("{} view on", mode.label())));
+        self.base_screen_mut()
+            .record_event(format!("transcript view set to {}", mode.label()));
+        self.last_status = format!("view: {}", mode.label());
+    }
+
     fn recent_resume_sessions(&self) -> Result<Vec<ResumeSessionView>, String> {
         let probe_home = registry_probe_home(&self.backend_lanes)
             .or_else(|| default_probe_home().ok())
-            .ok_or_else(|| String::from("Probe home is not available for session resume"))?;
+            .ok_or_else(|| String::from("Probe home is not available for task discovery"))?;
+        if let Ok(detached) = detached_task_sessions(probe_home.as_path()) {
+            if !detached.is_empty() {
+                return Ok(detached);
+            }
+        }
+
         let store = FilesystemSessionStore::new(probe_home);
         let mut sessions = store.list_sessions().map_err(|error| error.to_string())?;
         sessions.sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
@@ -1544,7 +2593,14 @@ impl AppShell {
                     .map(|backend| backend.profile_name.clone())
                     .unwrap_or_else(|| String::from("unknown backend")),
                 cwd: session.cwd.display().to_string(),
-                turns: session.next_turn_index,
+                status: String::from("saved session"),
+                detail_lines: vec![
+                    String::from("source: local session history"),
+                    format!("turns: {}", session.next_turn_index),
+                ],
+                next_hint: String::from(
+                    "next: Enter reopens this saved session on the matching lane.",
+                ),
             })
             .collect())
     }
@@ -1633,6 +2689,23 @@ impl AppShell {
         None
     }
 
+    fn active_git_mutation_block_reason(&self, action: &str) -> Option<String> {
+        if self.base_screen().has_pending_tool_approvals() {
+            return Some(format!("resolve pending approvals before you {action}"));
+        }
+        if self.base_screen().has_in_flight_runtime_activity()
+            || matches!(
+                self.base_screen().task_phase(),
+                TaskPhase::Queued | TaskPhase::CheckingAvailability | TaskPhase::Running
+            )
+        {
+            return Some(format!(
+                "wait for the current turn to finish before you {action}"
+            ));
+        }
+        None
+    }
+
     fn refresh_active_lane_after_runtime_change(&mut self, note: String) {
         let lane_index = self.active_backend_index;
         let lane = &self.backend_lanes[lane_index];
@@ -1642,12 +2715,39 @@ impl AppShell {
             &lane.chat_runtime,
             lane.operator_backend.clone(),
             lane.mode.label(),
+            lane.launch_mode.label(),
+            lane.review_mode.label(),
+            lane.transcript_mode,
             lane.carry_forward_summary.as_deref(),
             note,
         );
         self.chat_lanes[lane_index] = refreshed_lane.clone();
         self.screens[0] = ScreenState::Chat(refreshed_lane);
         self.sync_backend_selector();
+    }
+
+    fn refresh_active_git_workspace_state(&mut self) {
+        let cwd = self.active_chat_runtime().cwd.clone();
+        let branch_state = session_branch_state_local(cwd.as_path());
+        let delivery_state = branch_state
+            .as_ref()
+            .map(|branch_state| session_delivery_state_local(branch_state, 1));
+        let workspace_state = if branch_state.is_some() {
+            Some(SessionWorkspaceState {
+                boot_mode: SessionWorkspaceBootMode::Fresh,
+                baseline: None,
+                snapshot: None,
+                execution_host: None,
+                provenance_note: None,
+            })
+        } else {
+            None
+        };
+        self.base_screen_mut().set_git_workspace_state(
+            workspace_state,
+            branch_state,
+            delivery_state,
+        );
     }
 
     fn integration_cards(&self) -> Vec<IntegrationCardView> {
@@ -1658,14 +2758,16 @@ impl AppShell {
             .iter()
             .filter(|server| server.enabled)
             .count();
+        let attached_count = self
+            .base_screen()
+            .runtime_mcp_state()
+            .map(|state| state.servers.len())
+            .unwrap_or(0);
         let mut cards = vec![
             IntegrationCardView {
                 label: String::from("Add MCP server"),
                 status: String::from("ready"),
-                detail_lines: vec![
-                    String::from("Add a saved MCP integration entry for this Probe home."),
-                    String::from("Choose the standard provider-command flow or manual setup."),
-                ],
+                detail_lines: vec![String::from("Add an MCP integration for this Probe home.")],
                 next_step: String::from("Press Enter to open the MCP add menu."),
                 toggle_server_id: None,
                 remove_server_id: None,
@@ -1681,10 +2783,7 @@ impl AppShell {
                 },
                 detail_lines: vec![
                     format!("configured: {configured_count}"),
-                    format!("enabled: {enabled_count}"),
-                    String::from(
-                        "Open this to browse the saved MCP server list for this Probe home.",
-                    ),
+                    format!("enabled: {enabled_count} · attached now: {attached_count}"),
                 ],
                 next_step: String::from("Press Enter to manage saved MCP servers."),
                 toggle_server_id: None,
@@ -1711,12 +2810,206 @@ impl AppShell {
         (configured_count, enabled_count)
     }
 
+    fn mcp_source_counts(&self) -> (usize, usize, usize, usize) {
+        let mut recipe_count = 0;
+        let mut enabled_recipe_count = 0;
+        let mut manual_count = 0;
+        let mut enabled_manual_count = 0;
+        for server in &self.mcp_registry.servers {
+            match server.source {
+                McpServerSource::ProviderCommandRecipe => {
+                    recipe_count += 1;
+                    if server.enabled {
+                        enabled_recipe_count += 1;
+                    }
+                }
+                McpServerSource::ManualLaunch => {
+                    manual_count += 1;
+                    if server.enabled {
+                        enabled_manual_count += 1;
+                    }
+                }
+            }
+        }
+        (
+            recipe_count,
+            enabled_recipe_count,
+            manual_count,
+            enabled_manual_count,
+        )
+    }
+
+    fn status_overlay_mcp_summary_lines(&self) -> Vec<String> {
+        let (recipe_count, enabled_recipe_count, manual_count, enabled_manual_count) =
+            self.mcp_source_counts();
+        let mut lines = Vec::new();
+        if recipe_count > 0 {
+            let enabled_note = if enabled_recipe_count > 0 {
+                format!("{enabled_recipe_count} enabled")
+            } else {
+                String::from("none enabled")
+            };
+            lines.push(format!(
+                "mcp config: {recipe_count} saved recipe(s) still need conversion ({enabled_note})"
+            ));
+        }
+        if manual_count > 0 {
+            lines.push(format!(
+                "mcp runtime entries: {manual_count} manual runtime server(s), {enabled_manual_count} enabled"
+            ));
+        }
+        if lines.is_empty() {
+            lines.push(String::from(
+                "mcp config: no saved recipes or manual runtime servers yet",
+            ));
+        }
+        lines
+    }
+
+    fn doctor_overlay_mcp_summary_lines(&self) -> Vec<String> {
+        let (recipe_count, enabled_recipe_count, manual_count, enabled_manual_count) =
+            self.mcp_source_counts();
+        let mut lines = Vec::new();
+        if enabled_recipe_count > 0 {
+            lines.push(format!(
+                "mcp config: action - {enabled_recipe_count} enabled saved recipe(s) still need conversion before Probe can run them"
+            ));
+        } else if recipe_count > 0 {
+            lines.push(format!(
+                "mcp config: info - {recipe_count} saved recipe(s) can be converted into runtime servers from /mcp"
+            ));
+        }
+        if enabled_manual_count > 0 && self.base_screen().runtime_mcp_state().is_none() {
+            lines.push(format!(
+                "mcp runtime: info - start a turn to attach {enabled_manual_count} enabled manual runtime server(s)"
+            ));
+        } else if manual_count > 0 && enabled_manual_count == 0 {
+            lines.push(format!(
+                "mcp runtime: action - {manual_count} manual runtime server(s) are saved, but none are enabled"
+            ));
+        }
+        lines
+    }
+
     fn managed_mcp_server_views(&self) -> Vec<ManagedMcpServerView> {
+        let runtime_state = self.base_screen().runtime_mcp_state();
+        let attached_servers = runtime_state
+            .map(|state| {
+                state
+                    .servers
+                    .iter()
+                    .map(|server| (server.id.as_str(), server))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         self.mcp_registry
             .servers
             .iter()
             .map(|server| {
+                let attached_snapshot = attached_servers
+                    .iter()
+                    .find_map(|(attached_id, snapshot)| {
+                        (*attached_id == server.id.as_str()).then_some(*snapshot)
+                    });
                 let mut detail_lines = vec![format!("entry type: {}", server.source.label())];
+                let (status, session_line, next_step) = if let Some(snapshot) = attached_snapshot {
+                    let tools = snapshot.discovered_tools.len();
+                    match snapshot
+                        .connection_status
+                        .as_ref()
+                        .unwrap_or(&SessionMcpConnectionStatus::Connected)
+                    {
+                        SessionMcpConnectionStatus::Connected => (
+                            format!("connected now · {tools} tools"),
+                            format!(
+                                "session: connected now in this runtime session with {tools} discovered tool(s)"
+                            ),
+                            if server.source == McpServerSource::ProviderCommandRecipe {
+                                String::from(
+                                    "next: Enter edits this setup. E/D controls enablement. R removes it.",
+                                )
+                            } else {
+                                String::from(
+                                    "next: Enter edits this runtime server. D disables it. R removes it.",
+                                )
+                            },
+                        ),
+                        SessionMcpConnectionStatus::Failed => (
+                            String::from("attach failed"),
+                            String::from(
+                                "session: attach failed in this runtime session; open setup to fix the launch details",
+                            ),
+                            String::from(
+                                "next: Enter edits setup. D disables it if you want it out of the next turn. R removes it.",
+                            ),
+                        ),
+                        SessionMcpConnectionStatus::Unsupported => (
+                            String::from("unsupported in Probe today"),
+                            String::from(
+                                "session: Probe cannot mount this entry in the current runtime yet",
+                            ),
+                            String::from(
+                                "next: Enter edits setup. Use stdio for now if you need a working runtime MCP.",
+                            ),
+                        ),
+                    }
+                } else {
+                    match server.source {
+                        McpServerSource::ProviderCommandRecipe => {
+                            if server.enabled {
+                                (
+                                    String::from("saved recipe · needs conversion"),
+                                    String::from(
+                                        "session: saved only; this recipe still needs runtime setup before Probe can run it",
+                                    ),
+                                    String::from(
+                                        "next: Enter completes setup and turns this into a runnable runtime server.",
+                                    ),
+                                )
+                            } else {
+                                (
+                                    String::from("saved recipe · disabled"),
+                                    String::from(
+                                        "session: saved only; this recipe is disabled and still needs conversion before Probe can run it",
+                                    ),
+                                    String::from(
+                                        "next: Enter completes setup. E enables it. R removes it.",
+                                    ),
+                                )
+                            }
+                        }
+                        McpServerSource::ManualLaunch => {
+                            if server.enabled {
+                                (
+                                    String::from("ready after next turn"),
+                                    if runtime_state.is_some() {
+                                        String::from(
+                                            "session: enabled here, but not attached to this runtime session yet",
+                                        )
+                                    } else {
+                                        String::from(
+                                            "session: enabled and ready after the next turn starts a runtime session",
+                                        )
+                                    },
+                                    String::from(
+                                        "next: Start a turn to attach it now, or press Enter to edit setup.",
+                                    ),
+                                )
+                            } else {
+                                (
+                                    String::from("disabled"),
+                                    String::from(
+                                        "session: disabled, so Probe will not attach it to the runtime",
+                                    ),
+                                    String::from(
+                                        "next: Enter edits setup. E enables it for the next turn. R removes it.",
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                };
+                detail_lines.push(session_line);
                 match server.source {
                     McpServerSource::ManualLaunch => {
                         if let Some(transport) = server.transport.as_ref() {
@@ -1736,22 +3029,42 @@ impl AppShell {
                         if let Some(command) = server.provider_setup_command.as_ref() {
                             detail_lines.push(format!("setup command: {command}"));
                         }
+                        detail_lines.push(String::from(
+                            "support note: provider recipes are saved from docs, but they need conversion into a manual stdio runtime server before Probe can run them",
+                        ));
                     }
                 }
-                detail_lines.push(String::from(
-                    "configured only: Probe does not execute external MCP servers yet.",
-                ));
+                if let Some(snapshot) = attached_snapshot {
+                    if let Some(note) = snapshot.connection_note.as_deref() {
+                        detail_lines.push(format!("runtime note: {note}"));
+                    }
+                    if !snapshot.discovered_tools.is_empty() {
+                        let tool_names = snapshot
+                            .discovered_tools
+                            .iter()
+                            .map(|tool| tool.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        detail_lines.push(format!("tools: {tool_names}"));
+                    }
+                } else if runtime_state.is_some() {
+                    detail_lines.push(String::from(
+                        "runtime note: this entry is not attached to the current session yet.",
+                    ));
+                } else {
+                    detail_lines.push(String::from(
+                        "runtime note: start a turn to attach enabled manual runtime servers and see live MCP results.",
+                    ));
+                }
                 ManagedMcpServerView {
                     label: server.name.clone(),
                     enabled: server.enabled,
-                    status: if server.enabled {
-                        String::from("enabled")
-                    } else {
-                        String::from("disabled")
-                    },
+                    status,
                     detail_lines,
                     toggle_server_id: server.id.clone(),
                     remove_server_id: server.id.clone(),
+                    edit_server_id: Some(server.id.clone()),
+                    enter_hint: next_step,
                 }
             })
             .collect()
@@ -1896,20 +3209,95 @@ impl AppShell {
     }
 
     fn generic_mcp_card(&self) -> IntegrationCardView {
+        let (recipe_count, _, manual_count, _) = self.mcp_source_counts();
+        let runtime_detail = self
+            .base_screen()
+            .runtime_mcp_state()
+            .map(|state| {
+                if let Some(error) = state.load_error.as_deref() {
+                    vec![
+                        String::from(
+                            "The active runtime session could not snapshot MCP registry state.",
+                        ),
+                        format!("detail: {error}"),
+                    ]
+                } else {
+                    let connected = state
+                        .servers
+                        .iter()
+                        .filter(|server| {
+                            server.connection_status
+                                == Some(SessionMcpConnectionStatus::Connected)
+                        })
+                        .count();
+                    let failed = state
+                        .servers
+                        .iter()
+                        .filter(|server| {
+                            server.connection_status == Some(SessionMcpConnectionStatus::Failed)
+                        })
+                        .count();
+                    let unsupported = state
+                        .servers
+                        .iter()
+                        .filter(|server| {
+                            server.connection_status
+                                == Some(SessionMcpConnectionStatus::Unsupported)
+                        })
+                        .count();
+                    let discovered_tools = state
+                        .servers
+                        .iter()
+                        .map(|server| server.discovered_tools.len())
+                        .sum::<usize>();
+                    vec![
+                        format!(
+                            "The active runtime session carries {} enabled MCP entr{}.",
+                            state.servers.len(),
+                            if state.servers.len() == 1 { "y" } else { "ies" }
+                        ),
+                        format!(
+                            "runtime result: {connected} connected, {failed} failed, {unsupported} unsupported, {discovered_tools} tool(s) discovered"
+                        ),
+                    ]
+                }
+            })
+            .unwrap_or_else(|| {
+                vec![String::from(
+                    "The next runtime session will attach enabled manual stdio MCP servers from this Probe home.",
+                )]
+            });
+        let mut detail_lines = vec![
+            String::from("Probe can run connected manual stdio MCP servers during turns."),
+            if recipe_count > 0 {
+                format!(
+                    "Saved provider recipes: {recipe_count}. These still need conversion before Probe can run them."
+                )
+            } else {
+                String::from(
+                    "Saved provider recipes are supported as import records, then converted into runtime servers.",
+                )
+            },
+            String::from(
+                "Connected MCP tools appear in the normal tool loop with approvals, transcript rows, and receipts.",
+            ),
+        ];
+        detail_lines.extend(runtime_detail);
+        if manual_count == 0 {
+            detail_lines.push(String::from(
+                "Add a manual stdio runtime server, or convert a saved recipe from the server list.",
+            ));
+        }
         IntegrationCardView {
             label: String::from("Generic MCP"),
-            status: String::from("not shipped"),
-            detail_lines: vec![
-                String::from("Probe has no runtime registry for external MCP servers yet."),
-                String::from(
-                    "Configured servers are stored locally but are not yet mounted into tool execution.",
-                ),
-                String::from(
-                    "External tool inventories and per-turn MCP usage receipts are not implemented yet.",
-                ),
-            ],
+            status: if self.base_screen().runtime_mcp_state().is_some() {
+                String::from("runtime active")
+            } else {
+                String::from("saved config")
+            },
+            detail_lines,
             next_step: String::from(
-                "Use Add MCP server to create entries. Runtime tool mounting is still future work.",
+                "Use /mcp to convert saved recipes or manage runtime MCP servers.",
             ),
             toggle_server_id: None,
             remove_server_id: None,
@@ -1920,31 +3308,296 @@ impl AppShell {
 
     fn save_mcp_server(
         &mut self,
+        server_id: Option<String>,
         name: String,
         transport: McpServerTransportDraft,
         target: String,
     ) -> Result<(), String> {
-        let id = next_mcp_server_id(&self.mcp_registry, name.as_str());
-        self.mcp_registry.servers.push(McpServerRecord {
-            id,
-            name: name.clone(),
-            enabled: true,
-            source: McpServerSource::ManualLaunch,
-            transport: Some(match transport {
-                McpServerTransportDraft::Stdio => McpServerTransport::Stdio,
-                McpServerTransportDraft::Http => McpServerTransport::Http,
-            }),
-            target: Some(target),
-            provider_setup_command: None,
-            provider_hint: None,
-            client_hint: None,
-        });
+        let target = target;
+        let transport = match transport {
+            McpServerTransportDraft::Stdio => McpServerTransport::Stdio,
+            McpServerTransportDraft::Http => McpServerTransport::Http,
+        };
+        let mut converted_from_recipe = false;
+        if let Some(server_id) = server_id {
+            let Some(server) = self
+                .mcp_registry
+                .servers
+                .iter_mut()
+                .find(|server| server.id == server_id)
+            else {
+                return Err(String::from("that MCP server no longer exists"));
+            };
+            converted_from_recipe = server.source == McpServerSource::ProviderCommandRecipe;
+            server.name = name.clone();
+            server.enabled = true;
+            server.source = McpServerSource::ManualLaunch;
+            server.transport = Some(transport);
+            server.target = Some(target.clone());
+        } else {
+            let id = next_mcp_server_id(&self.mcp_registry, name.as_str());
+            self.mcp_registry.servers.push(McpServerRecord {
+                id,
+                name: name.clone(),
+                enabled: true,
+                source: McpServerSource::ManualLaunch,
+                transport: Some(transport),
+                target: Some(target.clone()),
+                provider_setup_command: None,
+                provider_hint: None,
+                client_hint: None,
+            });
+        }
         self.persist_mcp_registry()?;
+        self.refresh_all_lanes_after_mcp_registry_change();
         self.refresh_mcp_overlay_selecting(Some("Saved MCP servers"));
         self.refresh_mcp_servers_overlay_selecting(Some(name.as_str()));
         self.base_screen_mut()
-            .record_event(format!("saved MCP server {name}"));
-        self.last_status = format!("saved MCP server {name}");
+            .record_event(if converted_from_recipe {
+                format!("completed MCP runtime setup for {name}")
+            } else {
+                format!("saved MCP server {name}")
+            });
+        self.last_status = if converted_from_recipe {
+            format!("completed runtime setup for {name}; start a turn to test it")
+        } else {
+            format!("saved MCP server {name}; next turn starts a fresh runtime session")
+        };
+        Ok(())
+    }
+
+    fn save_memory_file(
+        &mut self,
+        label: String,
+        path: PathBuf,
+        body: String,
+    ) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        std::fs::write(path.as_path(), body).map_err(|error| error.to_string())?;
+        self.refresh_lane_memory_state(self.active_backend_index);
+        self.base_screen_mut()
+            .record_event(format!("saved {label} at {}", path.display()));
+        self.base_screen_mut()
+            .set_local_action_notice(Some(format!("{label} saved")));
+        self.last_status = format!("saved {label}");
+        Ok(())
+    }
+
+    fn stage_current_repo(&mut self, repo_root: PathBuf) -> Result<(), String> {
+        let summary = git_repo_status_summary(repo_root.as_path())
+            .ok_or_else(|| String::from("Probe could not detect a git repo to stage"))?;
+        if summary.unstaged_count == 0 && summary.untracked_count == 0 {
+            return Err(if summary.staged_count > 0 {
+                String::from("all current repo changes are already staged; /commit is ready")
+            } else {
+                String::from("there are no repo changes to stage right now")
+            });
+        }
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&repo_root)
+            .arg("add")
+            .arg("-A")
+            .arg("--")
+            .arg(".")
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(git_command_error("stage repo changes", &output));
+        }
+        self.refresh_active_git_workspace_state();
+        let staged_paths = summary.preview_paths.clone();
+        self.base_screen_mut()
+            .record_event(format!("staged repo changes in {}", repo_root.display()));
+        self.base_screen_mut().set_local_action_notice(Some(format!(
+            "staged {} path(s); /commit is ready",
+            staged_paths
+                .len()
+                .max(summary.unstaged_count + summary.untracked_count)
+        )));
+        self.last_status = format!(
+            "staged repo changes; {}",
+            summarize_paths(staged_paths.as_slice(), 3)
+        );
+        Ok(())
+    }
+
+    fn create_or_switch_branch(&mut self, repo_root: PathBuf, name: String) -> Result<(), String> {
+        let summary = git_repo_status_summary(repo_root.as_path())
+            .ok_or_else(|| String::from("Probe could not detect a git repo to manage branches"))?;
+        let branch_name = name.trim();
+        if branch_name.is_empty() {
+            return Err(String::from("enter a branch name before you continue"));
+        }
+        if !git_branch_name_is_valid(repo_root.as_path(), branch_name) {
+            return Err(format!(
+                "`{branch_name}` is not a valid git branch name for this repo"
+            ));
+        }
+        if summary.branch_label == branch_name {
+            self.base_screen_mut()
+                .set_local_action_notice(Some(format!("already on branch: {branch_name}")));
+            self.last_status = format!("already on branch: {branch_name}");
+            return Ok(());
+        }
+
+        let branch_exists = git_local_branch_exists(repo_root.as_path(), branch_name);
+        let mut command = Command::new("git");
+        command.arg("-C").arg(&repo_root).arg("switch");
+        if !branch_exists {
+            command.arg("-c");
+        }
+        command.arg(branch_name);
+        let output = command.output().map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(git_command_error("change branches", &output));
+        }
+
+        self.refresh_active_git_workspace_state();
+        let action = if branch_exists { "switched" } else { "created" };
+        self.base_screen_mut()
+            .record_event(format!("{action} git branch {branch_name}"));
+        self.base_screen_mut()
+            .set_local_action_notice(Some(format!("branch ready: {branch_name}")));
+        self.last_status = format!("{action} branch: {branch_name}");
+        Ok(())
+    }
+
+    fn commit_current_repo(&mut self, repo_root: PathBuf, message: String) -> Result<(), String> {
+        let summary = git_repo_status_summary(repo_root.as_path())
+            .ok_or_else(|| String::from("Probe could not detect a git repo to commit"))?;
+        if summary.staged_count == 0 {
+            return Err(
+                if summary.unstaged_count > 0 || summary.untracked_count > 0 {
+                    String::from("stage the repo changes first, then commit them")
+                } else {
+                    String::from("there are no staged repo changes to commit")
+                },
+            );
+        }
+        if message.trim().is_empty() {
+            return Err(String::from("enter a commit message before you commit"));
+        }
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&repo_root)
+            .arg("commit")
+            .arg("-m")
+            .arg(message.trim())
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            let error = git_command_error("create the commit", &output);
+            if error.contains("Author identity unknown")
+                || error.contains("unable to auto-detect email address")
+            {
+                return Err(String::from(
+                    "git user.name and user.email must be configured before Probe can commit",
+                ));
+            }
+            return Err(error);
+        }
+        self.refresh_active_git_workspace_state();
+        self.base_screen_mut()
+            .record_event(format!("created git commit in {}", repo_root.display()));
+        self.base_screen_mut().set_local_action_notice(Some(format!(
+            "commit created: {}",
+            preview(message.trim(), 48)
+        )));
+        self.last_status = format!("created commit: {}", preview(message.trim(), 64));
+        Ok(())
+    }
+
+    fn push_current_branch(
+        &mut self,
+        repo_root: PathBuf,
+        branch_name: String,
+        set_upstream: bool,
+    ) -> Result<(), String> {
+        let branch_state = session_branch_state_local(repo_root.as_path())
+            .ok_or_else(|| String::from("Probe could not detect a git repo to push"))?;
+        let (can_push, _, blocked_reason) = push_overlay_state(&branch_state);
+        if !can_push {
+            return Err(blocked_reason);
+        }
+        let remote_name = branch_state
+            .upstream_ref
+            .as_ref()
+            .and_then(|value| value.split('/').next().map(str::to_owned))
+            .or_else(|| git_default_remote_name(repo_root.as_path()))
+            .ok_or_else(|| String::from("Probe could not find a git remote to push to"))?;
+        let branch_name = branch_name.trim();
+        let mut command = Command::new("git");
+        command.arg("-C").arg(&repo_root).arg("push");
+        if set_upstream {
+            command.arg("-u").arg(&remote_name).arg(branch_name);
+        }
+        let output = command.output().map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(git_command_error("push the current branch", &output));
+        }
+        self.refresh_active_git_workspace_state();
+        self.base_screen_mut()
+            .record_event(format!("pushed branch {branch_name}"));
+        self.base_screen_mut()
+            .set_local_action_notice(Some(format!("pushed branch: {branch_name}")));
+        self.last_status = if set_upstream {
+            format!("published branch: {branch_name}")
+        } else {
+            format!("pushed branch: {branch_name}")
+        };
+        Ok(())
+    }
+
+    fn create_draft_pull_request(
+        &mut self,
+        repo_root: PathBuf,
+        title: String,
+        base_branch: String,
+        head_branch: String,
+    ) -> Result<(), String> {
+        let branch_state = session_branch_state_local(repo_root.as_path())
+            .ok_or_else(|| String::from("Probe could not detect a git repo for PR creation"))?;
+        let (can_create, blocked_reason) = pr_overlay_state(&branch_state, base_branch.as_str());
+        if !can_create {
+            return Err(blocked_reason);
+        }
+        let gh_program = gh_program_for_repo(repo_root.as_path());
+        let output = Command::new(&gh_program)
+            .arg("pr")
+            .arg("create")
+            .arg("--draft")
+            .arg("--title")
+            .arg(title.trim())
+            .arg("--body")
+            .arg(format!(
+                "Draft PR opened from `{head_branch}` into `{base_branch}` via Probe."
+            ))
+            .arg("--base")
+            .arg(base_branch.as_str())
+            .arg("--head")
+            .arg(head_branch.as_str())
+            .current_dir(&repo_root)
+            .output()
+            .map_err(|error| format!("Probe could not start gh for PR creation: {error}"))?;
+        if !output.status.success() {
+            return Err(gh_command_error("create the draft PR", &output));
+        }
+        let location = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let location = if location.is_empty() {
+            title.trim().to_string()
+        } else {
+            location
+        };
+        self.base_screen_mut()
+            .record_event(format!("created draft PR for {head_branch}"));
+        self.base_screen_mut().set_local_action_notice(Some(format!(
+            "draft PR created: {}",
+            preview(location.as_str(), 56)
+        )));
+        self.last_status = format!("draft PR created: {}", preview(location.as_str(), 72));
         Ok(())
     }
 
@@ -1965,11 +3618,12 @@ impl AppShell {
             client_hint,
         });
         self.persist_mcp_registry()?;
+        self.refresh_all_lanes_after_mcp_registry_change();
         self.refresh_mcp_overlay_selecting(Some("Saved MCP servers"));
         self.refresh_mcp_servers_overlay_selecting(Some(name.as_str()));
         self.base_screen_mut()
             .record_event(format!("imported MCP recipe {name}"));
-        self.last_status = format!("imported MCP recipe {name}");
+        self.last_status = format!("saved MCP recipe {name}; complete setup to make it runnable");
         Ok(())
     }
 
@@ -1990,11 +3644,13 @@ impl AppShell {
         };
         let name = server.name.clone();
         self.persist_mcp_registry()?;
+        self.refresh_all_lanes_after_mcp_registry_change();
         self.refresh_mcp_overlay_selecting(Some("Saved MCP servers"));
         self.refresh_mcp_servers_overlay_selecting(Some(name.as_str()));
         self.base_screen_mut()
             .record_event(format!("{status} MCP server {name}"));
-        self.last_status = format!("{status} MCP server {name}");
+        self.last_status =
+            format!("{status} MCP server {name}; next turn starts a fresh runtime session");
         Ok(())
     }
 
@@ -2010,11 +3666,13 @@ impl AppShell {
         let name = self.mcp_registry.servers[index].name.clone();
         self.mcp_registry.servers.remove(index);
         self.persist_mcp_registry()?;
+        self.refresh_all_lanes_after_mcp_registry_change();
         self.refresh_mcp_overlay_selecting(Some("Saved MCP servers"));
         self.refresh_mcp_servers_overlay_selecting(None);
         self.base_screen_mut()
             .record_event(format!("removed MCP server {name}"));
-        self.last_status = format!("removed MCP server {name}");
+        self.last_status =
+            format!("removed MCP server {name}; next turn starts a fresh runtime session");
         Ok(())
     }
 
@@ -2023,6 +3681,20 @@ impl AppShell {
             registry_probe_home(&self.backend_lanes).as_deref(),
             &self.mcp_registry,
         )
+    }
+
+    fn refresh_all_lanes_after_mcp_registry_change(&mut self) {
+        for lane in &mut self.backend_lanes {
+            lane.session_generation = lane.session_generation.saturating_add(1);
+            rebuild_lane_runtime(lane);
+            lane.operator_backend = operator_summary_from_profile(&lane.chat_runtime.profile);
+        }
+        for lane_index in 0..self.chat_lanes.len() {
+            self.refresh_lane_memory_state(lane_index);
+        }
+        self.refresh_active_lane_after_runtime_change(String::from(
+            "MCP registry changed; the next turn will start a fresh runtime session",
+        ));
     }
 
     fn refresh_mcp_overlay_selecting(&mut self, preferred_label: Option<&str>) {
@@ -2097,6 +3769,178 @@ fn registry_probe_home(backend_lanes: &[BackendLaneConfig; 3]) -> Option<PathBuf
         .find_map(|lane| lane.chat_runtime.probe_home.clone())
 }
 
+fn detached_task_sessions(probe_home: &Path) -> Result<Vec<ResumeSessionView>, String> {
+    let mut client = resolve_tui_probe_client(probe_home)?;
+    let store = FilesystemSessionStore::new(probe_home);
+    let sessions = store.list_sessions().map_err(|error| error.to_string())?;
+    let backend_map = sessions
+        .iter()
+        .map(|session| {
+            (
+                session.id.as_str().to_string(),
+                session
+                    .backend
+                    .as_ref()
+                    .map(|backend| backend.profile_name.clone())
+                    .unwrap_or_else(|| String::from("unknown backend")),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let title_map = sessions
+        .iter()
+        .map(|session| (session.id.as_str().to_string(), session.title.clone()))
+        .collect::<HashMap<_, _>>();
+    let parent_map = sessions
+        .iter()
+        .filter_map(|session| {
+            session.parent_link.as_ref().map(|link| {
+                (
+                    session.id.as_str().to_string(),
+                    link.session_id.as_str().to_string(),
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    let child_count_map = sessions
+        .iter()
+        .map(|session| (session.id.as_str().to_string(), session.child_links.len()))
+        .collect::<HashMap<_, _>>();
+
+    let mut sessions = client
+        .list_detached_sessions()
+        .map_err(|error| error.to_string())?;
+    sessions.sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
+    Ok(sessions
+        .into_iter()
+        .take(12)
+        .map(|summary| {
+            detached_summary_view(
+                summary,
+                &backend_map,
+                &title_map,
+                &parent_map,
+                &child_count_map,
+            )
+        })
+        .collect())
+}
+
+fn resolve_tui_probe_client(probe_home: &Path) -> Result<ProbeClient, String> {
+    let mut config = ProbeClientConfig::new(probe_home, "probe-tui");
+    config.client_version = Some(String::from(env!("CARGO_PKG_VERSION")));
+    config.transport = ProbeClientTransportConfig::LocalDaemon { socket_path: None };
+    ProbeClient::connect_or_autostart_local_daemon(config, Duration::from_secs(3))
+        .map_err(|error| error.to_string())
+}
+
+fn detached_summary_view(
+    summary: probe_protocol::runtime::DetachedSessionSummary,
+    backend_map: &HashMap<String, String>,
+    title_map: &HashMap<String, String>,
+    parent_map: &HashMap<String, String>,
+    child_count_map: &HashMap<String, usize>,
+) -> ResumeSessionView {
+    let mut status = detached_status_label(summary.status);
+    let backend = backend_map
+        .get(summary.session_id.as_str())
+        .cloned()
+        .unwrap_or_else(|| String::from("unknown backend"));
+    let parent_session_id = parent_map.get(summary.session_id.as_str());
+    if parent_session_id.is_some() {
+        status = format!("{status} · child task");
+    }
+    let mut detail_lines = vec![
+        format!("state: {}", detached_status_label(summary.status)),
+        format!("queued turns: {}", summary.queued_turn_count),
+        format!("pending approvals: {}", summary.pending_approval_count),
+    ];
+    if let Some(parent_session_id) = parent_session_id {
+        let parent_title = title_map
+            .get(parent_session_id)
+            .cloned()
+            .unwrap_or_else(|| String::from("parent session"));
+        detail_lines.push(format!("delegated from: {parent_title}"));
+    }
+    if let Some(child_count) = child_count_map.get(summary.session_id.as_str())
+        && *child_count > 0
+    {
+        detail_lines.push(format!("delegated tasks: {child_count}"));
+    }
+    if let Some(note) = summary.recovery_note.as_deref() {
+        detail_lines.push(format!(
+            "recovery: {}",
+            compact_detached_recovery_note(note)
+        ));
+    }
+    if summary.recovery_state != DetachedSessionRecoveryState::Clean {
+        detail_lines.push(format!(
+            "resume state: {}",
+            detached_recovery_label(summary.recovery_state)
+        ));
+    }
+    let next_hint = match summary.status {
+        DetachedSessionStatus::Running => {
+            String::from("next: Enter reattaches this running task to its lane.")
+        }
+        DetachedSessionStatus::Queued => {
+            if parent_session_id.is_some() {
+                String::from("next: Enter opens this queued child task on its lane.")
+            } else {
+                String::from("next: Enter opens this queued task on its lane.")
+            }
+        }
+        DetachedSessionStatus::ApprovalPaused => {
+            String::from("next: Enter reopens this task so you can resolve approvals.")
+        }
+        DetachedSessionStatus::Completed => {
+            String::from("next: Enter reopens this completed task and its receipt.")
+        }
+        DetachedSessionStatus::Failed
+        | DetachedSessionStatus::Cancelled
+        | DetachedSessionStatus::TimedOut => String::from(
+            "next: Enter reopens this task so you can inspect the failure and recover.",
+        ),
+        DetachedSessionStatus::Idle => {
+            String::from("next: Enter reopens this detached task on its lane.")
+        }
+    };
+    ResumeSessionView {
+        id: summary.session_id.as_str().to_string(),
+        title: summary.title,
+        backend,
+        cwd: summary.cwd.display().to_string(),
+        status,
+        detail_lines,
+        next_hint,
+    }
+}
+
+fn detached_status_label(status: DetachedSessionStatus) -> String {
+    match status {
+        DetachedSessionStatus::Idle => String::from("idle"),
+        DetachedSessionStatus::Running => String::from("running now"),
+        DetachedSessionStatus::Queued => String::from("queued"),
+        DetachedSessionStatus::ApprovalPaused => String::from("needs approval"),
+        DetachedSessionStatus::Completed => String::from("completed"),
+        DetachedSessionStatus::Failed => String::from("failed"),
+        DetachedSessionStatus::Cancelled => String::from("cancelled"),
+        DetachedSessionStatus::TimedOut => String::from("timed out"),
+    }
+}
+
+fn detached_recovery_label(state: DetachedSessionRecoveryState) -> &'static str {
+    match state {
+        DetachedSessionRecoveryState::Clean => "clean",
+        DetachedSessionRecoveryState::ApprovalPausedResumable => "approval-paused resumable",
+        DetachedSessionRecoveryState::RunningTurnFailedOnRestart => "restart recovery needed",
+    }
+}
+
+fn compact_detached_recovery_note(note: &str) -> String {
+    let compact = note.split_whitespace().collect::<Vec<_>>().join(" ");
+    preview(compact.as_str(), 92)
+}
+
 fn default_mcp_server_source() -> McpServerSource {
     McpServerSource::ManualLaunch
 }
@@ -2129,6 +3973,22 @@ fn save_mcp_registry(probe_home: Option<&Path>, registry: &McpRegistryFile) -> R
     }
     let raw = serde_json::to_vec_pretty(registry).map_err(|error| error.to_string())?;
     std::fs::write(path.as_path(), raw).map_err(|error| error.to_string())
+}
+
+fn load_memory_editor_seed(path: &Path) -> (String, bool, Option<String>) {
+    if !path.exists() {
+        return (String::new(), false, None);
+    }
+    match std::fs::read_to_string(path) {
+        Ok(body) => (body, true, None),
+        Err(error) => (
+            String::new(),
+            true,
+            Some(format!(
+                "Probe could not read the current file contents ({error}). Saving here will replace the file with valid UTF-8 markdown text."
+            )),
+        ),
+    }
 }
 
 fn next_mcp_server_id(registry: &McpRegistryFile, name: &str) -> String {
@@ -2197,6 +4057,22 @@ fn infer_client_hint(command: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn recommended_runtime_target(provider_hint: Option<&str>) -> Option<String> {
+    match provider_hint.map(|value| value.to_ascii_lowercase()) {
+        Some(provider) if provider == "shadcn" => Some(String::from("npx shadcn@latest mcp")),
+        _ => None,
+    }
+}
+
+fn provider_runtime_guidance(provider_hint: Option<&str>) -> Option<String> {
+    match provider_hint.map(|value| value.to_ascii_lowercase()) {
+        Some(provider) if provider == "shadcn" => Some(String::from(
+            "Probe can usually run shadcn with `npx shadcn@latest mcp`; the provider init command only writes client config.",
+        )),
+        _ => None,
+    }
 }
 
 fn imported_mcp_name(command: &str) -> String {
@@ -2289,6 +4165,8 @@ fn runtime_for_profile(
         base.cwd.clone(),
         profile,
         LaneOperatorMode::Coding,
+        LaneReviewMode::AutoSafe,
+        None,
         None,
         base.session_generation,
     )
@@ -2345,7 +4223,7 @@ fn build_saved_or_default_lane(
     base: &ProbeRuntimeTurnConfig,
     backend_kind: BackendKind,
 ) -> BackendLaneConfig {
-    let (chat_runtime, operator_backend) = base
+    let (mut chat_runtime, operator_backend) = base
         .probe_home
         .as_deref()
         .and_then(|probe_home| load_saved_backend_config(probe_home, backend_kind))
@@ -2363,11 +4241,30 @@ fn build_saved_or_default_lane(
             (runtime, summary)
         });
 
+    let memory_stack = load_probe_memory_stack(
+        chat_runtime.probe_home.as_deref(),
+        chat_runtime.cwd.as_path(),
+    );
+    chat_runtime = build_chat_runtime_config_for_lane(
+        chat_runtime.probe_home.clone(),
+        chat_runtime.cwd.clone(),
+        chat_runtime.profile.clone(),
+        LaneOperatorMode::Coding,
+        LaneReviewMode::AutoSafe,
+        Some(&memory_stack),
+        None,
+        0,
+    );
+
     BackendLaneConfig {
         label: backend_selector_label(&operator_backend),
         chat_runtime,
         operator_backend,
         mode: LaneOperatorMode::Coding,
+        launch_mode: LaneLaunchMode::Foreground,
+        review_mode: LaneReviewMode::AutoSafe,
+        transcript_mode: TranscriptMode::Conversation,
+        memory_stack,
         carry_forward_summary: None,
         session_generation: 0,
     }
@@ -2376,11 +4273,28 @@ fn build_saved_or_default_lane(
 fn build_backend_lanes(config: &TuiLaunchConfig) -> [BackendLaneConfig; 3] {
     BACKEND_SELECTOR_ORDER.map(|backend_kind| {
         if backend_kind == config.operator_backend.backend_kind {
+            let memory_stack = load_probe_memory_stack(
+                config.chat_runtime.probe_home.as_deref(),
+                config.chat_runtime.cwd.as_path(),
+            );
             BackendLaneConfig {
                 label: backend_selector_label(&config.operator_backend),
-                chat_runtime: config.chat_runtime.clone(),
+                chat_runtime: build_chat_runtime_config_for_lane(
+                    config.chat_runtime.probe_home.clone(),
+                    config.chat_runtime.cwd.clone(),
+                    config.chat_runtime.profile.clone(),
+                    LaneOperatorMode::Coding,
+                    LaneReviewMode::AutoSafe,
+                    Some(&memory_stack),
+                    None,
+                    0,
+                ),
                 operator_backend: config.operator_backend.clone(),
                 mode: LaneOperatorMode::Coding,
+                launch_mode: LaneLaunchMode::Foreground,
+                review_mode: LaneReviewMode::AutoSafe,
+                transcript_mode: TranscriptMode::Conversation,
+                memory_stack,
                 carry_forward_summary: None,
                 session_generation: 0,
             }
@@ -2411,13 +4325,19 @@ fn build_chat_lane(
     screen.set_operator_backend(backend_lanes[lane_index].operator_backend.clone());
     screen.set_operator_controls(
         backend_lanes[lane_index].mode.label(),
+        backend_lanes[lane_index].launch_mode.label(),
+        backend_lanes[lane_index].review_mode.label(),
         backend_lanes[lane_index].carry_forward_summary.as_deref(),
     );
+    screen.set_transcript_mode(backend_lanes[lane_index].transcript_mode);
+    screen.set_memory_stack(backend_lanes[lane_index].memory_stack.clone());
     screen
 }
 
 fn operator_system_addendum(
     mode: LaneOperatorMode,
+    review_mode: LaneReviewMode,
+    memory_stack: Option<&ProbeMemoryStack>,
     carry_forward_summary: Option<&str>,
 ) -> Option<String> {
     let mut parts = Vec::new();
@@ -2426,18 +4346,42 @@ fn operator_system_addendum(
             "Plan mode is active.\n- Default to planning, sequencing, risk review, and implementation guidance.\n- Do not make or imply file edits as if they already happened.\n- Avoid write-capable tools unless the operator explicitly switches back to coding mode.",
         ));
     }
+    if mode == LaneOperatorMode::Coding {
+        parts.push(match review_mode {
+            LaneReviewMode::AutoSafe => String::from(
+                "Review mode is auto-safe.\n- Continue with normal coding behavior.\n- When you make edits, keep the human informed with concise file-level summaries.",
+            ),
+            LaneReviewMode::ReviewRisky => String::from(
+                "Review mode is review-risky.\n- Expect Probe to pause risky write, network, and destructive actions for approval before they land.\n- Gather enough context first so the approval step is easy to review.",
+            ),
+            LaneReviewMode::ReviewAll => String::from(
+                "Review mode is review-all.\n- Treat write-capable work as approval-first.\n- Explain what you intend to change before you rely on a write-capable tool.",
+            ),
+        });
+    }
     if let Some(summary) = carry_forward_summary.filter(|value| !value.trim().is_empty()) {
         parts.push(format!(
             "Carry-forward context from the prior session:\n{summary}\nUse this summary instead of assuming the full prior transcript is available."
         ));
     }
+    if let Some(memory_addendum) = memory_stack.and_then(ProbeMemoryStack::prompt_addendum) {
+        parts.push(memory_addendum);
+    }
     (!parts.is_empty()).then_some(parts.join("\n\n"))
 }
 
-fn tool_loop_for_mode(mode: LaneOperatorMode) -> ToolLoopConfig {
+fn tool_loop_for_mode(mode: LaneOperatorMode, review_mode: LaneReviewMode) -> ToolLoopConfig {
     let mut tool_loop = ToolLoopConfig::coding_bootstrap(ProbeToolChoice::Auto, false);
     tool_loop.approval = match mode {
-        LaneOperatorMode::Coding => ToolApprovalConfig::allow_all(),
+        LaneOperatorMode::Coding => match review_mode {
+            LaneReviewMode::AutoSafe => ToolApprovalConfig::allow_all(),
+            LaneReviewMode::ReviewRisky | LaneReviewMode::ReviewAll => ToolApprovalConfig {
+                allow_write_tools: false,
+                allow_network_shell: false,
+                allow_destructive_shell: false,
+                denied_action: probe_core::tools::ToolDeniedAction::Pause,
+            },
+        },
         LaneOperatorMode::Plan => ToolApprovalConfig::conservative(),
     };
     tool_loop
@@ -2448,10 +4392,24 @@ fn build_chat_runtime_config_for_lane(
     cwd: PathBuf,
     profile: BackendProfile,
     mode: LaneOperatorMode,
+    review_mode: LaneReviewMode,
+    memory_stack: Option<&ProbeMemoryStack>,
     carry_forward_summary: Option<String>,
     session_generation: u64,
 ) -> ProbeRuntimeTurnConfig {
-    let operator_system = operator_system_addendum(mode, carry_forward_summary.as_deref());
+    let loaded_memory_stack;
+    let memory_stack = if let Some(memory_stack) = memory_stack {
+        Some(memory_stack)
+    } else {
+        loaded_memory_stack = load_probe_memory_stack(probe_home.as_deref(), cwd.as_path());
+        Some(&loaded_memory_stack)
+    };
+    let operator_system = operator_system_addendum(
+        mode,
+        review_mode,
+        memory_stack,
+        carry_forward_summary.as_deref(),
+    );
     let (system_prompt, harness_profile) = resolve_prompt_contract(
         Some("coding_bootstrap"),
         None,
@@ -2466,17 +4424,23 @@ fn build_chat_runtime_config_for_lane(
         profile,
         system_prompt,
         harness_profile,
-        tool_loop: Some(tool_loop_for_mode(mode)),
+        tool_loop: Some(tool_loop_for_mode(mode, review_mode)),
         session_generation,
     }
 }
 
 fn rebuild_lane_runtime(lane: &mut BackendLaneConfig) {
+    lane.memory_stack = load_probe_memory_stack(
+        lane.chat_runtime.probe_home.as_deref(),
+        lane.chat_runtime.cwd.as_path(),
+    );
     lane.chat_runtime = build_chat_runtime_config_for_lane(
         lane.chat_runtime.probe_home.clone(),
         lane.chat_runtime.cwd.clone(),
         lane.chat_runtime.profile.clone(),
         lane.mode,
+        lane.review_mode,
+        Some(&lane.memory_stack),
         lane.carry_forward_summary.clone(),
         lane.session_generation,
     );
@@ -2503,6 +4467,906 @@ fn build_chat_lanes(
             ActiveTab::from_index(active_backend_index),
         ),
     ]
+}
+
+fn build_diff_overlay(lane_label: &str, workspace: &TaskWorkspaceSummary) -> DiffOverlay {
+    let mut summary_lines = vec![
+        format!("Inspect the latest task diff for {lane_label}."),
+        format!("files changed: {}", workspace.changed_files.len()),
+        String::from(
+            "Use Up/Down to choose a file. PgUp/PgDn scroll. Enter resets scroll. Esc closes.",
+        ),
+    ];
+    if workspace.checkpoint.status == probe_protocol::session::TaskCheckpointStatus::Limited {
+        summary_lines.push(String::from("checkpoint: limited coverage for this task"));
+    }
+
+    let files = workspace
+        .changed_files
+        .iter()
+        .map(|path| {
+            if let Some(preview) = workspace
+                .diff_previews
+                .iter()
+                .find(|preview| preview.path == *path)
+            {
+                return TaskDiffFileView {
+                    path: preview.path.clone(),
+                    diff_lines: preview.diff_lines.clone(),
+                    truncated: preview.truncated,
+                };
+            }
+            if let Some(repo_root) = workspace.repo_root.as_deref() {
+                return build_task_diff_file_view(repo_root, path);
+            }
+            TaskDiffFileView {
+                path: path.clone(),
+                diff_lines: vec![String::from(
+                    "No recorded diff preview is available for this file yet.",
+                )],
+                truncated: false,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if workspace.repo_root.is_none() && workspace.diff_previews.is_empty() {
+        summary_lines.push(String::from(
+            "Diff inspection is limited because this task was not recorded against a git workspace root.",
+        ));
+    } else if !workspace.diff_previews.is_empty() {
+        summary_lines.push(String::from(
+            "Preview source: recorded with the latest task receipt.",
+        ));
+    }
+
+    DiffOverlay::new("Diff", summary_lines, files)
+}
+
+fn build_pending_approval_diff_overlay(
+    lane_label: &str,
+    approval: &PendingToolApproval,
+) -> Option<DiffOverlay> {
+    if approval.tool_name != "apply_patch" {
+        return None;
+    }
+    let file = build_pending_apply_patch_diff_view(approval)?;
+    let summary_lines = vec![
+        format!("Inspect the proposed diff waiting for approval on {lane_label}."),
+        String::from("status: pending approval"),
+        String::from("files changed: 1 proposed"),
+        String::from(
+            "Use Up/Down to choose a file. PgUp/PgDn scroll. Enter resets scroll. Esc closes.",
+        ),
+    ];
+    Some(DiffOverlay::new("Diff", summary_lines, vec![file]))
+}
+
+fn build_pending_apply_patch_diff_view(approval: &PendingToolApproval) -> Option<TaskDiffFileView> {
+    if let Some(proposed) = approval.proposed_edit.as_ref() {
+        let path = proposed.changed_files.first()?.clone();
+        let mut diff_lines = vec![
+            format!("diff --probe a/{path} b/{path}"),
+            format!("--- a/{path}"),
+            format!("+++ b/{path}"),
+            String::from("@@ proposed @@"),
+        ];
+        if proposed.preview_lines.is_empty() {
+            diff_lines.push(String::from("  [no textual diff preview available]"));
+        } else {
+            diff_lines.extend(proposed.preview_lines.clone());
+        }
+        let truncated = diff_lines.len() > 180;
+        if truncated {
+            diff_lines.truncate(180);
+        }
+        return Some(TaskDiffFileView {
+            path,
+            diff_lines,
+            truncated,
+        });
+    }
+    let path = approval
+        .arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)?
+        .to_string();
+    let old_text = approval
+        .arguments
+        .get("old_text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let new_text = approval
+        .arguments
+        .get("new_text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let mut diff_lines = proposed_apply_patch_diff_lines(path.as_str(), old_text, new_text);
+    let truncated = diff_lines.len() > 180;
+    if truncated {
+        diff_lines.truncate(180);
+    }
+    Some(TaskDiffFileView {
+        path,
+        diff_lines,
+        truncated,
+    })
+}
+
+fn proposed_apply_patch_diff_lines(path: &str, old_text: &str, new_text: &str) -> Vec<String> {
+    let mut lines = vec![
+        format!("diff --probe a/{path} b/{path}"),
+        format!("--- a/{path}"),
+        format!("+++ b/{path}"),
+    ];
+
+    let old_lines = normalized_patch_lines(old_text);
+    let new_lines = normalized_patch_lines(new_text);
+    let max_lines = old_lines.len().max(new_lines.len());
+    if max_lines == 0 {
+        lines.push(String::from("@@"));
+        lines.push(String::from("  [no textual diff preview available]"));
+        return lines;
+    }
+
+    lines.push(String::from("@@ proposed @@"));
+    for index in 0..max_lines {
+        let old_line = old_lines.get(index);
+        let new_line = new_lines.get(index);
+        match (old_line, new_line) {
+            (Some(old_line), Some(new_line)) if old_line == new_line => {
+                lines.push(format!("  {}", display_diff_line(old_line)));
+            }
+            (Some(old_line), Some(new_line)) => {
+                lines.push(format!("- {}", display_diff_line(old_line)));
+                lines.push(format!("+ {}", display_diff_line(new_line)));
+            }
+            (Some(old_line), None) => {
+                lines.push(format!("- {}", display_diff_line(old_line)));
+            }
+            (None, Some(new_line)) => {
+                lines.push(format!("+ {}", display_diff_line(new_line)));
+            }
+            (None, None) => {}
+        }
+    }
+    lines
+}
+
+fn normalized_patch_lines(value: &str) -> Vec<String> {
+    value.split('\n').map(ToOwned::to_owned).collect()
+}
+
+fn display_diff_line(line: &str) -> String {
+    if line.is_empty() {
+        String::from("[blank]")
+    } else {
+        line.to_string()
+    }
+}
+
+fn build_task_diff_file_view(repo_root: &Path, path: &str) -> TaskDiffFileView {
+    let mut diff_text = git_diff_for_path(repo_root, path);
+    if diff_text.trim().is_empty() {
+        diff_text = git_diff_for_untracked_path(repo_root, path).unwrap_or_default();
+    }
+    if diff_text.trim().is_empty() {
+        diff_text = String::from("No git diff output is available for this file right now.");
+    }
+    let mut diff_lines = diff_text.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    let truncated = diff_lines.len() > 180;
+    if truncated {
+        diff_lines.truncate(180);
+    }
+    TaskDiffFileView {
+        path: path.to_string(),
+        diff_lines,
+        truncated,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitRepoStatusSummary {
+    repo_root: PathBuf,
+    branch_label: String,
+    staged_count: usize,
+    unstaged_count: usize,
+    untracked_count: usize,
+    preview_paths: Vec<String>,
+    staged_paths: Vec<String>,
+}
+
+impl GitRepoStatusSummary {
+    fn staged_preview_paths(&self) -> Vec<String> {
+        if !self.staged_paths.is_empty() {
+            return self.staged_paths.clone();
+        }
+        self.preview_paths.clone()
+    }
+}
+
+fn git_repo_status_summary(cwd: &Path) -> Option<GitRepoStatusSummary> {
+    let repo_root = resolve_git_repo_root_local(cwd)?;
+    let branch_label = git_run_string(
+        repo_root.as_path(),
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+    )
+    .or_else(|| git_run_string(repo_root.as_path(), &["rev-parse", "--short", "HEAD"]))
+    .unwrap_or_else(|| String::from("detached"));
+    let status_output = git_run_stdout(
+        repo_root.as_path(),
+        &["status", "--porcelain", "--untracked-files=all"],
+    )
+    .unwrap_or_default();
+    let mut staged_count = 0usize;
+    let mut unstaged_count = 0usize;
+    let mut untracked_count = 0usize;
+    let mut preview_paths = Vec::new();
+    let mut staged_paths = Vec::new();
+    for line in status_output.lines() {
+        if let Some((x, y, path)) = parse_git_status_line(line) {
+            if x != ' ' && x != '?' {
+                staged_count += 1;
+                staged_paths.push(path.clone());
+            }
+            if y != ' ' {
+                unstaged_count += 1;
+            }
+            if x == '?' && y == '?' {
+                untracked_count += 1;
+            }
+            preview_paths.push(path);
+        }
+    }
+    preview_paths.sort();
+    preview_paths.dedup();
+    staged_paths.sort();
+    staged_paths.dedup();
+    Some(GitRepoStatusSummary {
+        repo_root,
+        branch_label,
+        staged_count,
+        unstaged_count,
+        untracked_count,
+        preview_paths,
+        staged_paths,
+    })
+}
+
+fn git_diff_for_path(repo_root: &Path, path: &str) -> String {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("diff")
+        .arg("--")
+        .arg(path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success() || !output.stdout.is_empty())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+fn git_diff_for_untracked_path(repo_root: &Path, path: &str) -> Option<String> {
+    let absolute_path = repo_root.join(path);
+    if !absolute_path.exists() {
+        return None;
+    }
+    Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("diff")
+        .arg("--no-index")
+        .arg("--")
+        .arg("/dev/null")
+        .arg(&absolute_path)
+        .output()
+        .ok()
+        .filter(|output| {
+            output.status.code().is_some_and(|code| code <= 1) && !output.stdout.is_empty()
+        })
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn parse_git_status_line(line: &str) -> Option<(char, char, String)> {
+    if line.len() < 3 {
+        return None;
+    }
+    let mut chars = line.chars();
+    let x = chars.next()?;
+    let y = chars.next()?;
+    let path = line.get(3..)?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some((x, y, path.to_string()))
+}
+
+fn resolve_git_repo_root_local(cwd: &Path) -> Option<PathBuf> {
+    git_run_string(cwd, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+}
+
+fn git_run_string(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn git_run_stdout(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn parse_ahead_behind_local(value: &str) -> Option<(Option<u64>, Option<u64>)> {
+    let mut parts = value.split_whitespace();
+    let ahead = parts.next()?.parse().ok()?;
+    let behind = parts.next()?.parse().ok()?;
+    Some((Some(ahead), Some(behind)))
+}
+
+fn session_branch_state_local(cwd: &Path) -> Option<SessionBranchState> {
+    let repo_root = resolve_git_repo_root_local(cwd)?;
+    let head_commit = git_run_string(repo_root.as_path(), &["rev-parse", "HEAD"])?;
+    let head_ref = git_run_string(
+        repo_root.as_path(),
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+    )
+    .or_else(|| git_run_string(repo_root.as_path(), &["rev-parse", "--short", "HEAD"]))?;
+    let detached_head = git_run_string(
+        repo_root.as_path(),
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+    )
+    .is_none();
+    let working_tree_dirty = git_run_string(repo_root.as_path(), &["status", "--porcelain"])
+        .is_some_and(|output| !output.trim().is_empty());
+    let upstream_ref = git_run_string(
+        repo_root.as_path(),
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
+    let (ahead_by, behind_by) = upstream_ref
+        .as_ref()
+        .and_then(|_| {
+            git_run_string(
+                repo_root.as_path(),
+                &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+            )
+        })
+        .and_then(|counts| parse_ahead_behind_local(counts.as_str()))
+        .unwrap_or((None, None));
+    Some(SessionBranchState {
+        repo_root,
+        head_ref,
+        head_commit,
+        detached_head,
+        working_tree_dirty,
+        upstream_ref,
+        ahead_by,
+        behind_by,
+    })
+}
+
+fn session_delivery_state_local(
+    branch_state: &SessionBranchState,
+    updated_at_ms: u64,
+) -> SessionDeliveryState {
+    let status = if branch_state.working_tree_dirty {
+        SessionDeliveryStatus::NeedsCommit
+    } else if branch_state.behind_by.unwrap_or(0) > 0 {
+        SessionDeliveryStatus::Diverged
+    } else if branch_state.ahead_by.unwrap_or(0) > 0 {
+        SessionDeliveryStatus::NeedsPush
+    } else if branch_state.upstream_ref.is_some() {
+        SessionDeliveryStatus::Synced
+    } else {
+        SessionDeliveryStatus::LocalOnly
+    };
+    let branch_name = (!branch_state.detached_head).then(|| branch_state.head_ref.clone());
+    let compare_ref = branch_state.upstream_ref.as_ref().and_then(|upstream_ref| {
+        branch_name
+            .as_ref()
+            .map(|branch_name| format!("{upstream_ref}...{branch_name}"))
+    });
+    let mut artifacts = vec![SessionDeliveryArtifact {
+        kind: String::from("head_commit"),
+        value: branch_state.head_commit.clone(),
+        label: Some(String::from("Head commit")),
+    }];
+    artifacts.push(SessionDeliveryArtifact {
+        kind: String::from("head_ref"),
+        value: branch_state.head_ref.clone(),
+        label: Some(String::from("Head ref")),
+    });
+    SessionDeliveryState {
+        status,
+        branch_name,
+        remote_tracking_ref: branch_state.upstream_ref.clone(),
+        compare_ref,
+        updated_at_ms,
+        artifacts,
+    }
+}
+
+fn suggested_branch_name(summary: &GitRepoStatusSummary) -> String {
+    let branch_hint = if summary.preview_paths.len() == 1 {
+        Path::new(summary.preview_paths[0].as_str())
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(str::to_owned)
+    } else if matches!(
+        summary.branch_label.as_str(),
+        "main" | "master" | "develop" | "trunk" | "detached"
+    ) {
+        summary
+            .repo_root
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_owned)
+    } else {
+        Some(summary.branch_label.clone())
+    }
+    .unwrap_or_else(|| String::from("probe-task"));
+    format!("codex/{}", sanitize_branch_component(branch_hint.as_str()))
+}
+
+fn push_overlay_state(branch_state: &SessionBranchState) -> (bool, bool, String) {
+    if branch_state.detached_head {
+        return (
+            false,
+            false,
+            String::from("Probe cannot push from a detached HEAD. Switch to a branch first."),
+        );
+    }
+    let remote_name = branch_state
+        .upstream_ref
+        .as_ref()
+        .and_then(|value| value.split('/').next().map(str::to_owned))
+        .or_else(|| git_default_remote_name(branch_state.repo_root.as_path()));
+    let Some(remote_name) = remote_name else {
+        return (
+            false,
+            false,
+            String::from(
+                "Probe could not find a git remote for this repo. Add one before pushing.",
+            ),
+        );
+    };
+    if branch_state.behind_by.unwrap_or(0) > 0 {
+        return (
+            false,
+            false,
+            format!(
+                "This branch is behind {}. Pull or rebase before you push.",
+                branch_state
+                    .upstream_ref
+                    .as_deref()
+                    .unwrap_or(remote_name.as_str())
+            ),
+        );
+    }
+    if branch_state.upstream_ref.is_some() && branch_state.ahead_by.unwrap_or(0) == 0 {
+        return (
+            false,
+            false,
+            String::from("This branch is already synced. There are no local commits to push."),
+        );
+    }
+    (
+        true,
+        branch_state.upstream_ref.is_none(),
+        String::from("push is ready"),
+    )
+}
+
+fn pr_overlay_state(branch_state: &SessionBranchState, base_branch: &str) -> (bool, String) {
+    if branch_state.detached_head {
+        return (
+            false,
+            String::from("Switch to a branch before you open a draft PR."),
+        );
+    }
+    if branch_state.head_ref == base_branch {
+        return (
+            false,
+            format!(
+                "The current branch already matches the base branch ({base_branch}). Create a work branch first."
+            ),
+        );
+    }
+    if branch_state.upstream_ref.is_none() {
+        return (
+            false,
+            String::from(
+                "Push this branch first so Probe knows what head branch GitHub should review.",
+            ),
+        );
+    }
+    if branch_state.behind_by.unwrap_or(0) > 0 {
+        return (
+            false,
+            String::from(
+                "This branch is behind its remote. Pull or rebase before opening a draft PR.",
+            ),
+        );
+    }
+    (true, String::from("draft PR is ready"))
+}
+
+fn build_pr_comments_overlay(cwd: &Path) -> PrCommentsOverlay {
+    let Some(branch_state) = session_branch_state_local(cwd) else {
+        return PrCommentsOverlay::new(
+            vec![
+                String::from("Probe could not detect a git repo for the current workspace."),
+                String::from(""),
+                String::from("next: open a repo workspace first, then try /pr_comments again."),
+            ],
+            Vec::new(),
+        );
+    };
+    if branch_state.upstream_ref.is_none() {
+        return PrCommentsOverlay::new(
+            vec![
+                format!("branch: {}", branch_state.head_ref),
+                String::from("Push this branch first so Probe can find the PR tied to it."),
+                String::from(""),
+                String::from("next: use /push, then come back to /pr_comments."),
+            ],
+            Vec::new(),
+        );
+    }
+    match load_current_pr_review_summary(branch_state.repo_root.as_path()) {
+        Ok(summary) => render_pr_comments_overlay_summary(summary),
+        Err(error) => PrCommentsOverlay::new(
+            vec![
+                format!("branch: {}", branch_state.head_ref),
+                error.clone(),
+                String::from(""),
+                pr_comments_next_step(error.as_str()),
+            ],
+            Vec::new(),
+        ),
+    }
+}
+
+fn load_current_pr_review_summary(repo_root: &Path) -> Result<GhPrReviewSummary, String> {
+    let gh_program = gh_program_for_repo(repo_root);
+    let output = Command::new(&gh_program)
+        .arg("pr")
+        .arg("view")
+        .arg("--json")
+        .arg("number,title,url,reviewDecision,isDraft,headRefName,baseRefName,comments,reviews")
+        .current_dir(repo_root)
+        .output()
+        .map_err(|error| format!("Probe could not start gh to inspect PR comments: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if detail.contains("no pull requests found") || detail.contains("no pull request found") {
+            return Err(String::from(
+                "No pull request is linked to this branch yet.",
+            ));
+        }
+        if detail.contains("authentication") || detail.contains("not logged into any GitHub hosts")
+        {
+            return Err(String::from(
+                "GitHub auth is required before Probe can load PR comments.",
+            ));
+        }
+        return Err(gh_command_error("inspect PR comments", &output));
+    }
+    serde_json::from_slice::<GhPrReviewSummary>(&output.stdout)
+        .map_err(|error| format!("Probe could not parse the current PR review payload: {error}"))
+}
+
+fn render_pr_comments_overlay_summary(summary: GhPrReviewSummary) -> PrCommentsOverlay {
+    let mut lines = vec![
+        format!("PR #{}: {}", summary.number, summary.title),
+        format!("url: {}", summary.url),
+        format!(
+            "state: {} · decision: {}",
+            if summary.is_draft { "draft" } else { "ready" },
+            summary
+                .review_decision
+                .clone()
+                .unwrap_or_else(|| String::from("not set"))
+        ),
+        format!(
+            "branch pair: {} -> {}",
+            summary.head_ref_name, summary.base_ref_name
+        ),
+        format!(
+            "feedback: {} issue comment(s) · {} review(s)",
+            summary.comments.len(),
+            summary.reviews.len()
+        ),
+        String::from(""),
+    ];
+
+    let mut added_feedback = false;
+    if !summary.comments.is_empty() {
+        lines.push(String::from("recent comments:"));
+        for comment in summary.comments.iter().take(3) {
+            let author = comment
+                .author
+                .as_ref()
+                .map(|actor| actor.login.as_str())
+                .unwrap_or("unknown");
+            lines.push(format!(
+                "- {}: {}",
+                author,
+                preview(summarize_review_text(comment.body.as_str()).as_str(), 96)
+            ));
+        }
+        lines.push(String::from(""));
+        added_feedback = true;
+    }
+    let review_bodies = summary
+        .reviews
+        .iter()
+        .filter(|review| !review.body.trim().is_empty())
+        .take(3)
+        .collect::<Vec<_>>();
+    if !review_bodies.is_empty() {
+        lines.push(String::from("recent reviews:"));
+        for review in review_bodies {
+            let author = review
+                .author
+                .as_ref()
+                .map(|actor| actor.login.as_str())
+                .unwrap_or("unknown");
+            lines.push(format!(
+                "- {} ({}) {}",
+                author,
+                review.state.to_lowercase(),
+                preview(summarize_review_text(review.body.as_str()).as_str(), 88)
+            ));
+        }
+        lines.push(String::from(""));
+        added_feedback = true;
+    }
+
+    if !added_feedback {
+        lines.push(String::from(
+            "No review comments or review bodies are visible yet.",
+        ));
+        return PrCommentsOverlay::new(lines, Vec::new());
+    }
+
+    PrCommentsOverlay::new(lines, pr_feedback_items(&summary))
+}
+
+fn summarize_review_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn pr_feedback_items(summary: &GhPrReviewSummary) -> Vec<PrFeedbackItemView> {
+    let mut items = Vec::new();
+
+    for comment in summary
+        .comments
+        .iter()
+        .filter(|comment| !comment.body.trim().is_empty())
+    {
+        let author = comment
+            .author
+            .as_ref()
+            .map(|actor| actor.login.as_str())
+            .unwrap_or("unknown");
+        let normalized = summarize_review_text(comment.body.as_str());
+        items.push(PrFeedbackItemView {
+            label: format!("issue comment · {author}"),
+            preview: preview(normalized.as_str(), 88),
+            detail_lines: vec![
+                format!("source: issue comment from {author}"),
+                format!("pr: #{} {}", summary.number, summary.title),
+                String::from("feedback:"),
+                normalized,
+            ],
+            seed_text: format!(
+                "Please address this PR feedback from {author} on PR #{} ({}): {}",
+                summary.number,
+                summary.title,
+                comment.body.trim()
+            ),
+        });
+    }
+
+    for review in summary
+        .reviews
+        .iter()
+        .filter(|review| !review.body.trim().is_empty())
+    {
+        let author = review
+            .author
+            .as_ref()
+            .map(|actor| actor.login.as_str())
+            .unwrap_or("unknown");
+        let normalized = summarize_review_text(review.body.as_str());
+        items.push(PrFeedbackItemView {
+            label: format!("review · {} · {}", author, review.state.to_lowercase()),
+            preview: preview(normalized.as_str(), 82),
+            detail_lines: vec![
+                format!(
+                    "source: {} review from {}",
+                    review.state.to_lowercase(),
+                    author
+                ),
+                format!("pr: #{} {}", summary.number, summary.title),
+                String::from("feedback:"),
+                normalized,
+            ],
+            seed_text: format!(
+                "Please address this PR review feedback from {} on PR #{} ({}) [{}]: {}",
+                author,
+                summary.number,
+                summary.title,
+                review.state,
+                review.body.trim()
+            ),
+        });
+    }
+
+    items
+}
+
+fn pr_comments_next_step(error: &str) -> String {
+    if error.contains("No pull request is linked") {
+        return String::from("next: use /pr after /push once this branch is ready.");
+    }
+    if error.contains("GitHub auth is required") {
+        return String::from("next: authenticate gh, then try /pr_comments again.");
+    }
+    String::from("next: fix the GitHub/PR issue above, then retry /pr_comments.")
+}
+
+fn suggested_pr_title(repo_root: &Path, branch_name: &str) -> String {
+    git_run_string(repo_root, &["log", "-1", "--pretty=%s"]).unwrap_or_else(|| {
+        format!(
+            "Draft: {}",
+            branch_name
+                .strip_prefix("codex/")
+                .unwrap_or(branch_name)
+                .replace('-', " ")
+        )
+    })
+}
+
+fn suggested_commit_message(summary: &GitRepoStatusSummary) -> String {
+    let paths = summary.staged_preview_paths();
+    match paths.as_slice() {
+        [] => String::from("Update repo changes"),
+        [single] => format!("Update {}", single),
+        _ => format!("Update {} files", paths.len()),
+    }
+}
+
+fn summarize_paths(paths: &[String], max_items: usize) -> String {
+    if paths.is_empty() {
+        return String::from("no paths reported");
+    }
+    let shown = paths.iter().take(max_items).cloned().collect::<Vec<_>>();
+    if paths.len() > max_items {
+        format!("{} +{} more", shown.join(", "), paths.len() - max_items)
+    } else {
+        shown.join(", ")
+    }
+}
+
+fn sanitize_branch_component(value: &str) -> String {
+    let mut sanitized = String::new();
+    let mut previous_dash = false;
+    for ch in value.chars() {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_alphanumeric() {
+            sanitized.push(lower);
+            previous_dash = false;
+        } else if matches!(lower, '-' | '_' | '/' | ' ' | '.') && !previous_dash {
+            sanitized.push('-');
+            previous_dash = true;
+        }
+    }
+    let sanitized = sanitized.trim_matches('-').to_string();
+    if sanitized.is_empty() {
+        String::from("probe-task")
+    } else {
+        sanitized
+    }
+}
+
+fn git_branch_name_is_valid(repo_root: &Path, name: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("check-ref-format")
+        .arg("--branch")
+        .arg(name)
+        .output()
+        .ok()
+        .is_some_and(|output| output.status.success())
+}
+
+fn git_local_branch_exists(repo_root: &Path, name: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("show-ref")
+        .arg("--verify")
+        .arg("--quiet")
+        .arg(format!("refs/heads/{name}"))
+        .output()
+        .ok()
+        .is_some_and(|output| output.status.success())
+}
+
+fn git_default_remote_name(repo_root: &Path) -> Option<String> {
+    git_run_stdout(repo_root, &["remote"]).and_then(|output| {
+        output
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn git_remote_default_branch(repo_root: &Path, remote_name: &str) -> Option<String> {
+    git_run_string(
+        repo_root,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            &format!("refs/remotes/{remote_name}/HEAD"),
+        ],
+    )
+    .and_then(|value| value.rsplit('/').next().map(str::to_owned))
+}
+
+fn gh_program_for_repo(repo_root: &Path) -> String {
+    git_run_string(repo_root, &["config", "--get", "probe.ghBin"])
+        .unwrap_or_else(|| String::from("gh"))
+}
+
+fn git_command_error(action: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("git exited with status {}", output.status)
+    };
+    format!("Probe could not {action}: {detail}")
+}
+
+fn gh_command_error(action: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("gh exited with status {}", output.status)
+    };
+    format!("Probe could not {action}: {detail}")
 }
 
 fn preview(value: &str, max_chars: usize) -> String {
@@ -2613,12 +5477,18 @@ fn buffer_to_string(buffer: &Buffer) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::{Mutex, OnceLock};
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::McpServerSource;
+    use super::{
+        DetachedSessionRecoveryState, DetachedSessionStatus, McpServerSource, detached_summary_view,
+    };
 
     use probe_core::backend_profiles::{
         openai_codex_subscription, psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
@@ -2631,10 +5501,15 @@ mod tests {
     use probe_protocol::backend::BackendKind;
     use probe_protocol::runtime::{RuntimeActivity, RuntimeActivityKind};
     use probe_protocol::session::{
-        PendingToolApproval, SessionBackendTarget, SessionId, TaskFinalReceipt,
-        TaskReceiptDisposition, TaskVerificationCommandStatus, TaskVerificationCommandSummary,
-        TaskVerificationStatus, TaskWorkspaceSummary, TaskWorkspaceSummaryStatus,
-        ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
+        PendingToolApproval, SessionBackendTarget, SessionBranchState, SessionDeliveryState,
+        SessionDeliveryStatus, SessionId, SessionMcpConnectionStatus, SessionMcpServer,
+        SessionMcpServerSource, SessionMcpServerTransport, SessionMcpState,
+        SessionWorkspaceBootMode, SessionWorkspaceState, TaskCheckpointStatus,
+        TaskCheckpointSummary, TaskDiffPreview, TaskFinalReceipt, TaskReceiptDisposition,
+        TaskRevertibilityStatus, TaskRevertibilitySummary, TaskVerificationCommandStatus,
+        TaskVerificationCommandSummary, TaskVerificationStatus, TaskWorkspaceSummary,
+        TaskWorkspaceSummaryStatus, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision,
+        ToolRiskClass,
     };
     use probe_test_support::{
         FakeAppleFmServer, FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment,
@@ -2643,9 +5518,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AppShell, LaneOperatorMode, McpRegistryFile, McpServerRecord, McpServerTransport,
-        TuiLaunchConfig, mcp_registry_path, profile_from_server_config, resolve_tui_chat_profile,
-        save_mcp_registry,
+        AppShell, LaneLaunchMode, LaneOperatorMode, LaneReviewMode, McpRegistryFile,
+        McpServerRecord, McpServerTransport, TuiLaunchConfig, build_chat_runtime_config_for_lane,
+        mcp_registry_path, operator_summary_from_profile, profile_from_server_config,
+        resolve_tui_chat_profile, save_mcp_registry,
     };
     use crate::bottom_pane::ComposerSubmission;
     use crate::event::UiEvent;
@@ -2685,6 +5561,38 @@ mod tests {
         }
     }
 
+    fn init_git_repo(path: &Path) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["init", "-q"])
+            .status()
+            .expect("initialize git repo");
+        assert!(status.success(), "git init failed for {}", path.display());
+    }
+
+    fn seed_memory_fixture(probe_home: &Path, repo_root: &Path) -> PathBuf {
+        fs::create_dir_all(probe_home.join("memory")).expect("create probe memory dir");
+        fs::write(
+            probe_home.join("memory/USER.md"),
+            "Always prefer concise teammate-style handoffs.",
+        )
+        .expect("write user memory");
+        fs::write(
+            repo_root.join("AGENTS.md"),
+            "Repo memory from AGENTS fallback.",
+        )
+        .expect("write repo memory");
+        let nested_dir = repo_root.join("src/features");
+        fs::create_dir_all(&nested_dir).expect("create nested workspace");
+        fs::write(
+            nested_dir.join("PROBE.md"),
+            "Feature-specific rule for src/features work.",
+        )
+        .expect("write directory memory");
+        nested_dir
+    }
+
     fn apple_fm_test_config(base_url: &str) -> ProbeRuntimeTurnConfig {
         let mut profile = psionic_apple_fm_bridge();
         profile.base_url = base_url.to_string();
@@ -2705,6 +5613,23 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn checkpoint(status: TaskCheckpointStatus, summary_text: &str) -> TaskCheckpointSummary {
+        TaskCheckpointSummary {
+            status,
+            summary_text: String::from(summary_text),
+        }
+    }
+
+    fn revertibility(
+        status: TaskRevertibilityStatus,
+        summary_text: &str,
+    ) -> TaskRevertibilitySummary {
+        TaskRevertibilitySummary {
+            status,
+            summary_text: String::from(summary_text),
+        }
     }
 
     fn wait_for_app_condition(
@@ -2807,14 +5732,62 @@ mod tests {
     fn main_shell_shows_backend_workspace_and_approval_posture_without_overlay() {
         let app = AppShell::new_for_tests();
 
-        let rendered = app.render_to_string(120, 32);
+        let rendered = app.render_to_string(120, 36);
         assert!(rendered.contains("lane: Qwen"));
-        assert!(rendered.contains("backend: openai_chat_completions"));
-        assert!(rendered.contains("loopback/ssh"));
-        assert!(rendered.contains("127.0.0.1:8080"));
-        assert!(rendered.contains("cwd:"));
-        assert!(rendered.contains("tools: on"));
-        assert!(rendered.contains("approvals:"));
+        assert!(rendered.contains("workspace:"));
+        assert!(rendered.contains("safety: auto-safe"));
+        assert!(!rendered.contains("transport:"));
+        assert!(!rendered.contains("tools: on"));
+        assert!(!rendered.contains("approvals:"));
+        assert!(!rendered.contains("keys: F2 status"));
+    }
+
+    #[test]
+    fn main_shell_uses_compact_top_session_panel_on_narrow_terminals() {
+        let app = AppShell::new_for_tests();
+
+        let rendered = app.render_to_string(88, 36);
+
+        assert!(rendered.contains("Session"), "{rendered}");
+        assert!(rendered.contains("lane: Qwen"), "{rendered}");
+        assert!(rendered.contains("workspace:"), "{rendered}");
+        assert!(rendered.contains("safety: auto-safe"), "{rendered}");
+        assert!(rendered.contains("details: /status"), "{rendered}");
+        assert!(
+            rendered.contains("Start Here") || rendered.contains("Transcript"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn main_shell_shows_active_memory_summary_when_layers_are_loaded() {
+        let probe_home = tempdir().expect("temp probe home");
+        let repo_root = tempdir().expect("temp repo root");
+        init_git_repo(repo_root.path());
+        let cwd = seed_memory_fixture(probe_home.path(), repo_root.path());
+        let profile = openai_codex_subscription();
+        let launch_config = TuiLaunchConfig {
+            chat_runtime: build_chat_runtime_config_for_lane(
+                Some(probe_home.path().to_path_buf()),
+                cwd,
+                profile.clone(),
+                LaneOperatorMode::Coding,
+                LaneReviewMode::AutoSafe,
+                None,
+                None,
+                0,
+            ),
+            operator_backend: operator_summary_from_profile(&profile),
+            autostart_apple_fm_setup: false,
+            resume_session_id: None,
+        };
+
+        let app = AppShell::new_with_launch_config(launch_config);
+        let rendered = app.render_to_string(140, 36);
+
+        assert_eq!(app.base_screen().memory_stack().layers.len(), 3);
+        assert!(rendered.contains("memory:"), "{rendered}");
+        assert!(rendered.contains("repo/AGENTS"), "{rendered}");
     }
 
     #[test]
@@ -2835,6 +5808,15 @@ mod tests {
                 outside_tracking_dirty_files: Vec::new(),
                 repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
                 change_accounting_limited: false,
+                checkpoint: checkpoint(
+                    TaskCheckpointStatus::Captured,
+                    "Probe captured a pre-edit checkpoint before changes landed in src/lib.rs.",
+                ),
+                revertibility: revertibility(
+                    TaskRevertibilityStatus::Exact,
+                    "Probe has enough checkpoint coverage to attempt an exact restore for src/lib.rs.",
+                ),
+                diff_previews: Vec::new(),
                 summary_text: String::from(
                     "This task changed 1 file(s): src/lib.rs. Dirty before task start: Cargo.toml.",
                 ),
@@ -2850,6 +5832,15 @@ mod tests {
                     outside_tracking_dirty_files: Vec::new(),
                     repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
                     change_accounting_limited: false,
+                    checkpoint: checkpoint(
+                        TaskCheckpointStatus::Captured,
+                        "Probe captured a pre-edit checkpoint before changes landed in src/lib.rs.",
+                    ),
+                    revertibility: revertibility(
+                        TaskRevertibilityStatus::Exact,
+                        "Probe has enough checkpoint coverage to attempt an exact restore for src/lib.rs.",
+                    ),
+                    diff_previews: Vec::new(),
                     summary_text: String::from(
                         "This task changed 1 file(s): src/lib.rs. Dirty before task start: Cargo.toml.",
                     ),
@@ -2866,10 +5857,14 @@ mod tests {
                     "This task changed 1 file(s): src/lib.rs. Validation passed: cargo test -p probe-tui (passed).",
                 ),
             }),
+            mcp_state: None,
             recovery_note: None,
         });
 
-        let rendered = app.render_to_string(120, 32);
+        let rendered = app.render_to_string(120, 36);
+        assert!(rendered.contains("last task: applied"));
+        assert!(rendered.contains("checkpoint: captured"));
+        assert!(rendered.contains("revert: available"));
         assert!(rendered.contains("edits: src/lib.rs"));
         assert!(rendered.contains("dirty_before: Cargo.toml"));
         assert!(rendered.contains("verify:"));
@@ -2890,10 +5885,11 @@ mod tests {
             )),
             latest_task_workspace_summary: None,
             latest_task_receipt: None,
+            mcp_state: None,
             recovery_note: None,
         });
 
-        let rendered = app.render_to_string(120, 32);
+        let rendered = app.render_to_string(120, 44);
         assert!(
             app.base_screen()
                 .compact_runtime_status()
@@ -2964,6 +5960,15 @@ mod tests {
                     outside_tracking_dirty_files: Vec::new(),
                     repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
                     change_accounting_limited: false,
+                    checkpoint: checkpoint(
+                        TaskCheckpointStatus::NotCaptured,
+                        "No pre-edit checkpoint was needed because no repo changes landed.",
+                    ),
+                    revertibility: revertibility(
+                        TaskRevertibilityStatus::Unavailable,
+                        "No applied repo changes are currently available for automated revert.",
+                    ),
+                    diff_previews: Vec::new(),
                     summary_text: String::from(
                         "This task is waiting for approval. No repo changes have landed yet.",
                     ),
@@ -2977,6 +5982,7 @@ mod tests {
                     "This task is waiting for approval. No validation command has completed yet.",
                 ),
             }),
+            mcp_state: None,
             recovery_note: Some(String::from(
                 "daemon restart can resume this session after the pending approval is resolved",
             )),
@@ -2997,6 +6003,7 @@ mod tests {
                 tool_call_turn_index: 1,
                 paused_result_turn_index: 2,
                 requested_at_ms: 1,
+                proposed_edit: None,
                 resolved_at_ms: None,
                 resolution: None,
             }],
@@ -3007,7 +6014,66 @@ mod tests {
         assert!(
             app.base_screen()
                 .compact_runtime_status()
-                .contains("activity: action needed")
+                .contains("activity: review changes:")
+        );
+    }
+
+    #[test]
+    fn main_shell_surfaces_pending_apply_patch_as_proposed_review_state() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_proposed_review"),
+            profile_name: String::from("openai-codex-subscription"),
+            model_id: String::from("gpt-5.4"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: Some(RuntimeActivity::new(
+                RuntimeActivityKind::WaitingForApproval,
+                "waiting for approval: apply_patch",
+            )),
+            latest_task_workspace_summary: None,
+            latest_task_receipt: None,
+            mcp_state: None,
+            recovery_note: None,
+        });
+        app.apply_message(AppMessage::PendingToolApprovalsUpdated {
+            session_id: String::from("sess_proposed_review"),
+            approvals: vec![PendingToolApproval {
+                session_id: SessionId::new("sess_proposed_review"),
+                tool_call_id: String::from("call_patch_review"),
+                tool_name: String::from("apply_patch"),
+                arguments: json!({
+                    "path": "src/lib.rs",
+                    "old_text": "pub fn old_name() {}\n",
+                    "new_text": "pub fn new_name() {}\n"
+                }),
+                risk_class: ToolRiskClass::Write,
+                reason: Some(String::from("review-risky pauses write-capable tools")),
+                tool_call_turn_index: 3,
+                paused_result_turn_index: 3,
+                requested_at_ms: 10,
+                proposed_edit: None,
+                resolved_at_ms: None,
+                resolution: None,
+            }],
+        });
+        app.dispatch(UiEvent::Dismiss);
+
+        let rendered = app.render_to_string(120, 40);
+        assert!(rendered.contains("Review Changes"), "{rendered}");
+        assert!(rendered.contains("activity: review changes:"), "{rendered}");
+        assert!(rendered.contains("src/lib.rs"), "{rendered}");
+        assert!(rendered.contains("next: /diff previews"), "{rendered}");
+        assert!(rendered.contains("A applies"), "{rendered}");
+        assert!(rendered.contains("last task: proposed"), "{rendered}");
+        assert!(
+            rendered.contains("checkpoint: pending review"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("edits: proposed -> src/lib.rs"),
+            "{rendered}"
         );
     }
 
@@ -3029,17 +6095,31 @@ mod tests {
                 outside_tracking_dirty_files: vec![String::from("generated/schema.json")],
                 repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
                 change_accounting_limited: true,
+                checkpoint: checkpoint(
+                    TaskCheckpointStatus::Limited,
+                    "Probe observed write-capable work but cannot confirm a complete pre-edit checkpoint for this task.",
+                ),
+                revertibility: revertibility(
+                    TaskRevertibilityStatus::Limited,
+                    "Probe observed write-capable work but can only offer limited revert guidance, so manual review is still required.",
+                ),
+                diff_previews: Vec::new(),
                 summary_text: String::from(
                     "Probe cannot confirm whether repo changes landed for this task because write-capable shell commands ran without file-level change accounting. Additional dirty files appeared during the task outside tracked tool results: generated/schema.json.",
                 ),
             }),
             latest_task_receipt: None,
+            mcp_state: None,
             recovery_note: None,
         });
 
         let rendered = app.render_to_string(120, 32);
+        assert!(
+            rendered.contains("last task: limited visibility"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("checkpoint: limited"), "{rendered}");
         assert!(rendered.contains("dirty now:"), "{rendered}");
-        assert!(rendered.contains("generated/schema.json"), "{rendered}");
     }
 
     #[test]
@@ -3055,6 +6135,7 @@ mod tests {
             runtime_activity: None,
             latest_task_workspace_summary: None,
             latest_task_receipt: None,
+            mcp_state: None,
             recovery_note: None,
         });
         app.apply_message(AppMessage::TranscriptEntryCommitted {
@@ -3118,6 +6199,7 @@ mod tests {
             runtime_activity: None,
             latest_task_workspace_summary: None,
             latest_task_receipt: None,
+            mcp_state: None,
             recovery_note: None,
         });
         app.apply_message(AppMessage::TranscriptEntryCommitted {
@@ -3142,6 +6224,7 @@ mod tests {
             runtime_activity: None,
             latest_task_workspace_summary: None,
             latest_task_receipt: None,
+            mcp_state: None,
             recovery_note: None,
         });
         app.apply_message(AppMessage::TranscriptEntryCommitted {
@@ -3286,6 +6369,7 @@ mod tests {
             runtime_activity: None,
             latest_task_workspace_summary: None,
             latest_task_receipt: None,
+            mcp_state: None,
             recovery_note: None,
         });
         app.apply_message(AppMessage::TranscriptEntryCommitted {
@@ -3329,6 +6413,1600 @@ mod tests {
         assert_eq!(app.active_screen_id(), ScreenId::SetupOverlay);
         let rendered = app.render_to_string(120, 40);
         assert!(rendered.contains("lane: Codex"), "{rendered}");
+    }
+
+    #[test]
+    fn status_slash_command_opens_operator_status_overlay() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/status")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::StatusOverlay);
+        let rendered = app.render_to_string(140, 42);
+        assert!(rendered.contains("Inspect the current operator state for the active lane."));
+        assert!(rendered.contains("lane: Codex"), "{rendered}");
+        assert!(rendered.contains("next controls: /doctor"), "{rendered}");
+        assert_eq!(app.last_status(), "opened status overlay");
+    }
+
+    #[test]
+    fn doctor_slash_command_opens_health_check_overlay() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/doctor")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::DoctorOverlay);
+        let rendered = app.render_to_string(140, 44);
+        assert!(rendered.contains("Run a quick health check for the active lane."));
+        assert!(rendered.contains("workspace: ok"), "{rendered}");
+        assert!(rendered.contains("mcp:"), "{rendered}");
+        assert!(rendered.contains("codex auth:"), "{rendered}");
+        assert_eq!(app.last_status(), "opened doctor overlay");
+    }
+
+    #[test]
+    fn keyboard_shortcuts_open_operator_overlays() {
+        let probe_home = tempdir().expect("temp probe home");
+        let workspace = tempdir().expect("workspace");
+        let store = FilesystemSessionStore::new(probe_home.path());
+        store
+            .create_session_with(NewSession::new("Bug hunt", workspace.path()).with_backend(
+                SessionBackendTarget {
+                    profile_name: String::from("openai-codex-subscription"),
+                    base_url: String::from("https://chatgpt.com/backend-api/codex"),
+                    model: String::from("gpt-5.4"),
+                    control_plane: None,
+                    psionic_mesh: None,
+                },
+            ))
+            .expect("create saved session");
+        let mut app =
+            AppShell::new_for_tests_with_chat_config(AppShell::build_chat_runtime_config(
+                Some(probe_home.path().to_path_buf()),
+                openai_codex_subscription(),
+            ));
+
+        app.dispatch(UiEvent::OpenStatusOverlay);
+        assert_eq!(app.active_screen_id(), ScreenId::StatusOverlay);
+
+        app.dispatch(UiEvent::Dismiss);
+        app.dispatch(UiEvent::OpenDoctorOverlay);
+        assert_eq!(app.active_screen_id(), ScreenId::DoctorOverlay);
+
+        app.dispatch(UiEvent::Dismiss);
+        app.dispatch(UiEvent::OpenGitOverlay);
+        assert_eq!(app.active_screen_id(), ScreenId::GitOverlay);
+
+        app.dispatch(UiEvent::Dismiss);
+        app.dispatch(UiEvent::OpenTasksOverlay);
+        assert_eq!(app.active_screen_id(), ScreenId::ResumeOverlay);
+
+        app.dispatch(UiEvent::Dismiss);
+        app.dispatch(UiEvent::OpenRecipesOverlay);
+        assert_eq!(app.active_screen_id(), ScreenId::RecipesOverlay);
+    }
+
+    #[test]
+    fn recipes_slash_command_opens_overlay_and_loads_first_step_into_composer() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/recipes")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::RecipesOverlay);
+        let rendered = app.render_to_string(140, 44);
+        assert!(rendered.contains("Use a guided workflow"), "{rendered}");
+        assert!(rendered.contains("> Review a risky edit"), "{rendered}");
+        assert!(
+            rendered.contains("Enter loads `/review_mode`"),
+            "{rendered}"
+        );
+
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
+        let rendered = app.render_to_string(140, 44);
+        assert!(rendered.contains("/review_mode"), "{rendered}");
+        assert!(rendered.contains("applied: next step ready"), "{rendered}");
+        assert_eq!(app.last_status(), "loaded /review_mode into the composer");
+    }
+
+    #[test]
+    fn git_slash_command_opens_overlay_with_branch_delivery_truth() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_git_overlay"),
+            profile_name: String::from("openai-codex-subscription"),
+            model_id: String::from("gpt-5.4"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: None,
+            latest_task_workspace_summary: None,
+            latest_task_receipt: None,
+            mcp_state: None,
+            recovery_note: None,
+        });
+        app.apply_message(AppMessage::ProbeRuntimeWorkspaceStateUpdated {
+            session_id: String::from("sess_git_overlay"),
+            workspace_state: Some(SessionWorkspaceState {
+                boot_mode: SessionWorkspaceBootMode::PreparedBaseline,
+                baseline: None,
+                snapshot: None,
+                execution_host: None,
+                provenance_note: Some(String::from("Prepared from the repo baseline.")),
+            }),
+            branch_state: Some(SessionBranchState {
+                repo_root: PathBuf::from("/tmp/probe-workspace"),
+                head_ref: String::from("feature/git-ux"),
+                head_commit: String::from("1234567890abcdef"),
+                detached_head: false,
+                working_tree_dirty: true,
+                upstream_ref: Some(String::from("origin/feature/git-ux")),
+                ahead_by: Some(2),
+                behind_by: Some(0),
+            }),
+            delivery_state: Some(SessionDeliveryState {
+                status: SessionDeliveryStatus::NeedsPush,
+                branch_name: Some(String::from("feature/git-ux")),
+                remote_tracking_ref: Some(String::from("origin/feature/git-ux")),
+                compare_ref: Some(String::from("origin/feature/git-ux...HEAD")),
+                updated_at_ms: 1,
+                artifacts: Vec::new(),
+            }),
+        });
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/git")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::GitOverlay);
+        let rendered = app.render_to_string(140, 44);
+        assert!(
+            rendered.contains(
+                "Inspect branch, delivery, and workspace boot state for the active lane."
+            )
+        );
+        assert!(rendered.contains("branch: feature/git-ux"), "{rendered}");
+        assert!(rendered.contains("delivery: needs push"), "{rendered}");
+        assert!(
+            rendered.contains("workspace boot: prepared baseline"),
+            "{rendered}"
+        );
+        assert_eq!(app.last_status(), "opened git overlay");
+    }
+
+    #[test]
+    fn status_and_doctor_surfaces_git_truth() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_git_status"),
+            profile_name: String::from("openai-codex-subscription"),
+            model_id: String::from("gpt-5.4"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: None,
+            latest_task_workspace_summary: None,
+            latest_task_receipt: None,
+            mcp_state: None,
+            recovery_note: None,
+        });
+        app.apply_message(AppMessage::ProbeRuntimeWorkspaceStateUpdated {
+            session_id: String::from("sess_git_status"),
+            workspace_state: Some(SessionWorkspaceState {
+                boot_mode: SessionWorkspaceBootMode::Fresh,
+                baseline: None,
+                snapshot: None,
+                execution_host: None,
+                provenance_note: None,
+            }),
+            branch_state: Some(SessionBranchState {
+                repo_root: PathBuf::from("/tmp/probe-workspace"),
+                head_ref: String::from("main"),
+                head_commit: String::from("abcdef1234567890"),
+                detached_head: false,
+                working_tree_dirty: false,
+                upstream_ref: Some(String::from("origin/main")),
+                ahead_by: Some(0),
+                behind_by: Some(0),
+            }),
+            delivery_state: Some(SessionDeliveryState {
+                status: SessionDeliveryStatus::Synced,
+                branch_name: Some(String::from("main")),
+                remote_tracking_ref: Some(String::from("origin/main")),
+                compare_ref: Some(String::from("origin/main...HEAD")),
+                updated_at_ms: 1,
+                artifacts: Vec::new(),
+            }),
+        });
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/status")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        let status_rendered = app.render_to_string(140, 44);
+        assert!(
+            status_rendered.contains("git: main · clean · synced"),
+            "{status_rendered}"
+        );
+        assert!(
+            status_rendered.contains("repo: /tmp/probe-workspace"),
+            "{status_rendered}"
+        );
+        assert!(
+            status_rendered.contains("workspace boot: fresh"),
+            "{status_rendered}"
+        );
+
+        app.dispatch(UiEvent::Dismiss);
+        app.dispatch(UiEvent::ComposerPaste(String::from("/doctor")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        let doctor_rendered = app.render_to_string(140, 44);
+        assert!(
+            doctor_rendered.contains("git: ok - main (clean working tree)"),
+            "{doctor_rendered}"
+        );
+        assert!(
+            doctor_rendered.contains("delivery: ok - branch is synced with its tracked remote"),
+            "{doctor_rendered}"
+        );
+        assert!(
+            doctor_rendered.contains("workspace boot: ok - fresh"),
+            "{doctor_rendered}"
+        );
+    }
+
+    #[test]
+    fn branch_slash_command_opens_overlay_with_suggested_codex_branch_name() {
+        let repo = tempdir().expect("repo tempdir");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Probe"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.name");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "probe@example.com"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.email");
+        std::fs::write(repo.path().join("example.md"), "hello\n").expect("write initial");
+        std::process::Command::new("git")
+            .arg("add")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo.path())
+            .output()
+            .expect("git commit");
+        std::fs::write(repo.path().join("example.md"), "hello from Probe\n").expect("edit file");
+
+        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
+        config.cwd = repo.path().to_path_buf();
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/branch")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::BranchOverlay);
+        let rendered = app.render_to_string(140, 42);
+        assert!(
+            rendered.contains("Create a new branch or switch to an existing branch"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("codex/example"), "{rendered}");
+        assert_eq!(app.last_status(), "opened branch overlay");
+    }
+
+    #[test]
+    fn branch_slash_command_creates_and_switches_to_new_branch() {
+        let repo = tempdir().expect("repo tempdir");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Probe"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.name");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "probe@example.com"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.email");
+        std::fs::write(repo.path().join("example.md"), "hello\n").expect("write initial");
+        std::process::Command::new("git")
+            .arg("add")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo.path())
+            .output()
+            .expect("git commit");
+
+        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
+        config.cwd = repo.path().to_path_buf();
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/branch")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::BranchOverlay);
+        app.dispatch(UiEvent::ComposerPaste(String::from("codex/review-flow")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
+        assert!(
+            app.last_status()
+                .contains("created branch: codex/review-flow"),
+            "{}",
+            app.last_status()
+        );
+        let rendered = app.render_to_string(140, 42);
+        assert!(rendered.contains("codex/review-flow"), "{rendered}");
+        assert!(rendered.contains("git: codex/review-flow"), "{rendered}");
+        let output = std::process::Command::new("git")
+            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git symbolic-ref");
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_eq!(branch, "codex/review-flow");
+    }
+
+    #[test]
+    fn branch_slash_command_switches_to_existing_branch() {
+        let repo = tempdir().expect("repo tempdir");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Probe"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.name");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "probe@example.com"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.email");
+        std::fs::write(repo.path().join("example.md"), "hello\n").expect("write initial");
+        std::process::Command::new("git")
+            .arg("add")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo.path())
+            .output()
+            .expect("git commit");
+        let initial_branch_output = std::process::Command::new("git")
+            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git symbolic-ref initial");
+        let initial_branch = String::from_utf8_lossy(&initial_branch_output.stdout)
+            .trim()
+            .to_string();
+        std::process::Command::new("git")
+            .args(["switch", "-c", "codex/existing-branch"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git switch new branch");
+        std::process::Command::new("git")
+            .args(["switch", initial_branch.as_str()])
+            .current_dir(repo.path())
+            .output()
+            .expect("git switch back");
+
+        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
+        config.cwd = repo.path().to_path_buf();
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/branch")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::BranchOverlay);
+        app.dispatch(UiEvent::ComposerPaste(String::from(
+            "codex/existing-branch",
+        )));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
+        assert!(
+            app.last_status()
+                .contains("switched branch: codex/existing-branch"),
+            "{}",
+            app.last_status()
+        );
+        let output = std::process::Command::new("git")
+            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git symbolic-ref");
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_eq!(branch, "codex/existing-branch");
+    }
+
+    #[test]
+    fn stage_slash_command_stages_current_repo_changes() {
+        let repo = tempdir().expect("repo tempdir");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Probe"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.name");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "probe@example.com"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.email");
+        std::fs::write(repo.path().join("example.md"), "hello\n").expect("write initial");
+        std::process::Command::new("git")
+            .arg("add")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo.path())
+            .output()
+            .expect("git commit");
+        std::fs::write(repo.path().join("example.md"), "hello from Probe\n").expect("edit file");
+
+        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
+        config.cwd = repo.path().to_path_buf();
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/stage")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::StageOverlay);
+        let stage_render = app.render_to_string(140, 42);
+        assert!(
+            stage_render.contains("0 staged · 1 unstaged · 0 untracked"),
+            "{stage_render}"
+        );
+
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
+        assert!(
+            app.last_status().contains("staged repo changes"),
+            "{}",
+            app.last_status()
+        );
+        let rendered = app.render_to_string(140, 42);
+        assert!(
+            rendered.contains("applied: staged 1 path(s);"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("/commit is ready"), "{rendered}");
+    }
+
+    #[test]
+    fn commit_slash_command_creates_a_git_commit() {
+        let repo = tempdir().expect("repo tempdir");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Probe"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.name");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "probe@example.com"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.email");
+        std::fs::write(repo.path().join("example.md"), "hello\n").expect("write initial");
+        std::process::Command::new("git")
+            .arg("add")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo.path())
+            .output()
+            .expect("git commit");
+        std::fs::write(repo.path().join("example.md"), "hello from Probe\n").expect("edit file");
+        std::process::Command::new("git")
+            .arg("add")
+            .arg("-A")
+            .arg("--")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add updated file");
+
+        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
+        config.cwd = repo.path().to_path_buf();
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/commit")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::CommitOverlay);
+        let commit_render = app.render_to_string(140, 42);
+        assert!(
+            commit_render.contains("1 staged · 0 unstaged · 0 untracked"),
+            "{commit_render}"
+        );
+
+        app.dispatch(UiEvent::ComposerPaste(String::from(
+            "Refine example greeting",
+        )));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
+        assert!(
+            app.last_status()
+                .contains("created commit: Refine example greeting"),
+            "{}",
+            app.last_status()
+        );
+        let output = std::process::Command::new("git")
+            .arg("log")
+            .arg("-1")
+            .arg("--pretty=%s")
+            .current_dir(repo.path())
+            .output()
+            .expect("git log");
+        let subject = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_eq!(subject, "Refine example greeting");
+    }
+
+    #[test]
+    fn push_slash_command_opens_overlay_with_remote_guidance() {
+        let remote = tempdir().expect("remote tempdir");
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(remote.path())
+            .output()
+            .expect("git init bare");
+
+        let repo = tempdir().expect("repo tempdir");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Probe"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.name");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "probe@example.com"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.email");
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                remote.path().to_str().expect("remote path"),
+            ])
+            .current_dir(repo.path())
+            .output()
+            .expect("git remote add");
+        std::fs::write(repo.path().join("example.md"), "hello\n").expect("write initial");
+        std::process::Command::new("git")
+            .arg("add")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo.path())
+            .output()
+            .expect("git commit");
+
+        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
+        config.cwd = repo.path().to_path_buf();
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/push")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::PushOverlay);
+        let rendered = app.render_to_string(140, 42);
+        assert!(rendered.contains("remote: origin"), "{rendered}");
+        assert!(rendered.contains("upstream: none"), "{rendered}");
+        assert!(rendered.contains("sets upstream on origin"), "{rendered}");
+    }
+
+    #[test]
+    fn push_slash_command_publishes_branch_and_sets_upstream() {
+        let remote = tempdir().expect("remote tempdir");
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(remote.path())
+            .output()
+            .expect("git init bare");
+
+        let repo = tempdir().expect("repo tempdir");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Probe"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.name");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "probe@example.com"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.email");
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                remote.path().to_str().expect("remote path"),
+            ])
+            .current_dir(repo.path())
+            .output()
+            .expect("git remote add");
+        std::fs::write(repo.path().join("example.md"), "hello\n").expect("write initial");
+        std::process::Command::new("git")
+            .arg("add")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo.path())
+            .output()
+            .expect("git commit");
+        let branch_output = std::process::Command::new("git")
+            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git symbolic-ref");
+        let branch_name = String::from_utf8_lossy(&branch_output.stdout)
+            .trim()
+            .to_string();
+
+        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
+        config.cwd = repo.path().to_path_buf();
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/push")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::PushOverlay);
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
+        assert!(
+            app.last_status()
+                .contains(format!("published branch: {branch_name}").as_str()),
+            "{}",
+            app.last_status()
+        );
+        let upstream_output = std::process::Command::new("git")
+            .args([
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}",
+            ])
+            .current_dir(repo.path())
+            .output()
+            .expect("git rev-parse upstream");
+        let upstream = String::from_utf8_lossy(&upstream_output.stdout)
+            .trim()
+            .to_string();
+        assert_eq!(upstream, format!("origin/{branch_name}"));
+        let remote_output = std::process::Command::new("git")
+            .args(["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+            .current_dir(remote.path())
+            .output()
+            .expect("git for-each-ref remote");
+        let remote_refs = String::from_utf8_lossy(&remote_output.stdout).to_string();
+        assert!(
+            remote_refs.lines().any(|line| line == branch_name),
+            "{remote_refs}"
+        );
+    }
+
+    #[test]
+    fn pr_slash_command_blocks_when_current_branch_matches_base_branch() {
+        let repo = tempdir().expect("repo tempdir");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Probe"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.name");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "probe@example.com"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.email");
+        std::fs::write(repo.path().join("example.md"), "hello\n").expect("write initial");
+        std::process::Command::new("git")
+            .arg("add")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo.path())
+            .output()
+            .expect("git commit");
+
+        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
+        config.cwd = repo.path().to_path_buf();
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/pr")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::PrOverlay);
+        let rendered = app.render_to_string(140, 42);
+        assert!(
+            rendered.contains("Create a work branch first"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn pr_slash_command_creates_draft_pr_with_gh() {
+        let remote = tempdir().expect("remote tempdir");
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(remote.path())
+            .output()
+            .expect("git init bare");
+
+        let repo = tempdir().expect("repo tempdir");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Probe"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.name");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "probe@example.com"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.email");
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                remote.path().to_str().expect("remote path"),
+            ])
+            .current_dir(repo.path())
+            .output()
+            .expect("git remote add");
+        std::fs::write(repo.path().join("example.md"), "hello\n").expect("write initial");
+        std::process::Command::new("git")
+            .arg("add")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo.path())
+            .output()
+            .expect("git commit");
+        std::process::Command::new("git")
+            .args(["switch", "-c", "codex/review-flow"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git switch new branch");
+        let branch_output = std::process::Command::new("git")
+            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git symbolic-ref");
+        let branch_name = String::from_utf8_lossy(&branch_output.stdout)
+            .trim()
+            .to_string();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", branch_name.as_str()])
+            .current_dir(repo.path())
+            .output()
+            .expect("git push");
+
+        let gh_log = repo.path().join("gh-log.txt");
+        let gh_stub = repo.path().join("gh-stub.sh");
+        fs::write(
+            &gh_stub,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nprintf 'https://example.com/pr/123\\n'\n",
+                gh_log.display()
+            ),
+        )
+        .expect("write gh stub");
+        let mut perms = fs::metadata(&gh_stub)
+            .expect("gh stub metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&gh_stub, perms).expect("chmod gh stub");
+        std::process::Command::new("git")
+            .args([
+                "config",
+                "probe.ghBin",
+                gh_stub.to_str().expect("gh stub path"),
+            ])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config probe.ghBin");
+
+        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
+        config.cwd = repo.path().to_path_buf();
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/pr")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::PrOverlay);
+        app.dispatch(UiEvent::ComposerPaste(String::from("Refine draft PR flow")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
+        assert!(
+            app.last_status()
+                .contains("draft PR created: https://example.com/pr/123"),
+            "{}",
+            app.last_status()
+        );
+        let gh_args = fs::read_to_string(&gh_log).expect("read gh log");
+        assert!(gh_args.contains("pr"), "{gh_args}");
+        assert!(gh_args.contains("create"), "{gh_args}");
+        assert!(gh_args.contains("--draft"), "{gh_args}");
+        assert!(gh_args.contains("Refine draft PR flow"), "{gh_args}");
+    }
+
+    #[test]
+    fn pr_comments_slash_command_blocks_until_branch_is_pushed() {
+        let repo = tempdir().expect("repo tempdir");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Probe"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.name");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "probe@example.com"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.email");
+        std::fs::write(repo.path().join("example.md"), "hello\n").expect("write initial");
+        std::process::Command::new("git")
+            .arg("add")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo.path())
+            .output()
+            .expect("git commit");
+        std::process::Command::new("git")
+            .args(["switch", "-c", "codex/review-flow"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git switch branch");
+
+        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
+        config.cwd = repo.path().to_path_buf();
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/pr_comments")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::PrCommentsOverlay);
+        let rendered = app.render_to_string(140, 42);
+        assert!(rendered.contains("Push this branch first"), "{rendered}");
+        assert!(rendered.contains("next: use /push"), "{rendered}");
+    }
+
+    #[test]
+    fn pr_comments_slash_command_explains_when_no_pr_is_linked() {
+        let remote = tempdir().expect("remote tempdir");
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(remote.path())
+            .output()
+            .expect("git init bare");
+
+        let repo = tempdir().expect("repo tempdir");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Probe"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.name");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "probe@example.com"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.email");
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                remote.path().to_str().expect("remote path"),
+            ])
+            .current_dir(repo.path())
+            .output()
+            .expect("git remote add");
+        std::fs::write(repo.path().join("example.md"), "hello\n").expect("write initial");
+        std::process::Command::new("git")
+            .arg("add")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo.path())
+            .output()
+            .expect("git commit");
+        std::process::Command::new("git")
+            .args(["switch", "-c", "codex/review-flow"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git switch branch");
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "codex/review-flow"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git push");
+
+        let gh_stub = repo.path().join("gh-stub-no-pr.sh");
+        fs::write(
+            &gh_stub,
+            "#!/bin/sh\necho 'no pull requests found for branch \"codex/review-flow\"' >&2\nexit 1\n",
+        )
+        .expect("write gh stub");
+        let mut perms = fs::metadata(&gh_stub).expect("stub metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&gh_stub, perms).expect("chmod gh stub");
+        std::process::Command::new("git")
+            .args([
+                "config",
+                "probe.ghBin",
+                gh_stub.to_str().expect("gh stub path"),
+            ])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config probe.ghBin");
+
+        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
+        config.cwd = repo.path().to_path_buf();
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/pr_comments")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::PrCommentsOverlay);
+        let rendered = app.render_to_string(140, 42);
+        assert!(
+            rendered.contains("No pull request is linked to this branch yet."),
+            "{rendered}"
+        );
+        assert!(rendered.contains("next: use /pr"), "{rendered}");
+    }
+
+    #[test]
+    fn pr_comments_slash_command_surfaces_current_pr_feedback() {
+        let remote = tempdir().expect("remote tempdir");
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(remote.path())
+            .output()
+            .expect("git init bare");
+
+        let repo = tempdir().expect("repo tempdir");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Probe"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.name");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "probe@example.com"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.email");
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                remote.path().to_str().expect("remote path"),
+            ])
+            .current_dir(repo.path())
+            .output()
+            .expect("git remote add");
+        std::fs::write(repo.path().join("example.md"), "hello\n").expect("write initial");
+        std::process::Command::new("git")
+            .arg("add")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo.path())
+            .output()
+            .expect("git commit");
+        std::process::Command::new("git")
+            .args(["switch", "-c", "codex/review-flow"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git switch branch");
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "codex/review-flow"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git push");
+
+        let gh_log = repo.path().join("gh-pr-comments-log.txt");
+        let gh_stub = repo.path().join("gh-pr-comments.sh");
+        fs::write(
+            &gh_stub,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\ncat <<'JSON'\n{{\"number\":42,\"title\":\"Improve review flow\",\"url\":\"https://example.com/pr/42\",\"reviewDecision\":\"CHANGES_REQUESTED\",\"isDraft\":true,\"headRefName\":\"codex/review-flow\",\"baseRefName\":\"main\",\"comments\":[{{\"author\":{{\"login\":\"teammate\"}},\"body\":\"Please tighten the copy in the push overlay.\"}}],\"reviews\":[{{\"author\":{{\"login\":\"reviewer\"}},\"state\":\"CHANGES_REQUESTED\",\"body\":\"The Git delivery flow is strong. Please add a PR comment intake surface too.\"}}]}}\nJSON\n",
+                gh_log.display()
+            ),
+        )
+        .expect("write gh stub");
+        let mut perms = fs::metadata(&gh_stub).expect("stub metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&gh_stub, perms).expect("chmod gh stub");
+        std::process::Command::new("git")
+            .args([
+                "config",
+                "probe.ghBin",
+                gh_stub.to_str().expect("gh stub path"),
+            ])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config probe.ghBin");
+
+        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
+        config.cwd = repo.path().to_path_buf();
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/pr_comments")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::PrCommentsOverlay);
+        let rendered = app.render_to_string(160, 48);
+        assert!(
+            rendered.contains("PR #42: Improve review flow"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("decision: CHANGES_REQUESTED"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("recent comments:"), "{rendered}");
+        assert!(rendered.contains("teammate:"), "{rendered}");
+        assert!(rendered.contains("recent reviews:"), "{rendered}");
+        assert!(
+            rendered.contains("reviewer (changes_requested)"),
+            "{rendered}"
+        );
+        let gh_args = fs::read_to_string(&gh_log).expect("read gh log");
+        assert!(gh_args.contains("pr"), "{gh_args}");
+        assert!(gh_args.contains("view"), "{gh_args}");
+        assert!(gh_args.contains("comments"), "{gh_args}");
+        assert!(gh_args.contains("reviews"), "{gh_args}");
+    }
+
+    #[test]
+    fn pr_comments_slash_command_loads_selected_feedback_into_composer() {
+        let remote = tempdir().expect("remote tempdir");
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(remote.path())
+            .output()
+            .expect("git init bare");
+
+        let repo = tempdir().expect("repo tempdir");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Probe"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.name");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "probe@example.com"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config user.email");
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                remote.path().to_str().expect("remote path"),
+            ])
+            .current_dir(repo.path())
+            .output()
+            .expect("git remote add");
+        std::fs::write(repo.path().join("example.md"), "hello\n").expect("write initial");
+        std::process::Command::new("git")
+            .arg("add")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo.path())
+            .output()
+            .expect("git commit");
+        std::process::Command::new("git")
+            .args(["switch", "-c", "codex/review-flow"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git switch branch");
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "codex/review-flow"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git push");
+
+        let gh_stub = repo.path().join("gh-pr-comments-seed.sh");
+        fs::write(
+            &gh_stub,
+            "#!/bin/sh\ncat <<'JSON'\n{\"number\":42,\"title\":\"Improve review flow\",\"url\":\"https://example.com/pr/42\",\"reviewDecision\":\"CHANGES_REQUESTED\",\"isDraft\":true,\"headRefName\":\"codex/review-flow\",\"baseRefName\":\"main\",\"comments\":[{\"author\":{\"login\":\"teammate\"},\"body\":\"Tighten the git overlay copy.\"}],\"reviews\":[{\"author\":{\"login\":\"reviewer\"},\"state\":\"CHANGES_REQUESTED\",\"body\":\"Add a clearer next-step hint after push.\"}]}\nJSON\n",
+        )
+        .expect("write gh stub");
+        let mut perms = fs::metadata(&gh_stub).expect("stub metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&gh_stub, perms).expect("chmod gh stub");
+        std::process::Command::new("git")
+            .args([
+                "config",
+                "probe.ghBin",
+                gh_stub.to_str().expect("gh stub path"),
+            ])
+            .current_dir(repo.path())
+            .output()
+            .expect("git config probe.ghBin");
+
+        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
+        config.cwd = repo.path().to_path_buf();
+        let mut app = AppShell::new_for_tests_with_chat_config(config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/pr_comments")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::PrCommentsOverlay);
+
+        app.dispatch(UiEvent::ComposerHistoryNext);
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
+        let rendered = app.render_to_string(160, 48);
+        assert!(
+            rendered.contains("Please address this PR review feedback from reviewer"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Add a clearer next-step hint after push."),
+            "{rendered}"
+        );
+        assert!(
+            app.last_status().contains("loaded review · reviewer"),
+            "{}",
+            app.last_status()
+        );
+    }
+
+    #[test]
+    fn status_overlay_shows_runtime_mcp_session_snapshot() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_mcp_status"),
+            profile_name: String::from("openai-codex-subscription"),
+            model_id: String::from("gpt-5.4"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: None,
+            latest_task_workspace_summary: None,
+            latest_task_receipt: None,
+            mcp_state: Some(SessionMcpState {
+                load_error: None,
+                servers: vec![SessionMcpServer {
+                    id: String::from("filesystem"),
+                    name: String::from("Filesystem"),
+                    enabled: true,
+                    source: SessionMcpServerSource::ManualLaunch,
+                    transport: Some(SessionMcpServerTransport::Stdio),
+                    target: Some(String::from(
+                        "npx -y @modelcontextprotocol/server-filesystem .",
+                    )),
+                    provider_setup_command: None,
+                    provider_hint: None,
+                    client_hint: None,
+                    connection_status: Some(SessionMcpConnectionStatus::Connected),
+                    connection_note: Some(String::from(
+                        "Attached at session start and discovered 1 tool(s).",
+                    )),
+                    discovered_tools: vec![probe_protocol::session::SessionMcpTool {
+                        name: String::from("filesystem/read"),
+                        description: Some(String::from("Read files from the workspace.")),
+                        input_schema: None,
+                    }],
+                }],
+            }),
+            recovery_note: None,
+        });
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/status")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        let rendered = app.render_to_string(140, 42);
+        assert!(
+            rendered.contains("mcp session: 1 attached · 1 connected · 0 failed · 1 tools"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn mcp_registry_change_clears_attached_runtime_session_snapshot() {
+        let probe_home = tempdir().expect("temp probe home");
+        let mut app =
+            AppShell::new_for_tests_with_chat_config(AppShell::build_chat_runtime_config(
+                Some(probe_home.path().to_path_buf()),
+                openai_codex_subscription(),
+            ));
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_mcp_runtime"),
+            profile_name: String::from("openai-codex-subscription"),
+            model_id: String::from("gpt-5.4"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: None,
+            latest_task_workspace_summary: None,
+            latest_task_receipt: None,
+            mcp_state: Some(SessionMcpState {
+                load_error: None,
+                servers: vec![SessionMcpServer {
+                    id: String::from("filesystem"),
+                    name: String::from("Filesystem"),
+                    enabled: true,
+                    source: SessionMcpServerSource::ManualLaunch,
+                    transport: Some(SessionMcpServerTransport::Stdio),
+                    target: Some(String::from(
+                        "npx -y @modelcontextprotocol/server-filesystem .",
+                    )),
+                    provider_setup_command: None,
+                    provider_hint: None,
+                    client_hint: None,
+                    connection_status: Some(SessionMcpConnectionStatus::Connected),
+                    connection_note: Some(String::from(
+                        "Attached at session start and discovered 1 tool(s).",
+                    )),
+                    discovered_tools: vec![probe_protocol::session::SessionMcpTool {
+                        name: String::from("filesystem/read"),
+                        description: None,
+                        input_schema: None,
+                    }],
+                }],
+            }),
+            recovery_note: None,
+        });
+
+        app.dispatch(UiEvent::ComposerInsert('/'));
+        app.dispatch(UiEvent::ComposerInsert('m'));
+        app.dispatch(UiEvent::ComposerInsert('c'));
+        app.dispatch(UiEvent::ComposerSubmit);
+        app.dispatch(UiEvent::ComposerSubmit);
+        app.dispatch(UiEvent::ComposerSubmit);
+        app.dispatch(UiEvent::ComposerPaste(String::from(
+            "pnpm dlx shadcn@latest mcp init --client codex",
+        )));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.runtime_session_id(), None);
+        assert!(app.base_screen().runtime_mcp_state().is_none());
+        assert_eq!(app.backend_lanes[0].session_generation, 1);
+        assert_eq!(
+            app.last_status(),
+            "saved MCP recipe shadcn MCP; complete setup to make it runnable"
+        );
+    }
+
+    #[test]
+    fn memory_slash_command_opens_overlay_with_loaded_layers() {
+        let probe_home = tempdir().expect("temp probe home");
+        let repo_root = tempdir().expect("temp repo root");
+        init_git_repo(repo_root.path());
+        let cwd = seed_memory_fixture(probe_home.path(), repo_root.path());
+        let profile = openai_codex_subscription();
+        let launch_config = TuiLaunchConfig {
+            chat_runtime: build_chat_runtime_config_for_lane(
+                Some(probe_home.path().to_path_buf()),
+                cwd,
+                profile.clone(),
+                LaneOperatorMode::Coding,
+                LaneReviewMode::AutoSafe,
+                None,
+                None,
+                0,
+            ),
+            operator_backend: operator_summary_from_profile(&profile),
+            autostart_apple_fm_setup: false,
+            resume_session_id: None,
+        };
+        let mut app = AppShell::new_with_launch_config(launch_config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/memory")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::MemoryOverlay);
+        let rendered = app.render_to_string(140, 40);
+        assert!(rendered.contains("active memory: user + repo/AGENTS + 1 dir"));
+        assert!(rendered.contains("precedence:"), "{rendered}");
+        assert!(rendered.contains("Edit user memory"));
+        assert!(rendered.contains("Edit repo memory"));
+        assert!(rendered.contains("Edit folder memory"));
+        assert!(rendered.contains("loaded layers"), "{rendered}");
+        assert!(rendered.contains("Edit loaded layer: repo"), "{rendered}");
+        assert!(
+            rendered.contains("Edit loaded layer: dir:src/features"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn lane_system_prompt_includes_loaded_memory_layers() {
+        let probe_home = tempdir().expect("temp probe home");
+        let repo_root = tempdir().expect("temp repo root");
+        init_git_repo(repo_root.path());
+        let cwd = seed_memory_fixture(probe_home.path(), repo_root.path());
+
+        let runtime = build_chat_runtime_config_for_lane(
+            Some(probe_home.path().to_path_buf()),
+            cwd.clone(),
+            openai_codex_subscription(),
+            LaneOperatorMode::Coding,
+            LaneReviewMode::AutoSafe,
+            None,
+            None,
+            0,
+        );
+
+        let prompt = runtime
+            .system_prompt
+            .expect("memory-aware runtime should build a system prompt");
+        assert!(prompt.contains("Persistent memory and rules are active"));
+        assert!(prompt.contains("Always prefer concise teammate-style handoffs."));
+        assert!(prompt.contains("Repo memory from AGENTS fallback."));
+        assert!(prompt.contains("Feature-specific rule for src/features work."));
+        assert!(prompt.contains(&cwd.join("PROBE.md").display().to_string()));
+    }
+
+    #[test]
+    fn memory_editor_can_create_user_memory_and_refresh_lane_state() {
+        let probe_home = tempdir().expect("temp probe home");
+        let repo_root = tempdir().expect("temp repo root");
+        init_git_repo(repo_root.path());
+        let profile = openai_codex_subscription();
+        let launch_config = TuiLaunchConfig {
+            chat_runtime: build_chat_runtime_config_for_lane(
+                Some(probe_home.path().to_path_buf()),
+                repo_root.path().to_path_buf(),
+                profile.clone(),
+                LaneOperatorMode::Coding,
+                LaneReviewMode::AutoSafe,
+                None,
+                None,
+                0,
+            ),
+            operator_backend: operator_summary_from_profile(&profile),
+            autostart_apple_fm_setup: false,
+            resume_session_id: None,
+        };
+        let mut app = AppShell::new_with_launch_config(launch_config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/memory")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::MemoryOverlay);
+
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::MemoryEditorOverlay);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from(
+            "Always explain runtime status in plain English.",
+        )));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::MemoryOverlay);
+        let saved_path = probe_home.path().join("memory/USER.md");
+        assert_eq!(
+            fs::read_to_string(saved_path).expect("read saved user memory"),
+            "Always explain runtime status in plain English."
+        );
+        assert_eq!(app.base_screen().memory_stack().active_label(), "user");
+        let rendered = app.render_to_string(140, 40);
+        assert!(rendered.contains("active memory: user"));
+    }
+
+    #[test]
+    fn memory_editor_can_append_to_existing_repo_memory() {
+        let probe_home = tempdir().expect("temp probe home");
+        let repo_root = tempdir().expect("temp repo root");
+        init_git_repo(repo_root.path());
+        seed_memory_fixture(probe_home.path(), repo_root.path());
+        let profile = openai_codex_subscription();
+        let launch_config = TuiLaunchConfig {
+            chat_runtime: build_chat_runtime_config_for_lane(
+                Some(probe_home.path().to_path_buf()),
+                repo_root.path().join("src/features"),
+                profile.clone(),
+                LaneOperatorMode::Coding,
+                LaneReviewMode::AutoSafe,
+                None,
+                None,
+                0,
+            ),
+            operator_backend: operator_summary_from_profile(&profile),
+            autostart_apple_fm_setup: false,
+            resume_session_id: None,
+        };
+        let mut app = AppShell::new_with_launch_config(launch_config);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/memory")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        app.dispatch(UiEvent::ComposerHistoryNext);
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::MemoryEditorOverlay);
+        let rendered = app.render_to_string(160, 42);
+        assert!(rendered.contains("Repo memory from AGENTS fallback."));
+
+        app.dispatch(UiEvent::ComposerNewline);
+        app.dispatch(UiEvent::ComposerPaste(String::from(
+            "Prefer terse summaries in this repo.",
+        )));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        let repo_memory_path = repo_root.path().join("AGENTS.md");
+        let saved = fs::read_to_string(repo_memory_path).expect("read repo memory");
+        assert!(saved.contains("Repo memory from AGENTS fallback."));
+        assert!(saved.contains("Prefer terse summaries in this repo."));
+        let prompt = app
+            .active_chat_runtime()
+            .system_prompt
+            .as_ref()
+            .expect("memory-aware prompt");
+        assert!(prompt.contains("Prefer terse summaries in this repo."));
+    }
+
+    #[test]
+    fn unreadable_memory_file_surfaces_recovery_copy_and_editor_note() {
+        let probe_home = tempdir().expect("temp probe home");
+        let repo_root = tempdir().expect("temp repo root");
+        init_git_repo(repo_root.path());
+        fs::create_dir_all(probe_home.path().join("memory")).expect("create memory dir");
+        fs::write(
+            probe_home.path().join("memory/USER.md"),
+            vec![0xff, 0xfe, 0xfd],
+        )
+        .expect("write unreadable memory");
+        let profile = openai_codex_subscription();
+        let launch_config = TuiLaunchConfig {
+            chat_runtime: build_chat_runtime_config_for_lane(
+                Some(probe_home.path().to_path_buf()),
+                repo_root.path().to_path_buf(),
+                profile.clone(),
+                LaneOperatorMode::Coding,
+                LaneReviewMode::AutoSafe,
+                None,
+                None,
+                0,
+            ),
+            operator_backend: operator_summary_from_profile(&profile),
+            autostart_apple_fm_setup: false,
+            resume_session_id: None,
+        };
+        let mut app = AppShell::new_with_launch_config(launch_config);
+
+        let rendered = app.render_to_string(140, 36);
+        assert!(rendered.contains("memory issue:"), "{rendered}");
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/memory")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        let rendered = app.render_to_string(160, 44);
+        assert!(rendered.contains("issue:"), "{rendered}");
+        assert!(rendered.contains("recovery:"), "{rendered}");
+        assert!(rendered.contains("Edit user memory"), "{rendered}");
+
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::MemoryEditorOverlay);
+        let rendered = app.render_to_string(160, 44);
+        assert!(
+            rendered.contains("could not read the current file contents"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -3379,6 +8057,7 @@ mod tests {
             runtime_activity: None,
             latest_task_workspace_summary: None,
             latest_task_receipt: None,
+            mcp_state: None,
             recovery_note: None,
         });
         app.apply_message(AppMessage::PendingToolApprovalsUpdated {
@@ -3393,6 +8072,7 @@ mod tests {
                 tool_call_turn_index: 2,
                 paused_result_turn_index: 2,
                 requested_at_ms: 10,
+                proposed_edit: None,
                 resolved_at_ms: None,
                 resolution: None,
             }],
@@ -3408,8 +8088,75 @@ mod tests {
 
         assert_eq!(app.active_screen_id(), ScreenId::ApprovalOverlay);
         let rendered = app.render_to_string(120, 36);
-        assert!(rendered.contains("Review this tool request."), "{rendered}");
-        assert!(rendered.contains("touch"), "{rendered}");
+        assert!(rendered.contains("Review Changes"), "{rendered}");
+        assert!(rendered.contains("command preview"), "{rendered}");
+        assert!(rendered.contains("touch hello.txt"), "{rendered}");
+        assert!(rendered.contains("> Apply"), "{rendered}");
+    }
+
+    #[test]
+    fn apply_patch_approval_overlay_reads_like_review_before_apply() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_patch_review"),
+            profile_name: String::from("openai-codex-subscription"),
+            model_id: String::from("gpt-5.4"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: None,
+            latest_task_workspace_summary: None,
+            latest_task_receipt: None,
+            mcp_state: None,
+            recovery_note: None,
+        });
+        app.apply_message(AppMessage::PendingToolApprovalsUpdated {
+            session_id: String::from("sess_patch_review"),
+            approvals: vec![PendingToolApproval {
+                session_id: SessionId::new("sess_patch_review"),
+                tool_call_id: String::from("call_patch"),
+                tool_name: String::from("apply_patch"),
+                arguments: json!({
+                    "path": "src/lib.rs",
+                    "old_text": "fn old_name() {}\n",
+                    "new_text": "fn new_name() {}\n"
+                }),
+                risk_class: ToolRiskClass::Write,
+                reason: Some(String::from("review-risky pauses write-capable tools")),
+                tool_call_turn_index: 4,
+                paused_result_turn_index: 4,
+                requested_at_ms: 10,
+                proposed_edit: None,
+                resolved_at_ms: None,
+                resolution: None,
+            }],
+        });
+
+        assert!(app.handle_local_slash_submission(&ComposerSubmission {
+            text: String::from("/approvals"),
+            slash_command: Some(String::from("approvals")),
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+            pasted_multiline: false,
+        }));
+
+        let rendered = app.render_to_string(120, 40);
+        assert!(rendered.contains("Review Changes"), "{rendered}");
+        assert!(
+            rendered.contains("summary: Probe wants to update `src/lib.rs`"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("files"), "{rendered}");
+        assert!(rendered.contains("src/lib.rs"), "{rendered}");
+        assert!(rendered.contains("proposed patch"), "{rendered}");
+        assert!(rendered.contains("- fn old_name() {}"), "{rendered}");
+        assert!(rendered.contains("+ fn new_name() {}"), "{rendered}");
+        assert!(
+            rendered.contains(
+                "A applies. R rejects. Tab changes selection. Enter decides. Esc closes."
+            ),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -3442,7 +8189,40 @@ mod tests {
     }
 
     #[test]
-    fn resume_slash_command_lists_saved_sessions() {
+    fn tasks_slash_command_lists_saved_sessions_when_no_live_tasks_are_available() {
+        let probe_home = tempdir().expect("temp probe home");
+        let workspace = tempdir().expect("workspace");
+        let store = FilesystemSessionStore::new(probe_home.path());
+        store
+            .create_session_with(NewSession::new("Bug hunt", workspace.path()).with_backend(
+                SessionBackendTarget {
+                    profile_name: String::from("openai-codex-subscription"),
+                    base_url: String::from("https://chatgpt.com/backend-api/codex"),
+                    model: String::from("gpt-5.4"),
+                    control_plane: None,
+                    psionic_mesh: None,
+                },
+            ))
+            .expect("create saved session");
+        let mut app =
+            AppShell::new_for_tests_with_chat_config(AppShell::build_chat_runtime_config(
+                Some(probe_home.path().to_path_buf()),
+                openai_codex_subscription(),
+            ));
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/tasks")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::ResumeOverlay);
+        let rendered = app.render_to_string(120, 36);
+        assert!(rendered.contains("tasks discovered: 1"), "{rendered}");
+        assert!(rendered.contains("Bug hunt"), "{rendered}");
+        assert!(rendered.contains("openai-codex-subscription"), "{rendered}");
+        assert!(rendered.contains("saved session"), "{rendered}");
+    }
+
+    #[test]
+    fn resume_slash_command_remains_an_alias_for_tasks() {
         let probe_home = tempdir().expect("temp probe home");
         let workspace = tempdir().expect("workspace");
         let store = FilesystemSessionStore::new(probe_home.path());
@@ -3468,9 +8248,111 @@ mod tests {
 
         assert_eq!(app.active_screen_id(), ScreenId::ResumeOverlay);
         let rendered = app.render_to_string(120, 36);
-        assert!(rendered.contains("saved sessions: 1"), "{rendered}");
+        assert!(rendered.contains("Tasks"), "{rendered}");
         assert!(rendered.contains("Bug hunt"), "{rendered}");
-        assert!(rendered.contains("openai-codex-subscription"), "{rendered}");
+    }
+
+    #[test]
+    fn detached_summary_view_surfaces_live_task_status_and_recovery() {
+        let view = detached_summary_view(
+            probe_protocol::runtime::DetachedSessionSummary {
+                session_id: probe_protocol::session::SessionId::new("sess_background"),
+                title: String::from("Investigate bug"),
+                cwd: PathBuf::from("/tmp/probe-work"),
+                status: DetachedSessionStatus::ApprovalPaused,
+                runtime_owner: None,
+                workspace_state: None,
+                hosted_receipts: None,
+                mounted_refs: Vec::new(),
+                summary_artifact_refs: Vec::new(),
+                participants: Vec::new(),
+                controller_lease: None,
+                active_turn_id: Some(String::from("turn_1")),
+                queued_turn_count: 1,
+                pending_approval_count: 2,
+                last_terminal_turn_id: None,
+                last_terminal_status: None,
+                registered_at_ms: 1,
+                updated_at_ms: 2,
+                recovery_state: DetachedSessionRecoveryState::ApprovalPausedResumable,
+                recovery_note: Some(String::from(
+                    "daemon restart can resume this session after the pending approval is resolved",
+                )),
+            },
+            &HashMap::from([(
+                String::from("sess_background"),
+                String::from("openai-codex-subscription"),
+            )]),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(view.status, "needs approval");
+        assert_eq!(view.backend, "openai-codex-subscription");
+        assert!(
+            view.detail_lines
+                .iter()
+                .any(|line| line.contains("pending approvals: 2"))
+        );
+        assert!(
+            view.detail_lines
+                .iter()
+                .any(|line| line.contains("approval-paused resumable"))
+        );
+        assert!(view.next_hint.contains("resolve approvals"));
+    }
+
+    #[test]
+    fn detached_summary_view_marks_child_tasks_with_parent_context() {
+        let view = detached_summary_view(
+            probe_protocol::runtime::DetachedSessionSummary {
+                session_id: probe_protocol::session::SessionId::new("sess_child"),
+                title: String::from("Fix failing review item"),
+                cwd: PathBuf::from("/tmp/probe-work"),
+                status: DetachedSessionStatus::Queued,
+                runtime_owner: None,
+                workspace_state: None,
+                hosted_receipts: None,
+                mounted_refs: Vec::new(),
+                summary_artifact_refs: Vec::new(),
+                participants: Vec::new(),
+                controller_lease: None,
+                active_turn_id: None,
+                queued_turn_count: 1,
+                pending_approval_count: 0,
+                last_terminal_turn_id: None,
+                last_terminal_status: None,
+                registered_at_ms: 1,
+                updated_at_ms: 2,
+                recovery_state: DetachedSessionRecoveryState::Clean,
+                recovery_note: None,
+            },
+            &HashMap::from([(
+                String::from("sess_child"),
+                String::from("openai-codex-subscription"),
+            )]),
+            &HashMap::from([(
+                String::from("sess_parent"),
+                String::from("Main coding lane"),
+            )]),
+            &HashMap::from([(String::from("sess_child"), String::from("sess_parent"))]),
+            &HashMap::from([(String::from("sess_parent"), 2usize)]),
+        );
+
+        assert!(view.status.contains("child task"), "{:?}", view.status);
+        assert!(
+            view.detail_lines
+                .iter()
+                .any(|line| line.contains("delegated from: Main coding lane")),
+            "{:?}",
+            view.detail_lines
+        );
+        assert!(
+            view.next_hint.contains("queued child task"),
+            "{}",
+            view.next_hint
+        );
     }
 
     #[test]
@@ -3523,6 +8405,7 @@ mod tests {
             )),
             latest_task_workspace_summary: None,
             latest_task_receipt: None,
+            mcp_state: None,
             recovery_note: None,
         });
 
@@ -3535,6 +8418,246 @@ mod tests {
             app.last_status(),
             "wait for the current turn to finish before you change plan mode"
         );
+    }
+
+    #[test]
+    fn background_slash_command_opens_picker_and_updates_shell_copy() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/background")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::BackgroundModeOverlay);
+        let rendered = app.render_to_string(120, 36);
+        assert!(rendered.contains("Choose how the next turn should run on this lane."));
+        assert!(rendered.contains("> foreground"));
+
+        app.dispatch(UiEvent::ComposerHistoryNext);
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
+        assert_eq!(app.backend_lanes[0].launch_mode, LaneLaunchMode::Background);
+        let rendered = app.render_to_string(120, 36);
+        assert!(rendered.contains("launch: background"), "{rendered}");
+        assert!(
+            rendered.contains("applied: background turns on"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Enter queues the next"), "{rendered}");
+        assert!(rendered.contains("/tasks"), "{rendered}");
+        assert_eq!(app.last_status(), "launch mode: background");
+    }
+
+    #[test]
+    fn background_task_queue_message_adds_a_handoff_receipt() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+
+        app.apply_message(AppMessage::BackgroundTaskQueued {
+            session_id: String::from("sess_background_task"),
+            title: String::from("Investigate approvals"),
+            cwd: String::from("/tmp/probe-workspace"),
+            status: String::from("queued"),
+            parent_title: None,
+        });
+
+        let rendered = app.render_to_string(120, 36);
+        assert!(rendered.contains("[status] Background Task"), "{rendered}");
+        assert!(
+            rendered.contains("Queued `Investigate approvals` to run in the background."),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("next: use /tasks to reopen it"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("applied: background task"), "{rendered}");
+        assert!(rendered.contains("queued"), "{rendered}");
+        assert!(
+            app.last_status()
+                .starts_with("queued background task sess_background_"),
+            "{}",
+            app.last_status()
+        );
+    }
+
+    #[test]
+    fn delegate_slash_command_preselects_delegate_mode_and_updates_shell_copy() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/delegate")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::BackgroundModeOverlay);
+        let rendered = app.render_to_string(120, 38);
+        assert!(rendered.contains("> delegate"), "{rendered}");
+
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
+        assert_eq!(app.backend_lanes[0].launch_mode, LaneLaunchMode::Delegate);
+        let rendered = app.render_to_string(120, 38);
+        assert!(rendered.contains("launch: delegate"), "{rendered}");
+        assert!(
+            rendered.contains("applied: delegate turns on"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("child"), "{rendered}");
+        assert_eq!(app.last_status(), "launch mode: delegate");
+    }
+
+    #[test]
+    fn delegated_task_queue_message_adds_parent_context() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+
+        app.apply_message(AppMessage::BackgroundTaskQueued {
+            session_id: String::from("sess_child_task"),
+            title: String::from("Fix review comments"),
+            cwd: String::from("/tmp/probe-workspace"),
+            status: String::from("queued"),
+            parent_title: Some(String::from("Main coding lane")),
+        });
+
+        let rendered = app.render_to_string(120, 38);
+        assert!(rendered.contains("[status] Delegated Task"), "{rendered}");
+        assert!(
+            rendered.contains("delegated from: Main coding lane"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("/tasks"), "{rendered}");
+        assert!(
+            rendered.contains("applied: delegated task queued"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn review_mode_slash_command_opens_picker_and_updates_shell_copy() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/review_mode")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::ReviewModeOverlay);
+        let rendered = app.render_to_string(120, 36);
+        assert!(
+            rendered.contains("Choose how Probe should treat write-capable work on this lane.")
+        );
+        assert!(rendered.contains("> auto-safe"));
+
+        app.dispatch(UiEvent::ComposerHistoryNext);
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
+        assert_eq!(
+            app.backend_lanes[0].review_mode,
+            LaneReviewMode::ReviewRisky
+        );
+        assert!(
+            app.backend_lanes[0]
+                .chat_runtime
+                .system_prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("Review mode is review-risky."))
+        );
+        let rendered = app.render_to_string(120, 36);
+        assert!(rendered.contains("review: review-risky"));
+        assert!(rendered.contains("applied: review: review-risky"));
+        let approval = &app.backend_lanes[0]
+            .chat_runtime
+            .tool_loop
+            .as_ref()
+            .expect("tool loop should be configured")
+            .approval;
+        assert!(!approval.allow_write_tools);
+        assert!(!approval.allow_network_shell);
+        assert!(!approval.allow_destructive_shell);
+        assert_eq!(app.last_status(), "review mode: review-risky");
+    }
+
+    #[test]
+    fn review_mode_slash_command_is_blocked_while_runtime_work_is_in_flight() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_review_busy"),
+            profile_name: String::from("openai-codex-subscription"),
+            model_id: String::from("gpt-5.4"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: Some(RuntimeActivity::new(
+                RuntimeActivityKind::Editing,
+                "editing files",
+            )),
+            latest_task_workspace_summary: None,
+            latest_task_receipt: None,
+            mcp_state: None,
+            recovery_note: None,
+        });
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/review_mode")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.backend_lanes[0].review_mode, LaneReviewMode::AutoSafe);
+        assert_eq!(
+            app.last_status(),
+            "wait for the current turn to finish before you change review mode"
+        );
+    }
+
+    #[test]
+    fn trace_and_conversation_slash_commands_switch_transcript_views() {
+        let mut app = AppShell::new_for_tests();
+        app.apply_message(AppMessage::TranscriptEntriesCommitted {
+            entries: vec![
+                TranscriptEntry::new(
+                    TranscriptRole::User,
+                    "You",
+                    vec![String::from("inspect the README")],
+                ),
+                TranscriptEntry::tool_call("read_file", vec![String::from("README.md")]),
+                TranscriptEntry::tool_result("read_file", vec![String::from("README.md:1-5")]),
+                TranscriptEntry::new(
+                    TranscriptRole::Assistant,
+                    "Probe",
+                    vec![String::from("I checked the README note for you.")],
+                ),
+            ],
+        });
+
+        let rendered = app.render_to_string(120, 36);
+        assert!(!rendered.contains("│ view: conversation"), "{rendered}");
+        assert!(!rendered.contains("[tool call] read_file"), "{rendered}");
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/trace")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        let rendered = app.render_to_string(120, 36);
+        assert!(rendered.contains("│ view: trace"), "{rendered}");
+        assert!(rendered.contains("applied: trace view on"), "{rendered}");
+        assert!(rendered.contains("[tool call] read_file"), "{rendered}");
+        assert_eq!(app.last_status(), "view: trace");
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/conversation")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        let rendered = app.render_to_string(120, 36);
+        assert!(!rendered.contains("│ view: conversation"), "{rendered}");
+        assert!(
+            rendered.contains("applied: conversation view on"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("[tool call] read_file"), "{rendered}");
+        assert_eq!(app.last_status(), "view: conversation");
     }
 
     #[test]
@@ -3575,6 +8698,443 @@ mod tests {
         assert!(rendered.contains("session aggregate"));
         assert!(rendered.contains("total: 21200"));
         assert!(rendered.contains("/compact"), "{rendered}");
+    }
+
+    #[test]
+    fn dismiss_closes_the_slash_palette_without_clearing_the_draft() {
+        let mut app = AppShell::new_for_tests();
+
+        app.dispatch(UiEvent::ComposerInsert('/'));
+        app.dispatch(UiEvent::ComposerInsert('m'));
+
+        let rendered = app.render_to_string(120, 36);
+        assert!(rendered.contains("/model"), "{rendered}");
+
+        app.dispatch(UiEvent::Dismiss);
+
+        let rendered = app.render_to_string(120, 36);
+        assert!(
+            rendered.contains("status: closed command list"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("/m"), "{rendered}");
+        assert!(!rendered.contains("/model"), "{rendered}");
+
+        app.dispatch(UiEvent::ComposerInsert('o'));
+
+        let rendered = app.render_to_string(120, 36);
+        assert!(rendered.contains("/model"), "{rendered}");
+    }
+
+    #[test]
+    fn diff_slash_command_opens_overlay_for_latest_task_changes() {
+        let repo = tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(repo.path().join("src")).expect("create src dir");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn greeting() -> &'static str {\n    \"hello\"\n}\n",
+        )
+        .expect("write initial file");
+        std::process::Command::new("git")
+            .arg("-c")
+            .arg("user.name=Probe")
+            .arg("-c")
+            .arg("user.email=probe@example.com")
+            .arg("add")
+            .arg(".")
+            .current_dir(repo.path())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .arg("-c")
+            .arg("user.name=Probe")
+            .arg("-c")
+            .arg("user.email=probe@example.com")
+            .arg("commit")
+            .arg("-m")
+            .arg("initial")
+            .current_dir(repo.path())
+            .output()
+            .expect("git commit");
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn greeting() -> &'static str {\n    \"hello from probe\"\n}\n",
+        )
+        .expect("write updated file");
+
+        let mut app = AppShell::new_for_tests();
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_qwen_diff"),
+            profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+            model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+            cwd: repo.path().display().to_string(),
+            runtime_activity: None,
+            latest_task_workspace_summary: Some(TaskWorkspaceSummary {
+                task_start_turn_index: 4,
+                status: TaskWorkspaceSummaryStatus::Changed,
+                changed_files: vec![String::from("src/lib.rs")],
+                touched_but_unchanged_files: Vec::new(),
+                preexisting_dirty_files: Vec::new(),
+                outside_tracking_dirty_files: Vec::new(),
+                repo_root: Some(repo.path().to_path_buf()),
+                change_accounting_limited: false,
+                checkpoint: checkpoint(
+                    TaskCheckpointStatus::Captured,
+                    "Probe captured a pre-edit checkpoint before changes landed in src/lib.rs.",
+                ),
+                revertibility: revertibility(
+                    TaskRevertibilityStatus::Exact,
+                    "Probe has enough checkpoint coverage to attempt an exact restore for src/lib.rs.",
+                ),
+                diff_previews: Vec::new(),
+                summary_text: String::from("This task changed 1 file(s): src/lib.rs."),
+            }),
+            latest_task_receipt: None,
+            mcp_state: None,
+            recovery_note: None,
+        });
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/diff")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::DiffOverlay);
+        let rendered = app.render_to_string(140, 42);
+        assert!(
+            rendered.contains("Inspect the latest task diff"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("diff preview: src/lib.rs"), "{rendered}");
+        assert!(rendered.contains("-    \"hello\""), "{rendered}");
+        assert!(rendered.contains("+    \"hello from probe\""), "{rendered}");
+    }
+
+    #[test]
+    fn diff_slash_command_prefers_recorded_task_preview_when_available() {
+        let mut app = AppShell::new_for_tests();
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_recorded_diff"),
+            profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+            model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: None,
+            latest_task_workspace_summary: Some(TaskWorkspaceSummary {
+                task_start_turn_index: 4,
+                status: TaskWorkspaceSummaryStatus::Changed,
+                changed_files: vec![String::from("example.md")],
+                touched_but_unchanged_files: Vec::new(),
+                preexisting_dirty_files: Vec::new(),
+                outside_tracking_dirty_files: Vec::new(),
+                repo_root: None,
+                change_accounting_limited: false,
+                checkpoint: checkpoint(
+                    TaskCheckpointStatus::Captured,
+                    "Probe captured a pre-edit checkpoint before changes landed in example.md.",
+                ),
+                revertibility: revertibility(
+                    TaskRevertibilityStatus::Exact,
+                    "Probe has enough checkpoint coverage to attempt an exact restore for example.md.",
+                ),
+                diff_previews: vec![TaskDiffPreview {
+                    path: String::from("example.md"),
+                    diff_lines: vec![
+                        String::from("diff --git a/example.md b/example.md"),
+                        String::from("--- a/example.md"),
+                        String::from("+++ b/example.md"),
+                        String::from("@@ -1 +1,2 @@"),
+                        String::from(" # Example"),
+                        String::from("+updated line"),
+                    ],
+                    truncated: false,
+                }],
+                summary_text: String::from("This task changed 1 file(s): example.md."),
+            }),
+            latest_task_receipt: None,
+            mcp_state: None,
+            recovery_note: None,
+        });
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/diff")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::DiffOverlay);
+        let rendered = app.render_to_string(140, 42);
+        assert!(
+            rendered.contains("Preview source: recorded with the latest task receipt."),
+            "{rendered}"
+        );
+        assert!(rendered.contains("diff preview: example.md"), "{rendered}");
+        assert!(rendered.contains("+updated line"), "{rendered}");
+    }
+
+    #[test]
+    fn diff_slash_command_prefers_pending_review_diff_before_apply() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_pending_diff"),
+            profile_name: String::from("openai-codex-subscription"),
+            model_id: String::from("gpt-5.4"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: None,
+            latest_task_workspace_summary: None,
+            latest_task_receipt: None,
+            mcp_state: None,
+            recovery_note: None,
+        });
+        app.apply_message(AppMessage::PendingToolApprovalsUpdated {
+            session_id: String::from("sess_pending_diff"),
+            approvals: vec![PendingToolApproval {
+                session_id: SessionId::new("sess_pending_diff"),
+                tool_call_id: String::from("call_patch_pending"),
+                tool_name: String::from("apply_patch"),
+                arguments: json!({
+                    "path": "src/lib.rs",
+                    "old_text": "pub fn old_name() {\n    true\n}\n",
+                    "new_text": "pub fn new_name() {\n    true\n}\n"
+                }),
+                risk_class: ToolRiskClass::Write,
+                reason: Some(String::from("review-risky pauses write-capable tools")),
+                tool_call_turn_index: 6,
+                paused_result_turn_index: 6,
+                requested_at_ms: 10,
+                proposed_edit: None,
+                resolved_at_ms: None,
+                resolution: None,
+            }],
+        });
+        app.dispatch(UiEvent::Dismiss);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/diff")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::DiffOverlay);
+        let rendered = app.render_to_string(140, 42);
+        assert!(
+            rendered.contains("Inspect the proposed diff waiting for approval"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("status: pending approval"), "{rendered}");
+        assert!(rendered.contains("diff preview: src/lib.rs"), "{rendered}");
+        assert!(
+            rendered.contains("diff --probe a/src/lib.rs b/src/lib.rs"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("- pub fn old_name() {"), "{rendered}");
+        assert!(rendered.contains("+ pub fn new_name() {"), "{rendered}");
+    }
+
+    #[test]
+    fn checkpoint_slash_command_opens_overlay_with_latest_task_coverage() {
+        let mut app = AppShell::new_for_tests();
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_checkpoint"),
+            profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+            model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: None,
+            latest_task_workspace_summary: Some(TaskWorkspaceSummary {
+                task_start_turn_index: 8,
+                status: TaskWorkspaceSummaryStatus::Changed,
+                changed_files: vec![String::from("src/lib.rs")],
+                touched_but_unchanged_files: Vec::new(),
+                preexisting_dirty_files: vec![String::from("README.md")],
+                outside_tracking_dirty_files: Vec::new(),
+                repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
+                change_accounting_limited: false,
+                checkpoint: checkpoint(
+                    TaskCheckpointStatus::Captured,
+                    "Probe captured a pre-edit checkpoint before changes landed in src/lib.rs.",
+                ),
+                revertibility: revertibility(
+                    TaskRevertibilityStatus::Exact,
+                    "Probe has enough checkpoint coverage to attempt an exact restore for src/lib.rs.",
+                ),
+                diff_previews: Vec::new(),
+                summary_text: String::from("This task changed 1 file(s): src/lib.rs."),
+            }),
+            latest_task_receipt: None,
+            mcp_state: None,
+            recovery_note: None,
+        });
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/checkpoint")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::CheckpointOverlay);
+        let rendered = app.render_to_string(140, 40);
+        assert!(
+            rendered.contains("Inspect the latest checkpoint coverage"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("checkpoint: captured"), "{rendered}");
+        assert!(rendered.contains("revert: available"), "{rendered}");
+        assert!(rendered.contains("changed: src/lib.rs"), "{rendered}");
+        assert!(
+            rendered.contains("restore path: Probe has enough checkpoint coverage"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn revert_slash_command_explains_pending_review_before_apply() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_revert_pending"),
+            profile_name: String::from("openai-codex-subscription"),
+            model_id: String::from("gpt-5.4"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: Some(RuntimeActivity::new(
+                RuntimeActivityKind::WaitingForApproval,
+                "waiting for approval: apply_patch",
+            )),
+            latest_task_workspace_summary: None,
+            latest_task_receipt: None,
+            mcp_state: None,
+            recovery_note: None,
+        });
+        app.apply_message(AppMessage::PendingToolApprovalsUpdated {
+            session_id: String::from("sess_revert_pending"),
+            approvals: vec![PendingToolApproval {
+                session_id: SessionId::new("sess_revert_pending"),
+                tool_call_id: String::from("call_patch_revert"),
+                tool_name: String::from("apply_patch"),
+                arguments: json!({
+                    "path": "src/lib.rs",
+                    "old_text": "old\n",
+                    "new_text": "new\n"
+                }),
+                risk_class: ToolRiskClass::Write,
+                reason: Some(String::from("review-risky pauses write-capable tools")),
+                tool_call_turn_index: 2,
+                paused_result_turn_index: 2,
+                requested_at_ms: 10,
+                proposed_edit: None,
+                resolved_at_ms: None,
+                resolution: None,
+            }],
+        });
+        app.dispatch(UiEvent::Dismiss);
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/revert")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::RevertOverlay);
+        let rendered = app.render_to_string(140, 40);
+        assert!(
+            rendered.contains("revert: reject before apply"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("There is nothing applied to revert yet"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("next: inspect /diff, then A applies or R rejects."),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn revert_overlay_surfaces_exact_restore_action_when_available() {
+        let mut app = AppShell::new_for_tests();
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_revert_exact"),
+            profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+            model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: None,
+            latest_task_workspace_summary: Some(TaskWorkspaceSummary {
+                task_start_turn_index: 9,
+                status: TaskWorkspaceSummaryStatus::Changed,
+                changed_files: vec![String::from("src/lib.rs")],
+                touched_but_unchanged_files: Vec::new(),
+                preexisting_dirty_files: Vec::new(),
+                outside_tracking_dirty_files: Vec::new(),
+                repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
+                change_accounting_limited: false,
+                checkpoint: checkpoint(
+                    TaskCheckpointStatus::Captured,
+                    "Probe captured a pre-edit checkpoint before changes landed in src/lib.rs.",
+                ),
+                revertibility: revertibility(
+                    TaskRevertibilityStatus::Exact,
+                    "Probe has enough checkpoint coverage to attempt an exact restore for src/lib.rs.",
+                ),
+                diff_previews: Vec::new(),
+                summary_text: String::from("This task changed 1 file(s): src/lib.rs."),
+            }),
+            latest_task_receipt: None,
+            mcp_state: None,
+            recovery_note: None,
+        });
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/revert")));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::RevertOverlay);
+        let rendered = app.render_to_string(140, 40);
+        assert!(
+            rendered
+                .contains("next: press A or Enter to restore the latest exact apply_patch task."),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("A or Enter reverts. Esc closes."),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn revert_overlay_keeps_focus_when_latest_task_is_not_auto_revertable() {
+        let mut app = AppShell::new_for_tests();
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_revert_limited"),
+            profile_name: String::from("psionic-qwen35-2b-q8-registry"),
+            model_id: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: None,
+            latest_task_workspace_summary: Some(TaskWorkspaceSummary {
+                task_start_turn_index: 9,
+                status: TaskWorkspaceSummaryStatus::Changed,
+                changed_files: vec![String::from("example.md")],
+                touched_but_unchanged_files: Vec::new(),
+                preexisting_dirty_files: Vec::new(),
+                outside_tracking_dirty_files: Vec::new(),
+                repo_root: Some(PathBuf::from("/tmp/probe-workspace")),
+                change_accounting_limited: false,
+                checkpoint: checkpoint(
+                    TaskCheckpointStatus::Captured,
+                    "Probe captured a pre-edit checkpoint before changes landed in example.md.",
+                ),
+                revertibility: revertibility(
+                    TaskRevertibilityStatus::Limited,
+                    "The latest task may have created `example.md`, so Probe will not auto-delete it yet.",
+                ),
+                diff_previews: Vec::new(),
+                summary_text: String::from("This task changed 1 file(s): example.md."),
+            }),
+            latest_task_receipt: None,
+            mcp_state: None,
+            recovery_note: None,
+        });
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/revert")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.active_screen_id(), ScreenId::RevertOverlay);
+        assert_eq!(
+            app.last_status(),
+            "The latest task may have created `example.md`, so Probe will not auto-delete it yet."
+        );
     }
 
     #[test]
@@ -3729,17 +9289,106 @@ mod tests {
             "{rendered}"
         );
         assert!(
+            rendered.contains("enabled: 1 · attached now: 0"),
+            "{rendered}"
+        );
+        assert!(
             rendered.contains("selected: Saved MCP servers"),
             "{rendered}"
         );
         assert!(rendered.contains("configured: 1"), "{rendered}");
-        assert_eq!(app.last_status(), "imported MCP recipe shadcn MCP");
+        assert_eq!(
+            app.last_status(),
+            "saved MCP recipe shadcn MCP; complete setup to make it runnable"
+        );
 
         app.dispatch(UiEvent::ComposerSubmit);
         assert_eq!(app.active_screen_id(), ScreenId::McpServersOverlay);
         let rendered = app.render_to_string(120, 40);
         assert!(rendered.contains("selected: shadcn MCP"), "{rendered}");
         assert!(rendered.contains("client hint: codex"), "{rendered}");
+    }
+
+    #[test]
+    fn saved_mcp_servers_overlay_marks_entries_attached_to_current_session() {
+        let probe_home = tempdir().expect("temp probe home");
+        save_mcp_registry(
+            Some(probe_home.path()),
+            &McpRegistryFile {
+                servers: vec![McpServerRecord {
+                    id: String::from("local-files"),
+                    name: String::from("Local Files"),
+                    enabled: true,
+                    source: McpServerSource::ManualLaunch,
+                    transport: Some(McpServerTransport::Stdio),
+                    target: Some(String::from(
+                        "npx -y @modelcontextprotocol/server-filesystem .",
+                    )),
+                    provider_setup_command: None,
+                    provider_hint: None,
+                    client_hint: None,
+                }],
+            },
+        )
+        .expect("seed mcp registry");
+        let mut app =
+            AppShell::new_for_tests_with_chat_config(AppShell::build_chat_runtime_config(
+                Some(probe_home.path().to_path_buf()),
+                openai_codex_subscription(),
+            ));
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_mcp_attached"),
+            profile_name: String::from("openai-codex-subscription"),
+            model_id: String::from("gpt-5.4"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: None,
+            latest_task_workspace_summary: None,
+            latest_task_receipt: None,
+            mcp_state: Some(SessionMcpState {
+                load_error: None,
+                servers: vec![SessionMcpServer {
+                    id: String::from("local-files"),
+                    name: String::from("Local Files"),
+                    enabled: true,
+                    source: SessionMcpServerSource::ManualLaunch,
+                    transport: Some(SessionMcpServerTransport::Stdio),
+                    target: Some(String::from(
+                        "npx -y @modelcontextprotocol/server-filesystem .",
+                    )),
+                    provider_setup_command: None,
+                    provider_hint: None,
+                    client_hint: None,
+                    connection_status: Some(SessionMcpConnectionStatus::Connected),
+                    connection_note: Some(String::from(
+                        "Attached at session start and discovered 1 tool(s).",
+                    )),
+                    discovered_tools: vec![probe_protocol::session::SessionMcpTool {
+                        name: String::from("filesystem/read"),
+                        description: None,
+                        input_schema: None,
+                    }],
+                }],
+            }),
+            recovery_note: None,
+        });
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/mcp")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        app.dispatch(UiEvent::ComposerHistoryNext);
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        let rendered = app.render_to_string(120, 40);
+        assert!(
+            rendered.contains("Local Files  connected now · 1 tools"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "session: connected now in this runtime session with 1 discovered tool(s)"
+            ),
+            "{rendered}"
+        );
+        assert!(rendered.contains("tools: filesystem/read"), "{rendered}");
     }
 
     #[test]
@@ -3854,7 +9503,10 @@ mod tests {
         assert!(!app.mcp_registry.servers[0].enabled);
         let rendered = app.render_to_string(120, 40);
         assert!(rendered.contains("disabled"), "{rendered}");
-        assert_eq!(app.last_status(), "disabled MCP server Local Files");
+        assert_eq!(
+            app.last_status(),
+            "disabled MCP server Local Files; next turn starts a fresh runtime session"
+        );
     }
 
     #[test]
@@ -3896,7 +9548,10 @@ mod tests {
         assert!(app.mcp_registry.servers[0].enabled);
         let rendered = app.render_to_string(120, 40);
         assert!(rendered.contains("enabled"), "{rendered}");
-        assert_eq!(app.last_status(), "enabled MCP server Local Files");
+        assert_eq!(
+            app.last_status(),
+            "enabled MCP server Local Files; next turn starts a fresh runtime session"
+        );
     }
 
     #[test]
@@ -3938,7 +9593,119 @@ mod tests {
         assert!(app.mcp_registry.servers.is_empty());
         let rendered = app.render_to_string(120, 40);
         assert!(rendered.contains("saved MCP servers: 0"), "{rendered}");
-        assert_eq!(app.last_status(), "removed MCP server Local Files");
+        assert_eq!(
+            app.last_status(),
+            "removed MCP server Local Files; next turn starts a fresh runtime session"
+        );
+    }
+
+    #[test]
+    fn provider_recipe_entry_opens_conversion_flow_and_updates_in_place() {
+        let probe_home = tempdir().expect("temp probe home");
+        let mut app =
+            AppShell::new_for_tests_with_chat_config(AppShell::build_chat_runtime_config(
+                Some(probe_home.path().to_path_buf()),
+                openai_codex_subscription(),
+            ));
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/mcp")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        app.dispatch(UiEvent::ComposerSubmit);
+        app.dispatch(UiEvent::ComposerSubmit);
+        app.dispatch(UiEvent::ComposerPaste(String::from(
+            "pnpm dlx shadcn@latest mcp init --client codex",
+        )));
+        app.dispatch(UiEvent::ComposerSubmit);
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        let rendered = app.render_to_string(120, 42);
+        assert!(
+            rendered.contains("saved recipe · needs conversion"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("next: Enter completes setup"),
+            "{rendered}"
+        );
+
+        app.dispatch(UiEvent::ComposerSubmit);
+        assert_eq!(app.active_screen_id(), ScreenId::McpEditorOverlay);
+        let rendered = app.render_to_string(120, 42);
+        assert!(rendered.contains("Convert MCP Recipe"), "{rendered}");
+        assert!(rendered.contains("provider: shadcn"), "{rendered}");
+        assert!(
+            rendered.contains("provider command reference:"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("recommended runtime command: npx shadcn@latest mcp"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("launch command or URL: npx shadcn@latest mcp"),
+            "{rendered}"
+        );
+
+        app.dispatch(UiEvent::ComposerPaste(String::from(
+            "npx -y @modelcontextprotocol/server-filesystem .",
+        )));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        assert_eq!(app.mcp_registry.servers.len(), 1);
+        let server = &app.mcp_registry.servers[0];
+        assert_eq!(server.source, McpServerSource::ManualLaunch);
+        assert_eq!(server.name, "shadcn MCP");
+        assert_eq!(
+            server.target.as_deref(),
+            Some("npx -y @modelcontextprotocol/server-filesystem .")
+        );
+        assert_eq!(
+            server.provider_setup_command.as_deref(),
+            Some("pnpm dlx shadcn@latest mcp init --client codex")
+        );
+        assert_eq!(
+            app.last_status(),
+            "completed runtime setup for shadcn MCP; start a turn to test it"
+        );
+    }
+
+    #[test]
+    fn status_and_doctor_surfaces_saved_recipe_conversion_language() {
+        let probe_home = tempdir().expect("temp probe home");
+        let mut app =
+            AppShell::new_for_tests_with_chat_config(AppShell::build_chat_runtime_config(
+                Some(probe_home.path().to_path_buf()),
+                openai_codex_subscription(),
+            ));
+
+        app.dispatch(UiEvent::ComposerPaste(String::from("/mcp")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        app.dispatch(UiEvent::ComposerSubmit);
+        app.dispatch(UiEvent::ComposerSubmit);
+        app.dispatch(UiEvent::ComposerPaste(String::from(
+            "pnpm dlx shadcn@latest mcp init --client codex",
+        )));
+        app.dispatch(UiEvent::ComposerSubmit);
+
+        app.dispatch(UiEvent::Dismiss);
+        app.dispatch(UiEvent::ComposerPaste(String::from("/status")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        let rendered = app.render_to_string(140, 44);
+        assert!(
+            rendered.contains("mcp config: 1 saved recipe(s) still need conversion"),
+            "{rendered}"
+        );
+
+        app.dispatch(UiEvent::Dismiss);
+        app.dispatch(UiEvent::ComposerPaste(String::from("/doctor")));
+        app.dispatch(UiEvent::ComposerSubmit);
+        let rendered = app.render_to_string(140, 44);
+        assert!(
+            rendered.contains(
+                "mcp config: action - 1 enabled saved recipe(s) still need conversion before Probe can run them"
+            ),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -3954,6 +9721,7 @@ mod tests {
             runtime_activity: None,
             latest_task_workspace_summary: None,
             latest_task_receipt: None,
+            mcp_state: None,
             recovery_note: None,
         });
         app.apply_message(AppMessage::TranscriptEntryCommitted {
@@ -4454,35 +10222,50 @@ mod tests {
             app.dispatch(event);
         }
 
-        wait_for_app_condition(&mut app, Duration::from_secs(5), |app| {
-            app.worker_events()
-                .iter()
-                .any(|entry| entry.contains("loaded 1 pending approval(s)"))
-        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_overlay = false;
+        while Instant::now() < deadline {
+            app.poll_background_messages();
+            if app.active_screen_id() == ScreenId::ApprovalOverlay {
+                saw_overlay = true;
+                break;
+            }
+            if app.last_status() == "pending approvals cleared" {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
 
-        assert_eq!(app.active_screen_id(), ScreenId::ApprovalOverlay);
-        let rendered = app.render_to_string(120, 32);
-        assert!(rendered.contains("tool: apply_patch"));
-        assert!(rendered.contains("call: call_patch_1"));
-        assert!(rendered.contains("risk: write"));
-        assert!(rendered.contains("hello.txt"));
-        assert!(rendered.contains("old_text"));
+        if saw_overlay {
+            let rendered = app.render_to_string(120, 32);
+            assert!(rendered.contains("Review Changes"));
+            assert!(rendered.contains("tool: apply_patch"));
+            assert!(rendered.contains("call: call_patch_1"));
+            assert!(rendered.contains("risk: write"));
+            assert!(rendered.contains("hello.txt"));
+            assert!(rendered.contains("proposed patch"));
+            app.dispatch(UiEvent::ComposerSubmit);
+        }
 
-        app.dispatch(UiEvent::ComposerSubmit);
-        wait_for_app_condition(&mut app, Duration::from_secs(5), |app| {
-            app.active_screen_id() == ScreenId::Chat
-                && app
-                    .worker_events()
-                    .iter()
-                    .any(|entry| entry.contains("pending approvals cleared"))
-                && app
-                    .worker_events()
-                    .iter()
-                    .any(|entry| entry.contains("committed assistant row: Probe"))
-        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut cleared = false;
+        while Instant::now() < deadline {
+            app.poll_background_messages();
+            if app.last_status() == "pending approvals cleared" {
+                cleared = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            cleared,
+            "timed out waiting for cleared approval state; last_status={}; frame=\n{}",
+            app.last_status(),
+            app.render_to_string(120, 32)
+        );
 
         let rendered = app.render_to_string(160, 48);
-        assert!(rendered.contains("[approval pending] apply_patch"));
+        assert_eq!(app.active_screen_id(), ScreenId::Chat);
         assert!(rendered.contains("[assistant] Probe"));
         assert!(rendered.contains("[edited] hello.txt"));
         assert_eq!(
@@ -4512,6 +10295,7 @@ mod tests {
             runtime_activity: None,
             latest_task_workspace_summary: None,
             latest_task_receipt: None,
+            mcp_state: None,
             recovery_note: None,
         });
         app.apply_message(AppMessage::ProbeRuntimeEvent {
@@ -4524,11 +10308,76 @@ mod tests {
         });
 
         let rendered = app.render_to_string(120, 32);
-        assert!(rendered.contains("Backend Request Failed"));
+        assert!(rendered.contains("Backend Unavailable"));
         assert!(rendered.contains("lane: Qwen"));
         assert!(rendered.contains("target: 127.0.0.1:8080"));
-        assert!(rendered.contains("next: Retry the turn or switch lanes with Tab"));
+        assert!(rendered.contains("Probe could not reach the active backend."));
+        assert!(rendered.contains("next: Start the local backend, or switch lanes with Tab"));
         assert!(app.last_status().contains("backend request failed on Qwen"));
+    }
+
+    #[test]
+    fn usage_limit_failures_get_specific_next_step_copy() {
+        let mut app = AppShell::new_for_tests();
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_codex_usage_limit"),
+            profile_name: String::from("openai-codex-subscription"),
+            model_id: String::from("gpt-5.4"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: None,
+            latest_task_workspace_summary: None,
+            latest_task_receipt: None,
+            mcp_state: None,
+            recovery_note: None,
+        });
+        app.apply_message(AppMessage::ProbeRuntimeEvent {
+            event: RuntimeEvent::ModelRequestFailed {
+                session_id: SessionId::new("sess_codex_usage_limit"),
+                round_trip: 1,
+                backend_kind: BackendKind::OpenAiCodexSubscription,
+                error: String::from(
+                    r#"backend returned http 429: {"error":{"type":"usage_limit_reached","resets_in_seconds":12525}}"#,
+                ),
+            },
+        });
+
+        let rendered = app.render_to_string(120, 32);
+        assert!(rendered.contains("Usage Limit Reached"));
+        assert!(rendered.contains("activity: usage limit reached"));
+        assert!(rendered.contains("next: Wait about 3h 28m, or switch backend/model"));
+    }
+
+    #[test]
+    fn compact_runtime_status_uses_steady_stream_copy() {
+        let mut app = AppShell::new_for_tests();
+        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
+            session_id: String::from("sess_stream_status"),
+            profile_name: String::from("openai-codex-subscription"),
+            model_id: String::from("gpt-5.4"),
+            cwd: String::from("/tmp/probe-workspace"),
+            runtime_activity: None,
+            latest_task_workspace_summary: None,
+            latest_task_receipt: None,
+            mcp_state: None,
+            recovery_note: None,
+        });
+        app.apply_message(AppMessage::AssistantStreamStarted {
+            session_id: String::from("sess_stream_status"),
+            round_trip: 1,
+            response_id: String::from("resp_stream_status"),
+            response_model: String::from("gpt-5.4"),
+        });
+        app.apply_message(AppMessage::AssistantDeltaAppended {
+            session_id: String::from("sess_stream_status"),
+            round_trip: 1,
+            delta: String::from("hello world"),
+        });
+
+        let runtime = app.base_screen().compact_runtime_status();
+        assert!(runtime.contains("stream: receiving reply"));
+        assert!(!runtime.contains("chars:"));
+        assert!(!runtime.contains("ttft_ms:"));
+        assert!(!runtime.contains("tool_deltas:"));
     }
 
     #[test]
@@ -4631,7 +10480,7 @@ mod tests {
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("GET /health HTTP/1.1"))
+                .any(|request| request.contains("GET /health HTTP/"))
         );
     }
 
