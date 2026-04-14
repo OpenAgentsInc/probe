@@ -258,6 +258,19 @@ That layer is intentionally runtime-scoped:
   unauthorized, so revocation or expiry does not leave stale runtime auth on
   disk
 
+Probe also has a private Forge-assigned run execution layer in
+`probe-core::forge_run_worker`.
+
+That runtime path is still deliberately subordinate to Forge:
+
+- Probe can inspect its current assigned Forge Run
+- Probe can claim the next Forge-assigned Run when the worker is idle
+- Probe can execute one assigned coding turn through `ProbeRuntime`
+- Probe emits Forge runtime lifecycle events such as `run.started`,
+  `run.progress`, `run.ready_for_verification`, and `run.failed`
+- Probe reports the linked runtime session id back to Forge so Forge can bind
+  Run lifecycle state to runtime truth
+
 Probe still does not become the authority for Work Orders, Runs, Leases,
 Evidence, Verification, or Delivery.
 

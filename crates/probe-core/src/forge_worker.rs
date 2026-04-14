@@ -45,6 +45,106 @@ pub struct ForgeWorkerRuntimeContext {
     pub worker_state: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForgeAssignedRunRecord {
+    pub request_id: String,
+    pub run: ForgeAssignedRunSummary,
+    pub work_order: ForgeAssignedWorkOrder,
+    pub workspace: ForgeAssignedWorkspace,
+    pub controller_lease: Option<ForgeAssignedControllerLease>,
+    pub worker: ForgeAssignedWorker,
+    pub active_recovery: ForgeAssignedRecovery,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForgeAssignedRunSummary {
+    pub id: String,
+    pub work_order_id: String,
+    pub state: String,
+    pub version: i64,
+    pub workspace_id: Option<String>,
+    pub controller_lease_id: Option<String>,
+    pub assigned_worker_id: Option<String>,
+    pub active_worker_session_id: Option<String>,
+    pub runtime_kind: Option<String>,
+    pub runtime_session_id: Option<String>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForgeAssignedWorkOrder {
+    pub id: String,
+    pub org_id: String,
+    pub project_id: String,
+    pub title: String,
+    pub state: String,
+    pub version: i64,
+    pub repository_id: Option<String>,
+    pub base_ref: Option<String>,
+    pub verification_policy: Value,
+    pub requested_outputs: Value,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForgeAssignedWorkspace {
+    pub id: String,
+    pub state: String,
+    pub version: i64,
+    pub repository_id: Option<String>,
+    pub base_ref: Option<String>,
+    pub worktree_ref: Option<String>,
+    pub environment_class: Option<String>,
+    pub mounted_pack_ids: Value,
+    pub secret_scope_ref: Option<String>,
+    pub retention_policy: Option<String>,
+    pub status_metadata: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForgeAssignedControllerLease {
+    pub id: String,
+    pub state: String,
+    pub version: i64,
+    pub holder_actor_id: String,
+    pub holder_kind: String,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForgeAssignedWorker {
+    pub id: String,
+    pub display_name: String,
+    pub runtime_kind: String,
+    pub environment_class: Option<String>,
+    pub state: String,
+    pub last_seen_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForgeAssignedRecovery {
+    pub id: String,
+    pub worker_id: String,
+    pub worker_session_id: String,
+    pub attempt_number: i64,
+    pub status: String,
+    pub summary: Value,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForgeRunStateRecord {
+    pub request_id: String,
+    pub run_id: String,
+    pub run_state: String,
+    pub work_order_state: String,
+    pub worker_state: Option<String>,
+    pub runtime_session_id: Option<String>,
+    pub latest_recovery_status: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ForgeWorkerAuthStore {
     path: PathBuf,
@@ -238,6 +338,111 @@ impl ForgeWorkerAuthController {
         }
     }
 
+    pub fn current_run(&self) -> Result<Option<ForgeAssignedRunRecord>, ForgeWorkerError> {
+        let record = self
+            .store
+            .load()?
+            .ok_or(ForgeWorkerError::WorkerNotAttached)?;
+
+        match self
+            .client
+            .get(format!("{}/worker/v1/runs/current", record.base_url))
+            .header("authorization", format!("Bearer {}", record.session_token))
+            .header("x-request-id", next_request_id("current-run"))
+            .send()
+            .map_err(ForgeWorkerError::Http)
+        {
+            Ok(response) if response.status() == StatusCode::UNAUTHORIZED => {
+                let _ = self.store.clear();
+                Err(ForgeWorkerError::WorkerSessionRevoked)
+            }
+            Ok(response) => {
+                let payload: ForgeRunClaimResponse = decode_json_response(response)?;
+                let request_id = payload.request_id;
+                let assignment = payload.assignment;
+                Ok(assignment.map(|assignment| {
+                    let mut record = ForgeAssignedRunRecord::from(assignment);
+                    record.request_id = request_id.clone();
+                    record
+                }))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn claim_next_run(&self) -> Result<Option<ForgeAssignedRunRecord>, ForgeWorkerError> {
+        let record = self
+            .store
+            .load()?
+            .ok_or(ForgeWorkerError::WorkerNotAttached)?;
+
+        match self
+            .client
+            .post(format!("{}/worker/v1/runs/claim-next", record.base_url))
+            .header("authorization", format!("Bearer {}", record.session_token))
+            .header("x-request-id", next_request_id("claim-run"))
+            .json(&json!({}))
+            .send()
+            .map_err(ForgeWorkerError::Http)
+        {
+            Ok(response) if response.status() == StatusCode::UNAUTHORIZED => {
+                let _ = self.store.clear();
+                Err(ForgeWorkerError::WorkerSessionRevoked)
+            }
+            Ok(response) => {
+                let payload: ForgeRunClaimResponse = decode_json_response(response)?;
+                let request_id = payload.request_id;
+                let assignment = payload.assignment;
+                Ok(assignment.map(|assignment| {
+                    let mut record = ForgeAssignedRunRecord::from(assignment);
+                    record.request_id = request_id.clone();
+                    record
+                }))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn record_run_event(
+        &self,
+        run_id: &str,
+        event_type: &str,
+        runtime_session_id: Option<&str>,
+        summary: Value,
+    ) -> Result<ForgeRunStateRecord, ForgeWorkerError> {
+        let record = self
+            .store
+            .load()?
+            .ok_or(ForgeWorkerError::WorkerNotAttached)?;
+
+        match self
+            .client
+            .post(format!(
+                "{}/worker/v1/runs/{run_id}/events",
+                record.base_url
+            ))
+            .header("authorization", format!("Bearer {}", record.session_token))
+            .header("x-request-id", next_request_id("run-event"))
+            .json(&json!({
+                "event_type": event_type,
+                "runtime_session_id": runtime_session_id,
+                "summary": summary,
+            }))
+            .send()
+            .map_err(ForgeWorkerError::Http)
+        {
+            Ok(response) if response.status() == StatusCode::UNAUTHORIZED => {
+                let _ = self.store.clear();
+                Err(ForgeWorkerError::WorkerSessionRevoked)
+            }
+            Ok(response) => {
+                let payload: ForgeRunDetailResponse = decode_json_response(response)?;
+                Ok(ForgeRunStateRecord::from(payload))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn clear(&self) -> Result<bool, ForgeWorkerError> {
         self.store.clear()
     }
@@ -259,6 +464,23 @@ struct ForgeWorkerContextResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct ForgeRunClaimResponse {
+    request_id: String,
+    assignment: Option<ForgeRunAssignmentPayload>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ForgeRunDetailResponse {
+    run: ForgeRunPayload,
+    work_order: ForgeWorkOrderPayload,
+    workspace: Option<ForgeWorkspacePayload>,
+    controller_lease: Option<ForgeControllerLeasePayload>,
+    worker: Option<ForgeWorkerProjectionPayload>,
+    recent_events: Vec<ForgeRecentRunEventPayload>,
+    recovery_history: Vec<ForgeRecoveryPayload>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct ForgeWorkerApiWorker {
     id: String,
     org_id: String,
@@ -269,6 +491,16 @@ struct ForgeWorkerApiWorker {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct ForgeWorkerProjectionPayload {
+    id: String,
+    display_name: String,
+    runtime_kind: String,
+    environment_class: Option<String>,
+    state: String,
+    last_seen_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct ForgeWorkerSessionContext {
     worker_id: String,
     org_id: String,
@@ -276,6 +508,95 @@ struct ForgeWorkerSessionContext {
     runtime_kind: String,
     environment_class: Option<String>,
     session_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ForgeRunAssignmentPayload {
+    run: ForgeRunPayload,
+    work_order: ForgeWorkOrderPayload,
+    workspace: ForgeWorkspacePayload,
+    controller_lease: Option<ForgeControllerLeasePayload>,
+    worker: ForgeWorkerProjectionPayload,
+    active_recovery: ForgeRecoveryPayload,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ForgeRunPayload {
+    id: String,
+    work_order_id: String,
+    state: String,
+    version: i64,
+    workspace_id: Option<String>,
+    controller_lease_id: Option<String>,
+    assigned_worker_id: Option<String>,
+    active_worker_session_id: Option<String>,
+    runtime: ForgeRunRuntimePayload,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ForgeRunRuntimePayload {
+    kind: Option<String>,
+    session_id: Option<String>,
+    summary: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ForgeWorkOrderPayload {
+    id: String,
+    org_id: String,
+    project_id: String,
+    title: String,
+    state: String,
+    version: i64,
+    repository_id: Option<String>,
+    base_ref: Option<String>,
+    verification_policy: Value,
+    requested_outputs: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ForgeWorkspacePayload {
+    id: String,
+    state: String,
+    version: i64,
+    repository_id: Option<String>,
+    base_ref: Option<String>,
+    worktree_ref: Option<String>,
+    environment_class: Option<String>,
+    mounted_pack_ids: Value,
+    secret_scope_ref: Option<String>,
+    retention_policy: Option<String>,
+    status_metadata: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ForgeControllerLeasePayload {
+    id: String,
+    state: String,
+    version: i64,
+    holder_actor_id: String,
+    holder_kind: String,
+    expires_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ForgeRecentRunEventPayload {
+    event_type: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ForgeRecoveryPayload {
+    id: String,
+    worker_id: String,
+    worker_session_id: String,
+    attempt_number: i64,
+    status: String,
+    summary: Value,
+    started_at: String,
+    ended_at: Option<String>,
+    updated_at: String,
 }
 
 #[derive(Debug)]
@@ -320,6 +641,135 @@ impl From<ForgeWorkerContextResponse> for ForgeWorkerRuntimeContext {
             environment_class: value.worker_session.environment_class,
             session_id: value.worker_session.session_id,
             worker_state: value.worker.state,
+        }
+    }
+}
+
+impl From<ForgeRunAssignmentPayload> for ForgeAssignedRunRecord {
+    fn from(value: ForgeRunAssignmentPayload) -> Self {
+        Self {
+            request_id: String::new(),
+            run: ForgeAssignedRunSummary::from(value.run),
+            work_order: ForgeAssignedWorkOrder::from(value.work_order),
+            workspace: ForgeAssignedWorkspace::from(value.workspace),
+            controller_lease: value
+                .controller_lease
+                .map(ForgeAssignedControllerLease::from),
+            worker: ForgeAssignedWorker::from(value.worker),
+            active_recovery: ForgeAssignedRecovery::from(value.active_recovery),
+        }
+    }
+}
+
+impl From<ForgeRunPayload> for ForgeAssignedRunSummary {
+    fn from(value: ForgeRunPayload) -> Self {
+        Self {
+            id: value.id,
+            work_order_id: value.work_order_id,
+            state: value.state,
+            version: value.version,
+            workspace_id: value.workspace_id,
+            controller_lease_id: value.controller_lease_id,
+            assigned_worker_id: value.assigned_worker_id,
+            active_worker_session_id: value.active_worker_session_id,
+            runtime_kind: value.runtime.kind,
+            runtime_session_id: value.runtime.session_id,
+            started_at: value.started_at,
+            finished_at: value.finished_at,
+        }
+    }
+}
+
+impl From<ForgeWorkOrderPayload> for ForgeAssignedWorkOrder {
+    fn from(value: ForgeWorkOrderPayload) -> Self {
+        Self {
+            id: value.id,
+            org_id: value.org_id,
+            project_id: value.project_id,
+            title: value.title,
+            state: value.state,
+            version: value.version,
+            repository_id: value.repository_id,
+            base_ref: value.base_ref,
+            verification_policy: value.verification_policy,
+            requested_outputs: value.requested_outputs,
+        }
+    }
+}
+
+impl From<ForgeWorkspacePayload> for ForgeAssignedWorkspace {
+    fn from(value: ForgeWorkspacePayload) -> Self {
+        Self {
+            id: value.id,
+            state: value.state,
+            version: value.version,
+            repository_id: value.repository_id,
+            base_ref: value.base_ref,
+            worktree_ref: value.worktree_ref,
+            environment_class: value.environment_class,
+            mounted_pack_ids: value.mounted_pack_ids,
+            secret_scope_ref: value.secret_scope_ref,
+            retention_policy: value.retention_policy,
+            status_metadata: value.status_metadata,
+        }
+    }
+}
+
+impl From<ForgeControllerLeasePayload> for ForgeAssignedControllerLease {
+    fn from(value: ForgeControllerLeasePayload) -> Self {
+        Self {
+            id: value.id,
+            state: value.state,
+            version: value.version,
+            holder_actor_id: value.holder_actor_id,
+            holder_kind: value.holder_kind,
+            expires_at: value.expires_at,
+        }
+    }
+}
+
+impl From<ForgeWorkerProjectionPayload> for ForgeAssignedWorker {
+    fn from(value: ForgeWorkerProjectionPayload) -> Self {
+        Self {
+            id: value.id,
+            display_name: value.display_name,
+            runtime_kind: value.runtime_kind,
+            environment_class: value.environment_class,
+            state: value.state,
+            last_seen_at: value.last_seen_at,
+        }
+    }
+}
+
+impl From<ForgeRecoveryPayload> for ForgeAssignedRecovery {
+    fn from(value: ForgeRecoveryPayload) -> Self {
+        Self {
+            id: value.id,
+            worker_id: value.worker_id,
+            worker_session_id: value.worker_session_id,
+            attempt_number: value.attempt_number,
+            status: value.status,
+            summary: value.summary,
+            started_at: value.started_at,
+            ended_at: value.ended_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<ForgeRunDetailResponse> for ForgeRunStateRecord {
+    fn from(value: ForgeRunDetailResponse) -> Self {
+        Self {
+            request_id: String::new(),
+            run_id: value.run.id,
+            run_state: value.run.state,
+            work_order_state: value.work_order.state,
+            worker_state: value.worker.map(|worker| worker.state),
+            runtime_session_id: value.run.runtime.session_id,
+            latest_recovery_status: value
+                .recovery_history
+                .first()
+                .map(|item| item.status.clone()),
         }
     }
 }
