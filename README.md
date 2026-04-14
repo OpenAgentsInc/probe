@@ -26,6 +26,8 @@ Current shipped surface:
 - append-only local transcripts under `PROBE_HOME` or `~/.probe`
 - bounded oracle and long-context escalation lanes
 - local acceptance/eval and module-optimization tooling
+- private Forge worker-attachment support in `probe-core::forge_worker` for
+  persisted worker-session state, attach, heartbeat, and revocation handling
 
 ## Backends
 
@@ -239,6 +241,25 @@ cargo run -p probe-cli -- codex logout
 Probe persists this state at `PROBE_HOME/auth/openai-codex.json` with private
 file permissions. The current TUI backend overlay also shows whether that auth
 state exists and whether it is expired.
+
+## Forge Worker Auth
+
+Probe now has a private Forge worker-auth support layer in
+`probe-core::forge_worker`.
+
+That layer is intentionally runtime-scoped:
+
+- Probe stores the persisted Forge worker session under
+  `PROBE_HOME/auth/forge-worker.json`
+- Probe can consume Forge bootstrap credentials and exchange them for a
+  short-lived worker session token
+- Probe can emit worker heartbeats through the Forge worker-auth contract
+- Probe clears the local worker session automatically if Forge returns
+  unauthorized, so revocation or expiry does not leave stale runtime auth on
+  disk
+
+Probe still does not become the authority for Work Orders, Runs, Leases,
+Evidence, Verification, or Delivery.
 
 After auth succeeds, use the ChatGPT-backed Codex profile directly:
 
