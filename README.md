@@ -270,6 +270,12 @@ That runtime path is still deliberately subordinate to Forge:
   `run.progress`, `run.ready_for_verification`, and `run.failed`
 - Probe reports the linked runtime session id back to Forge so Forge can bind
   Run lifecycle state to runtime truth
+- Probe includes transcript refs, retained summary artifact refs, and recovery
+  context in `run.ready_for_verification` summaries so Forge can assemble
+  Evidence Bundles without guessing
+- Probe emits an explicit resume-style `run.progress` event when a restarted
+  worker finds an already-active Forge Run, so Forge can track recovery
+  honestly without making Probe the lifecycle authority
 
 Probe still does not become the authority for Work Orders, Runs, Leases,
 Evidence, Verification, or Delivery.
