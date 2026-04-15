@@ -3192,7 +3192,11 @@ mod tests {
         );
         let requests = server.finish();
         assert_eq!(requests.len(), 1);
-        assert!(requests[0].contains("POST /v1/chat/completions HTTP/1.1"));
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("POST /v1/chat/completions HTTP/1.1"))
+        );
     }
 
     #[test]
