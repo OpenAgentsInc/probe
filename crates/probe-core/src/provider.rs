@@ -1,3 +1,4 @@
+use std::env;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 use std::sync::Arc;
@@ -138,6 +139,10 @@ pub enum ProviderError {
     MissingCodexSubscriptionAuth {
         path: String,
     },
+    MissingOpenAiApiKey {
+        profile_name: String,
+        env_var: String,
+    },
     UnsupportedFeature {
         backend: BackendKind,
         feature: &'static str,
@@ -152,7 +157,14 @@ impl Display for ProviderError {
             Self::Auth(error) => write!(f, "{error}"),
             Self::MissingCodexSubscriptionAuth { path } => write!(
                 f,
-                "codex subscription auth is missing at {path}; run `probe codex login --method browser`"
+                "codex subscription auth is missing at {path}; run `probe codex login --method browser` locally or `probe codex login --method headless` on worker machines"
+            ),
+            Self::MissingOpenAiApiKey {
+                profile_name,
+                env_var,
+            } => write!(
+                f,
+                "backend profile `{profile_name}` requires bearer auth from env `{env_var}`; export it before running Probe against that OpenAI-compatible lane"
             ),
             Self::UnsupportedFeature { backend, feature } => {
                 write!(f, "backend {:?} does not support {feature}", backend)
@@ -197,6 +209,7 @@ impl ProviderError {
             Self::OpenAi(_)
             | Self::Auth(_)
             | Self::MissingCodexSubscriptionAuth { .. }
+            | Self::MissingOpenAiApiKey { .. }
             | Self::UnsupportedFeature { .. } => None,
         }
     }
@@ -544,6 +557,17 @@ fn openai_provider_config_from_profile(
 ) -> Result<OpenAiProviderConfig, ProviderError> {
     let mut config = OpenAiProviderConfig::from_backend_profile(profile);
     if profile.kind != BackendKind::OpenAiCodexSubscription {
+        if !profile.api_key_env.trim().is_empty() {
+            let token = env::var(profile.api_key_env.as_str())
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| ProviderError::MissingOpenAiApiKey {
+                    profile_name: profile.name.clone(),
+                    env_var: profile.api_key_env.clone(),
+                })?;
+            config.auth = OpenAiRequestAuth::BearerToken(token);
+        }
         return Ok(config);
     }
 
@@ -703,12 +727,31 @@ fn provider_usage_from_openai(usage: probe_provider_openai::ChatCompletionUsage)
 
 #[cfg(test)]
 mod tests {
+    use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
+
     use crate::backend_profiles::openai_codex_subscription;
 
     use super::{
-        OpenAiRequestContext, PlainTextMessage, ProviderError, complete_plain_text_with_context,
-        normalize_openai_assistant_text, normalize_openai_stream_display_text,
+        OpenAiRequestAuth, OpenAiRequestContext, PlainTextMessage, ProviderError,
+        complete_plain_text_with_context, normalize_openai_assistant_text,
+        normalize_openai_stream_display_text, openai_provider_config_from_profile,
     };
+
+    fn explicit_openai_env_profile(env_var: &str) -> BackendProfile {
+        BackendProfile {
+            name: String::from("test-openai-chat-profile"),
+            kind: BackendKind::OpenAiChatCompletions,
+            base_url: String::from("http://127.0.0.1:8080/v1"),
+            model: String::from("tiny-qwen35"),
+            reasoning_level: None,
+            api_key_env: env_var.to_string(),
+            timeout_secs: 30,
+            attach_mode: ServerAttachMode::AttachToExisting,
+            prefix_cache_mode: PrefixCacheMode::BackendDefault,
+            control_plane: None,
+            psionic_mesh: None,
+        }
+    }
 
     #[test]
     fn openai_assistant_text_unwraps_message_envelope() {
@@ -755,5 +798,36 @@ mod tests {
             error,
             ProviderError::MissingCodexSubscriptionAuth { .. }
         ));
+    }
+
+    #[test]
+    fn openai_chat_backend_requires_explicit_api_key_env_when_configured() {
+        let profile = explicit_openai_env_profile("PROBE_TEST_OPENAI_API_KEY_REQUIRED");
+        let error = openai_provider_config_from_profile(&profile, OpenAiRequestContext::default())
+            .expect_err("configured env-backed profile should fail without its bearer env");
+
+        assert!(matches!(error, ProviderError::MissingOpenAiApiKey { .. }));
+    }
+
+    #[test]
+    fn openai_chat_backend_uses_configured_api_key_env() {
+        let profile = explicit_openai_env_profile("PROBE_TEST_OPENAI_API_KEY_PRESENT");
+        // SAFETY: this test uses a unique env key and restores process state before exit.
+        unsafe {
+            std::env::set_var("PROBE_TEST_OPENAI_API_KEY_PRESENT", "probe-test-bearer");
+        }
+
+        let config = openai_provider_config_from_profile(&profile, OpenAiRequestContext::default())
+            .expect("configured env-backed profile should resolve its bearer");
+
+        assert_eq!(
+            config.auth,
+            OpenAiRequestAuth::BearerToken(String::from("probe-test-bearer"))
+        );
+
+        // SAFETY: this test removes the unique env key it created.
+        unsafe {
+            std::env::remove_var("PROBE_TEST_OPENAI_API_KEY_PRESENT");
+        }
     }
 }

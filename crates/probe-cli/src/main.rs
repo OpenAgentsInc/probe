@@ -3132,6 +3132,7 @@ fn print_codex_auth_status(
     );
     if !status.authenticated {
         println!("hint=run `probe codex login --method browser`");
+        println!("worker_hint=run `probe codex login --method headless`");
     }
 }
 

@@ -96,8 +96,11 @@ The explicit allowlist is implemented in
 Prerequisite:
 
 ```bash
-cargo run -p probe-cli -- codex login --method browser
+cargo run -p probe-cli -- codex login --method headless
 ```
+
+Use `--method browser` for a local interactive machine. Use `--method headless`
+for worker machines and SSH-only hosts.
 
 One-shot Codex turn:
 
@@ -133,6 +136,14 @@ Expected behavior:
 - Probe includes the subscription headers listed above.
 - Probe sends `instructions` plus `input` instead of `messages`.
 - Probe refuses unsupported non-Codex models before the HTTP call is made.
+
+## Contrast With The OpenAI-compatible Psionic Lane
+
+The Codex subscription lane does not use `PROBE_OPENAI_API_KEY`.
+
+The built-in OpenAI-compatible Psionic-backed profiles do. Probe now resolves
+their configured bearer env var explicitly and fails early if that env var is
+missing or empty, instead of silently relying on an implicit placeholder.
 
 ## Tests
 

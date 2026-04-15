@@ -293,6 +293,7 @@ pub struct ProbeTestEnvironment {
 
 impl ProbeTestEnvironment {
     pub fn new() -> Self {
+        ensure_test_openai_api_key();
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let probe_home = temp_dir.path().join(".probe");
         let workspace = temp_dir.path().join("workspace");
@@ -340,6 +341,18 @@ impl ProbeTestEnvironment {
 }
 
 static SNAPSHOT_ROOT_ONCE: Once = Once::new();
+static TEST_OPENAI_API_KEY_ONCE: Once = Once::new();
+
+fn ensure_test_openai_api_key() {
+    TEST_OPENAI_API_KEY_ONCE.call_once(|| {
+        // SAFETY: tests set this process-wide value exactly once to a fixed
+        // fixture token so env-backed OpenAI-compatible auth stays explicit
+        // without concurrent mutation.
+        unsafe {
+            std::env::set_var("PROBE_OPENAI_API_KEY", "probe-test-openai-key");
+        }
+    });
+}
 
 pub fn configure_snapshot_root() {
     SNAPSHOT_ROOT_ONCE.call_once(|| {
@@ -354,7 +367,10 @@ pub fn configure_snapshot_root() {
 
 pub fn probe_cli_command() -> Command {
     configure_snapshot_root();
-    Command::cargo_bin("probe-cli").expect("probe-cli binary should build for tests")
+    let mut command =
+        Command::cargo_bin("probe-cli").expect("probe-cli binary should build for tests");
+    command.env("PROBE_OPENAI_API_KEY", "probe-test-openai-key");
+    command
 }
 
 pub fn write_openai_attach_server_config(

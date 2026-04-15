@@ -218,14 +218,19 @@ Probe will print the authorize URL, open the browser when possible, wait for
 the localhost callback, and then persist the resulting auth state at
 `PROBE_HOME/auth/openai-codex.json`.
 
-If you are on a headless machine or do not want Probe to open the browser:
+Recommended worker or headless flow:
+
+```bash
+# device-code auth for a worker machine or SSH-only host
+cargo run -p probe-cli -- codex login --method headless
+```
+
+If you are on a headless machine or do not want Probe to open the browser, you
+can also:
 
 ```bash
 # browser auth, but copy the URL manually
 cargo run -p probe-cli -- codex login --method browser --no-open-browser
-
-# device-code auth
-cargo run -p probe-cli -- codex login --method headless
 ```
 
 Verify or clear the saved ChatGPT auth:
@@ -240,7 +245,8 @@ cargo run -p probe-cli -- codex logout
 
 Probe persists this state at `PROBE_HOME/auth/openai-codex.json` with private
 file permissions. The current TUI backend overlay also shows whether that auth
-state exists and whether it is expired.
+state exists and whether it is expired. `probe codex status` now also prints a
+worker-oriented hint for the headless device flow.
 
 ## Forge Worker Auth
 
@@ -332,6 +338,11 @@ needed, and submit the prompt there.
 The canonical Codex backend profile sends requests to
 `https://chatgpt.com/backend-api/codex/responses` with subscription bearer auth
 instead of using `PROBE_OPENAI_API_KEY`.
+
+The OpenAI-compatible Psionic-backed profiles are different: they use the env
+var named by the profile, currently `PROBE_OPENAI_API_KEY`. Probe now resolves
+that env var explicitly and fails early if the profile requires it and the env
+var is missing or empty.
 
 ## TUI
 

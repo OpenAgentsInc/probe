@@ -74,6 +74,9 @@ Probe will:
 4. exchange the returned authorization code
 5. persist the resulting token state
 
+This is the preferred operator flow for worker machines, SSH-only hosts, and
+the first private Forge worker lane.
+
 ## Status And Logout
 
 Inspect the current auth state:
@@ -81,6 +84,11 @@ Inspect the current auth state:
 ```bash
 cargo run -p probe-cli -- codex status
 ```
+
+When auth is missing, Probe now prints both:
+
+- a local browser-login hint
+- a worker-oriented headless-login hint
 
 Clear the stored state:
 
@@ -111,6 +119,7 @@ submits any real request.
    - `authenticated=true`
    - `expires_ms` is populated
    - `account_id` is populated when the subscription exposes one
+   - the saved path is `PROBE_HOME/auth/openai-codex.json`
 5. Run `cargo run -p probe-cli -- codex logout`.
 6. Re-run `cargo run -p probe-cli -- codex status` and confirm `authenticated=false`.
 

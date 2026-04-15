@@ -111,6 +111,9 @@ fn codex_status_reports_missing_auth_state() {
         .stdout(predicate::str::contains("authenticated=false"))
         .stdout(predicate::str::contains(
             "hint=run `probe codex login --method browser`",
+        ))
+        .stdout(predicate::str::contains(
+            "worker_hint=run `probe codex login --method headless`",
         ));
 }
 
@@ -194,6 +197,9 @@ fn exec_codex_profile_requires_login_before_request_execution() {
         ))
         .stderr(predicate::str::contains(
             "probe codex login --method browser",
+        ))
+        .stderr(predicate::str::contains(
+            "probe codex login --method headless",
         ));
 }
 

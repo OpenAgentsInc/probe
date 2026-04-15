@@ -44,3 +44,7 @@ the backend cache implementation.
 
 The CLI can now construct its default provider config from the canonical
 profile rather than from an unstructured hard-coded localhost placeholder.
+
+Probe now resolves the configured bearer env var explicitly. If a profile names
+`PROBE_OPENAI_API_KEY` and that env var is missing or empty, Probe fails early
+instead of silently sending a placeholder bearer token.
