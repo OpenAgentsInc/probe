@@ -520,8 +520,36 @@ mod tests {
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
     use serde_json::{Value, json};
 
+    struct ScopedEnvVar {
+        key: String,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &str, value: &str) -> Self {
+            // SAFETY: each test uses a unique process-wide env key and this
+            // guard removes it on drop.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self {
+                key: key.to_string(),
+            }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            // SAFETY: this only removes the unique key created by the guard.
+            unsafe {
+                std::env::remove_var(&self.key);
+            }
+        }
+    }
+
     #[test]
     fn forge_assigned_run_executes_and_reports_lifecycle_events() {
+        let api_key_env = "PROBE_FORGE_RUN_TEST_OPENAI_API_KEY";
+        let _api_key_guard = ScopedEnvVar::set(api_key_env, "probe-test-openai-key");
         let forge_requests = Arc::new(Mutex::new(Vec::<String>::new()));
         let forge_requests_thread = Arc::clone(&forge_requests);
         let run_event_payloads = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -771,7 +799,7 @@ mod tests {
             base_url: String::from(provider.base_url()),
             model: String::from("qwen3.5-2b-q8_0-registry.gguf"),
             reasoning_level: None,
-            api_key_env: String::from("PROBE_OPENAI_API_KEY"),
+            api_key_env: String::from(api_key_env),
             timeout_secs: 15,
             attach_mode: ServerAttachMode::AttachToExisting,
             prefix_cache_mode: PrefixCacheMode::BackendDefault,

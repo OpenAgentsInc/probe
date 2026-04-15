@@ -102,6 +102,9 @@ cargo run -p probe-cli -- codex login --method headless
 Use `--method browser` for a local interactive machine. Use `--method headless`
 for worker machines and SSH-only hosts.
 
+The first checked-in worker deploy lane uses that headless flow directly
+through `scripts/deploy/forge-worker/03-run-headless-codex-login.sh`.
+
 One-shot Codex turn:
 
 ```bash
@@ -145,6 +148,10 @@ The built-in OpenAI-compatible Psionic-backed profiles do. Probe now resolves
 their configured bearer env var explicitly and fails early if that env var is
 missing or empty, instead of silently relying on an implicit placeholder.
 
+That means the first Forge worker deploy lane should keep
+`PROBE_OPENAI_API_KEY` unset unless the operator intentionally changes the
+worker to an env-backed OpenAI-compatible profile.
+
 ## Tests
 
 The main retained coverage for this backend lives in:
@@ -162,4 +169,5 @@ cargo test -p probe-provider-openai
 cargo test -p probe-core --lib
 cargo test -p probe-cli --test cli_regressions
 cargo test -p probe-tui
+bash scripts/deploy/forge-worker/99-local-smoke.sh
 ```

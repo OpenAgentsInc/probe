@@ -1,4 +1,8 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    path::PathBuf,
+    process::Command,
+    sync::{Arc, Mutex},
+};
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
@@ -315,6 +319,35 @@ fn forge_run_loop_can_exit_cleanly_on_idle() {
             .any(|request| request.contains("POST /worker/v1/runs/claim-next HTTP/1.1"))
     );
     let _ = provider.finish();
+}
+
+#[test]
+fn forge_worker_deploy_lane_local_smoke_script_passes() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repo root canonicalized");
+    let script_path = repo_root.join("scripts/deploy/forge-worker/99-local-smoke.sh");
+    assert!(script_path.is_file(), "missing local smoke script");
+
+    let output = Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&repo_root)
+        .env("PROBE_BINARY", assert_cmd::cargo::cargo_bin("probe-cli"))
+        .output()
+        .expect("run local smoke script");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "local smoke failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("local_smoke_passed=true"),
+        "stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("probe_home="), "stdout:\n{stdout}");
 }
 
 fn models_response() -> Value {

@@ -1992,7 +1992,7 @@ fn now_ms() -> u64 {
 mod tests {
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, Once};
     use std::thread;
 
     use probe_core::backend_profiles::{psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry};
@@ -2019,6 +2019,25 @@ mod tests {
     struct ToolCallbackResponse {
         status_code: u16,
         body: String,
+    }
+
+    static ACCEPTANCE_OPENAI_API_KEY_ONCE: Once = Once::new();
+    const ACCEPTANCE_OPENAI_API_KEY_ENV: &str = "PROBE_ACCEPTANCE_TEST_OPENAI_API_KEY";
+
+    fn configure_mock_qwen_profile(base_url: &str) -> probe_protocol::backend::BackendProfile {
+        ACCEPTANCE_OPENAI_API_KEY_ONCE.call_once(|| {
+            // SAFETY: the acceptance test suite sets one fixed process-wide
+            // env var once so env-backed OpenAI-compatible profiles resolve
+            // explicitly without concurrent mutation.
+            unsafe {
+                std::env::set_var(ACCEPTANCE_OPENAI_API_KEY_ENV, "probe-test-openai-key");
+            }
+        });
+
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = base_url.to_string();
+        profile.api_key_env = String::from(ACCEPTANCE_OPENAI_API_KEY_ENV);
+        profile
     }
 
     fn record_apple_comparison_session(
@@ -2241,8 +2260,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let probe_home = temp.path().join(".probe");
         let report_path = default_report_path(probe_home.as_path());
-        let mut profile = psionic_qwen35_2b_q8_registry();
-        profile.base_url = format!("http://{address}/v1");
+        let profile = configure_mock_qwen_profile(format!("http://{address}/v1").as_str());
 
         let report = run_acceptance_harness(AcceptanceHarnessConfig {
             probe_home,
@@ -2294,8 +2312,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let probe_home = temp.path().join(".probe");
         let report_path = default_self_test_report_path(probe_home.as_path());
-        let mut profile = psionic_qwen35_2b_q8_registry();
-        profile.base_url = server.base_url().to_string();
+        let profile = configure_mock_qwen_profile(server.base_url());
 
         let report = run_acceptance_harness_for_case_names(
             AcceptanceHarnessConfig {
@@ -2472,8 +2489,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let probe_home = temp.path().join(".probe");
         let report_path = default_matrix_report_path(probe_home.as_path());
-        let mut profile = psionic_qwen35_2b_q8_registry();
-        profile.base_url = server.base_url().to_string();
+        let profile = configure_mock_qwen_profile(server.base_url());
 
         let report = run_acceptance_matrix(AcceptanceMatrixConfig {
             probe_home,
@@ -2581,8 +2597,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let probe_home = temp.path().join(".probe");
         let report_path = default_comparison_report_path(probe_home.as_path());
-        let mut qwen_profile = psionic_qwen35_2b_q8_registry();
-        qwen_profile.base_url = qwen_server.base_url().to_string();
+        let qwen_profile = configure_mock_qwen_profile(qwen_server.base_url());
         let mut apple_profile = psionic_apple_fm_bridge();
         apple_profile.base_url = apple_server.base_url().to_string();
 

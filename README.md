@@ -319,6 +319,25 @@ Those commands keep the boundary explicit:
 - `probe forge run-once` and `probe forge run-loop` are worker commands, not a
   replacement control plane
 
+For the first boring private Linux deploy lane, use
+`scripts/deploy/forge-worker/`:
+
+- `01-provision-baseline.sh`
+- `02-configure-and-start.sh`
+- `03-run-headless-codex-login.sh`
+- `04-open-logs.sh`
+- `05-refresh-attachment.sh`
+- `06-restart-service.sh`
+- `99-local-smoke.sh`
+
+That lane is documented in
+[`docs/81-codex-backed-forge-worker-deploy-lane.md`](docs/81-codex-backed-forge-worker-deploy-lane.md)
+and keeps the auth split explicit:
+
+- Codex subscription auth lives at `PROBE_HOME/auth/openai-codex.json`
+- Forge worker-session auth lives at `PROBE_HOME/auth/forge-worker.json`
+- `PROBE_OPENAI_API_KEY` stays empty for the default Codex lane
+
 After auth succeeds, use the ChatGPT-backed Codex profile directly:
 
 ```bash

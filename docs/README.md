@@ -280,3 +280,8 @@ This folder holds technical planning docs for the Probe runtime.
   - internal GCP IAP attach for hosted Probe sessions, reuse of the detached
     registry as the runtime-owned discovery surface, and CLI hosted attach
     flags for team session inspection
+- `81-codex-backed-forge-worker-deploy-lane.md`
+  - checked-in deploy lane for the first private Forge worker, including the
+    GCE baseline scripts, persistent `PROBE_HOME`, systemd-managed
+    `probe forge run-loop`, Codex headless auth, bootstrap reattach flow, and
+    the retained local smoke validation path

@@ -1,0 +1,22 @@
+[Unit]
+Description=Probe Forge worker run loop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=probe-worker
+Group=probe-worker
+EnvironmentFile=/etc/probe-forge-worker.env
+ExecStart=/usr/local/bin/probe-forge-worker
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+

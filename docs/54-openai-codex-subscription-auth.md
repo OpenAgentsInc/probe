@@ -77,6 +77,12 @@ Probe will:
 This is the preferred operator flow for worker machines, SSH-only hosts, and
 the first private Forge worker lane.
 
+The checked-in worker deploy lane lives under
+`scripts/deploy/forge-worker/` and wraps this exact command through
+`03-run-headless-codex-login.sh`. The canonical stored path remains:
+
+- `PROBE_HOME/auth/openai-codex.json`
+
 ## Status And Logout
 
 Inspect the current auth state:
@@ -132,4 +138,10 @@ cargo test -p probe-openai-auth
 cargo test -p probe-cli --test cli_regressions
 cargo test -p probe-tui
 cargo test -p probe-core --lib
+```
+
+For the first private Forge worker deployment path, also validate:
+
+```bash
+bash scripts/deploy/forge-worker/99-local-smoke.sh
 ```
