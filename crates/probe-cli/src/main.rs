@@ -27,6 +27,10 @@ use probe_core::backend_profiles::{
 use probe_core::dataset_export::{
     DatasetExportConfig, DatasetKind, DecisionCaseRecord, DecisionSessionSummary, export_dataset,
 };
+use probe_core::forge_run_worker::{
+    ForgeAssignedRunExecutionOutcome, ForgeAssignedRunExecutionRequest, ForgeAssignedRunExecutor,
+};
+use probe_core::forge_worker::{ForgeAssignedRunRecord, ForgeWorkerAuthController};
 use probe_core::harness::{
     HarnessCandidateManifest, builtin_harness_candidate_manifests, render_harness_profile,
     resolve_prompt_contract,
@@ -74,6 +78,7 @@ use probe_server::detached_watchdog::DetachedTurnWatchdogPolicy;
 use probe_server::server::{run_local_daemon_with_watchdog_policy, run_stdio_server};
 use probe_tui::{AppShell, TuiLaunchConfig, UiEvent, run_probe_tui_with_config};
 use serde::Serialize;
+use serde_json::{Value, json};
 
 #[derive(Parser, Debug)]
 #[command(name = "probe")]
@@ -88,6 +93,7 @@ struct Cli {
 enum Commands {
     Exec(ExecArgs),
     Chat(ChatArgs),
+    Forge(ForgeArgs),
     #[command(about = "Inspect or publish Probe plugin offers above the mesh attach surface")]
     Mesh(MeshArgs),
     #[command(about = "Manage the local detached Probe daemon")]
@@ -126,9 +132,28 @@ struct CodexArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct ForgeArgs {
+    #[command(subcommand)]
+    command: ForgeCommands,
+}
+
+#[derive(clap::Args, Debug)]
 struct MeshArgs {
     #[command(subcommand)]
     command: MeshCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum ForgeCommands {
+    Status(ForgeStatusArgs),
+    Attach(ForgeAttachArgs),
+    Context(ForgeContextArgs),
+    CurrentRun(ForgeCurrentRunArgs),
+    ClaimNext(ForgeClaimNextArgs),
+    Heartbeat(ForgeHeartbeatArgs),
+    Detach(ForgeDetachArgs),
+    RunOnce(ForgeRunOnceArgs),
+    RunLoop(ForgeRunLoopArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -286,6 +311,122 @@ struct CodexStatusArgs {
 struct CodexLogoutArgs {
     #[arg(long)]
     probe_home: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct ForgeStatusArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct ForgeAttachArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[arg(long)]
+    forge_base_url: String,
+    #[arg(long)]
+    worker_id: String,
+    #[arg(long)]
+    bootstrap_token: String,
+    #[arg(long)]
+    hostname: Option<String>,
+    #[arg(long)]
+    attachment_metadata_json: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct ForgeContextArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct ForgeCurrentRunArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct ForgeClaimNextArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct ForgeHeartbeatArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[arg(long, default_value = "attached")]
+    state: String,
+    #[arg(long)]
+    current_run_id: Option<String>,
+    #[arg(long)]
+    metadata_json: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct ForgeDetachArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct ForgeWorkerExecArgs {
+    #[arg(long, default_value = PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE)]
+    profile: String,
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+    #[arg(long)]
+    system: Option<String>,
+    #[arg(long, default_value = "coding_bootstrap")]
+    tool_set: String,
+    #[arg(long, default_value = "auto")]
+    tool_choice: String,
+    #[arg(long, default_value_t = false)]
+    parallel_tool_calls: bool,
+    #[arg(long, default_value_t = false)]
+    approve_write_tools: bool,
+    #[arg(long, default_value_t = false)]
+    approve_network_shell: bool,
+    #[arg(long, default_value_t = false)]
+    approve_destructive_shell: bool,
+    #[arg(long, default_value_t = false)]
+    pause_for_approval: bool,
+    #[arg(long)]
+    oracle_profile: Option<String>,
+    #[arg(long, default_value_t = 1)]
+    oracle_max_calls: usize,
+    #[arg(long)]
+    long_context_profile: Option<String>,
+    #[arg(long, default_value_t = 1)]
+    long_context_max_calls: usize,
+    #[arg(long, default_value_t = 6)]
+    long_context_max_evidence_files: usize,
+    #[arg(long, default_value_t = 160)]
+    long_context_max_lines_per_file: u64,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[command(flatten)]
+    server: ServerArgs,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct ForgeRunOnceArgs {
+    #[command(flatten)]
+    exec: ForgeWorkerExecArgs,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct ForgeRunLoopArgs {
+    #[command(flatten)]
+    exec: ForgeWorkerExecArgs,
+    #[arg(long, default_value_t = 1_000)]
+    poll_interval_ms: u64,
+    #[arg(long)]
+    max_iterations: Option<usize>,
+    #[arg(long, default_value_t = false)]
+    exit_on_idle: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -598,6 +739,7 @@ fn run() -> Result<(), String> {
     match cli.command {
         Commands::Exec(args) => run_exec(args),
         Commands::Chat(args) => run_chat(args),
+        Commands::Forge(args) => run_forge(args),
         Commands::Mesh(args) => run_mesh(args),
         Commands::Daemon(args) => run_daemon(args),
         Commands::Ps(args) => run_ps(args),
@@ -626,6 +768,212 @@ fn run_codex(args: CodexArgs) -> Result<(), String> {
         CodexCommands::Login(args) => run_codex_login(args),
         CodexCommands::Status(args) => run_codex_status(args),
         CodexCommands::Logout(args) => run_codex_logout(args),
+    }
+}
+
+fn run_forge(args: ForgeArgs) -> Result<(), String> {
+    match args.command {
+        ForgeCommands::Status(args) => run_forge_status(args),
+        ForgeCommands::Attach(args) => run_forge_attach(args),
+        ForgeCommands::Context(args) => run_forge_context(args),
+        ForgeCommands::CurrentRun(args) => run_forge_current_run(args),
+        ForgeCommands::ClaimNext(args) => run_forge_claim_next(args),
+        ForgeCommands::Heartbeat(args) => run_forge_heartbeat(args),
+        ForgeCommands::Detach(args) => run_forge_detach(args),
+        ForgeCommands::RunOnce(args) => run_forge_run_once(args),
+        ForgeCommands::RunLoop(args) => run_forge_run_loop(args),
+    }
+}
+
+fn run_forge_status(args: ForgeStatusArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let controller = ForgeWorkerAuthController::from_probe_home(probe_home.as_path())
+        .map_err(stringify_error)?;
+    let status = controller.status().map_err(stringify_error)?;
+    print_kv("path", status.path.display().to_string())?;
+    print_kv("attached", status.attached)?;
+    print_kv("base_url", status.base_url)?;
+    print_kv("worker_id", status.worker_id)?;
+    print_kv("expires_at", status.expires_at)?;
+    Ok(())
+}
+
+fn run_forge_attach(args: ForgeAttachArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let controller = ForgeWorkerAuthController::new(probe_home.as_path(), args.forge_base_url)
+        .map_err(stringify_error)?;
+    let attachment_metadata = parse_forge_attachment_metadata(
+        args.hostname.as_deref(),
+        args.attachment_metadata_json.as_deref(),
+    )?;
+    let record = controller
+        .attach_worker(
+            args.worker_id.as_str(),
+            args.bootstrap_token.as_str(),
+            attachment_metadata,
+        )
+        .map_err(stringify_error)?;
+    print_kv("attached", true)?;
+    print_kv("path", controller.store().path().display().to_string())?;
+    print_kv("base_url", record.base_url)?;
+    print_kv("worker_id", record.worker_id)?;
+    print_kv("org_id", record.org_id)?;
+    print_kv("project_id", record.project_id)?;
+    print_kv("runtime_kind", record.runtime_kind)?;
+    print_kv("environment_class", record.environment_class)?;
+    print_kv("session_id", record.session_id)?;
+    print_kv("expires_at", record.expires_at)?;
+    Ok(())
+}
+
+fn run_forge_context(args: ForgeContextArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let controller = ForgeWorkerAuthController::from_probe_home(probe_home.as_path())
+        .map_err(stringify_error)?;
+    match controller.worker_context() {
+        Ok(Some(context)) => {
+            print_kv("attached", true)?;
+            print_kv("request_id", context.request_id)?;
+            print_kv("worker_id", context.worker_id)?;
+            print_kv("org_id", context.org_id)?;
+            print_kv("project_id", context.project_id)?;
+            print_kv("runtime_kind", context.runtime_kind)?;
+            print_kv("environment_class", context.environment_class)?;
+            print_kv("session_id", context.session_id)?;
+            print_kv("worker_state", context.worker_state)?;
+            Ok(())
+        }
+        Ok(None) => {
+            print_kv("attached", false)?;
+            Ok(())
+        }
+        Err(error) => Err(stringify_error(error)),
+    }
+}
+
+fn run_forge_current_run(args: ForgeCurrentRunArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let controller = ForgeWorkerAuthController::from_probe_home(probe_home.as_path())
+        .map_err(stringify_error)?;
+    match controller.current_run() {
+        Ok(Some(assignment)) => {
+            print_kv("assignment", "current")?;
+            print_forge_assignment(&assignment)
+        }
+        Ok(None) => {
+            print_kv("assignment", "none")?;
+            Ok(())
+        }
+        Err(probe_core::forge_worker::ForgeWorkerError::WorkerNotAttached) => {
+            print_kv("attached", false)?;
+            Ok(())
+        }
+        Err(error) => Err(stringify_error(error)),
+    }
+}
+
+fn run_forge_claim_next(args: ForgeClaimNextArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let controller = ForgeWorkerAuthController::from_probe_home(probe_home.as_path())
+        .map_err(stringify_error)?;
+    match controller.claim_next_run() {
+        Ok(Some(assignment)) => {
+            print_kv("assignment", "claimed")?;
+            print_forge_assignment(&assignment)
+        }
+        Ok(None) => {
+            print_kv("assignment", "none")?;
+            Ok(())
+        }
+        Err(probe_core::forge_worker::ForgeWorkerError::WorkerNotAttached) => {
+            print_kv("attached", false)?;
+            Ok(())
+        }
+        Err(error) => Err(stringify_error(error)),
+    }
+}
+
+fn run_forge_heartbeat(args: ForgeHeartbeatArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let controller = ForgeWorkerAuthController::from_probe_home(probe_home.as_path())
+        .map_err(stringify_error)?;
+    let metadata_patch = parse_optional_json_value(args.metadata_json.as_deref())?;
+    match controller.heartbeat(
+        args.state.as_str(),
+        args.current_run_id.as_deref(),
+        metadata_patch,
+    ) {
+        Ok(context) => {
+            print_kv("request_id", context.request_id)?;
+            print_kv("worker_id", context.worker_id)?;
+            print_kv("session_id", context.session_id)?;
+            print_kv("worker_state", context.worker_state)?;
+            Ok(())
+        }
+        Err(probe_core::forge_worker::ForgeWorkerError::WorkerNotAttached) => {
+            print_kv("attached", false)?;
+            Ok(())
+        }
+        Err(error) => Err(stringify_error(error)),
+    }
+}
+
+fn run_forge_detach(args: ForgeDetachArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home)?;
+    let controller = ForgeWorkerAuthController::from_probe_home(probe_home.as_path())
+        .map_err(stringify_error)?;
+    let path = controller.store().path().display().to_string();
+    let cleared = controller.clear().map_err(stringify_error)?;
+    print_kv("path", path)?;
+    print_kv("cleared", cleared)?;
+    Ok(())
+}
+
+fn run_forge_run_once(args: ForgeRunOnceArgs) -> Result<(), String> {
+    let (probe_home, _server_guard, request) =
+        resolve_forge_exec_request(&args.exec, "forge-run-once")?;
+    let controller = ForgeWorkerAuthController::from_probe_home(probe_home.as_path())
+        .map_err(stringify_error)?;
+    let runtime = ProbeRuntime::new(probe_home.as_path());
+    let executor = ForgeAssignedRunExecutor::new(controller, runtime);
+    let outcome = executor.run_once(request).map_err(stringify_error)?;
+    print_forge_execution_outcome(&outcome)
+}
+
+fn run_forge_run_loop(args: ForgeRunLoopArgs) -> Result<(), String> {
+    let (probe_home, _server_guard, request) =
+        resolve_forge_exec_request(&args.exec, "forge-run-loop")?;
+    let controller = ForgeWorkerAuthController::from_probe_home(probe_home.as_path())
+        .map_err(stringify_error)?;
+    let runtime = ProbeRuntime::new(probe_home.as_path());
+    let executor = ForgeAssignedRunExecutor::new(controller, runtime);
+
+    let mut iterations = 0usize;
+    loop {
+        if let Some(max_iterations) = args.max_iterations {
+            if iterations >= max_iterations {
+                print_kv("loop_completed", true)?;
+                print_kv("iterations", iterations)?;
+                print_kv("exit_reason", "max_iterations")?;
+                return Ok(());
+            }
+        }
+
+        iterations += 1;
+        let outcome = executor
+            .run_once(request.clone())
+            .map_err(stringify_error)?;
+        print_kv("iteration", iterations)?;
+        print_forge_execution_outcome(&outcome)?;
+
+        if matches!(outcome, ForgeAssignedRunExecutionOutcome::Idle) && args.exit_on_idle {
+            print_kv("loop_completed", true)?;
+            print_kv("iterations", iterations)?;
+            print_kv("exit_reason", "idle")?;
+            return Ok(());
+        }
+
+        std::thread::sleep(Duration::from_millis(args.poll_interval_ms));
     }
 }
 
@@ -1373,6 +1721,195 @@ fn resolve_probe_home_path(probe_home: Option<PathBuf>) -> Result<PathBuf, Strin
     probe_home
         .map(Ok)
         .unwrap_or_else(|| default_probe_home().map_err(|error| error.to_string()))
+}
+
+fn resolve_forge_exec_request(
+    args: &ForgeWorkerExecArgs,
+    surface: &str,
+) -> Result<
+    (
+        PathBuf,
+        ServerProcessGuard,
+        ForgeAssignedRunExecutionRequest,
+    ),
+    String,
+> {
+    let probe_home = resolve_probe_home_path(args.probe_home.clone())?;
+    let mut profile = named_profile(args.profile.as_str())?;
+    let server_guard = prepare_server(probe_home.as_path(), &args.server, &profile)?;
+    print_backend_target_summary(surface, &server_guard);
+    apply_server_summary_to_profile(&mut profile, &server_guard.operator_summary());
+    let cwd = args
+        .cwd
+        .clone()
+        .unwrap_or(current_working_dir().map_err(|error| error.to_string())?);
+    let tool_loop = resolve_tool_loop(
+        Some(args.tool_set.as_str()),
+        args.tool_choice.as_str(),
+        args.parallel_tool_calls,
+        args.approve_write_tools,
+        args.approve_network_shell,
+        args.approve_destructive_shell,
+        args.pause_for_approval,
+    )?;
+    let tool_loop = attach_oracle_config(
+        tool_loop,
+        Some(args.tool_set.as_str()),
+        args.oracle_profile.as_deref(),
+        args.oracle_max_calls,
+        &server_guard,
+    )?;
+    let tool_loop = attach_long_context_config(
+        tool_loop,
+        Some(args.tool_set.as_str()),
+        args.long_context_profile.as_deref(),
+        args.long_context_max_calls,
+        args.long_context_max_evidence_files,
+        args.long_context_max_lines_per_file,
+        &server_guard,
+    )?;
+    let (system_prompt, harness_profile) = resolve_prompt_config(
+        Some(args.tool_set.as_str()),
+        None,
+        args.system.as_deref(),
+        cwd.as_path(),
+        profile.kind,
+    )?;
+
+    Ok((
+        probe_home,
+        server_guard,
+        ForgeAssignedRunExecutionRequest {
+            profile,
+            default_cwd: cwd,
+            system_prompt,
+            harness_profile,
+            tool_loop,
+        },
+    ))
+}
+
+fn parse_forge_attachment_metadata(
+    hostname: Option<&str>,
+    metadata_json: Option<&str>,
+) -> Result<Option<Value>, String> {
+    let mut value = match metadata_json {
+        Some(raw) => serde_json::from_str::<Value>(raw)
+            .map_err(|error| format!("invalid --attachment-metadata-json: {error}"))?,
+        None => json!({}),
+    };
+
+    if !value.is_object() {
+        return Err(String::from(
+            "--attachment-metadata-json must decode to a JSON object",
+        ));
+    }
+
+    if let Some(hostname) = hostname {
+        value
+            .as_object_mut()
+            .expect("validated object metadata")
+            .insert(
+                String::from("hostname"),
+                Value::String(hostname.to_string()),
+            );
+    }
+
+    if value.as_object().is_some_and(|object| object.is_empty()) {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
+fn parse_optional_json_value(raw: Option<&str>) -> Result<Option<Value>, String> {
+    raw.map(|value| serde_json::from_str::<Value>(value).map_err(|error| error.to_string()))
+        .transpose()
+}
+
+fn print_forge_assignment(assignment: &ForgeAssignedRunRecord) -> Result<(), String> {
+    print_kv("request_id", assignment.request_id.as_str())?;
+    print_kv("run_id", assignment.run.id.as_str())?;
+    print_kv("run_state", assignment.run.state.as_str())?;
+    print_kv("run_version", assignment.run.version)?;
+    print_kv("runtime_kind", assignment.run.runtime_kind.clone())?;
+    print_kv(
+        "runtime_session_id",
+        assignment.run.runtime_session_id.clone(),
+    )?;
+    print_kv("work_order_id", assignment.work_order.id.as_str())?;
+    print_kv("work_order_title", assignment.work_order.title.as_str())?;
+    print_kv("work_order_state", assignment.work_order.state.as_str())?;
+    print_kv("workspace_id", assignment.workspace.id.as_str())?;
+    print_kv("workspace_state", assignment.workspace.state.as_str())?;
+    print_kv(
+        "workspace_worktree_ref",
+        assignment.workspace.worktree_ref.clone(),
+    )?;
+    print_kv(
+        "workspace_environment_class",
+        assignment.workspace.environment_class.clone(),
+    )?;
+    print_kv(
+        "controller_lease_id",
+        assignment
+            .controller_lease
+            .as_ref()
+            .map(|lease| lease.id.clone()),
+    )?;
+    print_kv(
+        "controller_lease_state",
+        assignment
+            .controller_lease
+            .as_ref()
+            .map(|lease| lease.state.clone()),
+    )?;
+    print_kv("worker_id", assignment.worker.id.as_str())?;
+    print_kv("worker_state", assignment.worker.state.as_str())?;
+    print_kv("recovery_id", assignment.active_recovery.id.as_str())?;
+    print_kv(
+        "recovery_attempt_number",
+        assignment.active_recovery.attempt_number,
+    )?;
+    print_kv(
+        "recovery_status",
+        assignment.active_recovery.status.as_str(),
+    )?;
+    Ok(())
+}
+
+fn print_forge_execution_outcome(outcome: &ForgeAssignedRunExecutionOutcome) -> Result<(), String> {
+    match outcome {
+        ForgeAssignedRunExecutionOutcome::Idle => {
+            print_kv("outcome", "idle")?;
+        }
+        ForgeAssignedRunExecutionOutcome::ExistingActiveRun { assignment } => {
+            print_kv("outcome", "existing_active_run")?;
+            print_forge_assignment(assignment)?;
+        }
+        ForgeAssignedRunExecutionOutcome::Executed(result) => {
+            print_kv("outcome", "executed")?;
+            print_forge_assignment(&result.assignment)?;
+            print_kv("probe_session_id", result.probe_session_id.clone())?;
+            print_kv("final_run_state", result.final_run_state.as_str())?;
+            print_kv("assistant_text", result.assistant_text.clone())?;
+            print_kv("error", result.error.clone())?;
+        }
+    }
+
+    Ok(())
+}
+
+fn print_kv<T: Serialize>(key: &str, value: T) -> Result<(), String> {
+    println!(
+        "{key}={}",
+        serde_json::to_string(&value).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn stringify_error(error: impl std::fmt::Display) -> String {
+    error.to_string()
 }
 
 fn local_daemon_client_config(probe_home: PathBuf, surface: &str) -> ProbeClientConfig {

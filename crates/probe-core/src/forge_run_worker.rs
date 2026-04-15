@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use probe_protocol::backend::BackendProfile;
-use probe_protocol::session::SessionSummaryArtifact;
+use probe_protocol::session::{SessionHarnessProfile, SessionSummaryArtifact};
 use serde_json::{Value, json};
 
 use crate::forge_worker::{ForgeAssignedRunRecord, ForgeWorkerAuthController, ForgeWorkerError};
@@ -18,6 +18,7 @@ pub struct ForgeAssignedRunExecutionRequest {
     pub profile: BackendProfile,
     pub default_cwd: PathBuf,
     pub system_prompt: Option<String>,
+    pub harness_profile: Option<SessionHarnessProfile>,
     pub tool_loop: Option<ToolLoopConfig>,
 }
 
@@ -122,7 +123,7 @@ impl ForgeAssignedRunExecutor {
                 title: Some(format!("Forge: {}", assignment.work_order.title)),
                 cwd: execution_cwd(&assignment, &request.default_cwd),
                 system_prompt: request.system_prompt,
-                harness_profile: None,
+                harness_profile: request.harness_profile,
                 tool_loop: request.tool_loop,
             },
             event_sink,
@@ -783,6 +784,7 @@ mod tests {
                 profile,
                 default_cwd: temp.path().to_path_buf(),
                 system_prompt: None,
+                harness_profile: None,
                 tool_loop: None,
             })
             .unwrap();
@@ -1082,6 +1084,7 @@ mod tests {
                 profile,
                 default_cwd: temp.path().to_path_buf(),
                 system_prompt: None,
+                harness_profile: None,
                 tool_loop: None,
             })
             .unwrap();

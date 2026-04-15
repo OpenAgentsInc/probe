@@ -280,6 +280,39 @@ That runtime path is still deliberately subordinate to Forge:
 Probe still does not become the authority for Work Orders, Runs, Leases,
 Evidence, Verification, or Delivery.
 
+The first-party worker CLI now sits on top of that runtime layer:
+
+```bash
+# inspect local Forge worker attachment state
+cargo run -p probe-cli -- forge status --probe-home ~/.probe
+
+# attach a Probe worker to Forge with a bootstrap credential
+cargo run -p probe-cli -- forge attach \
+  --probe-home ~/.probe \
+  --forge-base-url http://127.0.0.1:8080 \
+  --worker-id forge-worker-123 \
+  --bootstrap-token <forge-bootstrap-token>
+
+# inspect or claim assigned Forge work
+cargo run -p probe-cli -- forge current-run --probe-home ~/.probe
+cargo run -p probe-cli -- forge claim-next --probe-home ~/.probe
+
+# execute one assigned Forge Run through the real Probe runtime
+cargo run -p probe-cli -- forge run-once \
+  --probe-home ~/.probe \
+  --cwd /path/to/worktree
+
+# stay attached as a worker and keep polling for new assignments
+cargo run -p probe-cli -- forge run-loop --probe-home ~/.probe
+```
+
+Those commands keep the boundary explicit:
+
+- Forge stays authoritative for work lifecycle state
+- Probe stores only the local worker session and runtime artifacts
+- `probe forge run-once` and `probe forge run-loop` are worker commands, not a
+  replacement control plane
+
 After auth succeeds, use the ChatGPT-backed Codex profile directly:
 
 ```bash

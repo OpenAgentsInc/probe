@@ -221,6 +221,23 @@ pub struct ForgeWorkerAuthController {
 }
 
 impl ForgeWorkerAuthController {
+    pub fn from_probe_home(probe_home: impl AsRef<Path>) -> Result<Self, ForgeWorkerError> {
+        let store = ForgeWorkerAuthStore::new(probe_home.as_ref());
+        let base_url = store
+            .load()?
+            .map(|record| record.base_url)
+            .unwrap_or_else(|| String::from("http://127.0.0.1"));
+        let client = Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(ForgeWorkerError::Http)?;
+        Ok(Self {
+            client,
+            base_url: trim_base_url(base_url),
+            store,
+        })
+    }
+
     pub fn new(
         probe_home: impl AsRef<Path>,
         base_url: impl Into<String>,
