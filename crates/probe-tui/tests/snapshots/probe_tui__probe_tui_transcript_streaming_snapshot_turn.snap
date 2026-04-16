@@ -1,18 +1,17 @@
 ---
 source: crates/probe-tui/tests/probe_tui.rs
-assertion_line: 309
 expression: snapshot
 ---
-┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│  Codex │ Qwen │ Apple FM                                                                         │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
-
 ┌─ Transcript ─────────────────────────────────────────────────────────────────────────────────────┐
 │ [user] You                                                                                       │
 │   Reply with the next honest proof target.                                                       │
 │                                                                                                  │
 │ [active assistant] Probe                                                                         │
 │   Stream remote Qwen tokens into the retained transcript.                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │

@@ -1,18 +1,17 @@
 ---
 source: crates/probe-tui/tests/probe_tui.rs
-assertion_line: 215
 expression: snapshot
 ---
-┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│  Codex │ Qwen │ Apple FM                                                                         │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
-
 ┌─ Transcript ─────────────────────────────────────────────────────────────────────────────────────┐
 │ [user] You                                                                                       │
 │   Inspect README and summarize Probe.                                                            │
 │                                                                                                  │
 │ [active assistant] Probe                                                                         │
 │   Probe owns the coding-agent runtime, including sessions, tools, approvals, and transcripts.    │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │

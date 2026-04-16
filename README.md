@@ -92,7 +92,8 @@ The npm install path is currently mac-first for Apple silicon. Packaging and
 release details live in `docs/82-mac-first-npm-global-install-packaging.md`
 and `docs/83-mac-first-npm-release-staging.md`.
 
-Bare `probe` now opens the TUI by default.
+Bare `probe` now opens the TUI by default. The default TUI path is Codex-first
+and no longer exposes the old backend selector strip in the primary shell.
 
 Run the TUI:
 
@@ -364,9 +365,9 @@ cargo run -p probe-cli -- exec \
   "Reply with the exact text: codex backend ready"
 ```
 
-In the TUI, launch `cargo probe` or `probe tui`, press `Tab` until the
-`Codex` lane is selected, use `Shift+Tab` there to cycle Codex reasoning if
-needed, and submit the prompt there.
+In the TUI, launch `cargo probe` or `probe`. The default path now prefers the
+Codex-backed TUI automatically and drops you straight into the transcript
+shell.
 
 The canonical Codex backend profile sends requests to
 `https://chatgpt.com/backend-api/codex/responses` with subscription bearer auth
@@ -383,7 +384,7 @@ var is missing or empty.
 uses a retained transcript widget with committed user, tool, and assistant
 turns plus one explicit active-turn cell. `Chat` is the home surface and the
 composer now submits through the real Probe session loop. `probe tui` now uses the
-same prepared backend contract as `probe chat`: it resolves the selected
+same prepared backend contract as `probe chat`: it resolves the chosen
 backend, runs server readiness or attach preparation first, and then carries
 the prepared host, port, model, backend kind, and attach mode into the UI.
 The first submit creates a persisted Probe session; later submits continue that
@@ -417,18 +418,10 @@ The first supported remote-Qwen posture stays narrow and explicit:
 - `127.0.0.1` attach is treated as local or SSH-forwarded
 - `100.x.y.z` attach is treated as direct Tailnet attach
 
-The top selector is now a backend switcher, not a view switcher. Probe keeps one
-transcript-first home shell on screen at a time, and `Tab` flips the active
-backend between the Codex subscription lane, the current Qwen or Tailnet lane,
-and the Apple FM lane. `Shift+Tab` moves backward between lanes except on the
-Codex lane, where it cycles reasoning instead. When the backend changes, Probe
-resets the chat surface so the next submit starts a fresh session on that
-backend instead of continuing the previous backend lane.
-Each backend lane now keeps its own saved attach config under
-`~/.probe/server/psionic-openai-chat-completions.json`,
-`~/.probe/server/openai-codex-subscription.json`, or
-`~/.probe/server/psionic-apple-fm.json`, so switching back does not fabricate a
-fresh target.
+The default TUI path is now Codex-first and no longer exposes the old backend
+selector strip or backend-cycling hotkeys in the primary shell. Qwen and Apple
+FM code paths still exist for explicit backend/profile work, but they are not
+part of the normal user-facing TUI hot path.
 
 The default `cargo probe` chat lane now auto-approves local tools and keeps
 tool transcript rows terse. Tool calls and results render as compact command,
@@ -436,8 +429,6 @@ path, or error summaries instead of debug-shaped JSON blobs.
 
 Keys:
 
-- `Tab`: switch active backend
-- `Shift+Tab`: on Codex, cycle reasoning; otherwise move to the previous backend
 - `Enter`: submit the composer
 - `Ctrl+J`: insert a newline
 - `Up`, `Down`: recall draft history

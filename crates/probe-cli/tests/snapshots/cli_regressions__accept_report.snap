@@ -514,7 +514,7 @@ expression: report
   "run": {
     "git_commit_sha": "<git-sha>",
     "git_dirty": "<git-dirty>",
-    "probe_version": "0.1.1",
+    "probe_version": "0.1.2",
     "run_id": "<run-id>",
     "schema_version": "v3"
   },

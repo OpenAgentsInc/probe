@@ -8,6 +8,7 @@ fn shell_border() -> Style {
     Style::default().fg(Color::Rgb(0x73, 0xc2, 0xfb))
 }
 
+#[allow(dead_code)]
 fn shell_accent() -> Style {
     Style::default()
         .fg(Color::Rgb(0xf8, 0xf4, 0xe3))
@@ -23,11 +24,13 @@ fn panel_padding() -> Padding {
     Padding::horizontal(1)
 }
 
+#[allow(dead_code)]
 pub struct TabStrip {
     labels: Vec<String>,
     selected: usize,
 }
 
+#[allow(dead_code)]
 impl TabStrip {
     pub fn new(labels: Vec<String>, selected: usize) -> Self {
         Self { labels, selected }

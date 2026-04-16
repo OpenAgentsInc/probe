@@ -422,7 +422,7 @@ impl BottomPane {
         frame.render_widget(status_block, rows[0]);
         frame.render_widget(
             Paragraph::new(Line::from(format!(
-                "status: {status} | Tab backend | Shift+Tab Codex/back | Ctrl+R/S/A/O | F1 | Ctrl+C"
+                "status: {status} | Ctrl+R/S/A/O | F1 | Ctrl+C"
             )))
             .wrap(Wrap { trim: false }),
             status_inner,

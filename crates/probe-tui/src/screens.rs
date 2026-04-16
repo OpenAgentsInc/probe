@@ -9,7 +9,7 @@ use probe_core::tools::tool_result_model_text;
 use probe_openai_auth::OpenAiCodexAuthStore;
 use probe_protocol::session::{PendingToolApproval, ToolApprovalResolution};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::Paragraph;
 
@@ -20,7 +20,7 @@ use crate::message::{
     AppleFmFailureSummary, AppleFmUsageSummary,
 };
 use crate::transcript::{ActiveTurn, RetainedTranscript, TranscriptEntry, TranscriptRole};
-use crate::widgets::{InfoPanel, ModalCard, TabStrip};
+use crate::widgets::{InfoPanel, ModalCard};
 
 const MAX_EVENT_LOG: usize = 16;
 const LINE_SCROLL_STEP: u16 = 3;
@@ -69,6 +69,7 @@ impl ActiveTab {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn next(self) -> Self {
         match self {
             Self::Primary => Self::Secondary,
@@ -77,6 +78,7 @@ impl ActiveTab {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn previous(self) -> Self {
         match self {
             Self::Primary => Self::Tertiary,
@@ -315,7 +317,6 @@ impl Default for AppleFmSetupState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatScreen {
     active_tab: ActiveTab,
-    tab_labels: Vec<String>,
     emphasized_copy: bool,
     recent_events: VecDeque<String>,
     task_events: VecDeque<String>,
@@ -334,11 +335,6 @@ impl Default for ChatScreen {
     fn default() -> Self {
         let mut screen = Self {
             active_tab: ActiveTab::Primary,
-            tab_labels: vec![
-                String::from("Codex"),
-                String::from("Qwen"),
-                String::from("Apple FM"),
-            ],
             emphasized_copy: false,
             recent_events: VecDeque::new(),
             task_events: VecDeque::new(),
@@ -353,11 +349,10 @@ impl Default for ChatScreen {
             setup: AppleFmSetupState::default(),
         };
         screen.record_event("probe tui ready");
+        screen.record_event("the default TUI path picks the backend automatically");
         screen.record_event("press Ctrl+R to rerun backend check when supported");
         screen.record_event("press Ctrl+S to inspect backend status");
         screen.record_event("press F1 for help");
-        screen.record_event("press Tab to switch backends");
-        screen.record_event("press Shift+Tab for Codex reasoning or previous backend");
         screen
     }
 }
@@ -367,8 +362,7 @@ impl ChatScreen {
         self.active_tab
     }
 
-    pub fn set_backend_selector(&mut self, labels: Vec<String>, active_tab: ActiveTab) {
-        self.tab_labels = labels;
+    pub fn set_backend_selector(&mut self, _labels: Vec<String>, active_tab: ActiveTab) {
         self.active_tab = active_tab;
     }
 
@@ -1416,11 +1410,7 @@ impl ChatScreen {
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, stack_depth: usize) {
-        let sections = Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
-            .spacing(1)
-            .split(area);
-        TabStrip::new(self.tab_labels.clone(), self.active_tab.index()).render(frame, sections[0]);
-        self.render_chat_shell(frame, sections[1], stack_depth);
+        self.render_chat_shell(frame, area, stack_depth);
     }
 
     fn render_chat_shell(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
@@ -1466,7 +1456,7 @@ impl ChatScreen {
             return Text::from(vec![
                 Line::from("Probe does not have a prepared backend summary yet."),
                 Line::from(""),
-                Line::from("Restart the TUI from `probe tui` after selecting a backend target."),
+                Line::from("Restart the TUI from `probe tui` after preparing a backend target."),
             ]);
         };
 
@@ -1924,7 +1914,6 @@ impl HelpScreen {
         let content = Paragraph::new(Text::from(vec![
             Line::from("Probe Chat Shell Keys"),
             Line::from(""),
-            Line::from("Tab / Shift+Tab     backend / Codex effort"),
             Line::from("Enter / Ctrl+J      submit / newline"),
             Line::from("Up / Down           draft history recall"),
             Line::from("Mouse wheel / PgUp  scroll active panel"),
@@ -1935,6 +1924,7 @@ impl HelpScreen {
             Line::from("Ctrl+T              toggle operator notes"),
             Line::from("F1 / Esc            toggle or dismiss help"),
             Line::from("Ctrl+C              quit"),
+            Line::from("Backend choice on the default TUI path is automatic and Codex-first."),
             Line::from(
                 "Slash commands, typed mentions, attachments, and paste state live in the draft model.",
             ),

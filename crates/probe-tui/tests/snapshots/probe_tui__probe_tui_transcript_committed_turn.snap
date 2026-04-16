@@ -1,13 +1,12 @@
 ---
 source: crates/probe-tui/tests/probe_tui.rs
-assertion_line: 363
 expression: snapshot
 ---
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  Codex │ Qwen │ Apple FM                                                     │
-└──────────────────────────────────────────────────────────────────────────────┘
-
 ┌─ Transcript ─────────────────────────────────────────────────────────────────┐
+│   turn: 1                                                                    │
+│                                                                              │
+│ [tool result] read_file                                                      │
+│   call: call_readme_1                                                        │
 │   result: read README.md:1-3                                                 │
 │   turn: 2                                                                    │
 │   policy: auto_allow                                                         │

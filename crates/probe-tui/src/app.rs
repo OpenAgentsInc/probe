@@ -164,13 +164,15 @@ impl AppShell {
         probe_home: Option<&Path>,
     ) -> (BackendProfile, ServerOperatorSummary) {
         probe_home
-            .and_then(load_server_config)
+            .and_then(|probe_home| {
+                load_saved_backend_config(probe_home, BackendKind::OpenAiCodexSubscription)
+            })
             .map(|config| {
                 let profile = profile_from_server_config(&config);
                 (profile, config.operator_summary())
             })
             .unwrap_or_else(|| {
-                let profile = psionic_qwen35_2b_q8_registry();
+                let profile = openai_codex_subscription();
                 let summary = operator_summary_from_profile(&profile);
                 (profile, summary)
             })
@@ -256,25 +258,6 @@ impl AppShell {
 
     pub fn dispatch(&mut self, event: UiEvent) {
         self.poll_background_messages();
-        if self.active_screen_id() == ScreenId::Chat {
-            match event {
-                UiEvent::NextView => {
-                    self.switch_backend(self.base_screen().active_tab().next());
-                    self.poll_background_messages();
-                    return;
-                }
-                UiEvent::PreviousView => {
-                    if self.cycle_codex_reasoning_level() {
-                        self.poll_background_messages();
-                        return;
-                    }
-                    self.switch_backend(self.base_screen().active_tab().previous());
-                    self.poll_background_messages();
-                    return;
-                }
-                _ => {}
-            }
-        }
         match event {
             UiEvent::Quit => {
                 self.base_screen_mut().record_event("quit requested");
@@ -598,6 +581,7 @@ impl AppShell {
         &self.backend_lanes[self.active_backend_index].chat_runtime
     }
 
+    #[allow(dead_code)]
     fn active_backend_kind(&self) -> BackendKind {
         self.backend_lanes[self.active_backend_index]
             .operator_backend
@@ -619,11 +603,13 @@ impl AppShell {
             .set_backend_selector(labels, active_tab);
     }
 
+    #[allow(dead_code)]
     fn persist_active_chat_lane(&mut self) {
         let screen = self.base_screen().clone();
         self.chat_lanes[self.active_backend_index] = screen;
     }
 
+    #[allow(dead_code)]
     fn persist_backend_lane_snapshot(&self, lane_index: usize) -> Result<(), String> {
         let lane = &self.backend_lanes[lane_index];
         let Some(probe_home) = lane.chat_runtime.probe_home.as_deref() else {
@@ -640,6 +626,7 @@ impl AppShell {
             .map_err(|error| error.to_string())
     }
 
+    #[allow(dead_code)]
     fn restore_chat_lane(&mut self, lane_index: usize, active_tab: ActiveTab) {
         let labels = self.backend_selector_labels();
         let mut screen = self.chat_lanes[lane_index].clone();
@@ -648,6 +635,7 @@ impl AppShell {
         self.screens[0] = ScreenState::Chat(screen);
     }
 
+    #[allow(dead_code)]
     fn switch_backend(&mut self, active_tab: ActiveTab) {
         if self.base_screen().has_pending_tool_approvals() {
             self.last_status = String::from("resolve pending approvals before switching backend");
@@ -663,6 +651,7 @@ impl AppShell {
         self.last_status = format!("active backend: {}", lane.label);
     }
 
+    #[allow(dead_code)]
     fn cycle_codex_reasoning_level(&mut self) -> bool {
         if self.active_backend_kind() != BackendKind::OpenAiCodexSubscription {
             return false;
@@ -715,11 +704,6 @@ impl AppShell {
 #[cfg(test)]
 fn resolve_tui_chat_profile(probe_home: Option<&Path>) -> BackendProfile {
     AppShell::chat_profile_and_summary_from_probe_home(probe_home).0
-}
-
-fn load_server_config(probe_home: &Path) -> Option<PsionicServerConfig> {
-    let config_path = PsionicServerConfig::config_path(probe_home);
-    PsionicServerConfig::load_or_create(config_path.as_path()).ok()
 }
 
 fn load_saved_backend_config(probe_home: &Path, kind: BackendKind) -> Option<PsionicServerConfig> {
@@ -1010,7 +994,7 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{AppShell, TuiLaunchConfig, profile_from_server_config, resolve_tui_chat_profile};
+    use super::{AppShell, profile_from_server_config, resolve_tui_chat_profile};
     use crate::event::UiEvent;
     use crate::message::{
         AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
@@ -1107,20 +1091,25 @@ mod tests {
     }
 
     #[test]
-    fn tui_chat_profile_uses_probe_server_config_when_present() {
+    fn tui_chat_profile_prefers_saved_codex_backend_snapshot() {
         let probe_home = tempdir().expect("temp probe home");
-        let mut config = PsionicServerConfig::default();
-        config.set_api_kind(BackendKind::AppleFmBridge);
-        config.port = 19091;
-        config.model_id = Some(String::from("apple-foundation-model"));
+        let mut config = PsionicServerConfig::from_backend_profile(&openai_codex_subscription());
+        config.reasoning_level = Some(String::from("high"));
         config
-            .save(PsionicServerConfig::config_path(probe_home.path()).as_path())
-            .expect("save server config");
+            .save(
+                PsionicServerConfig::backend_config_path(
+                    probe_home.path(),
+                    BackendKind::OpenAiCodexSubscription,
+                )
+                .as_path(),
+            )
+            .expect("save codex backend snapshot");
 
         let profile = resolve_tui_chat_profile(Some(probe_home.path()));
-        assert_eq!(profile.kind, BackendKind::AppleFmBridge);
-        assert_eq!(profile.base_url, "http://127.0.0.1:19091");
-        assert_eq!(profile.model, "apple-foundation-model");
+        assert_eq!(profile.kind, BackendKind::OpenAiCodexSubscription);
+        assert_eq!(profile.base_url, "https://chatgpt.com/backend-api/codex");
+        assert_eq!(profile.model, "gpt-5.4");
+        assert_eq!(profile.reasoning_level.as_deref(), Some("high"));
     }
 
     #[test]
@@ -1137,58 +1126,22 @@ mod tests {
     }
 
     #[test]
-    fn backend_selector_orders_codex_then_qwen_then_apple_fm() {
+    fn chat_shell_hides_the_backend_selector_strip() {
         let app = AppShell::new_for_tests();
-
-        assert_eq!(
-            app.backend_selector_labels(),
-            vec![
-                String::from("Codex"),
-                String::from("Qwen"),
-                String::from("Apple FM"),
-            ]
-        );
-        assert_eq!(app.active_tab(), ActiveTab::Secondary);
+        let rendered = app.render_to_string(120, 32);
+        assert!(!rendered.contains("Codex │ Qwen │ Apple FM"));
     }
 
     #[test]
-    fn shift_tab_on_codex_cycles_reasoning_and_resets_the_lane() {
-        let mut config = AppShell::build_chat_runtime_config(None, openai_codex_subscription());
-        config.profile.reasoning_level = Some(String::from("high"));
-        let mut app = AppShell::new_for_tests_with_chat_config(config);
-        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
-            session_id: String::from("sess_codex"),
-            profile_name: String::from("openai-codex-subscription"),
-            model_id: String::from("gpt-5.4"),
-            cwd: String::from("/tmp/probe-workspace"),
-        });
-        app.apply_message(AppMessage::TranscriptEntryCommitted {
-            entry: TranscriptEntry::new(
-                TranscriptRole::User,
-                "You",
-                vec![String::from("codex lane message")],
-            ),
-        });
+    fn backend_navigation_hotkeys_are_noops_on_the_chat_shell() {
+        let mut app = AppShell::new_for_tests();
+        let active_tab = app.active_tab();
+
+        app.dispatch(UiEvent::NextView);
+        assert_eq!(app.active_tab(), active_tab);
 
         app.dispatch(UiEvent::PreviousView);
-
-        assert_eq!(app.active_tab(), ActiveTab::Primary);
-        assert_eq!(
-            probe_core::backend_profiles::resolved_reasoning_level_for_backend(
-                BackendKind::OpenAiCodexSubscription,
-                app.backend_lanes[0]
-                    .chat_runtime
-                    .profile
-                    .reasoning_level
-                    .as_deref()
-            ),
-            Some("xhigh")
-        );
-        assert_eq!(app.runtime_session_id(), None);
-        let rendered = app.render_to_string(120, 32);
-        assert!(!rendered.contains("Transcript is empty."));
-        assert!(!rendered.contains("codex lane message"));
-        assert_eq!(app.last_status(), "codex reasoning level: xhigh");
+        assert_eq!(app.active_tab(), active_tab);
     }
 
     #[test]
@@ -1211,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_switches_backend_and_copy_toggle_still_work() {
+    fn toggle_copy_still_works_without_backend_switching() {
         let mut app = AppShell::new_for_tests();
         assert_eq!(app.active_tab(), ActiveTab::Secondary);
         assert!(!app.emphasized_copy());
@@ -1229,86 +1182,10 @@ mod tests {
             ),
         });
 
-        app.dispatch(UiEvent::PreviousView);
-        assert_eq!(app.active_tab(), ActiveTab::Primary);
-        assert_eq!(app.runtime_session_id(), None);
-        let rendered_secondary = app.render_to_string(120, 32);
-        assert!(!rendered_secondary.contains("Transcript is empty."));
-        assert!(!rendered_secondary.contains("primary lane message"));
-        app.apply_message(AppMessage::ProbeRuntimeSessionReady {
-            session_id: String::from("sess_codex"),
-            profile_name: String::from("openai-codex-subscription"),
-            model_id: String::from("gpt-5.4"),
-            cwd: String::from("/tmp/probe-workspace"),
-        });
-        app.apply_message(AppMessage::TranscriptEntryCommitted {
-            entry: TranscriptEntry::new(
-                TranscriptRole::User,
-                "You",
-                vec![String::from("secondary lane message")],
-            ),
-        });
-
         app.dispatch(UiEvent::ToggleBody);
         assert!(app.emphasized_copy());
-
-        app.dispatch(UiEvent::NextView);
-        assert_eq!(app.active_tab(), ActiveTab::Secondary);
-        assert_eq!(app.runtime_session_id(), Some("sess_tailnet"));
-        let rendered_primary = app.render_to_string(120, 32);
-        assert!(rendered_primary.contains("primary lane message"));
-        assert!(!rendered_primary.contains("secondary lane message"));
-    }
-
-    #[test]
-    fn backend_switch_uses_saved_backend_snapshot_for_alternate_lane() {
-        let probe_home = tempdir().expect("temp probe home");
-
-        let mut qwen = PsionicServerConfig::default();
-        qwen.host = String::from("100.108.56.85");
-        qwen.port = 8080;
-        qwen.model_id = Some(String::from("qwen3.5-2b-q8_0-registry.gguf"));
-        qwen.save(
-            PsionicServerConfig::backend_config_path(
-                probe_home.path(),
-                BackendKind::OpenAiChatCompletions,
-            )
-            .as_path(),
-        )
-        .expect("save qwen snapshot");
-
-        let mut apple = PsionicServerConfig::default();
-        apple.set_api_kind(BackendKind::AppleFmBridge);
-        apple.port = 11435;
-        apple.model_id = Some(String::from("apple-foundation-model"));
-
-        let launch_config = TuiLaunchConfig {
-            chat_runtime: ProbeRuntimeTurnConfig {
-                probe_home: Some(probe_home.path().to_path_buf()),
-                cwd: PathBuf::from("."),
-                profile: profile_from_server_config(&apple),
-                system_prompt: None,
-                harness_profile: None,
-                tool_loop: None,
-            },
-            operator_backend: apple.operator_summary(),
-            autostart_apple_fm_setup: false,
-            resume_session_id: None,
-        };
-        let mut app = AppShell::new_with_launch_config(launch_config);
-
-        app.dispatch(UiEvent::PreviousView);
-
         let rendered = app.render_to_string(120, 32);
-        assert!(rendered.contains("100.108.56.85:8080"));
-        assert_eq!(app.backend_lanes[1].label, "Tailnet");
-        assert_eq!(app.backend_lanes[1].operator_backend.host, "100.108.56.85");
-        assert_eq!(app.backend_lanes[1].operator_backend.port, 8080);
-        assert_eq!(
-            app.backend_lanes[1].chat_runtime.profile.base_url,
-            "http://100.108.56.85:8080/v1"
-        );
-        assert_eq!(app.last_status(), "active backend: Tailnet");
+        assert!(rendered.contains("Probe now renders real user, tool, and assistant turns."));
     }
 
     #[test]

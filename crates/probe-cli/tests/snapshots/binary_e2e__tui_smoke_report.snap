@@ -1,10 +1,9 @@
 ---
 source: crates/probe-cli/tests/binary_e2e.rs
-assertion_line: 335
 expression: report
 ---
 {
-  "final_render": "┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ Codex │ Qwen │ Apple FM │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ ┌─ Transcript ─────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ [user] You │ │ hello │ │ │ │ [tool call] read_file │ │ README.md │ │ │ │ [tool result] read_file │ │ README.md:1-1 │ │ # Probe acceptance fixture │ │ │ │ [assistant] Probe │ │ Probe inspected README.md through the real runtime. │ │ │ │ │ │ │ │ │ │ │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ status: pending approvals cleared | backend: OpenAiChatCompletions | target: 127.0.0.1:<port> | model: tiny-qwen35 | │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ ┌─ Composer ───────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ cmd: plain | hist: 1 │ │ Type a Probe message. Enter submits. Ctrl+J inserts a newline. │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
+  "final_render": "┌─ Transcript ─────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ [user] You │ │ hello │ │ │ │ [tool call] read_file │ │ README.md │ │ │ │ [tool result] read_file │ │ README.md:1-1 │ │ # Probe acceptance fixture │ │ │ │ [assistant] Probe │ │ Probe inspected README.md through the real runtime. │ │ │ │ │ │ │ │ │ │ │ │ │ │ │ │ │ │ │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ status: pending approvals cleared | backend: OpenAiChatCompletions | target: 127.0.0.1:<port> | model: tiny-qwen35 | │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ ┌─ Composer ───────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │ cmd: plain | hist: 1 │ │ Type a Probe message. Enter submits. Ctrl+J inserts a newline. │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
   "last_status": "pending approvals cleared",
   "recent_events": [
     "queued Probe runtime turn: hello",
@@ -12,11 +11,10 @@ expression: report
     "loopback attach may be local or an SSH-forwarded remote Psionic target",
     "backend transport: loopback_or_ssh_forward (http://127.0.0.1:<port>/v1)",
     "backend target: openai_chat_completions attach 127.0.0.1:<port> model=tiny-qwen35",
-    "press Shift+Tab for Codex reasoning or previous backend",
-    "press Tab to switch backends",
     "press F1 for help",
     "press Ctrl+S to inspect backend status",
     "press Ctrl+R to rerun backend check when supported",
+    "the default TUI path picks the backend automatically",
     "probe tui ready"
   ],
   "runtime_session_id": "<session-id>",

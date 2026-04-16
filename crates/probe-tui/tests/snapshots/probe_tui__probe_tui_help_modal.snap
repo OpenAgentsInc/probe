@@ -8,12 +8,12 @@ expression: snapshot
            ┌─ Help ─────────────────────────────────────────────────┐
            │ Probe Chat Shell Keys                                  │
            │                                                        │
-           │ Tab / Shift+Tab     backend / Codex effort             │
            │ Enter / Ctrl+J      submit / newline                   │
            │ Up / Down           draft history recall               │
            │ Mouse wheel / PgUp  scroll active panel                │
            │ PgDn                scroll back toward latest          │
            │ Ctrl+O              add attachment placeholder         │
+           │ Ctrl+R / Ctrl+S     backend check / backend overlay    │
            └────────────────────────────────────────────────────────┘
 
 

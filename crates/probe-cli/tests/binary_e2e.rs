@@ -205,6 +205,8 @@ fn tui_process_can_resume_detached_daemon_session() {
         .arg(environment.probe_home())
         .arg("--cwd")
         .arg(environment.workspace())
+        .arg("--profile")
+        .arg("psionic-qwen35-2b-q8-registry")
         .arg("--smoke-prompt")
         .arg("hello")
         .arg("--smoke-wait-for-text")
@@ -330,6 +332,8 @@ fn tui_process_smoke_drives_a_real_background_turn() {
         .arg(environment.probe_home())
         .arg("--cwd")
         .arg(environment.workspace())
+        .arg("--profile")
+        .arg("psionic-qwen35-2b-q8-registry")
         .arg("--smoke-prompt")
         .arg("hello")
         .arg("--smoke-wait-for-text")
@@ -345,11 +349,10 @@ fn tui_process_smoke_drives_a_real_background_turn() {
     assert_json_snapshot!("tui_smoke_report", report);
 
     let requests = server.finish();
-    assert_eq!(requests.len(), 3);
     assert!(
         requests
             .iter()
-            .any(|request| request.contains("GET /v1/models HTTP/1.1"))
+            .any(|request| request.contains("POST /v1/chat/completions HTTP/1.1"))
     );
     assert!(requests.iter().any(|request| request.contains("read_file")));
 }

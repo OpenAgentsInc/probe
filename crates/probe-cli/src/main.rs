@@ -2781,6 +2781,19 @@ fn resolve_tui_profile(
         return named_profile(profile_name);
     }
 
+    if server_args.server_mode == "attach"
+        && server_args.server_config.is_none()
+        && server_args.server_binary.is_none()
+        && server_args.server_model_path.is_none()
+        && server_args.server_model_id.is_none()
+        && server_args.server_host.is_none()
+        && server_args.server_port.is_none()
+        && server_args.server_backend.is_none()
+        && server_args.server_reasoning_budget.is_none()
+    {
+        return Ok(resolve_codex_backend_profile(probe_home));
+    }
+
     let config_path = server_args
         .server_config
         .clone()
@@ -3931,7 +3944,9 @@ mod tests {
     use clap::Parser;
     use tempfile::tempdir;
 
-    use probe_core::backend_profiles::{psionic_apple_fm_bridge, psionic_inference_mesh};
+    use probe_core::backend_profiles::{
+        openai_codex_subscription, psionic_apple_fm_bridge, psionic_inference_mesh,
+    };
     use probe_protocol::runtime::{
         DetachedSessionRecoveryState, DetachedSessionStatus, DetachedSessionSummary,
     };
@@ -3945,7 +3960,7 @@ mod tests {
         BackendKind, Cli, Commands, HostedConnectArgs, ProbeClientTransportConfig,
         PsionicServerConfig, ServerArgs, ToolApprovalConfig, TuiArgs, build_tui_runtime_config,
         operator_client_config, render_detached_summary_line, render_turn_backend_receipt,
-        render_turn_observability, resolve_server_config,
+        render_turn_observability, resolve_server_config, resolve_tui_profile,
     };
 
     #[test]
@@ -4119,6 +4134,37 @@ mod tests {
             Some(Commands::Tui(args)) => assert_eq!(args, TuiArgs::default()),
             other => panic!("expected tui command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_tui_profile_prefers_codex_on_the_default_hot_path() {
+        let probe_home = tempdir().expect("temp probe home");
+
+        let mut saved_default = PsionicServerConfig::default();
+        saved_default.host = String::from("127.0.0.1");
+        saved_default.port = 18080;
+        saved_default.model_id = Some(String::from("custom-qwen.gguf"));
+        saved_default
+            .save(PsionicServerConfig::config_path(probe_home.path()).as_path())
+            .expect("save default qwen config");
+
+        let mut saved_codex =
+            PsionicServerConfig::from_backend_profile(&openai_codex_subscription());
+        saved_codex.reasoning_level = Some(String::from("high"));
+        saved_codex
+            .save(
+                PsionicServerConfig::backend_config_path(
+                    probe_home.path(),
+                    BackendKind::OpenAiCodexSubscription,
+                )
+                .as_path(),
+            )
+            .expect("save codex backend snapshot");
+
+        let profile = resolve_tui_profile(probe_home.path(), None, &ServerArgs::default())
+            .expect("default tui profile should resolve");
+        assert_eq!(profile.kind, BackendKind::OpenAiCodexSubscription);
+        assert_eq!(profile.reasoning_level.as_deref(), Some("high"));
     }
 
     #[test]
