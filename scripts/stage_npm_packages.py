@@ -46,6 +46,10 @@ def parse_args() -> argparse.Namespace:
         help="Publish the staged tarballs to npm after packaging them.",
     )
     parser.add_argument(
+        "--otp",
+        help="One-time password for npm accounts that require 2FA when publishing.",
+    )
+    parser.add_argument(
         "--keep-staging-dirs",
         action="store_true",
         help="Retain temporary vendor and staging directories instead of deleting them.",
@@ -73,6 +77,7 @@ def main() -> int:
 
     output_dir = args.output_dir or (REPO_ROOT / "dist" / "npm")
     output_dir.mkdir(parents=True, exist_ok=True)
+    otp = args.otp or os.environ.get("NPM_CONFIG_OTP")
 
     runner_temp = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir()))
     vendor_temp_root = Path(tempfile.mkdtemp(prefix="probe-npm-native-", dir=runner_temp))
@@ -118,17 +123,18 @@ def main() -> int:
 
         if args.publish:
             for package in PACKAGES:
-                run_command(
-                    [
-                        "npm",
-                        "publish",
-                        str(tarballs[package]),
-                        "--access",
-                        "public",
-                        "--tag",
-                        publish_tag_for_package(package),
-                    ]
-                )
+                publish_cmd = [
+                    "npm",
+                    "publish",
+                    str(tarballs[package]),
+                    "--access",
+                    "public",
+                    "--tag",
+                    publish_tag_for_package(package),
+                ]
+                if otp:
+                    publish_cmd.extend(["--otp", otp])
+                run_command(publish_cmd)
 
         print("Publish order:")
         for package in PACKAGES:

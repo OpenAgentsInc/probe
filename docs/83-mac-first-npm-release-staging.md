@@ -116,6 +116,24 @@ That publishes in this order:
 1. payload tarball with tag `darwin-arm64`
 2. meta tarball with tag `latest`
 
+The payload tarball deliberately keeps the canonical package name
+`@openagentsinc/probe` and relies on npm aliasing from the meta package's
+`optionalDependencies`, matching the `@openai/codex` pattern. Directly
+installing both tarballs side-by-side from local files is not a faithful
+simulation of the real registry install path because npm does not recreate that
+alias resolution flow in the same way.
+
+If npm publish requires 2FA, pass the OTP directly:
+
+```bash
+./scripts/stage_npm_packages.py \
+  --release-version 0.1.0 \
+  --artifact-path /tmp/probe-aarch64-apple-darwin.gz \
+  --output-dir /tmp/probe-npm-dist \
+  --publish \
+  --otp 123456
+```
+
 ## Required smoke test after publish
 
 After publishing, the honest mac smoke test is:
@@ -125,6 +143,15 @@ npm i -g @openagentsinc/probe
 probe --help
 probe exec "hello"
 ```
+
+Before publish, the honest local proof points are narrower:
+
+- `./scripts/stage_npm_packages.py --release-version ... --artifact-path ...`
+  should produce both tarballs
+- `node <staged-meta-dir>/bin/probe.js --help` should launch the staged native
+  payload when `vendor/` is present
+- the published-registry install must still be run afterward to prove the alias
+  flow used by `npm i -g @openagentsinc/probe`
 
 That smoke test belongs above the release staging layer because it validates
 the real registry path, not just local tarball construction.

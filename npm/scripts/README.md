@@ -105,3 +105,20 @@ The script publishes:
 
 - `probe-darwin-arm64` with npm tag `darwin-arm64`
 - `probe` with npm tag `latest`
+
+The payload tarball intentionally uses the canonical package name
+`@openagentsinc/probe` with a platform-suffixed version, and the meta package
+installs it through an npm alias. That mirrors the `@openai/codex` flow. A
+direct local install of both tarballs is not equivalent to the real registry
+path.
+
+If the npm account requires 2FA for publish, pass the one-time password:
+
+```bash
+./scripts/stage_npm_packages.py \
+  --release-version 0.1.0 \
+  --artifact-path /tmp/probe-aarch64-apple-darwin.gz \
+  --output-dir /tmp/probe-npm-dist \
+  --publish \
+  --otp 123456
+```
