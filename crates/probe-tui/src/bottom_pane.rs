@@ -393,15 +393,12 @@ impl BottomPane {
         }
     }
 
-    fn title_segments(&self, state: &BottomPaneState, runtime_status: &str) -> Vec<String> {
+    fn title_segments(&self, state: &BottomPaneState) -> Vec<String> {
         let mut parts = Vec::new();
         if let Some(label) = state.title_state_label() {
             parts.push(label.to_string());
         }
         parts.extend(self.composer.title_segments());
-        if !runtime_status.is_empty() {
-            parts.push(runtime_status.to_string());
-        }
         parts
     }
 
@@ -409,14 +406,14 @@ impl BottomPane {
         &self,
         frame: &mut Frame<'_>,
         area: Rect,
-        runtime_status: &str,
+        runtime_status_segments: &[String],
         state: &BottomPaneState,
     ) {
         let composer_block = Block::default()
             .borders(Borders::ALL)
             .padding(Padding::horizontal(1))
             .title(
-                self.title_line(state, runtime_status)
+                self.title_line(state, runtime_status_segments)
                     .alignment(Alignment::Right),
             )
             .style(theme::shell_border());
@@ -466,15 +463,17 @@ impl BottomPane {
         self.composer.text.as_str()
     }
 
-    fn title_line(&self, state: &BottomPaneState, runtime_status: &str) -> Line<'static> {
+    fn title_line(
+        &self,
+        state: &BottomPaneState,
+        runtime_status_segments: &[String],
+    ) -> Line<'static> {
         let mut spans = vec![Span::raw(" ".to_string())];
-        for (index, segment) in self
-            .title_segments(state, runtime_status)
-            .iter()
-            .enumerate()
-        {
+        let mut all_segments = self.title_segments(state);
+        all_segments.extend(runtime_status_segments.iter().cloned());
+        for (index, segment) in all_segments.iter().enumerate() {
             if index > 0 {
-                spans.push(Span::styled(" | ".to_string(), theme::footer_separator()));
+                spans.push(Span::styled(" · ".to_string(), theme::footer_separator()));
             }
             spans.extend(styled_footer_segment(segment));
         }
@@ -524,7 +523,8 @@ fn is_reasoning_segment(segment: &str) -> bool {
 }
 
 fn looks_draft_meta_segment(segment: &str) -> bool {
-    segment.starts_with("attach ")
+    segment == "plain"
+        || segment.starts_with("attach ")
         || segment.starts_with("hist ")
         || segment == "paste"
         || segment.starts_with("round ")

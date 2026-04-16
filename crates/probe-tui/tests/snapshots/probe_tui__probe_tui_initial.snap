@@ -23,6 +23,6 @@ expression: snapshot
 
 
 
-┌───────────────────────────────────── plain | qwen3.5-2b-q8_0-registry... | . ┐
+┌───────────────────────────────────── plain · qwen3.5-2b-q8_0-registry... · . ┐
 │ Type a Probe message. Enter submits. Shift+Enter inserts a newline.          │
 └──────────────────────────────────────────────────────────────────────────────┘

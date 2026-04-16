@@ -10,6 +10,34 @@ pub(crate) fn shell_accent() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+pub(crate) fn history_header() -> Style {
+    Style::default().add_modifier(Modifier::BOLD)
+}
+
+pub(crate) fn history_detail() -> Style {
+    subtle()
+}
+
+pub(crate) fn history_bullet() -> Style {
+    subtle().add_modifier(Modifier::BOLD)
+}
+
+pub(crate) fn history_success_bullet() -> Style {
+    Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub(crate) fn history_warning_bullet() -> Style {
+    Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub(crate) fn history_error_bullet() -> Style {
+    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+}
+
 pub(crate) fn subtle() -> Style {
     Style::default()
         .fg(Color::DarkGray)
@@ -24,12 +52,12 @@ pub(crate) fn helper() -> Style {
     subtle()
 }
 
-pub(crate) fn transcript_label() -> Style {
-    subtle()
-}
-
 pub(crate) fn user_title() -> Style {
     Style::default().fg(Color::Cyan)
+}
+
+pub(crate) fn user_message() -> Style {
+    Style::default().bg(Color::Rgb(23, 27, 36))
 }
 
 pub(crate) fn assistant_title() -> Style {
@@ -37,7 +65,7 @@ pub(crate) fn assistant_title() -> Style {
 }
 
 pub(crate) fn tool_title() -> Style {
-    Style::default().fg(Color::Magenta)
+    Style::default().fg(Color::Cyan)
 }
 
 pub(crate) fn system_title() -> Style {
@@ -46,12 +74,6 @@ pub(crate) fn system_title() -> Style {
 
 pub(crate) fn status_title() -> Style {
     Style::default().fg(Color::Yellow)
-}
-
-pub(crate) fn active_label() -> Style {
-    Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::DIM)
 }
 
 pub(crate) fn inline_code() -> Style {

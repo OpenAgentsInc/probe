@@ -23,6 +23,6 @@ expression: snapshot
 
 
 
-┌──────────────────────────── locked | plain | qwen3.5-2b-q8_0-registry... | . ┐
+┌──────────────────────────── locked · plain · qwen3.5-2b-q8_0-registry... · . ┐
 │ Input disabled while help owns focus. Esc or F1 returns to chat.             │
 └──────────────────────────────────────────────────────────────────────────────┘

@@ -42,8 +42,14 @@ transcript.
 Issue `#119` does not change transcript ownership or row taxonomy. It changes
 presentation:
 
-- transcript labels stay explicit, but render dim instead of looking like raw
-  log prefixes
+- transcript rows now read like Codex history cells instead of bracketed log
+  labels
+- user turns render with a dim `› ` prefix
+- assistant turns render as bullet-led message rows
+- tool turns render as `• Calling …` / `• Called …` rows with dim `  └ `
+  detail lines
+- paused and refused tools render as warning/error rows instead of fake success
+  rows
 - user titles, paths, links, issue refs, and inline code render in cyan
 - slash commands and typed mentions render in magenta
 - blockquotes render in green

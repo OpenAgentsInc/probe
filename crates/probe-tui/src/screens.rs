@@ -524,7 +524,7 @@ impl ChatScreen {
         })
     }
 
-    pub fn composer_header_status(&self) -> String {
+    pub fn composer_header_status(&self) -> Vec<String> {
         let model = self
             .runtime
             .model_id
@@ -552,7 +552,7 @@ impl ChatScreen {
             ));
         }
         parts.push(status_marker(self).to_string());
-        parts.join(" | ")
+        parts
     }
 
     fn clear_stream(&mut self) {

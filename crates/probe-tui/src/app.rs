@@ -608,7 +608,7 @@ impl AppShell {
         self.bottom_pane.render(
             frame,
             sections[1],
-            self.base_screen().composer_header_status().as_str(),
+            self.base_screen().composer_header_status().as_slice(),
             &pane_state,
         );
         if self.active_screen_id() == ScreenId::Chat
@@ -1448,7 +1448,7 @@ mod tests {
         ));
         let rendered = app.render_to_string(120, 32);
 
-        assert!(rendered.contains("plain | gpt-5.4 | high | ."));
+        assert!(rendered.contains("plain · gpt-5.4 · high · ."));
         assert!(!rendered.contains("status:"));
         assert!(!rendered.contains("Composer"));
         assert!(!rendered.contains("cmd: plain"));
@@ -1482,7 +1482,7 @@ mod tests {
         let rendered = app.render_to_string(140, 36);
 
         assert!(rendered.contains("probe#118 Add typed GitHub issue selection"));
-        assert!(rendered.contains("[status] GitHub Issue"));
+        assert!(rendered.contains("• GitHub Issue"));
         assert!(
             rendered.contains(
                 "selected: probe#118 Add typed GitHub issue selection for Probe priorities"
@@ -1551,14 +1551,14 @@ mod tests {
         assert_eq!(app.active_screen_id(), ScreenId::Help);
         let rendered = app.render_to_string(120, 36);
         assert!(rendered.contains("/help /backend /approvals /reasoning /clear"));
-        assert!(!rendered.contains("[user] You"));
+        assert!(!rendered.contains("› /help"));
 
         app.dispatch(UiEvent::Dismiss);
         submit_draft(&mut app, "/backend");
         assert_eq!(app.active_screen_id(), ScreenId::SetupOverlay);
         let rendered = app.render_to_string(120, 36);
         assert!(rendered.contains("backend_kind:"));
-        assert!(!rendered.contains("[user] You"));
+        assert!(!rendered.contains("› /backend"));
     }
 
     #[test]
@@ -1578,7 +1578,7 @@ mod tests {
 
         let rendered = app.render_to_string(140, 36);
         assert!(rendered.contains("keep transcript"));
-        assert!(rendered.contains("gpt-5.4 | low | ."));
+        assert!(rendered.contains("gpt-5.4 · low · ."));
         assert_eq!(app.last_status(), "codex reasoning level: low");
     }
 
@@ -1654,8 +1654,7 @@ mod tests {
         app.dispatch(UiEvent::ComposerSubmit);
 
         let rendered = app.render_to_string(120, 32);
-        assert!(rendered.contains("[user] You"));
-        assert!(rendered.contains("hi"));
+        assert!(rendered.contains("› hi"));
         assert!(rendered.contains("!"));
         assert!(
             app.recent_events()
@@ -1690,7 +1689,7 @@ mod tests {
         });
 
         let rendered = app.render_to_string(140, 36);
-        assert!(!rendered.contains("[status] GitHub Issue"));
+        assert!(!rendered.contains("• GitHub Issue"));
         assert!(
             !app.worker_events()
                 .iter()
@@ -1759,9 +1758,9 @@ mod tests {
         let mut saw_active_turn = false;
         wait_for_app_condition(&mut app, Duration::from_secs(5), |app| {
             let rendered = app.render_to_string(120, 32);
-            if rendered.contains("[active assistant]")
-                || rendered.contains("[active tool]")
-                || rendered.contains("[active status]")
+            if rendered.contains("• Waiting for Reply")
+                || rendered.contains("• Running read_file")
+                || rendered.contains("• Streaming Tool Call")
             {
                 saw_active_turn = true;
             }
@@ -1794,16 +1793,15 @@ mod tests {
         assert!(saw_active_turn);
         let mut rendered = app.render_to_string(120, 32);
         for _ in 0..6 {
-            if rendered.contains("[tool call] read_file")
-                && rendered.contains("[tool result] read_file")
+            if rendered.contains("• Calling read_file") && rendered.contains("• Called read_file")
             {
                 break;
             }
             app.dispatch(UiEvent::PageUp);
             rendered = app.render_to_string(120, 32);
         }
-        assert!(rendered.contains("[tool call] read_file"));
-        assert!(rendered.contains("[tool result] read_file"));
+        assert!(rendered.contains("• Calling read_file"));
+        assert!(rendered.contains("• Called read_file"));
         assert!(rendered.contains("README.md"));
         assert!(
             app.worker_events()
@@ -1868,10 +1866,10 @@ mod tests {
         });
 
         let rendered = app.render_to_string(140, 40);
-        assert!(rendered.contains("[tool call] read_file"));
-        assert!(rendered.contains("[tool result] read_file"));
-        assert!(rendered.contains("[tool call] list_files"));
-        assert!(rendered.contains("[active status] Running Tool: list_files"));
+        assert!(rendered.contains("• Calling read_file"));
+        assert!(rendered.contains("• Called read_file"));
+        assert!(rendered.contains("• Calling list_files"));
+        assert!(rendered.contains("• Running list_files"));
 
         app.apply_message(AppMessage::TranscriptEntriesCommitted {
             entries: vec![
@@ -1898,12 +1896,12 @@ mod tests {
         });
 
         let rendered = app.render_to_string(140, 40);
-        assert_eq!(rendered.matches("[tool call] read_file").count(), 1);
-        assert_eq!(rendered.matches("[tool result] read_file").count(), 1);
-        assert_eq!(rendered.matches("[tool call] list_files").count(), 1);
-        assert_eq!(rendered.matches("[tool result] list_files").count(), 1);
-        assert!(!rendered.contains("[active status] Running Tool: list_files"));
-        assert!(rendered.contains("[assistant] Probe"));
+        assert_eq!(rendered.matches("• Calling read_file").count(), 1);
+        assert_eq!(rendered.matches("• Called read_file").count(), 1);
+        assert_eq!(rendered.matches("• Calling list_files").count(), 1);
+        assert_eq!(rendered.matches("• Called list_files").count(), 1);
+        assert!(!rendered.contains("• Running list_files"));
+        assert!(rendered.contains("Done."));
     }
 
     #[test]
@@ -2083,7 +2081,7 @@ mod tests {
         });
 
         let rendered = app.render_to_string(140, 36);
-        assert!(rendered.contains("[active status] Authentication Needed"));
+        assert!(rendered.contains("Authentication Needed"));
         assert!(rendered.contains("probe codex login"));
         assert!(rendered.contains("Partial answer before auth failed."));
     }
@@ -2175,8 +2173,8 @@ mod tests {
         });
 
         let rendered = app.render_to_string(160, 48);
-        assert!(rendered.contains("[approval pending] apply_patch"));
-        assert!(rendered.contains("[tool result] apply_patch"));
+        assert!(rendered.contains("⚠ Approval needed for apply_patch"));
+        assert!(rendered.contains("• Called apply_patch"));
         assert_eq!(
             std::fs::read_to_string(environment.workspace().join("hello.txt"))
                 .expect("read patched file"),

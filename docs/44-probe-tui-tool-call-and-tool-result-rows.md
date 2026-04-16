@@ -27,10 +27,10 @@ only on a generic role/title/body shape.
 That keeps the retained transcript model from issue `#35` while giving the UI a
 clear way to distinguish:
 
-- `[tool call]`
-- `[tool result]`
-- `[tool refused]`
-- `[approval pending]`
+- `• Calling …`
+- `• Called …`
+- `✖ Blocked …`
+- `⚠ Approval needed for …`
 
 without inventing a separate TUI-only tool-history store.
 
@@ -63,9 +63,8 @@ to a real approve or reject flow.
 
 Coverage now proves:
 
-- successful runtime-backed tool turns render `[tool call]` and `[tool result]`
-  rows
-- paused tool turns render `[approval pending]` rows
+- successful runtime-backed tool turns render `Calling` and `Called` rows
+- paused tool turns render `Approval needed` rows
 - snapshots reflect the new tool transcript taxonomy
 
 Validation:

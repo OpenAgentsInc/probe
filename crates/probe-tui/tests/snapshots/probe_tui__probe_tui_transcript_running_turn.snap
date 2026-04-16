@@ -2,12 +2,10 @@
 source: crates/probe-tui/tests/probe_tui.rs
 expression: snapshot
 ---
-[user] You
-  Summarize what Probe owns.
+› Summarize what Probe owns.
 
-[tool call] read_file
-  README.md
-
+• Calling read_file
+  └ README.md
 
 
 
@@ -23,6 +21,8 @@ expression: snapshot
 
 
 
-┌───────────────────────────────────── plain | qwen3.5-2b-q8_0-registry... | . ┐
+
+
+┌───────────────────────────────────── plain · qwen3.5-2b-q8_0-registry... · . ┐
 │ Type a Probe message. Enter submits. Shift+Enter inserts a newline.          │
 └──────────────────────────────────────────────────────────────────────────────┘
