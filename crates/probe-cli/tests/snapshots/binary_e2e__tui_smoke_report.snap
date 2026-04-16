@@ -3,7 +3,7 @@ source: crates/probe-cli/tests/binary_e2e.rs
 expression: report
 ---
 {
-  "final_render": "[user] You hello [status] GitHub Issue priority: hello result: no GitHub-backed repos were discoverable from the current workspace [tool call] read_file README.md [tool result] read_file README.md:1-1 # Probe acceptance fixture [assistant] Probe Probe inspected README.md through the real runtime. ┌──────────────────────────────────────────────────────────────────────────────────── plain | hist 1 | tiny-qwen35 | . ┐ │ Type a Probe message. Enter submits. Shift+Enter inserts a newline. │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
+  "final_render": "[user] You hello [status] GitHub Issue priority: hello result: no GitHub-backed repos were discoverable from the current workspace [tool call] read_file README.md [tool result] read_file README.md:1-1 Probe acceptance fixture [assistant] Probe Probe inspected README.md through the real runtime. ┌──────────────────────────────────────────────────────────────────────────────────── plain | hist 1 | tiny-qwen35 | . ┐ │ Type a Probe message. Enter submits. Shift+Enter inserts a newline. │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
   "last_status": "pending approvals cleared",
   "recent_events": [
     "queued Probe runtime turn: hello",

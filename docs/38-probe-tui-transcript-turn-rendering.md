@@ -3,6 +3,9 @@
 ## Summary
 
 Issue #38 turns the Probe TUI transcript into the main shell surface.
+Issue `#119` later kept the same retained transcript model but replaced the old
+plain-text row rendering with Codex-style semantic colors plus fenced-code
+syntax highlighting.
 
 The shell now renders:
 
@@ -33,6 +36,23 @@ instead of mostly setup copy.
 
 `ActiveTurn` remains the single live mutable cell at the bottom of the
 transcript.
+
+### Codex-style transcript rendering
+
+Issue `#119` does not change transcript ownership or row taxonomy. It changes
+presentation:
+
+- transcript labels stay explicit, but render dim instead of looking like raw
+  log prefixes
+- user titles, paths, links, issue refs, and inline code render in cyan
+- slash commands and typed mentions render in magenta
+- blockquotes render in green
+- markdown headings render with heading emphasis instead of raw `#` markers
+- fenced code blocks use a Probe-owned syntect plus two-face renderer with the
+  same Catppuccin-Mocha syntax-theme direction Codex uses on dark terminals
+
+That gives Probe transcript rows Codex-like color behavior without importing
+Codex's full transcript architecture or abandoning the retained widget model.
 
 ### Composer -> transcript path
 
@@ -79,5 +99,5 @@ Validation commands:
 
 ```bash
 cargo test -p probe-tui -- --nocapture
-cargo test -p probe-cli --test cli_regressions -- --nocapture
+cargo test -p probe-cli --test binary_e2e tui_process_smoke_drives_a_real_background_turn
 ```

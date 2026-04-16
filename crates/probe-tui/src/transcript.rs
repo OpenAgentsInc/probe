@@ -1,4 +1,7 @@
-use ratatui::text::{Line, Text};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span, Text};
+
+use crate::{rich_text, theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscriptRole {
@@ -121,10 +124,13 @@ impl TranscriptEntry {
     }
 
     fn render_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(format!("[{}] {}", self.label(), self.title))];
-        for line in &self.body {
-            lines.push(Line::from(format!("  {line}")));
-        }
+        let mut lines = vec![header_line(
+            self.label(),
+            theme::transcript_label(),
+            entry_title_style(self.role, self.kind),
+            self.title.as_str(),
+        )];
+        lines.extend(indented_body_lines(self.body.as_slice()));
         lines
     }
 }
@@ -162,14 +168,13 @@ impl ActiveTurn {
     }
 
     fn render_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(format!(
-            "[active {}] {}",
-            self.role.label(),
-            self.title
-        ))];
-        for line in &self.body {
-            lines.push(Line::from(format!("  {line}")));
-        }
+        let mut lines = vec![header_line(
+            format!("active {}", self.role.label()).as_str(),
+            theme::active_label(),
+            entry_title_style(self.role, TranscriptEntryKind::Generic),
+            self.title.as_str(),
+        )];
+        lines.extend(indented_body_lines(self.body.as_slice()));
         lines
     }
 }
@@ -254,8 +259,50 @@ fn append_entry_lines(lines: &mut Vec<Line<'static>>, entries: &[TranscriptEntry
     }
 }
 
+fn entry_title_style(role: TranscriptRole, kind: TranscriptEntryKind) -> Style {
+    match kind {
+        TranscriptEntryKind::ToolCall | TranscriptEntryKind::ToolResult => theme::tool_title(),
+        TranscriptEntryKind::ToolRefused | TranscriptEntryKind::ApprovalPending => {
+            theme::status_title()
+        }
+        TranscriptEntryKind::Generic => match role {
+            TranscriptRole::System => theme::system_title(),
+            TranscriptRole::Status => theme::status_title(),
+            TranscriptRole::Tool => theme::tool_title(),
+            TranscriptRole::Assistant => theme::assistant_title(),
+            TranscriptRole::User => theme::user_title(),
+        },
+    }
+}
+
+fn header_line(label: &str, label_style: Style, title_style: Style, title: &str) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(format!("[{label}]"), label_style),
+        Span::raw(" ".to_string()),
+    ];
+    spans.extend(rich_text::highlight_inline_spans(title, title_style));
+    Line::from(spans)
+}
+
+fn indented_body_lines(body: &[String]) -> Vec<Line<'static>> {
+    if body.is_empty() {
+        return Vec::new();
+    }
+    let rendered = rich_text::render_markdownish_lines(body.join("\n").as_str());
+    rendered
+        .into_iter()
+        .map(|line| {
+            let mut spans = vec![Span::styled("  ".to_string(), theme::subtle())];
+            spans.extend(line.spans);
+            Line::from(spans)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    use ratatui::style::Color;
+
     use super::{ActiveTurn, RetainedTranscript, TranscriptEntry, TranscriptRole};
 
     fn lines_to_plain_text(transcript: &RetainedTranscript) -> String {
@@ -317,5 +364,31 @@ mod tests {
         assert!(rendered.contains("[tool call] read_file"));
         assert!(rendered.contains("[tool result] read_file"));
         assert!(rendered.contains("[active tool] Running Tool: list_files"));
+    }
+
+    #[test]
+    fn transcript_header_and_body_pick_up_codex_style_colors() {
+        let entry = TranscriptEntry::new(
+            TranscriptRole::User,
+            "You",
+            vec![String::from(
+                "/plan see probe#119 in crates/probe-tui/src/lib.rs",
+            )],
+        );
+        let lines = entry.render_lines();
+        assert_eq!(lines[0].spans[0].style.fg, Some(Color::DarkGray));
+        assert_eq!(lines[0].spans[2].style.fg, Some(Color::Cyan));
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .any(|span| span.style.fg == Some(Color::Magenta))
+        );
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .any(|span| span.style.fg == Some(Color::Cyan))
+        );
     }
 }

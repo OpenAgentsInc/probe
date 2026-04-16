@@ -3,6 +3,8 @@
 ## Summary
 
 Issue #37 adds the first real input subsystem to `probe-tui`.
+Issue `#119` later kept that shape but replaced the old plain blue footer copy
+with Codex-style semantic color treatment.
 
 Probe now has:
 
@@ -55,6 +57,23 @@ Submissions are currently captured back into shell state and recorded in the UI
 event log. That proves the input seam without pretending the full runtime turn
 loop is already wired through the TUI.
 
+### Codex-style color treatment
+
+Issue `#119` keeps the single-footer layout from the later shell work but
+upgrades its rendering semantics:
+
+- footer metadata segments are styled by meaning instead of one plain string
+- slash commands and typed mentions render in magenta
+- model ids, issue refs, paths, links, and inline code render in cyan
+- reasoning metadata stays visible in magenta instead of getting buried in a
+  generic status blob
+- placeholder and helper copy use dim italic treatment instead of Probe's older
+  custom blue
+
+The composer body itself now token-highlights typed commands, issue refs, and
+path-like tokens so the shell reads closer to Codex while preserving Probe's
+owned layout.
+
 ### Key routing
 
 Global shell commands moved to modifier-driven bindings:
@@ -92,5 +111,5 @@ Validation commands:
 
 ```bash
 cargo test -p probe-tui -- --nocapture
-cargo test -p probe-cli --test cli_regressions -- --nocapture
+cargo test -p probe-cli --test binary_e2e tui_process_smoke_drives_a_real_background_turn
 ```

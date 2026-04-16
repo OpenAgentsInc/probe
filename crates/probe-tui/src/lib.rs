@@ -1,8 +1,11 @@
 mod app;
 mod bottom_pane;
 mod event;
+mod highlight;
 mod message;
+mod rich_text;
 mod screens;
+mod theme;
 mod transcript;
 mod widgets;
 mod worker;

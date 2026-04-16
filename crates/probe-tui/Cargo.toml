@@ -13,9 +13,12 @@ probe-openai-auth.workspace = true
 probe-protocol.workspace = true
 probe-provider-apple-fm.workspace = true
 psionic-apple-fm.workspace = true
+pulldown-cmark.workspace = true
 ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+syntect.workspace = true
+two-face.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

@@ -1,10 +1,10 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 
 use crate::event::UiEvent;
+use crate::{rich_text, theme};
 
 const PLACEHOLDER: &str = "Type a Probe message. Enter submits. Shift+Enter inserts a newline.";
 const MAX_VISIBLE_COMPOSER_LINES: usize = 4;
@@ -393,7 +393,7 @@ impl BottomPane {
         }
     }
 
-    fn title_text(&self, state: &BottomPaneState, runtime_status: &str) -> String {
+    fn title_segments(&self, state: &BottomPaneState, runtime_status: &str) -> Vec<String> {
         let mut parts = Vec::new();
         if let Some(label) = state.title_state_label() {
             parts.push(label.to_string());
@@ -402,7 +402,7 @@ impl BottomPane {
         if !runtime_status.is_empty() {
             parts.push(runtime_status.to_string());
         }
-        parts.join(" | ")
+        parts
     }
 
     pub fn render(
@@ -412,36 +412,24 @@ impl BottomPane {
         runtime_status: &str,
         state: &BottomPaneState,
     ) {
-        let title = self.title_text(state, runtime_status);
         let composer_block = Block::default()
             .borders(Borders::ALL)
             .padding(Padding::horizontal(1))
-            .title(Line::from(format!(" {title} ")).alignment(Alignment::Right))
-            .style(shell_border());
+            .title(
+                self.title_line(state, runtime_status)
+                    .alignment(Alignment::Right),
+            )
+            .style(theme::shell_border());
         let composer_inner = composer_block.inner(area);
         frame.render_widget(composer_block, area);
 
         let content = if let Some(helper_copy) = state.helper_copy() {
-            Text::from(Line::styled(
-                helper_copy.to_string(),
-                Style::default()
-                    .fg(Color::Rgb(0x91, 0xae, 0xc4))
-                    .add_modifier(Modifier::DIM),
-            ))
+            Text::from(Line::styled(helper_copy.to_string(), theme::helper()))
         } else {
             let lines = if self.composer.text.is_empty() {
-                vec![Line::styled(
-                    PLACEHOLDER,
-                    Style::default()
-                        .fg(Color::Rgb(0x91, 0xae, 0xc4))
-                        .add_modifier(Modifier::DIM),
-                )]
+                vec![Line::styled(PLACEHOLDER, theme::placeholder())]
             } else {
-                self.composer
-                    .visible_lines()
-                    .into_iter()
-                    .map(Line::from)
-                    .collect()
+                rich_text::highlight_plain_lines(self.composer.visible_lines().join("\n").as_str())
             };
             Text::from(lines)
         };
@@ -477,10 +465,69 @@ impl BottomPane {
     pub fn current_text(&self) -> &str {
         self.composer.text.as_str()
     }
+
+    fn title_line(&self, state: &BottomPaneState, runtime_status: &str) -> Line<'static> {
+        let mut spans = vec![Span::raw(" ".to_string())];
+        for (index, segment) in self
+            .title_segments(state, runtime_status)
+            .iter()
+            .enumerate()
+        {
+            if index > 0 {
+                spans.push(Span::styled(" | ".to_string(), theme::footer_separator()));
+            }
+            spans.extend(styled_footer_segment(segment));
+        }
+        spans.push(Span::raw(" ".to_string()));
+        Line::from(spans)
+    }
 }
 
-fn shell_border() -> Style {
-    Style::default().fg(Color::Rgb(0x73, 0xc2, 0xfb))
+fn styled_footer_segment(segment: &str) -> Vec<Span<'static>> {
+    if segment.chars().count() == 1
+        && let Some(icon) = segment.chars().next()
+    {
+        return vec![Span::styled(icon.to_string(), theme::status_icon(icon))];
+    }
+
+    let style = if segment == "busy" {
+        theme::state_busy()
+    } else if segment == "locked" {
+        theme::state_locked()
+    } else if is_reasoning_segment(segment) {
+        theme::reasoning()
+    } else if looks_model_segment(segment) {
+        theme::model()
+    } else if looks_draft_meta_segment(segment) {
+        theme::draft_meta()
+    } else {
+        Default::default()
+    };
+    rich_text::highlight_inline_spans(segment, style)
+}
+
+fn looks_model_segment(segment: &str) -> bool {
+    segment.starts_with("gpt-")
+        || segment.starts_with("o1")
+        || segment.starts_with("o3")
+        || segment.starts_with("o4")
+        || segment.contains("claude")
+        || segment.contains("gemini")
+        || segment.contains("qwen")
+}
+
+fn is_reasoning_segment(segment: &str) -> bool {
+    matches!(
+        segment,
+        "auto" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    )
+}
+
+fn looks_draft_meta_segment(segment: &str) -> bool {
+    segment.starts_with("attach ")
+        || segment.starts_with("hist ")
+        || segment == "paste"
+        || segment.starts_with("round ")
 }
 
 fn slash_command(value: &str) -> Option<String> {
@@ -552,7 +599,9 @@ fn line_end(value: &str, cursor: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{BottomPane, BottomPaneState};
+    use ratatui::style::Color;
+
+    use super::{BottomPane, BottomPaneState, styled_footer_segment};
     use crate::event::UiEvent;
 
     #[test]
@@ -635,5 +684,15 @@ mod tests {
         assert_eq!(submitted.mentions.len(), 2);
         assert_eq!(submitted.attachments.len(), 1);
         assert!(submitted.pasted_multiline);
+    }
+
+    #[test]
+    fn footer_segments_pick_up_model_reasoning_and_status_styles() {
+        let model = styled_footer_segment("gpt-5.4");
+        let reasoning = styled_footer_segment("high");
+        let status = styled_footer_segment("*");
+        assert_eq!(model[0].style.fg, Some(Color::Cyan));
+        assert_eq!(reasoning[0].style.fg, Some(Color::Magenta));
+        assert_eq!(status[0].style.fg, Some(Color::Cyan));
     }
 }

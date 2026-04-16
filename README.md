@@ -15,8 +15,9 @@ Current shipped surface:
 - `probe tui` / `cargo probe` for the local terminal UI plus explicit
   detached-session reattach with `--resume`
 - a Codex-first TUI shell with backend autodetection, no interactive backend
-  selector strip on the hot path, and background GitHub issue selection
-  metadata when `gh` is available
+  selector strip on the hot path, Codex-style transcript and composer color
+  treatment, syntax-highlighted fenced code blocks, and background GitHub
+  issue selection metadata when `gh` is available
 - `probe-server` for the first typed local stdio supervision contract
 - `probe-daemon` for the first long-lived local Unix-socket supervision path
 - `probe daemon run|stop` plus `probe ps|attach|logs|stop` for local detached
@@ -100,6 +101,10 @@ GitHub issue selection across discoverable local sibling repos. When `gh`
 finds a match, the footer and transcript show the selected issue metadata.
 When no issue matches, the transcript records that cleanly instead of
 pretending a selection exists.
+Transcript rows, tool output, and the footer/composer metadata now use the same
+semantic color direction as Codex: cyan links, paths, issue refs, and inline
+code; magenta slash commands and reasoning metadata; green quote/status accents;
+and syntax-highlighted fenced code blocks via a Probe-owned Rust renderer.
 
 Run the TUI:
 

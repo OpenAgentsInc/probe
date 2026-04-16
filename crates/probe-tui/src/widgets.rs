@@ -1,19 +1,8 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Tabs, Wrap};
 
-fn shell_border() -> Style {
-    Style::default().fg(Color::Rgb(0x73, 0xc2, 0xfb))
-}
-
-#[allow(dead_code)]
-fn shell_accent() -> Style {
-    Style::default()
-        .fg(Color::Rgb(0xf8, 0xf4, 0xe3))
-        .bg(Color::Rgb(0x13, 0x26, 0x3a))
-        .add_modifier(Modifier::BOLD)
-}
+use crate::theme;
 
 pub(crate) fn padded_title(title: &str) -> String {
     format!("─ {title} ")
@@ -44,9 +33,9 @@ impl TabStrip {
                 Block::default()
                     .borders(Borders::ALL)
                     .padding(panel_padding())
-                    .style(shell_border()),
+                    .style(theme::shell_border()),
             )
-            .highlight_style(shell_accent());
+            .highlight_style(theme::shell_accent());
         frame.render_widget(tabs, area);
     }
 }
@@ -63,10 +52,6 @@ impl<'a> ModalCard<'a> {
 
     pub fn render(self, frame: &mut Frame<'_>, area: Rect) {
         frame.render_widget(Clear, area);
-        frame.render_widget(
-            Block::default().style(Style::default().bg(Color::Rgb(0x10, 0x17, 0x20))),
-            area,
-        );
         let vertical = Layout::vertical([Constraint::Percentage(65)])
             .flex(Flex::Center)
             .split(area);
@@ -78,11 +63,7 @@ impl<'a> ModalCard<'a> {
             .borders(Borders::ALL)
             .padding(panel_padding())
             .title(padded_title(self.title))
-            .style(
-                Style::default()
-                    .fg(Color::Rgb(0xff, 0xf1, 0xd0))
-                    .bg(Color::Rgb(0x17, 0x24, 0x2f)),
-            );
+            .style(theme::shell_border());
         let inner = block.inner(modal_area);
 
         frame.render_widget(Clear, modal_area);

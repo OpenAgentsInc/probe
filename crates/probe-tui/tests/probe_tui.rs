@@ -170,7 +170,7 @@ fn completed_tool_turn_renders_compact_output_text() {
 
     let rendered = app.render_to_string(100, 24);
     assert!(rendered.contains("README.md:1-4"));
-    assert!(rendered.contains("# Probe"));
+    assert!(rendered.contains("Probe"));
     assert!(!rendered.contains("\"content\""));
     assert!(!rendered.contains("bytes_returned"));
 }
