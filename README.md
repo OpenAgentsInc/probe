@@ -84,13 +84,15 @@ Install the published macOS arm64 CLI:
 
 ```bash
 npm i -g @openagentsinc/probe
-probe --help
+probe
 probe exec --profile openai-codex-subscription "hello"
 ```
 
 The npm install path is currently mac-first for Apple silicon. Packaging and
 release details live in `docs/82-mac-first-npm-global-install-packaging.md`
 and `docs/83-mac-first-npm-release-staging.md`.
+
+Bare `probe` now opens the TUI by default.
 
 Run the TUI:
 

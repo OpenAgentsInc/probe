@@ -140,9 +140,13 @@ After publishing, the honest mac smoke test is:
 
 ```bash
 npm i -g @openagentsinc/probe
-probe --help
-probe exec "hello"
+probe
+probe exec --profile openai-codex-subscription "hello"
 ```
+
+`probe` should open the TUI by default. The `exec` example above assumes this
+machine already has a working hosted Codex login saved under `PROBE_HOME`; if
+it does not, use another configured backend profile for the second smoke step.
 
 Before publish, the honest local proof points are narrower:
 

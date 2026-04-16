@@ -86,7 +86,7 @@ use serde_json::{Value, json};
 #[command(about = "Probe coding-agent runtime CLI")]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -447,7 +447,7 @@ struct InternalDaemonArgs {
     watchdog_timeout_ms: Option<u64>,
 }
 
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
 struct TuiArgs {
     #[arg(long)]
     resume: Option<String>,
@@ -471,6 +471,24 @@ struct TuiArgs {
     smoke_timeout_ms: u64,
     #[arg(long, hide = true)]
     smoke_report_path: Option<PathBuf>,
+}
+
+impl Default for TuiArgs {
+    fn default() -> Self {
+        Self {
+            resume: None,
+            profile: None,
+            cwd: None,
+            probe_home: None,
+            server: ServerArgs::default(),
+            smoke_prompt: None,
+            smoke_attach_only: false,
+            smoke_wait_for_text: None,
+            smoke_wait_for_worker_event: None,
+            smoke_timeout_ms: 5_000,
+            smoke_report_path: None,
+        }
+    }
 }
 
 #[derive(clap::Args, Debug)]
@@ -693,7 +711,7 @@ struct AdoptCandidateArgs {
     state: String,
 }
 
-#[derive(clap::Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
 struct ServerArgs {
     #[arg(long, default_value = "attach")]
     server_mode: String,
@@ -713,6 +731,22 @@ struct ServerArgs {
     server_backend: Option<String>,
     #[arg(long)]
     server_reasoning_budget: Option<u8>,
+}
+
+impl Default for ServerArgs {
+    fn default() -> Self {
+        Self {
+            server_mode: String::from("attach"),
+            server_config: None,
+            server_binary: None,
+            server_model_path: None,
+            server_model_id: None,
+            server_host: None,
+            server_port: None,
+            server_backend: None,
+            server_reasoning_budget: None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -736,7 +770,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
-    match cli.command {
+    match cli.command.unwrap_or(Commands::Tui(TuiArgs::default())) {
         Commands::Exec(args) => run_exec(args),
         Commands::Chat(args) => run_chat(args),
         Commands::Forge(args) => run_forge(args),
@@ -3894,6 +3928,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
+    use clap::Parser;
     use tempfile::tempdir;
 
     use probe_core::backend_profiles::{psionic_apple_fm_bridge, psionic_inference_mesh};
@@ -3907,10 +3942,10 @@ mod tests {
     };
 
     use super::{
-        BackendKind, HostedConnectArgs, ProbeClientTransportConfig, PsionicServerConfig,
-        ServerArgs, ToolApprovalConfig, build_tui_runtime_config, operator_client_config,
-        render_detached_summary_line, render_turn_backend_receipt, render_turn_observability,
-        resolve_server_config,
+        BackendKind, Cli, Commands, HostedConnectArgs, ProbeClientTransportConfig,
+        PsionicServerConfig, ServerArgs, ToolApprovalConfig, TuiArgs, build_tui_runtime_config,
+        operator_client_config, render_detached_summary_line, render_turn_backend_receipt,
+        render_turn_observability, resolve_server_config,
     };
 
     #[test]
@@ -4069,6 +4104,21 @@ mod tests {
             .tool_loop
             .expect("tui config should include tool loop");
         assert_eq!(tool_loop.approval, ToolApprovalConfig::allow_all());
+    }
+
+    #[test]
+    fn bare_probe_parse_defaults_to_no_subcommand() {
+        let cli = Cli::try_parse_from(["probe"]).expect("bare probe should parse");
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn explicit_tui_parse_matches_default_tui_args() {
+        let cli = Cli::try_parse_from(["probe", "tui"]).expect("probe tui should parse");
+        match cli.command {
+            Some(Commands::Tui(args)) => assert_eq!(args, TuiArgs::default()),
+            other => panic!("expected tui command, got {other:?}"),
+        }
     }
 
     #[test]
