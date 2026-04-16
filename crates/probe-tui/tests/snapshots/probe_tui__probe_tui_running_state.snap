@@ -5,6 +5,7 @@ expression: snapshot
 
 
 
+
            ┌─ Backend ──────────────────────────────────────────────┐
            │ Running call 1/3: Sanity Check                         │
            │                                                        │
@@ -14,15 +15,14 @@ expression: snapshot
            │ Response                                               │
            │ [waiting for Apple FM reply]                           │
            │                                                        │
+           │ Backend Status                                         │
+           │   phase: running                                       │
+           │   call: 1/3                                            │
            └────────────────────────────────────────────────────────┘
 
 
 
 
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: opened backend overlay | backend: apple_fm_bridge | target:          │
-└──────────────────────────────────────────────────────────────────────────────┘
-
-┌─ Composer (disabled) ────────────────────────────────────────────────────────┐
-│ Composer disabled while backend overlay owns focus. Esc returns to chat.     │
+┌────────────────────────────────locked | plain | apple-foundation-model | idle┐
+│ Input disabled while backend overlay owns focus. Esc returns to chat.        │
 └──────────────────────────────────────────────────────────────────────────────┘

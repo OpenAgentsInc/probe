@@ -34,8 +34,8 @@ surface feel fake even when the runtime was honest:
   - preserves partial output on stream failure and only clears the live stream
     cell when the authoritative transcript rows land
 - `crates/probe-tui/src/app.rs`
-  - reuses the existing bottom status bar as a compact backend and stream state
-    surface, avoiding a return to the old right-rail clutter
+  - reuses the input box header as a compact backend and stream state surface,
+    avoiding a return to the old right-rail clutter
 
 ## Operator Contract
 

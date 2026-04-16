@@ -118,15 +118,6 @@ enum AssistantStreamMode {
     Snapshot,
 }
 
-impl AssistantStreamMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Delta => "delta",
-            Self::Snapshot => "snapshot",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct StreamToolCallState {
     tool_index: usize,
@@ -513,23 +504,7 @@ impl ChatScreen {
         })
     }
 
-    pub fn compact_runtime_status(&self) -> String {
-        let backend = self
-            .runtime
-            .backend_kind
-            .as_deref()
-            .or_else(|| {
-                self.operator_backend
-                    .as_ref()
-                    .map(|summary| render_backend_kind(summary.backend_kind))
-            })
-            .unwrap_or("pending");
-        let phase = self.runtime.phase.as_deref().unwrap_or("idle");
-        let target = self
-            .operator_backend
-            .as_ref()
-            .map(ServerOperatorSummary::endpoint_label)
-            .unwrap_or_else(|| String::from("pending"));
+    pub fn composer_header_status(&self) -> String {
         let model = self
             .runtime
             .model_id
@@ -540,46 +515,25 @@ impl ChatScreen {
                     .and_then(|summary| summary.model_id.as_deref())
             })
             .unwrap_or("pending");
-
-        if let Some(stream) = &self.stream {
-            let mode = stream.mode.label();
-            let chars = stream.assistant_text.chars().count();
-            let tool_calls = stream.tool_calls.len();
-            let mut parts = vec![
-                format!("backend: {backend}"),
-                format!("target: {target}"),
-                format!("model: {}", preview(model, 28)),
-                format!("phase: {phase}"),
-                format!("round: {}", stream.round_trip),
-                format!("stream: {mode}"),
-                format!("chars: {chars}"),
-            ];
-            if tool_calls > 0 {
-                parts.push(format!("tool_deltas: {tool_calls}"));
-            }
-            if let Some(ms) = stream.first_chunk_ms {
-                parts.push(format!("ttft_ms: {ms}"));
-            }
-            if let Some(finish_reason) = stream.finish_reason.as_deref() {
-                parts.push(format!("finish: {finish_reason}"));
-            }
-            if stream.failure.is_some() {
-                parts.push(String::from("state: failed"));
-            }
-            return parts.join(" | ");
+        let reasoning = self.operator_backend.as_ref().and_then(|summary| {
+            resolved_reasoning_level_for_backend(
+                summary.backend_kind,
+                summary.reasoning_level.as_deref(),
+            )
+        });
+        let phase = compact_phase_label(self.runtime.phase.as_deref().unwrap_or("idle"));
+        let mut parts = vec![preview(model, 24)];
+        if let Some(reasoning) = reasoning {
+            parts.push(reasoning.to_string());
         }
-
-        let mut parts = vec![
-            format!("backend: {backend}"),
-            format!("target: {target}"),
-            format!("model: {}", preview(model, 28)),
-            format!("phase: {phase}"),
-        ];
-        if let Some(round_trip) = self.runtime.round_trip {
-            parts.push(format!("round: {round_trip}"));
+        parts.push(phase.to_string());
+        if let Some(round_trip) = self.runtime.round_trip
+            && self.runtime.phase.as_deref().unwrap_or("idle") != "idle"
+        {
+            parts.push(format!("round {round_trip}"));
         }
-        if let Some(tool) = self.runtime.active_tool.as_deref() {
-            parts.push(format!("tool: {tool}"));
+        if self.pending_tool_approval_count() > 0 {
+            parts.push(format!("approval {}", self.pending_tool_approval_count()));
         }
         parts.join(" | ")
     }
@@ -2449,6 +2403,19 @@ fn render_backend_kind(value: probe_protocol::backend::BackendKind) -> &'static 
             "openai_codex_subscription"
         }
         probe_protocol::backend::BackendKind::AppleFmBridge => "apple_fm_bridge",
+    }
+}
+
+fn compact_phase_label(phase: &str) -> &str {
+    match phase {
+        "turn_started" => "queued",
+        "model_request" => "waiting",
+        "assistant_streaming" | "assistant_snapshot_streaming" => "streaming",
+        "assistant_snapshot" => "snapshot",
+        "tool_call_streaming" => "tooling",
+        "assistant_stream_finished" => "done",
+        "model_request_failed" => "failed",
+        other => other,
     }
 }
 

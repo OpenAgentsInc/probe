@@ -1,6 +1,5 @@
 ---
 source: crates/probe-cli/tests/cli_regressions.rs
-assertion_line: 191
 expression: report
 ---
 {
@@ -514,7 +513,7 @@ expression: report
   "run": {
     "git_commit_sha": "<git-sha>",
     "git_dirty": "<git-dirty>",
-    "probe_version": "0.1.2",
+    "probe_version": "0.1.3",
     "run_id": "<run-id>",
     "schema_version": "v3"
   },

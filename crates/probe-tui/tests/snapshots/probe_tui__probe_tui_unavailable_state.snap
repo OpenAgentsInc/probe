@@ -5,6 +5,7 @@ expression: snapshot
 
 
 
+
            ┌─ Backend ──────────────────────────────────────────────┐
            │ Apple FM is not ready on this machine right now.       │
            │                                                        │
@@ -14,15 +15,14 @@ expression: snapshot
            │ machine is admitted.                                   │
            │                                                        │
            │ Backend Status                                         │
+           │   phase: unavailable                                   │
+           │   calls_done: 0                                        │
+           │   focus: backend overlay                               │
            └────────────────────────────────────────────────────────┘
 
 
 
 
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: opened backend overlay | backend: apple_fm_bridge | target:          │
-└──────────────────────────────────────────────────────────────────────────────┘
-
-┌─ Composer (disabled) ────────────────────────────────────────────────────────┐
-│ Composer disabled while backend overlay owns focus. Esc returns to chat.     │
+┌────────────────────────────────locked | plain | apple-foundation-model | idle┐
+│ Input disabled while backend overlay owns focus. Esc returns to chat.        │
 └──────────────────────────────────────────────────────────────────────────────┘

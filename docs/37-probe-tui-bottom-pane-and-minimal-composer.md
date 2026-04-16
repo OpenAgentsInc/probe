@@ -20,7 +20,7 @@ owner. That made the missing text box a structural problem, not a cosmetic one.
 `BottomPane` is the first honest seam for:
 
 - composer state and editing behavior
-- bottom-of-screen shell status
+- compact input-header chrome
 - cursor placement
 - future draft history, slash commands, mentions, attachments, and overlay
   replacement
@@ -34,7 +34,7 @@ screen area on every frame.
 
 The bottom pane owns:
 
-- shell status text
+- compact input-header metadata
 - composer rendering
 - cursor math
 - composer editing commands

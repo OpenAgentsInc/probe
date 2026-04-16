@@ -109,7 +109,7 @@ This folder holds technical planning docs for the Probe runtime.
 - `37-probe-tui-bottom-pane-and-minimal-composer.md`
   - the first real bottom-pane seam for Probe TUI input: a cursor-bearing
     composer, modifier-based global shell commands, explicit disabled/busy
-    states, and bottom-pane-owned status rendering instead of a passive footer
+    states, and bottom-pane-owned input chrome instead of a passive footer
 - `38-probe-tui-transcript-turn-rendering.md`
   - the first real chat transcript turn model for Probe TUI, including visible
     user/tool/assistant entries, a worker-driven active-turn cell, and a more
@@ -150,7 +150,7 @@ This folder holds technical planning docs for the Probe runtime.
 - `49-probe-tui-streamed-output-rendering.md`
   - real incremental TUI rendering for streamed OpenAI deltas and Apple FM
     snapshots, streamed tool-call assembly in the active cell, compact backend
-    and stream state in the bottom status bar, and authoritative replacement by
+    and stream state in the input header, and authoritative replacement by
     committed transcript rows
 - `50-tailnet-qwen-operator-lane.md`
   - first-class remote-Qwen operator lane for `probe tui`, `probe chat`, and

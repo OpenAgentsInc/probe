@@ -3,6 +3,11 @@ source: crates/probe-tui/tests/probe_tui.rs
 expression: snapshot
 ---
 ┌─ Transcript ─────────────────────────────────────────────────────────────────┐
+│   Summarize what Probe owns.                                                 │
+│                                                                              │
+│ [tool call] read_file                                                        │
+│   call: call_readme_1                                                        │
+│   args: {"path":"README.md"}                                                 │
 │   turn: 1                                                                    │
 │                                                                              │
 │ [tool result] read_file                                                      │
@@ -18,11 +23,6 @@ expression: snapshot
 │ approvals, and CLI/TUI surfaces.                                             │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ status: committed assistant row | backend: openai_chat_completions | target: │
-└──────────────────────────────────────────────────────────────────────────────┘
-
-┌─ Composer ───────────────────────────────────────────────────────────────────┐
-│ cmd: plain                                                                   │
+┌────────────────────────────────────plain | qwen3.5-2b-q8_0-registry... | idle┐
 │ Type a Probe message. Enter submits. Ctrl+J inserts a newline.               │
 └──────────────────────────────────────────────────────────────────────────────┘

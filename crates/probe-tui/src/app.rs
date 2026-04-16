@@ -471,7 +471,7 @@ impl AppShell {
         self.bottom_pane.render(
             frame,
             sections[1],
-            self.bottom_status_line().as_str(),
+            self.base_screen().composer_header_status().as_str(),
             &pane_state,
         );
         if self.active_screen_id() == ScreenId::Chat
@@ -504,30 +504,21 @@ impl AppShell {
             .expect("base screen is always chat")
     }
 
-    fn bottom_status_line(&self) -> String {
-        let runtime = self.base_screen().compact_runtime_status();
-        if runtime.is_empty() {
-            self.last_status.clone()
-        } else {
-            format!("{} | {}", self.last_status, runtime)
-        }
-    }
-
     fn bottom_pane_state(&self) -> BottomPaneState {
         match self.active_screen_id() {
             ScreenId::Help => {
                 return BottomPaneState::Disabled(String::from(
-                    "Composer disabled while help owns focus. Esc or F1 returns to chat.",
+                    "Input disabled while help owns focus. Esc or F1 returns to chat.",
                 ));
             }
             ScreenId::SetupOverlay => {
                 return BottomPaneState::Disabled(String::from(
-                    "Composer disabled while backend overlay owns focus. Esc returns to chat.",
+                    "Input disabled while backend overlay owns focus. Esc returns to chat.",
                 ));
             }
             ScreenId::ApprovalOverlay => {
                 return BottomPaneState::Disabled(String::from(
-                    "Composer replaced by the active overlay.",
+                    "Input replaced by the active overlay.",
                 ));
             }
             ScreenId::Chat => {}
@@ -543,7 +534,7 @@ impl AppShell {
         match self.task_phase() {
             TaskPhase::Queued | TaskPhase::CheckingAvailability | TaskPhase::Running => {
                 BottomPaneState::Busy(String::from(
-                    "Backend check is running in the background. Composer stays live.",
+                    "Backend check is running in the background. Input stays live.",
                 ))
             }
             TaskPhase::Idle | TaskPhase::Unavailable | TaskPhase::Completed | TaskPhase::Failed => {
@@ -1130,6 +1121,21 @@ mod tests {
         let app = AppShell::new_for_tests();
         let rendered = app.render_to_string(120, 32);
         assert!(!rendered.contains("Codex │ Qwen │ Apple FM"));
+    }
+
+    #[test]
+    fn codex_footer_collapses_runtime_state_into_the_input_header() {
+        let mut config = openai_codex_subscription();
+        config.reasoning_level = Some(String::from("high"));
+        let app = AppShell::new_for_tests_with_chat_config(AppShell::build_chat_runtime_config(
+            None, config,
+        ));
+        let rendered = app.render_to_string(120, 32);
+
+        assert!(rendered.contains("plain | gpt-5.4 | high | idle"));
+        assert!(!rendered.contains("status:"));
+        assert!(!rendered.contains("Composer"));
+        assert!(!rendered.contains("cmd: plain"));
     }
 
     #[test]

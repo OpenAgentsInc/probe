@@ -38,7 +38,7 @@ that path was still implicit:
   - stores and renders the operator backend summary
   - upgrades the old setup overlay into a backend overlay
   - shows the remote operator contract explicitly for non-Apple-FM lanes
-  - keeps the compact backend summary visible in the bottom status bar
+  - keeps the compact backend summary visible in the input header
 
 ## Operator Contract
 
@@ -76,8 +76,8 @@ The first remote Probe lane stays narrow:
   where it cycles reasoning level instead
 - switching backend resets the visible chat shell so the next submit starts a
   fresh session on that backend
-- the TUI bottom status bar shows backend kind, target, attach mode, model, and
-  live phase
+- the TUI input header shows compact model and live phase context for the
+  active backend without a separate status box
 - `Ctrl+S` opens a backend overlay that shows the operator contract for remote
   Qwen lanes instead of unrelated Apple FM setup detail
 - Apple FM startup checks only foreground when the active chat backend is Apple

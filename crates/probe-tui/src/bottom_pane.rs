@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
@@ -23,11 +23,11 @@ impl BottomPaneState {
         matches!(self, Self::Active | Self::Busy(_))
     }
 
-    fn title(&self) -> String {
+    fn title_state_label(&self) -> Option<&'static str> {
         match self {
-            Self::Active => String::from("─ Composer "),
-            Self::Busy(_) => String::from("─ Composer (busy) "),
-            Self::Disabled(_) => String::from("─ Composer (disabled) "),
+            Self::Active => None,
+            Self::Busy(_) => Some("busy"),
+            Self::Disabled(_) => Some("locked"),
         }
     }
 
@@ -255,37 +255,21 @@ impl ComposerState {
         self.pasted_multiline = snapshot.pasted_multiline;
     }
 
-    fn metadata_line(&self) -> String {
+    fn title_segments(&self) -> Vec<String> {
         let mut parts = vec![match slash_command(self.text.as_str()) {
-            Some(command) => format!("cmd: /{command}"),
-            None => String::from("cmd: plain"),
+            Some(command) => format!("/{command}"),
+            None => String::from("plain"),
         }];
-
-        let mentions = parse_mentions(self.text.as_str());
-        if !mentions.is_empty() {
-            parts.push(format!(
-                "mentions: {}",
-                render_mentions(mentions.as_slice())
-            ));
-        }
         if !self.attachments.is_empty() {
-            parts.push(format!(
-                "attach: {}",
-                self.attachments
-                    .iter()
-                    .map(|attachment| attachment.label.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+            parts.push(format!("attach {}", self.attachments.len()));
         }
         if self.pasted_multiline {
-            parts.push(String::from("paste: multiline"));
+            parts.push(String::from("paste"));
         }
         if !self.history.is_empty() {
-            parts.push(format!("hist: {}", self.history.len()));
+            parts.push(format!("hist {}", self.history.len()));
         }
-
-        parts.join(" | ")
+        parts
     }
 
     fn visible_lines(&self) -> Vec<String> {
@@ -341,9 +325,9 @@ impl BottomPane {
         let content_lines = if state.helper_copy().is_some() {
             1u16
         } else {
-            1 + self.composer.line_count().min(MAX_VISIBLE_COMPOSER_LINES) as u16
+            self.composer.line_count().min(MAX_VISIBLE_COMPOSER_LINES) as u16
         };
-        3 + 1 + content_lines + 2
+        content_lines + 2
     }
 
     pub fn handle_event(
@@ -409,32 +393,33 @@ impl BottomPane {
         }
     }
 
-    pub fn render(&self, frame: &mut Frame<'_>, area: Rect, status: &str, state: &BottomPaneState) {
-        let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
-            .spacing(1)
-            .split(area);
+    fn title_text(&self, state: &BottomPaneState, runtime_status: &str) -> String {
+        let mut parts = Vec::new();
+        if let Some(label) = state.title_state_label() {
+            parts.push(label.to_string());
+        }
+        parts.extend(self.composer.title_segments());
+        if !runtime_status.is_empty() {
+            parts.push(runtime_status.to_string());
+        }
+        parts.join(" | ")
+    }
 
-        let status_block = Block::default()
-            .borders(Borders::ALL)
-            .padding(Padding::horizontal(1))
-            .style(shell_border());
-        let status_inner = status_block.inner(rows[0]);
-        frame.render_widget(status_block, rows[0]);
-        frame.render_widget(
-            Paragraph::new(Line::from(format!(
-                "status: {status} | Ctrl+R/S/A/O | F1 | Ctrl+C"
-            )))
-            .wrap(Wrap { trim: false }),
-            status_inner,
-        );
-
+    pub fn render(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        runtime_status: &str,
+        state: &BottomPaneState,
+    ) {
+        let title = self.title_text(state, runtime_status);
         let composer_block = Block::default()
             .borders(Borders::ALL)
             .padding(Padding::horizontal(1))
-            .title(state.title())
+            .title(Line::from(title).alignment(Alignment::Right))
             .style(shell_border());
-        let composer_inner = composer_block.inner(rows[1]);
-        frame.render_widget(composer_block, rows[1]);
+        let composer_inner = composer_block.inner(area);
+        frame.render_widget(composer_block, area);
 
         let content = if let Some(helper_copy) = state.helper_copy() {
             Text::from(Line::styled(
@@ -444,22 +429,20 @@ impl BottomPane {
                     .add_modifier(Modifier::DIM),
             ))
         } else {
-            let mut lines = vec![Line::styled(
-                self.composer.metadata_line(),
-                Style::default()
-                    .fg(Color::Rgb(0xf1, 0xc4, 0x53))
-                    .add_modifier(Modifier::DIM),
-            )];
-            if self.composer.text.is_empty() {
-                lines.push(Line::styled(
+            let lines = if self.composer.text.is_empty() {
+                vec![Line::styled(
                     PLACEHOLDER,
                     Style::default()
                         .fg(Color::Rgb(0x91, 0xae, 0xc4))
                         .add_modifier(Modifier::DIM),
-                ));
+                )]
             } else {
-                lines.extend(self.composer.visible_lines().into_iter().map(Line::from));
-            }
+                self.composer
+                    .visible_lines()
+                    .into_iter()
+                    .map(Line::from)
+                    .collect()
+            };
             Text::from(lines)
         };
         frame.render_widget(
@@ -473,13 +456,10 @@ impl BottomPane {
         if !state.input_enabled() {
             return None;
         }
-        let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(0)])
-            .spacing(1)
-            .split(area);
         let composer_inner = Block::default()
             .borders(Borders::ALL)
             .padding(Padding::horizontal(1))
-            .inner(rows[1]);
+            .inner(area);
         let visible_lines = self.composer.visible_lines();
         let visible_start_row = self
             .composer
@@ -489,7 +469,7 @@ impl BottomPane {
         let row = row.saturating_sub(visible_start_row);
         Some((
             composer_inner.x.saturating_add(col as u16),
-            composer_inner.y.saturating_add(1 + row as u16),
+            composer_inner.y.saturating_add(row as u16),
         ))
     }
 
@@ -543,14 +523,6 @@ fn parse_mentions(value: &str) -> Vec<DraftMention> {
         }
     }
     mentions
-}
-
-fn render_mentions(mentions: &[DraftMention]) -> String {
-    mentions
-        .iter()
-        .map(|mention| format!("{}:{}", mention.kind.label(), mention.value))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn previous_grapheme_bounds(value: &str, cursor: usize) -> Option<(usize, usize)> {

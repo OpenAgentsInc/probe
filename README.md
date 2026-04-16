@@ -401,8 +401,8 @@ streams full session snapshots rather than fake token deltas. The chat surface
 now renders those streams honestly in place: one retained active cell grows
 with streamed deltas or snapshot replacement until the authoritative
 transcript rows land, streamed tool-call assembly stays visible before final
-tool rows commit, and the bottom status bar carries a compact backend and
-stream summary.
+tool rows commit, and the input header carries the compact backend and stream
+summary instead of a separate status box.
 
 Setup, help, and approval flows live in a typed overlay stack above or in
 place of the composer. The old setup surface is now a backend overlay:
