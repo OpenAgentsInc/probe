@@ -80,6 +80,18 @@ small Codex-specific system prompt instead of the generic local-Qwen path.
 
 ## Quick Start
 
+Install the published macOS arm64 CLI:
+
+```bash
+npm i -g @openagentsinc/probe
+probe --help
+probe exec --profile openai-codex-subscription "hello"
+```
+
+The npm install path is currently mac-first for Apple silicon. Packaging and
+release details live in `docs/82-mac-first-npm-global-install-packaging.md`
+and `docs/83-mac-first-npm-release-staging.md`.
+
 Run the TUI:
 
 ```bash
@@ -91,10 +103,6 @@ Run a one-shot turn:
 ```bash
 cargo run -p probe-cli -- exec "Explain what this repository does."
 ```
-
-Probe now also carries the first checked-in npm wrapper surface for a future
-global install path under `npm/`. The current packaging work is mac-first and
-is documented in `docs/82-mac-first-npm-global-install-packaging.md`.
 
 Start an interactive session:
 
