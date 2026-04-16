@@ -99,6 +99,5 @@ The npm wrapper belongs in `probe`, not in the workspace repo, because:
 - the packaging logic needs to evolve alongside the native binary and release
   shape
 
-The next step is not to redesign the wrapper again. The next step is to add
-the mac-first native artifact and publish flow above this checked-in package
-surface.
+The next layer above this wrapper surface is now documented in
+`docs/83-mac-first-npm-release-staging.md`.

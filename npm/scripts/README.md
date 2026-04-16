@@ -70,5 +70,38 @@ Pack either staged directory when needed:
   --pack-output /tmp/probe-npm/probe-npm-0.1.0.tgz
 ```
 
-The broader release staging and publish flow lives in the follow-on root
-script added for the next packaging issue.
+The broader release staging and publish flow now lives in the repo-root
+`scripts/stage_npm_packages.py`.
+
+## Release staging
+
+Create a compressed native mac artifact from the current release binary:
+
+```bash
+cargo build --release -p probe-cli
+gzip -c target/release/probe-cli > /tmp/probe-aarch64-apple-darwin.gz
+```
+
+Stage both the payload tarball and the meta tarball:
+
+```bash
+./scripts/stage_npm_packages.py \
+  --release-version 0.1.0 \
+  --artifact-path /tmp/probe-aarch64-apple-darwin.gz \
+  --output-dir /tmp/probe-npm-dist
+```
+
+Publish in the correct order and with the correct tags:
+
+```bash
+./scripts/stage_npm_packages.py \
+  --release-version 0.1.0 \
+  --artifact-path /tmp/probe-aarch64-apple-darwin.gz \
+  --output-dir /tmp/probe-npm-dist \
+  --publish
+```
+
+The script publishes:
+
+- `probe-darwin-arm64` with npm tag `darwin-arm64`
+- `probe` with npm tag `latest`

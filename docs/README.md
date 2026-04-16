@@ -289,3 +289,7 @@ This folder holds technical planning docs for the Probe runtime.
   - checked-in npm wrapper shape for the first macOS global install surface,
     including the thin meta package, the first platform payload package, and
     the `probe` launcher that spawns the native binary from `vendor/`
+- `83-mac-first-npm-release-staging.md`
+  - mac-first native artifact handling, npm tarball staging, publish order,
+    and dist-tag rules so `latest` stays on the thin meta package instead of
+    the platform payload
