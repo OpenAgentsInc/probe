@@ -51,7 +51,7 @@ pub fn openai_codex_subscription() -> BackendProfile {
         base_url: String::from(DEFAULT_OPENAI_CODEX_BASE_URL),
         model: String::from(OPENAI_CODEX_SUBSCRIPTION_MODEL),
         reasoning_level: None,
-        api_key_env: String::new(),
+        api_key_env: String::from("PROBE_OPENAI_API_KEY"),
         timeout_secs: 60,
         attach_mode: ServerAttachMode::AttachToExisting,
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
@@ -282,7 +282,7 @@ mod tests {
         );
         assert_eq!(profile.base_url, DEFAULT_OPENAI_CODEX_BASE_URL);
         assert_eq!(profile.model, OPENAI_CODEX_SUBSCRIPTION_MODEL);
-        assert_eq!(profile.api_key_env, "");
+        assert_eq!(profile.api_key_env, "PROBE_OPENAI_API_KEY");
         assert_eq!(profile.timeout_secs, 60);
     }
 

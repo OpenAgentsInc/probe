@@ -44,10 +44,14 @@ Runtime-owned request construction now happens in:
 
 The Codex transport differs from the local OpenAI-compatible path in four ways:
 
-1. It loads stored OAuth state from `PROBE_HOME/auth/openai-codex.json`.
-2. It calls `refresh_if_needed()` before request execution.
-3. It rewrites the request target to `/backend-api/codex/responses`.
-4. It injects Codex-specific headers.
+1. It loads versioned multi-account OAuth state from
+   `PROBE_HOME/auth/openai-codex.json`.
+2. It refreshes saved accounts independently when they are expired.
+3. It refreshes or reuses cached usage snapshots from
+   `GET /backend-api/wham/usage`.
+4. It ranks non-expired accounts by remaining headroom and picks the best one.
+5. It rewrites the request target to `/backend-api/codex/responses`.
+6. It injects Codex-specific headers.
 
 Current header set:
 
@@ -56,6 +60,18 @@ Current header set:
 - `originator: probe`
 - `User-Agent: probe/<version> (<os>; <arch>)`
 - `session_id: <probe session id>` when the runtime has a session id
+
+If all connected subscription accounts are rate-limited and
+`PROBE_OPENAI_API_KEY` is present, Probe now rewrites the target to the public
+Responses API at:
+
+- `https://api.openai.com/v1/responses`
+
+In that fallback mode Probe keeps the same model and Responses body shape, but:
+
+- auth comes from `PROBE_OPENAI_API_KEY`
+- `ChatGPT-Account-Id` is omitted
+- the fallback is only used after the saved subscription accounts are exhausted
 
 Current hosted-body contract:
 
@@ -136,21 +152,26 @@ Expected behavior:
 - Probe resolves the canonical Codex profile.
 - Probe uses `https://chatgpt.com/backend-api/codex/responses`.
 - Probe refreshes expired auth state before sending the request.
+- Probe refreshes cached usage snapshots and picks the account with the most
+  remaining headroom.
+- Probe rotates to the next saved account if the chosen account still returns
+  `429`.
 - Probe includes the subscription headers listed above.
 - Probe sends `instructions` plus `input` instead of `messages`.
 - Probe refuses unsupported non-Codex models before the HTTP call is made.
+- If every saved subscription account is rate-limited and
+  `PROBE_OPENAI_API_KEY` is exported, Probe falls back to
+  `https://api.openai.com/v1/responses`.
 
 ## Contrast With The OpenAI-compatible Psionic Lane
 
-The Codex subscription lane does not use `PROBE_OPENAI_API_KEY`.
+The Codex subscription lane still does not require `PROBE_OPENAI_API_KEY` for
+normal attached subscription usage.
 
-The built-in OpenAI-compatible Psionic-backed profiles do. Probe now resolves
-their configured bearer env var explicitly and fails early if that env var is
-missing or empty, instead of silently relying on an implicit placeholder.
-
-That means the first Forge worker deploy lane should keep
-`PROBE_OPENAI_API_KEY` unset unless the operator intentionally changes the
-worker to an env-backed OpenAI-compatible profile.
+The built-in OpenAI-compatible Psionic-backed profiles still require that env
+var directly. Probe now also treats it as an optional last-resort fallback for
+the Codex subscription lane after the saved subscription accounts are
+rate-limited.
 
 ## Tests
 

@@ -25,12 +25,25 @@ Probe stores subscription auth at:
 
 - `PROBE_HOME/auth/openai-codex.json`
 
-Stored fields:
+That file is now a Probe-owned versioned multi-account store rather than one
+flat token record.
 
+Per-account stored fields include:
+
+- stable local `key`
+- optional `label`
 - `refresh`
 - `access`
 - `expires`
 - optional `account_id`
+- `added_at_ms`
+- optional `last_selected_at_ms`
+- optional cached rate-limit snapshot from `GET /backend-api/wham/usage`
+
+The store also keeps the current `selected_account_key`.
+
+Probe still reads the original single-record JSON shape for backward
+compatibility and transparently lifts it into the multi-account view.
 
 On Unix systems the file is written with `0600` permissions.
 
@@ -58,6 +71,12 @@ Use `--no-open-browser` if you want to copy the URL manually:
 cargo run -p probe-cli -- codex login --method browser --no-open-browser
 ```
 
+To add a readable local label for later status output:
+
+```bash
+cargo run -p probe-cli -- codex login --method browser --label work
+```
+
 ### Headless Device Flow
 
 Run:
@@ -83,6 +102,26 @@ The checked-in worker deploy lane lives under
 
 - `PROBE_HOME/auth/openai-codex.json`
 
+You can also attach a label on this path:
+
+```bash
+cargo run -p probe-cli -- codex login --method headless --label personal
+```
+
+## Smart Selection And Fallback
+
+When Probe executes against the `openai-codex-subscription` backend now, it:
+
+1. refreshes each saved account independently when needed
+2. refreshes cached usage snapshots from `GET /backend-api/wham/usage`
+3. ranks non-expired accounts by remaining headroom
+4. prefers the account with the lowest `used_percent`
+5. rotates to the next account if the chosen account still returns `429`
+6. optionally falls back to `PROBE_OPENAI_API_KEY` only after the connected
+   subscription accounts are rate-limited
+
+That keeps one exhausted or stale account from blocking the others.
+
 ## Status And Logout
 
 Inspect the current auth state:
@@ -91,7 +130,15 @@ Inspect the current auth state:
 cargo run -p probe-cli -- codex status
 ```
 
-When auth is missing, Probe now prints both:
+Status now prints:
+
+- account count
+- selected account key and label
+- per-account expiry and cached rate-limit summary
+- the selected execution route
+- whether `PROBE_OPENAI_API_KEY` is currently available as an optional fallback
+
+When auth is missing, Probe still prints both:
 
 - a local browser-login hint
 - a worker-oriented headless-login hint
@@ -100,6 +147,12 @@ Clear the stored state:
 
 ```bash
 cargo run -p probe-cli -- codex logout
+```
+
+Remove one saved account without clearing the rest:
+
+```bash
+cargo run -p probe-cli -- codex logout --account acct_123
 ```
 
 ## TUI Surface
@@ -123,11 +176,14 @@ submits any real request.
 3. Run either browser or headless login.
 4. Re-run `cargo run -p probe-cli -- codex status` and confirm:
    - `authenticated=true`
-   - `expires_ms` is populated
+   - `account_count` increments
+   - `expires_ms` is populated for the selected account
    - `account_id` is populated when the subscription exposes one
    - the saved path is `PROBE_HOME/auth/openai-codex.json`
-5. Run `cargo run -p probe-cli -- codex logout`.
-6. Re-run `cargo run -p probe-cli -- codex status` and confirm `authenticated=false`.
+5. Add a second account and confirm the status output lists both accounts.
+6. Run `cargo run -p probe-cli -- codex logout --account <account_id>` and confirm only that one account is removed.
+7. Run `cargo run -p probe-cli -- codex logout`.
+8. Re-run `cargo run -p probe-cli -- codex status` and confirm `authenticated=false`.
 
 ## Validation
 

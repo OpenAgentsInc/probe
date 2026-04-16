@@ -109,11 +109,62 @@ fn codex_status_reports_missing_auth_state() {
         .stdout(predicate::str::contains("model=gpt-5.4"))
         .stdout(predicate::str::contains("reasoning_level=backend_default"))
         .stdout(predicate::str::contains("authenticated=false"))
+        .stdout(predicate::str::contains("account_count=0"))
         .stdout(predicate::str::contains(
             "hint=run `probe codex login --method browser`",
         ))
         .stdout(predicate::str::contains(
             "worker_hint=run `probe codex login --method headless`",
+        ));
+}
+
+#[test]
+fn codex_status_lists_multiple_accounts_and_selected_route() {
+    let environment = ProbeTestEnvironment::new();
+    let store = OpenAiCodexAuthStore::new(environment.probe_home());
+    store
+        .save_account(
+            &OpenAiCodexAuthRecord {
+                refresh: String::from("refresh-one"),
+                access: String::from("access-one"),
+                expires: u64::MAX / 2,
+                account_id: Some(String::from("acct-one")),
+            },
+            Some(String::from("personal")),
+        )
+        .expect("save first auth state");
+    store
+        .save_account(
+            &OpenAiCodexAuthRecord {
+                refresh: String::from("refresh-two"),
+                access: String::from("access-two"),
+                expires: u64::MAX / 2,
+                account_id: Some(String::from("acct-two")),
+            },
+            Some(String::from("work")),
+        )
+        .expect("save second auth state");
+
+    probe_cli_command()
+        .arg("codex")
+        .arg("status")
+        .arg("--probe-home")
+        .arg(environment.probe_home())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("authenticated=true"))
+        .stdout(predicate::str::contains("account_count=2"))
+        .stdout(predicate::str::contains(
+            "selected_account_key=acct:acct-two",
+        ))
+        .stdout(predicate::str::contains(
+            "account key=acct:acct-one label=personal",
+        ))
+        .stdout(predicate::str::contains(
+            "account key=acct:acct-two label=work",
+        ))
+        .stdout(predicate::str::contains(
+            "selected_route=subscription:acct:acct-two:work",
         ));
 }
 
@@ -174,6 +225,51 @@ fn codex_logout_removes_persisted_auth_state() {
         .stdout(predicate::str::contains("deleted=true"));
 
     assert!(!store.path().exists(), "logout should delete the auth file");
+}
+
+#[test]
+fn codex_logout_can_remove_one_account_without_clearing_the_store() {
+    let environment = ProbeTestEnvironment::new();
+    let store = OpenAiCodexAuthStore::new(environment.probe_home());
+    store
+        .save_account(
+            &OpenAiCodexAuthRecord {
+                refresh: String::from("refresh-one"),
+                access: String::from("access-one"),
+                expires: u64::MAX / 2,
+                account_id: Some(String::from("acct-one")),
+            },
+            Some(String::from("personal")),
+        )
+        .expect("save first auth state");
+    store
+        .save_account(
+            &OpenAiCodexAuthRecord {
+                refresh: String::from("refresh-two"),
+                access: String::from("access-two"),
+                expires: u64::MAX / 2,
+                account_id: Some(String::from("acct-two")),
+            },
+            Some(String::from("work")),
+        )
+        .expect("save second auth state");
+
+    probe_cli_command()
+        .arg("codex")
+        .arg("logout")
+        .arg("--probe-home")
+        .arg(environment.probe_home())
+        .arg("--account")
+        .arg("acct-two")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("account=acct-two"))
+        .stdout(predicate::str::contains("deleted=true"));
+
+    let status = store.status().expect("status after targeted logout");
+    assert!(status.authenticated);
+    assert_eq!(status.account_count, 1);
+    assert_eq!(status.account_id.as_deref(), Some("acct-one"));
 }
 
 #[test]

@@ -1813,10 +1813,17 @@ impl ChatScreen {
             Ok(status) if status.authenticated => vec![
                 String::from("status: connected"),
                 format!("path: {}", status.path.display()),
+                format!("accounts: {}", status.account_count),
                 format!("expired: {}", status.expired),
                 format!(
                     "account_id: {}",
                     status.account_id.as_deref().unwrap_or("none")
+                ),
+                format!(
+                    "selected: {}",
+                    status.selected_account_label.as_deref().unwrap_or_else(|| {
+                        status.selected_account_key.as_deref().unwrap_or("none")
+                    })
                 ),
                 String::from("manage: `probe codex status` / `probe codex logout`"),
             ],

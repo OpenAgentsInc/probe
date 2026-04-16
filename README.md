@@ -11,7 +11,9 @@ Current shipped surface:
 
 - `probe exec` for one-shot turns
 - `probe chat` for daemon-backed interactive sessions plus resume
-- `probe codex login|status|logout` for ChatGPT/Codex subscription auth
+- `probe codex login|status|logout` for multi-account ChatGPT/Codex
+  subscription auth with live limit-aware routing and optional API-key
+  fallback
 - `probe tui` / `cargo probe` for the local terminal UI plus explicit
   detached-session reattach with `--resume`
 - a Codex-first TUI shell with backend autodetection, no interactive backend
@@ -57,7 +59,9 @@ Probe currently ships four backend profiles across three backend families:
   - request endpoint: `https://chatgpt.com/backend-api/codex/responses`
   - model: `gpt-5.4`
   - reasoning level: `backend_default`
-  - auth source: `PROBE_HOME/auth/openai-codex.json`
+  - auth source: versioned multi-account state at `PROBE_HOME/auth/openai-codex.json`
+  - optional fallback env: `PROBE_OPENAI_API_KEY` after all connected
+    subscription accounts are rate-limited
 - `psionic-apple-fm-bridge`
   - default base URL: `http://127.0.0.1:11435`
   - model: `apple-foundation-model`
@@ -67,6 +71,11 @@ Apple FM is attach-only. Probe checks `GET /health` before use and stays honest
 about unavailable or non-admitted machines.
 Codex is also attach-only, but its attach target is the hosted ChatGPT Codex
 endpoint rather than a local Psionic server.
+Probe now supports multiple saved Codex subscription accounts in one auth file,
+refreshes them independently, polls the hosted usage endpoint to estimate
+headroom, prefers the account with the most remaining capacity, and can fall
+back to `PROBE_OPENAI_API_KEY` only after the saved subscription accounts are
+rate-limited.
 The mesh profile is attach-only as well. Probe discovers live routed inventory
 from `GET /psionic/management/status`, picks the effective model from that
 inventory, prints the mesh role or fallback posture in operator output, and

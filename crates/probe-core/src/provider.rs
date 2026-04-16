@@ -3,7 +3,7 @@ use std::fmt::{Display, Formatter};
 use std::path::Path;
 use std::sync::Arc;
 
-use probe_openai_auth::{OpenAiAuthError, OpenAiCodexAuthController};
+use probe_openai_auth::{OpenAiAuthError, OpenAiCodexAuthController, OpenAiCodexRoute};
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_protocol::session::{
     BackendAvailabilityReceipt, BackendFailureReceipt, BackendTranscriptReceipt,
@@ -21,6 +21,14 @@ use psionic_apple_fm::{
     AppleFmChatUsage, AppleFmErrorCode, AppleFmTextStreamEvent, AppleFmToolCallError,
     AppleFmTranscript, AppleFmUsageMeasurement, AppleFmUsageTruth,
 };
+
+const DEFAULT_OPENAI_API_BASE_URL: &str = "https://api.openai.com/v1";
+
+#[derive(Clone, Debug)]
+struct ResolvedCodexAttempt {
+    provider_config: OpenAiProviderConfig,
+    account_key: Option<String>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlainTextMessageRole {
@@ -262,28 +270,26 @@ pub fn complete_openai_plain_text_with_context_and_callback(
     context: OpenAiRequestContext<'_>,
     callback: Option<&mut OpenAiStreamChunkCallback<'_>>,
 ) -> Result<PlainTextProviderResponse, ProviderError> {
-    let provider_config = openai_provider_config_from_profile(profile, context)?;
-    let provider = OpenAiProviderClient::new(provider_config).map_err(ProviderError::OpenAi)?;
     let request_messages = messages
         .iter()
         .map(PlainTextMessage::to_openai_message)
         .collect::<Vec<_>>();
-    let response = match callback {
-        Some(callback) => {
-            let mut streaming_config = provider.config().clone();
-            streaming_config.stream = true;
-            let request = probe_provider_openai::ChatCompletionRequest::from_config(
-                &streaming_config,
-                request_messages,
-            );
-            provider
-                .send_chat_completion_with_callback(&request, callback)
-                .map_err(ProviderError::OpenAi)?
-        }
-        None => provider
-            .chat_completion(request_messages)
-            .map_err(ProviderError::OpenAi)?,
-    };
+    let mut callback = callback;
+    let response =
+        execute_openai_request_with_routing(profile, context, |provider, provider_config| {
+            match callback.as_mut() {
+                Some(callback) => {
+                    let mut streaming_config = provider_config.clone();
+                    streaming_config.stream = true;
+                    let request = probe_provider_openai::ChatCompletionRequest::from_config(
+                        &streaming_config,
+                        request_messages.clone(),
+                    );
+                    provider.send_chat_completion_with_callback(&request, &mut **callback)
+                }
+                None => provider.chat_completion(request_messages.clone()),
+            }
+        })?;
     let assistant_text = response
         .first_message_text()
         .map(normalize_openai_assistant_text);
@@ -442,23 +448,24 @@ pub fn openai_tool_loop_response_with_callback(
         });
     }
 
-    let provider_config = openai_provider_config_from_profile(profile, context)?;
-    let provider =
-        OpenAiProviderClient::new(provider_config.clone()).map_err(ProviderError::OpenAi)?;
-    let mut request =
-        probe_provider_openai::ChatCompletionRequest::from_config(&provider_config, messages)
-            .with_tools(tools, tool_choice, parallel_tool_calls);
-    if callback.is_some() {
-        request.stream = true;
-    }
-    let response = match callback {
-        Some(callback) => provider
-            .send_chat_completion_with_callback(&request, callback)
-            .map_err(ProviderError::OpenAi)?,
-        None => provider
-            .send_chat_completion(&request)
-            .map_err(ProviderError::OpenAi)?,
-    };
+    let mut callback = callback;
+    let response =
+        execute_openai_request_with_routing(profile, context, |provider, provider_config| {
+            let mut request = probe_provider_openai::ChatCompletionRequest::from_config(
+                provider_config,
+                messages.clone(),
+            )
+            .with_tools(tools.clone(), tool_choice.clone(), parallel_tool_calls);
+            if callback.is_some() {
+                request.stream = true;
+            }
+            match callback.as_mut() {
+                Some(callback) => {
+                    provider.send_chat_completion_with_callback(&request, &mut **callback)
+                }
+                None => provider.send_chat_completion(&request),
+            }
+        })?;
     let tool_calls = response.first_tool_calls().map(ToOwned::to_owned);
     let assistant_text = response
         .first_message_text()
@@ -551,6 +558,143 @@ fn plain_text_provider_response_from_apple_session(
     }
 }
 
+fn execute_openai_request_with_routing<T>(
+    profile: &BackendProfile,
+    context: OpenAiRequestContext<'_>,
+    mut execute: impl FnMut(
+        &OpenAiProviderClient,
+        &OpenAiProviderConfig,
+    ) -> Result<T, OpenAiProviderError>,
+) -> Result<T, ProviderError> {
+    if profile.kind != BackendKind::OpenAiCodexSubscription {
+        let provider_config = openai_provider_config_from_profile(profile, context)?;
+        let provider =
+            OpenAiProviderClient::new(provider_config.clone()).map_err(ProviderError::OpenAi)?;
+        return execute(&provider, &provider_config).map_err(ProviderError::OpenAi);
+    }
+
+    let probe_home =
+        context
+            .probe_home
+            .ok_or_else(|| ProviderError::MissingCodexSubscriptionAuth {
+                path: String::from("PROBE_HOME/auth/openai-codex.json"),
+            })?;
+    let controller = OpenAiCodexAuthController::new(probe_home).map_err(ProviderError::Auth)?;
+    let auth_path = controller.store().path().display().to_string();
+    let attempts = codex_provider_attempts_from_profile(profile, context, &controller)?;
+    if attempts.is_empty() {
+        return Err(ProviderError::MissingCodexSubscriptionAuth { path: auth_path });
+    }
+
+    let mut last_rate_limit_error = None;
+    for attempt in attempts {
+        if let Some(account_key) = attempt.account_key.as_deref() {
+            controller
+                .mark_selected_account(account_key)
+                .map_err(ProviderError::Auth)?;
+        }
+        let provider = OpenAiProviderClient::new(attempt.provider_config.clone())
+            .map_err(ProviderError::OpenAi)?;
+        match execute(&provider, &attempt.provider_config) {
+            Ok(response) => return Ok(response),
+            Err(OpenAiProviderError::HttpStatus { status: 429, body }) => {
+                if let Some(account_key) = attempt.account_key.as_deref() {
+                    controller
+                        .mark_account_rate_limited(account_key, body.as_str())
+                        .map_err(ProviderError::Auth)?;
+                }
+                last_rate_limit_error =
+                    Some(ProviderError::OpenAi(OpenAiProviderError::HttpStatus {
+                        status: 429,
+                        body,
+                    }));
+            }
+            Err(error) => return Err(ProviderError::OpenAi(error)),
+        }
+    }
+
+    Err(last_rate_limit_error
+        .unwrap_or(ProviderError::MissingCodexSubscriptionAuth { path: auth_path }))
+}
+
+fn codex_provider_attempts_from_profile(
+    profile: &BackendProfile,
+    context: OpenAiRequestContext<'_>,
+    controller: &OpenAiCodexAuthController,
+) -> Result<Vec<ResolvedCodexAttempt>, ProviderError> {
+    let routing_plan = controller
+        .routing_plan(Some(codex_api_key_env(profile)))
+        .map_err(ProviderError::Auth)?;
+    routing_plan
+        .routes
+        .iter()
+        .map(|route| codex_provider_attempt_from_route(profile, context, route))
+        .collect()
+}
+
+fn codex_provider_attempt_from_route(
+    profile: &BackendProfile,
+    context: OpenAiRequestContext<'_>,
+    route: &OpenAiCodexRoute,
+) -> Result<ResolvedCodexAttempt, ProviderError> {
+    let mut config = OpenAiProviderConfig::from_backend_profile(profile);
+    decorate_codex_provider_config(&mut config, context, None);
+    match route {
+        OpenAiCodexRoute::SubscriptionAccount(account) => {
+            config.auth = OpenAiRequestAuth::BearerToken(account.record.access.clone());
+            if let Some(account_id) = account.record.account_id.as_deref() {
+                config
+                    .extra_headers
+                    .insert(String::from("ChatGPT-Account-Id"), account_id.to_string());
+            }
+            Ok(ResolvedCodexAttempt {
+                provider_config: config,
+                account_key: Some(account.account_key.clone()),
+            })
+        }
+        OpenAiCodexRoute::ApiKeyFallback(route) => {
+            config.base_url = String::from(DEFAULT_OPENAI_API_BASE_URL);
+            config.auth = OpenAiRequestAuth::BearerToken(route.api_key.clone());
+            config.extra_headers.remove("ChatGPT-Account-Id");
+            Ok(ResolvedCodexAttempt {
+                provider_config: config,
+                account_key: None,
+            })
+        }
+    }
+}
+
+fn decorate_codex_provider_config(
+    config: &mut OpenAiProviderConfig,
+    context: OpenAiRequestContext<'_>,
+    account_id: Option<&str>,
+) {
+    config
+        .extra_headers
+        .insert(String::from("originator"), String::from("probe"));
+    config
+        .extra_headers
+        .insert(String::from("User-Agent"), codex_user_agent());
+    if let Some(account_id) = account_id {
+        config
+            .extra_headers
+            .insert(String::from("ChatGPT-Account-Id"), account_id.to_string());
+    }
+    if let Some(session_id) = context.session_id {
+        config
+            .extra_headers
+            .insert(String::from("session_id"), String::from(session_id));
+    }
+}
+
+fn codex_api_key_env(profile: &BackendProfile) -> &str {
+    if profile.api_key_env.trim().is_empty() {
+        "PROBE_OPENAI_API_KEY"
+    } else {
+        profile.api_key_env.as_str()
+    }
+}
+
 fn openai_provider_config_from_profile(
     profile: &BackendProfile,
     context: OpenAiRequestContext<'_>,
@@ -579,28 +723,11 @@ fn openai_provider_config_from_profile(
             })?;
     let controller = OpenAiCodexAuthController::new(probe_home).map_err(ProviderError::Auth)?;
     let auth_path = controller.store().path().display().to_string();
-    let record = controller
-        .refresh_if_needed()
-        .map_err(ProviderError::Auth)?
+    let attempt = codex_provider_attempts_from_profile(profile, context, &controller)?
+        .into_iter()
+        .next()
         .ok_or(ProviderError::MissingCodexSubscriptionAuth { path: auth_path })?;
-    config.auth = OpenAiRequestAuth::BearerToken(record.access);
-    config
-        .extra_headers
-        .insert(String::from("originator"), String::from("probe"));
-    config
-        .extra_headers
-        .insert(String::from("User-Agent"), codex_user_agent());
-    if let Some(account_id) = record.account_id {
-        config
-            .extra_headers
-            .insert(String::from("ChatGPT-Account-Id"), account_id);
-    }
-    if let Some(session_id) = context.session_id {
-        config
-            .extra_headers
-            .insert(String::from("session_id"), String::from(session_id));
-    }
-    Ok(config)
+    Ok(attempt.provider_config)
 }
 
 fn codex_user_agent() -> String {
@@ -727,13 +854,18 @@ fn provider_usage_from_openai(usage: probe_provider_openai::ChatCompletionUsage)
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
+    use probe_test_support::{FakeHttpResponse, FakeOpenAiServer};
+    use serde_json::json;
+    use tempfile::tempdir;
 
     use crate::backend_profiles::openai_codex_subscription;
 
     use super::{
-        OpenAiRequestAuth, OpenAiRequestContext, PlainTextMessage, ProviderError,
-        complete_plain_text_with_context, normalize_openai_assistant_text,
+        DEFAULT_OPENAI_API_BASE_URL, OpenAiRequestAuth, OpenAiRequestContext, PlainTextMessage,
+        ProviderError, complete_plain_text_with_context, normalize_openai_assistant_text,
         normalize_openai_stream_display_text, openai_provider_config_from_profile,
     };
 
@@ -829,5 +961,212 @@ mod tests {
         unsafe {
             std::env::remove_var("PROBE_TEST_OPENAI_API_KEY_PRESENT");
         }
+    }
+
+    #[test]
+    fn codex_backend_uses_api_key_fallback_when_all_accounts_are_limited() {
+        let temp = tempdir().expect("temp dir");
+        let auth_path = temp.path().join("auth/openai-codex.json");
+        fs::create_dir_all(auth_path.parent().expect("auth dir")).expect("create auth dir");
+        fs::write(
+            &auth_path,
+            serde_json::to_vec_pretty(&json!({
+                "version": 2,
+                "selected_account_key": "acct:acct-limited",
+                "accounts": [
+                    {
+                        "key": "acct:acct-limited",
+                        "refresh": "refresh-limited",
+                        "access": "access-limited",
+                        "expires": u64::MAX / 2,
+                        "account_id": "acct-limited",
+                        "added_at_ms": 10,
+                        "last_selected_at_ms": 10,
+                        "rate_limits": {
+                            "fetched_at_ms": u64::MAX / 4,
+                            "plan_type": "pro",
+                            "allowed": false,
+                            "limit_reached": true,
+                            "primary_window": {
+                                "used_percent": 100,
+                                "limit_window_seconds": 604800,
+                                "reset_after_seconds": 1800,
+                                "reset_at": 1776793745u64
+                            }
+                        }
+                    }
+                ]
+            }))
+            .expect("serialize auth state"),
+        )
+        .expect("write auth state");
+        let mut profile = openai_codex_subscription();
+        profile.api_key_env = String::from("PROBE_TEST_CODEX_FALLBACK_API_KEY");
+        let previous_api_key = std::env::var("PROBE_TEST_CODEX_FALLBACK_API_KEY").ok();
+        // SAFETY: this test restores the prior process env state before exit.
+        unsafe {
+            std::env::set_var("PROBE_TEST_CODEX_FALLBACK_API_KEY", "probe-test-fallback");
+        }
+        let config = openai_provider_config_from_profile(
+            &profile,
+            OpenAiRequestContext {
+                probe_home: Some(temp.path()),
+                session_id: Some("sess-fallback"),
+            },
+        )
+        .expect("codex provider config");
+        assert_eq!(config.base_url, DEFAULT_OPENAI_API_BASE_URL);
+        assert_eq!(
+            config.auth,
+            OpenAiRequestAuth::BearerToken(String::from("probe-test-fallback"))
+        );
+        assert!(
+            !config.extra_headers.contains_key("ChatGPT-Account-Id"),
+            "api key fallback must not send a ChatGPT account header"
+        );
+        // SAFETY: this test restores the prior process env state.
+        unsafe {
+            match previous_api_key {
+                Some(value) => std::env::set_var("PROBE_TEST_CODEX_FALLBACK_API_KEY", value),
+                None => std::env::remove_var("PROBE_TEST_CODEX_FALLBACK_API_KEY"),
+            }
+        }
+    }
+
+    #[test]
+    fn codex_request_rotates_to_next_account_after_429() {
+        let temp = tempdir().expect("temp dir");
+        let auth_path = temp.path().join("auth/openai-codex.json");
+        fs::create_dir_all(auth_path.parent().expect("auth dir")).expect("create auth dir");
+        fs::write(
+            &auth_path,
+            serde_json::to_vec_pretty(&json!({
+                "version": 2,
+                "selected_account_key": "acct:acct-first",
+                "accounts": [
+                    {
+                        "key": "acct:acct-first",
+                        "label": "first",
+                        "refresh": "refresh-first",
+                        "access": "access-first",
+                        "expires": u64::MAX / 2,
+                        "account_id": "acct-first",
+                        "added_at_ms": 10,
+                        "last_selected_at_ms": 10,
+                        "rate_limits": {
+                            "fetched_at_ms": u64::MAX / 4,
+                            "plan_type": "pro",
+                            "allowed": true,
+                            "limit_reached": false,
+                            "primary_window": {
+                                "used_percent": 12,
+                                "limit_window_seconds": 604800,
+                                "reset_after_seconds": 1800,
+                                "reset_at": 1776793745u64
+                            }
+                        }
+                    },
+                    {
+                        "key": "acct:acct-second",
+                        "label": "second",
+                        "refresh": "refresh-second",
+                        "access": "access-second",
+                        "expires": u64::MAX / 2,
+                        "account_id": "acct-second",
+                        "added_at_ms": 20,
+                        "last_selected_at_ms": 20,
+                        "rate_limits": {
+                            "fetched_at_ms": u64::MAX / 4,
+                            "plan_type": "pro",
+                            "allowed": true,
+                            "limit_reached": false,
+                            "primary_window": {
+                                "used_percent": 40,
+                                "limit_window_seconds": 604800,
+                                "reset_after_seconds": 1800,
+                                "reset_at": 1776793745u64
+                            }
+                        }
+                    }
+                ]
+            }))
+            .expect("serialize auth state"),
+        )
+        .expect("write auth state");
+        let server = FakeOpenAiServer::from_handler(|request| {
+            assert_eq!(request.path, "/v1/responses");
+            let raw = request.raw.to_ascii_lowercase();
+            if raw.contains("chatgpt-account-id: acct-first") {
+                FakeHttpResponse::json_status(
+                    429,
+                    json!({
+                        "error": {
+                            "type": "usage_limit_reached",
+                            "plan_type": "pro",
+                            "resets_in_seconds": 1200
+                        }
+                    }),
+                )
+            } else if raw.contains("chatgpt-account-id: acct-second") {
+                FakeHttpResponse::json_ok(json!({
+                    "id": "resp_second",
+                    "model": "gpt-5.4",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "output_text", "text": "hello from second"}
+                            ]
+                        }
+                    ],
+                    "usage": {
+                        "input_tokens": 8,
+                        "output_tokens": 4,
+                        "total_tokens": 12
+                    }
+                }))
+            } else {
+                panic!("missing expected ChatGPT account header: {}", request.raw);
+            }
+        });
+        let mut profile = openai_codex_subscription();
+        profile.base_url = server.base_url().to_string();
+        let response = complete_plain_text_with_context(
+            &profile,
+            vec![PlainTextMessage::user("hello")],
+            OpenAiRequestContext {
+                probe_home: Some(temp.path()),
+                session_id: Some("sess-rotate"),
+            },
+        )
+        .expect("rotated codex response");
+        assert_eq!(
+            response.assistant_text.as_deref(),
+            Some("hello from second")
+        );
+        let requests = server.finish();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains("chatgpt-account-id: acct-first")
+        );
+        assert!(
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("chatgpt-account-id: acct-second")
+        );
+
+        let stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(auth_path).expect("read auth state"))
+                .expect("parse auth state");
+        assert_eq!(
+            stored["selected_account_key"].as_str(),
+            Some("acct:acct-second")
+        );
+        assert_eq!(
+            stored["accounts"][0]["rate_limits"]["limit_reached"].as_bool(),
+            Some(true)
+        );
     }
 }

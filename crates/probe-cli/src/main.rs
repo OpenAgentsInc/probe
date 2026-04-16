@@ -297,6 +297,8 @@ struct CodexLoginArgs {
     method: String,
     #[arg(long)]
     probe_home: Option<PathBuf>,
+    #[arg(long)]
+    label: Option<String>,
     #[arg(long, default_value_t = false)]
     no_open_browser: bool,
 }
@@ -311,6 +313,8 @@ struct CodexStatusArgs {
 struct CodexLogoutArgs {
     #[arg(long)]
     probe_home: Option<PathBuf>,
+    #[arg(long)]
+    account: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1018,11 +1022,11 @@ fn run_codex_login(args: CodexLoginArgs) -> Result<(), String> {
     let controller =
         OpenAiCodexAuthController::new(probe_home.as_path()).map_err(|error| error.to_string())?;
     let method = args.method.trim().to_ascii_lowercase();
-    let status = match method.as_str() {
+    let record = match method.as_str() {
         "browser" => {
             let no_open_browser = args.no_open_browser;
             controller
-                .login_browser(|prompt| {
+                .login_browser_with_label(args.label.clone(), |prompt| {
                     println!("method=browser");
                     println!("authorize_url={}", prompt.authorize_url);
                     println!("redirect_uri={}", prompt.redirect_uri);
@@ -1038,7 +1042,7 @@ fn run_codex_login(args: CodexLoginArgs) -> Result<(), String> {
                 .map_err(|error| error.to_string())?
         }
         "device" | "headless" => controller
-            .login_device(|prompt| {
+            .login_device_with_label(args.label.clone(), |prompt| {
                 println!("method=headless");
                 println!("verification_url={}", prompt.verification_url);
                 println!("user_code={}", prompt.user_code);
@@ -1052,7 +1056,17 @@ fn run_codex_login(args: CodexLoginArgs) -> Result<(), String> {
         }
     };
     let profile = resolve_codex_backend_profile(probe_home.as_path());
-    print_codex_auth_record("status=authenticated", &status, &profile);
+    let status = controller.status().map_err(|error| error.to_string())?;
+    let routing_plan = controller
+        .routing_plan(Some(profile.api_key_env.as_str()))
+        .map_err(|error| error.to_string())?;
+    print_codex_auth_record(
+        "status=authenticated",
+        &record,
+        &status,
+        &profile,
+        &routing_plan,
+    );
     Ok(())
 }
 
@@ -1062,9 +1076,24 @@ fn run_codex_status(args: CodexStatusArgs) -> Result<(), String> {
         .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
     let controller =
         OpenAiCodexAuthController::new(probe_home.as_path()).map_err(|error| error.to_string())?;
+    controller
+        .refresh_accounts_for_routing()
+        .map_err(|error| error.to_string())?;
     let status = controller.status().map_err(|error| error.to_string())?;
     let profile = resolve_codex_backend_profile(probe_home.as_path());
-    print_codex_auth_status(&status, &profile);
+    let api_key_fallback_available = std::env::var(profile.api_key_env.as_str())
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .is_some();
+    let routing_plan = controller.routing_plan(Some(profile.api_key_env.as_str()));
+    print_codex_auth_status(
+        &status,
+        &profile,
+        routing_plan.as_ref().ok(),
+        routing_plan.as_ref().err().map(ToString::to_string),
+        api_key_fallback_available,
+    );
     Ok(())
 }
 
@@ -1075,8 +1104,16 @@ fn run_codex_logout(args: CodexLogoutArgs) -> Result<(), String> {
     let controller =
         OpenAiCodexAuthController::new(probe_home.as_path()).map_err(|error| error.to_string())?;
     let status = controller.status().map_err(|error| error.to_string())?;
-    let deleted = controller.clear().map_err(|error| error.to_string())?;
+    let deleted = match args.account.as_deref() {
+        Some(selector) => controller
+            .clear_account(selector)
+            .map_err(|error| error.to_string())?,
+        None => controller.clear().map_err(|error| error.to_string())?,
+    };
     println!("path={}", status.path.display());
+    if let Some(selector) = args.account.as_deref() {
+        println!("account={selector}");
+    }
     println!("deleted={deleted}");
     Ok(())
 }
@@ -3137,7 +3174,9 @@ fn print_session_backend_target(backend: &SessionBackendTarget) {
 fn print_codex_auth_record(
     prefix: &str,
     record: &probe_openai_auth::OpenAiCodexAuthRecord,
+    status: &OpenAiCodexAuthStatus,
     profile: &probe_protocol::backend::BackendProfile,
+    routing_plan: &probe_openai_auth::OpenAiCodexRoutingPlan,
 ) {
     println!("{prefix}");
     println!("model={}", profile.model);
@@ -3151,11 +3190,23 @@ fn print_codex_auth_record(
         "account_id={}",
         record.account_id.as_deref().unwrap_or("none")
     );
+    println!("account_count={}", status.account_count);
+    println!(
+        "selected_account_key={}",
+        status.selected_account_key.as_deref().unwrap_or("none")
+    );
+    println!(
+        "selected_route={}",
+        render_codex_route_summary(routing_plan)
+    );
 }
 
 fn print_codex_auth_status(
     status: &OpenAiCodexAuthStatus,
     profile: &probe_protocol::backend::BackendProfile,
+    routing_plan: Option<&probe_openai_auth::OpenAiCodexRoutingPlan>,
+    routing_error: Option<String>,
+    api_key_fallback_available: bool,
 ) {
     println!("path={}", status.path.display());
     println!("model={}", profile.model);
@@ -3165,6 +3216,7 @@ fn print_codex_auth_status(
             .unwrap_or("none")
     );
     println!("authenticated={}", status.authenticated);
+    println!("account_count={}", status.account_count);
     println!("expired={}", status.expired);
     println!(
         "expires_ms={}",
@@ -3177,9 +3229,81 @@ fn print_codex_auth_status(
         "account_id={}",
         status.account_id.as_deref().unwrap_or("none")
     );
+    println!(
+        "selected_account_key={}",
+        status.selected_account_key.as_deref().unwrap_or("none")
+    );
+    println!(
+        "selected_account_label={}",
+        status.selected_account_label.as_deref().unwrap_or("none")
+    );
+    println!("api_key_fallback_available={api_key_fallback_available}");
+    if let Some(plan) = routing_plan {
+        println!("selected_route={}", render_codex_route_summary(plan));
+    }
+    if let Some(error) = routing_error.as_deref() {
+        println!("routing_error={error}");
+    }
+    for account in &status.accounts {
+        let used_percent = account
+            .rate_limits
+            .as_ref()
+            .and_then(|snapshot| snapshot.used_percent())
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| String::from("none"));
+        let reset_after_seconds = account
+            .rate_limits
+            .as_ref()
+            .and_then(|snapshot| snapshot.reset_after_seconds())
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| String::from("none"));
+        let plan_type = account
+            .rate_limits
+            .as_ref()
+            .and_then(|snapshot| snapshot.plan_type.as_deref())
+            .unwrap_or("none");
+        let allowed = account
+            .rate_limits
+            .as_ref()
+            .map(|snapshot| snapshot.allowed.to_string())
+            .unwrap_or_else(|| String::from("unknown"));
+        let limit_reached = account
+            .rate_limits
+            .as_ref()
+            .map(|snapshot| snapshot.limit_reached.to_string())
+            .unwrap_or_else(|| String::from("unknown"));
+        println!(
+            "account key={} label={} selected={} expired={} account_id={} expires_ms={} plan={} allowed={} limit_reached={} used_percent={} reset_after_seconds={}",
+            account.key,
+            account.label.as_deref().unwrap_or("none"),
+            account.selected,
+            account.expired,
+            account.account_id.as_deref().unwrap_or("none"),
+            account.expires,
+            plan_type,
+            allowed,
+            limit_reached,
+            used_percent,
+            reset_after_seconds,
+        );
+    }
     if !status.authenticated {
         println!("hint=run `probe codex login --method browser`");
         println!("worker_hint=run `probe codex login --method headless`");
+    }
+}
+
+fn render_codex_route_summary(plan: &probe_openai_auth::OpenAiCodexRoutingPlan) -> String {
+    match plan.routes.first() {
+        Some(probe_openai_auth::OpenAiCodexRoute::SubscriptionAccount(route)) => format!(
+            "subscription:{}:{}",
+            route.account_key,
+            route.label.as_deref().unwrap_or("none")
+        ),
+        Some(probe_openai_auth::OpenAiCodexRoute::ApiKeyFallback(route)) => {
+            format!("api_key_fallback:{}", route.env_var)
+        }
+        None => String::from("none"),
     }
 }
 
