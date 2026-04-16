@@ -430,7 +430,7 @@ path, or error summaries instead of debug-shaped JSON blobs.
 Keys:
 
 - `Enter`: submit the composer
-- `Ctrl+J`: insert a newline
+- `Shift+Enter`: insert a newline
 - `Up`, `Down`: recall draft history
 - `Ctrl+O`: add an attachment placeholder to the draft
 - `Ctrl+R`: rerun backend check when supported

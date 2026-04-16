@@ -2,27 +2,27 @@
 source: crates/probe-tui/tests/probe_tui.rs
 expression: snapshot
 ---
-┌─ Transcript ─────────────────────────────────────────────────────────────────┐
-│ [user] You                                                                   │
-│   Summarize what Probe owns.                                                 │
-│                                                                              │
-│ [tool call] read_file                                                        │
-│   README.md                                                                  │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+[user] You
+  Summarize what Probe owns.
 
-┌────────────────plain | qwen3.5-2b-q8_0-registry... | tool_requested | round 1┐
-│ Type a Probe message. Enter submits. Ctrl+J inserts a newline.               │
+[tool call] read_file
+  README.md
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+┌───────────────────────────────────── plain | qwen3.5-2b-q8_0-registry... | . ┐
+│ Type a Probe message. Enter submits. Shift+Enter inserts a newline.          │
 └──────────────────────────────────────────────────────────────────────────────┘

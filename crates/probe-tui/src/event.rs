@@ -44,9 +44,7 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
         KeyCode::F(1) => Some(UiEvent::OpenHelp),
         KeyCode::PageUp => Some(UiEvent::PageUp),
         KeyCode::PageDown => Some(UiEvent::PageDown),
-        KeyCode::Enter if modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiEvent::ComposerNewline)
-        }
+        KeyCode::Enter if modifiers.contains(KeyModifiers::SHIFT) => Some(UiEvent::ComposerNewline),
         KeyCode::Enter => Some(UiEvent::ComposerSubmit),
         KeyCode::Backspace => Some(UiEvent::ComposerBackspace),
         KeyCode::Delete => Some(UiEvent::ComposerDelete),
@@ -72,9 +70,6 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
         KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::ToggleBody)
         }
-        KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiEvent::ComposerNewline)
-        }
         KeyCode::Char(character)
             if !modifiers.contains(KeyModifiers::CONTROL)
                 && !modifiers.contains(KeyModifiers::ALT) =>
@@ -82,6 +77,25 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
             Some(UiEvent::ComposerInsert(character))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::{UiEvent, event_from_key};
+
+    #[test]
+    fn plain_enter_submits() {
+        let event = event_from_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(event, Some(UiEvent::ComposerSubmit));
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline() {
+        let event = event_from_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(event, Some(UiEvent::ComposerNewline));
     }
 }
 

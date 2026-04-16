@@ -2,27 +2,27 @@
 source: crates/probe-tui/tests/probe_tui.rs
 expression: snapshot
 ---
-┌─ Transcript ─────────────────────────────────────────────────────────────────┐
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
 
-┌────────────────────────────────────plain | qwen3.5-2b-q8_0-registry... | idle┐
-│ Type a Probe message. Enter submits. Ctrl+J inserts a newline.               │
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+┌───────────────────────────────────── plain | qwen3.5-2b-q8_0-registry... | . ┐
+│ Type a Probe message. Enter submits. Shift+Enter inserts a newline.          │
 └──────────────────────────────────────────────────────────────────────────────┘

@@ -2,31 +2,31 @@
 source: crates/probe-tui/tests/probe_tui.rs
 expression: snapshot
 ---
-┌─ Transcript ─────────────────────────────────────────────────────────────────────────────────────┐
-│ [user] You                                                                                       │
-│   Inspect README and summarize Probe.                                                            │
-│                                                                                                  │
-│ [active assistant] Probe                                                                         │
-│   Probe owns the coding-agent runtime, including sessions, tools, approvals, and transcripts.    │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+[user] You
+  Inspect README and summarize Probe.
 
-┌─────────────────────────────────────────plain | qwen3.5-2b-q8_0-registry... | streaming | round 1┐
-│ Type a Probe message. Enter submits. Ctrl+J inserts a newline.                                   │
+[active assistant] Probe
+  Probe owns the coding-agent runtime, including sessions, tools, approvals, and transcripts.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+┌───────────────────────────────────────────────────────── plain | qwen3.5-2b-q8_0-registry... | * ┐
+│ Type a Probe message. Enter submits. Shift+Enter inserts a newline.                              │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

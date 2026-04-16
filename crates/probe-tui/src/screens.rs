@@ -20,7 +20,7 @@ use crate::message::{
     AppleFmFailureSummary, AppleFmUsageSummary,
 };
 use crate::transcript::{ActiveTurn, RetainedTranscript, TranscriptEntry, TranscriptRole};
-use crate::widgets::{InfoPanel, ModalCard};
+use crate::widgets::ModalCard;
 
 const MAX_EVENT_LOG: usize = 16;
 const LINE_SCROLL_STEP: u16 = 3;
@@ -521,20 +521,11 @@ impl ChatScreen {
                 summary.reasoning_level.as_deref(),
             )
         });
-        let phase = compact_phase_label(self.runtime.phase.as_deref().unwrap_or("idle"));
         let mut parts = vec![preview(model, 24)];
         if let Some(reasoning) = reasoning {
-            parts.push(reasoning.to_string());
+            parts.push(display_reasoning_level(reasoning).to_string());
         }
-        parts.push(phase.to_string());
-        if let Some(round_trip) = self.runtime.round_trip
-            && self.runtime.phase.as_deref().unwrap_or("idle") != "idle"
-        {
-            parts.push(format!("round {round_trip}"));
-        }
-        if self.pending_tool_approval_count() > 0 {
-            parts.push(format!("approval {}", self.pending_tool_approval_count()));
-        }
+        parts.push(status_marker(self).to_string());
         parts.join(" | ")
     }
 
@@ -1370,10 +1361,12 @@ impl ChatScreen {
     fn render_chat_shell(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
         let body = self.render_primary_body();
         let scroll_y = self.transcript_scroll_y(body.lines.len(), area.height);
-        let title = self.transcript_panel_title();
-        InfoPanel::new(title.as_str(), body)
-            .with_scroll(scroll_y)
-            .render(frame, area);
+        frame.render_widget(
+            Paragraph::new(body)
+                .scroll((scroll_y, 0))
+                .wrap(ratatui::widgets::Wrap { trim: false }),
+            area,
+        );
     }
 
     fn render_setup_overlay_text(&self, stack_depth: usize) -> Text<'static> {
@@ -1777,13 +1770,6 @@ impl ChatScreen {
         self.transcript_scroll_from_bottom = 0;
     }
 
-    fn transcript_panel_title(&self) -> String {
-        if self.transcript_follow_latest || self.transcript_scroll_from_bottom == 0 {
-            return String::from("Transcript");
-        }
-        format!("Transcript v {} below", self.transcript_scroll_from_bottom)
-    }
-
     fn sync_transcript_scroll_after_update(&mut self) {
         let line_count = self.render_primary_body().lines.len();
         if self.transcript_follow_latest {
@@ -1834,7 +1820,7 @@ impl ChatScreen {
     }
 
     fn transcript_scroll_y(&self, line_count: usize, panel_height: u16) -> u16 {
-        let viewport_height = panel_height.saturating_sub(2) as usize;
+        let viewport_height = panel_height as usize;
         let max_top_scroll = line_count.saturating_sub(viewport_height);
         let from_bottom = usize::from(
             self.transcript_scroll_from_bottom
@@ -1868,7 +1854,7 @@ impl HelpScreen {
         let content = Paragraph::new(Text::from(vec![
             Line::from("Probe Chat Shell Keys"),
             Line::from(""),
-            Line::from("Enter / Ctrl+J      submit / newline"),
+            Line::from("Enter / Shift+Enter submit / newline"),
             Line::from("Up / Down           draft history recall"),
             Line::from("Mouse wheel / PgUp  scroll active panel"),
             Line::from("PgDn                scroll back toward latest"),
@@ -2406,17 +2392,45 @@ fn render_backend_kind(value: probe_protocol::backend::BackendKind) -> &'static 
     }
 }
 
-fn compact_phase_label(phase: &str) -> &str {
-    match phase {
-        "turn_started" => "queued",
-        "model_request" => "waiting",
-        "assistant_streaming" | "assistant_snapshot_streaming" => "streaming",
-        "assistant_snapshot" => "snapshot",
-        "tool_call_streaming" => "tooling",
-        "assistant_stream_finished" => "done",
-        "model_request_failed" => "failed",
+fn display_reasoning_level(value: &str) -> &str {
+    match value {
+        "backend_default" => "auto",
         other => other,
     }
+}
+
+fn status_marker(screen: &ChatScreen) -> char {
+    if screen.pending_tool_approval_count() > 0 {
+        return '!';
+    }
+
+    let phase = screen.runtime.phase.as_deref();
+    if matches!(
+        screen.setup.phase,
+        TaskPhase::Failed | TaskPhase::Unavailable
+    ) || matches!(phase, Some("model_request_failed"))
+    {
+        return 'x';
+    }
+
+    if matches!(
+        screen.setup.phase,
+        TaskPhase::Queued | TaskPhase::CheckingAvailability | TaskPhase::Running
+    ) || matches!(
+        phase,
+        Some(
+            "turn_started"
+                | "model_request"
+                | "assistant_streaming"
+                | "assistant_snapshot_streaming"
+                | "assistant_snapshot"
+                | "tool_call_streaming"
+        )
+    ) {
+        return '*';
+    }
+
+    '.'
 }
 
 fn render_runtime_risk_class(value: probe_protocol::session::ToolRiskClass) -> &'static str {

@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 
 use crate::event::UiEvent;
 
-const PLACEHOLDER: &str = "Type a Probe message. Enter submits. Ctrl+J inserts a newline.";
+const PLACEHOLDER: &str = "Type a Probe message. Enter submits. Shift+Enter inserts a newline.";
 const MAX_VISIBLE_COMPOSER_LINES: usize = 4;
 const MAX_HISTORY_ENTRIES: usize = 24;
 const ATTACHMENT_LIBRARY: [&str; 3] = ["README.md", "Cargo.toml", "docs/README.md"];
@@ -416,7 +416,7 @@ impl BottomPane {
         let composer_block = Block::default()
             .borders(Borders::ALL)
             .padding(Padding::horizontal(1))
-            .title(Line::from(title).alignment(Alignment::Right))
+            .title(Line::from(format!(" {title} ")).alignment(Alignment::Right))
             .style(shell_border());
         let composer_inner = composer_block.inner(area);
         frame.render_widget(composer_block, area);

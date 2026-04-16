@@ -277,7 +277,6 @@ fn manual_scroll_pauses_stream_follow_until_return_to_bottom() {
 
     app.dispatch(UiEvent::PageUp);
     let scrolled = app.render_to_string(100, 24);
-    assert!(scrolled.contains("Transcript v "));
     assert!(!scrolled.contains("older line 39"));
 
     app.apply_message(AppMessage::AssistantStreamStarted {
@@ -293,7 +292,6 @@ fn manual_scroll_pauses_stream_follow_until_return_to_bottom() {
     });
 
     let still_scrolled = app.render_to_string(100, 24);
-    assert!(still_scrolled.contains("Transcript v "));
     assert!(!still_scrolled.contains("STREAMING MARKER"));
 
     for _ in 0..8 {
@@ -301,7 +299,6 @@ fn manual_scroll_pauses_stream_follow_until_return_to_bottom() {
     }
 
     let at_bottom = app.render_to_string(100, 24);
-    assert!(!at_bottom.contains("Transcript v "));
     assert!(at_bottom.contains("STREAMING MARKER"));
 }
 

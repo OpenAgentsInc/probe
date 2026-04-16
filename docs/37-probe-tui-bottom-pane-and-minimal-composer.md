@@ -49,7 +49,7 @@ The initial composer supports:
 - home / end movement within the current line
 - multiline editing
 - `Enter` submit
-- `Ctrl+J` newline
+- `Shift+Enter` newline
 
 Submissions are currently captured back into shell state and recorded in the UI
 event log. That proves the input seam without pretending the full runtime turn

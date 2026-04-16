@@ -2,31 +2,31 @@
 source: crates/probe-tui/tests/probe_tui.rs
 expression: snapshot
 ---
-┌─ Transcript ─────────────────────────────────────────────────────────────────────────────────────┐
-│ [user] You                                                                                       │
-│   Reply with the next honest proof target.                                                       │
-│                                                                                                  │
-│ [active assistant] Probe                                                                         │
-│   Stream remote Qwen tokens into the retained transcript.                                        │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+[user] You
+  Reply with the next honest proof target.
 
-┌───────────────────────────────────────────────plain | apple-foundation-model | snapshot | round 1┐
-│ Type a Probe message. Enter submits. Ctrl+J inserts a newline.                                   │
+[active assistant] Probe
+  Stream remote Qwen tokens into the retained transcript.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+┌────────────────────────────────────────────────────────────── plain | apple-foundation-model | * ┐
+│ Type a Probe message. Enter submits. Shift+Enter inserts a newline.                              │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

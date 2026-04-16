@@ -23,6 +23,6 @@ expression: snapshot
 
 
 
-┌────────────────────────────────locked | plain | apple-foundation-model | idle┐
+┌───────────────────────────────── locked | plain | apple-foundation-model | . ┐
 │ Input disabled while backend overlay owns focus. Esc returns to chat.        │
 └──────────────────────────────────────────────────────────────────────────────┘

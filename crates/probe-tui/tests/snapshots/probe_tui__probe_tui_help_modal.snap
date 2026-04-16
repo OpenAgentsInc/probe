@@ -9,7 +9,7 @@ expression: snapshot
            ┌─ Help ─────────────────────────────────────────────────┐
            │ Probe Chat Shell Keys                                  │
            │                                                        │
-           │ Enter / Ctrl+J      submit / newline                   │
+           │ Enter / Shift+Enter submit / newline                   │
            │ Up / Down           draft history recall               │
            │ Mouse wheel / PgUp  scroll active panel                │
            │ PgDn                scroll back toward latest          │
@@ -23,6 +23,6 @@ expression: snapshot
 
 
 
-┌───────────────────────────locked | plain | qwen3.5-2b-q8_0-registry... | idle┐
+┌──────────────────────────── locked | plain | qwen3.5-2b-q8_0-registry... | . ┐
 │ Input disabled while help owns focus. Esc or F1 returns to chat.             │
 └──────────────────────────────────────────────────────────────────────────────┘

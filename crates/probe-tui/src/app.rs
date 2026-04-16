@@ -1132,7 +1132,7 @@ mod tests {
         ));
         let rendered = app.render_to_string(120, 32);
 
-        assert!(rendered.contains("plain | gpt-5.4 | high | idle"));
+        assert!(rendered.contains("plain | gpt-5.4 | high | ."));
         assert!(!rendered.contains("status:"));
         assert!(!rendered.contains("Composer"));
         assert!(!rendered.contains("cmd: plain"));

@@ -2,27 +2,27 @@
 source: crates/probe-tui/tests/probe_tui.rs
 expression: snapshot
 ---
-┌─ Transcript ─────────────────────────────────────────────────────────────────┐
-│   Summarize what Probe owns.                                                 │
-│                                                                              │
-│ [tool call] read_file                                                        │
-│   call: call_readme_1                                                        │
-│   args: {"path":"README.md"}                                                 │
-│   turn: 1                                                                    │
-│                                                                              │
-│ [tool result] read_file                                                      │
-│   call: call_readme_1                                                        │
-│   result: read README.md:1-3                                                 │
-│   turn: 2                                                                    │
-│   policy: auto_allow                                                         │
-│   risk: read_only                                                            │
-│   approval: not_required                                                     │
-│                                                                              │
-│ [assistant] Probe                                                            │
-│   Probe owns the coding-agent runtime: sessions, transcripts, tools,         │
-│ approvals, and CLI/TUI surfaces.                                             │
-└──────────────────────────────────────────────────────────────────────────────┘
+[user] You
+  Summarize what Probe owns.
 
-┌────────────────────────────────────plain | qwen3.5-2b-q8_0-registry... | idle┐
-│ Type a Probe message. Enter submits. Ctrl+J inserts a newline.               │
+[tool call] read_file
+  call: call_readme_1
+  args: {"path":"README.md"}
+  turn: 1
+
+[tool result] read_file
+  call: call_readme_1
+  result: read README.md:1-3
+  turn: 2
+  policy: auto_allow
+  risk: read_only
+  approval: not_required
+
+[assistant] Probe
+  Probe owns the coding-agent runtime: sessions, transcripts, tools, approvals,
+and CLI/TUI surfaces.
+  This reply came back through the persisted runtime session.
+
+┌───────────────────────────────────── plain | qwen3.5-2b-q8_0-registry... | . ┐
+│ Type a Probe message. Enter submits. Shift+Enter inserts a newline.          │
 └──────────────────────────────────────────────────────────────────────────────┘
