@@ -1,6 +1,7 @@
 mod app;
 mod bottom_pane;
 mod event;
+mod failure;
 mod highlight;
 mod message;
 mod rich_text;

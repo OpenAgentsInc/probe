@@ -48,6 +48,19 @@ binding behavior:
 The current UI surfaces those bindings in the composer metadata line and in the
 committed user turn after submit.
 
+Exact zero-argument shell commands now stay local to the TUI:
+
+- `/help`
+- `/backend`
+- `/approvals`
+- `/reasoning`
+- `/clear`
+
+That means the hot path keeps the simpler shell behavior from current `main`
+instead of importing PR `#107`'s heavier command palette. Slash-prefixed text
+with extra arguments or natural-language content still submits as a normal
+Probe runtime turn.
+
 ### Attachments
 
 `Ctrl+O` now adds an attachment placeholder to the draft.
@@ -72,6 +85,7 @@ Coverage now includes:
 - shell-style history recall
 - attachment placeholder submission
 - slash-command and typed-mention extraction
+- exact local slash-command handling for help, backend, reasoning, and clear
 - explicit paste-aware submission behavior
 
 Validation commands:

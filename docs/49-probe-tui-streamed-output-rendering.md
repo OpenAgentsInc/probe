@@ -33,6 +33,8 @@ surface feel fake even when the runtime was honest:
     authoritative tool rows commit
   - preserves partial output on stream failure and only clears the live stream
     cell when the authoritative transcript rows land
+  - classifies runtime failures into operator-facing next steps instead of
+    dumping raw backend transport text into the title row
 - `crates/probe-tui/src/app.rs`
   - reuses the input box header as a compact backend and stream state surface,
     avoiding a return to the old right-rail clutter
@@ -47,6 +49,11 @@ surface feel fake even when the runtime was honest:
   `tool_result` transcript rows commit
 - failures keep any partial assistant output visible together with the backend
   error
+- failure titles and next steps now stay typed and compact:
+  - Codex auth failures point to `probe codex login`
+  - local backend reachability failures tell the operator to start the target
+    and retry
+  - usage-limit failures surface the reset window when the backend provides it
 - authoritative committed transcript rows still replace the live cell once the
   runtime session store has the durable turn
 

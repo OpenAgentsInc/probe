@@ -497,9 +497,10 @@ fn stream_failure_keeps_partial_output_visible() {
     });
 
     let rendered = app.render_to_string(120, 30);
-    assert!(rendered.contains("Assistant Stream Failed"));
+    assert!(rendered.contains("Backend Unavailable"));
     assert!(rendered.contains("Probe had started answering before"));
     assert!(rendered.contains("transport connection dropped"));
+    assert!(rendered.contains("Start the local backend"));
 }
 
 #[test]

@@ -16,6 +16,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::bottom_pane::ComposerSubmission;
 use crate::event::UiEvent;
+use crate::failure::classify_runtime_failure;
 use crate::message::{
     AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
     AppleFmFailureSummary, AppleFmUsageSummary,
@@ -400,6 +401,22 @@ impl ChatScreen {
         self.runtime.pending_approvals.first()
     }
 
+    pub fn has_active_runtime_work(&self) -> bool {
+        matches!(
+            self.runtime.phase.as_deref(),
+            Some(
+                "turn_started"
+                    | "model_request"
+                    | "assistant_streaming"
+                    | "assistant_snapshot_streaming"
+                    | "assistant_snapshot"
+                    | "tool_call_streaming"
+                    | "tool_requested"
+                    | "tool_running"
+            )
+        )
+    }
+
     pub fn set_operator_backend(&mut self, summary: ServerOperatorSummary) {
         self.runtime.backend_kind = Some(render_backend_kind(summary.backend_kind).to_string());
         self.runtime.model_id = summary.model_id.clone();
@@ -732,8 +749,10 @@ impl ChatScreen {
         let Some(stream) = self.stream.as_ref() else {
             return;
         };
-        self.transcript
-            .set_active_turn(render_stream_active_turn(stream));
+        self.transcript.set_active_turn(render_stream_active_turn(
+            stream,
+            self.operator_backend.as_ref(),
+        ));
         self.snap_transcript_to_latest();
     }
 
@@ -1922,6 +1941,9 @@ impl HelpScreen {
             Line::from("Ctrl+T              toggle operator notes"),
             Line::from("F1 / Esc            toggle or dismiss help"),
             Line::from("Ctrl+C              quit"),
+            Line::from(""),
+            Line::from("Local slash commands"),
+            Line::from("/help /backend /approvals /reasoning /clear"),
             Line::from("Backend choice on the default TUI path is automatic and Codex-first."),
             Line::from(
                 "Slash commands, typed mentions, attachments, and paste state live in the draft model.",
@@ -2109,13 +2131,19 @@ impl ApprovalOverlay {
     }
 }
 
-fn render_stream_active_turn(stream: &AssistantStreamState) -> ActiveTurn {
+fn render_stream_active_turn(
+    stream: &AssistantStreamState,
+    operator_backend: Option<&ServerOperatorSummary>,
+) -> ActiveTurn {
     let display_text = normalize_openai_stream_display_text(stream.assistant_text.as_str());
-    let is_waiting =
-        display_text.is_empty() && stream.tool_calls.is_empty() && stream.failure.is_none();
+    let failure = stream
+        .failure
+        .as_deref()
+        .map(|error| classify_runtime_failure(error, operator_backend));
+    let is_waiting = display_text.is_empty() && stream.tool_calls.is_empty() && failure.is_none();
     let mut body = Vec::new();
-    if let Some(error) = stream.failure.as_deref() {
-        body.push(format!("backend request failed: {error}"));
+    if let Some(summary) = failure.as_ref() {
+        body.extend(summary.body_lines());
     }
 
     if !stream.tool_calls.is_empty() {
@@ -2135,6 +2163,9 @@ fn render_stream_active_turn(stream: &AssistantStreamState) -> ActiveTurn {
     }
 
     if !display_text.is_empty() {
+        if failure.is_some() {
+            body.push(String::from("partial_response:"));
+        }
         body.extend(split_text_lines(display_text.as_str()));
     }
 
@@ -2142,15 +2173,15 @@ fn render_stream_active_turn(stream: &AssistantStreamState) -> ActiveTurn {
         TranscriptRole::Assistant
     } else if display_text.is_empty() && !stream.tool_calls.is_empty() {
         TranscriptRole::Tool
-    } else if stream.failure.is_some() {
+    } else if failure.is_some() {
         TranscriptRole::Status
     } else {
         TranscriptRole::Assistant
     };
     let title = if is_waiting {
         "Waiting for Reply"
-    } else if stream.failure.is_some() {
-        "Assistant Stream Failed"
+    } else if let Some(summary) = failure.as_ref() {
+        summary.title
     } else if display_text.is_empty() && !stream.tool_calls.is_empty() {
         "Streaming Tool Call"
     } else {

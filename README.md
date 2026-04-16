@@ -460,6 +460,20 @@ a real pending-approval record in `probe-core`, opens the approval overlay with
 the live tool details, and resumes the paused turn after approve or reject
 instead of leaving the operator in a dead-end pause state.
 
+Exact zero-argument slash commands stay local to the shell instead of being
+sent to the runtime:
+
+- `/help`
+- `/backend`
+- `/approvals`
+- `/reasoning`
+- `/clear`
+
+Anything else, including slash-prefixed prompts with extra text, still goes
+through the normal Probe runtime turn path. Stream failures now render typed
+recovery guidance in the transcript, such as Codex reauth or local-backend
+restart advice, while keeping any partial assistant output visible.
+
 Remote attach examples:
 
 ```bash

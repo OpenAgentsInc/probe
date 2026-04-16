@@ -22,7 +22,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::{Frame, Terminal};
 
-use crate::bottom_pane::{BottomPane, BottomPaneState};
+use crate::bottom_pane::{BottomPane, BottomPaneState, ComposerSubmission};
 use crate::event::{UiEvent, event_from_key, event_from_mouse};
 use crate::message::{AppMessage, BackgroundTaskRequest, ProbeRuntimeTurnConfig};
 use crate::screens::{
@@ -282,6 +282,10 @@ impl AppShell {
             {
                 let pane_state = self.bottom_pane_state();
                 if let Some(submitted) = self.bottom_pane.handle_event(event, &pane_state) {
+                    if self.handle_local_slash_command(&submitted) {
+                        self.poll_background_messages();
+                        return;
+                    }
                     let preview = submission_preview(&submitted, 48);
                     let issue_priority = submitted.text.clone();
                     let issue_cwd = self.active_chat_runtime().cwd.clone();
@@ -327,16 +331,12 @@ impl AppShell {
                     ScreenAction::None => {}
                     ScreenAction::OpenHelp => {
                         self.base_screen_mut().record_event("help modal took focus");
-                        if self.active_screen_id() != ScreenId::Help {
-                            self.screens.push(ScreenState::Help(HelpScreen::new()));
-                        }
+                        self.open_help_modal();
                     }
                     ScreenAction::OpenSetupOverlay => {
                         self.base_screen_mut()
                             .record_event("backend overlay took focus");
-                        if self.active_screen_id() != ScreenId::SetupOverlay {
-                            self.screens.push(ScreenState::Setup(SetupOverlay::new()));
-                        }
+                        self.open_setup_overlay();
                     }
                     ScreenAction::OpenApprovalOverlay => {
                         let Some(approval) =
@@ -350,14 +350,7 @@ impl AppShell {
                         };
                         self.base_screen_mut()
                             .record_event("approval overlay took focus");
-                        if self.active_screen_id() == ScreenId::ApprovalOverlay {
-                            if let Some(ScreenState::Approval(screen)) = self.screens.last_mut() {
-                                *screen = ApprovalOverlay::new(approval);
-                            }
-                        } else {
-                            self.screens
-                                .push(ScreenState::Approval(ApprovalOverlay::new(approval)));
-                        }
+                        self.open_approval_overlay_for(approval);
                     }
                     ScreenAction::CloseModal => {
                         if self.screens.len() > 1 {
@@ -371,9 +364,7 @@ impl AppShell {
                 if let Some(command) = outcome.command {
                     match command {
                         ScreenCommand::RunAppleFmSetup => {
-                            if self.active_screen_id() != ScreenId::SetupOverlay {
-                                self.screens.push(ScreenState::Setup(SetupOverlay::new()));
-                            }
+                            self.open_setup_overlay();
                             if let Some(request) = self.default_setup_request() {
                                 if let Err(error) = self.submit_background_task(request) {
                                     self.last_status = error;
@@ -404,6 +395,71 @@ impl AppShell {
             }
         }
         self.poll_background_messages();
+    }
+
+    fn handle_local_slash_command(&mut self, submitted: &ComposerSubmission) -> bool {
+        let Some(command) = exact_local_slash_command(submitted) else {
+            return false;
+        };
+
+        match command {
+            "help" => {
+                self.base_screen_mut()
+                    .record_event("local slash command opened help modal");
+                self.open_help_modal();
+                self.last_status = String::from("opened help modal");
+            }
+            "backend" => {
+                self.base_screen_mut()
+                    .record_event("local slash command opened backend overlay");
+                self.open_setup_overlay();
+                self.last_status = String::from("opened backend overlay");
+            }
+            "approvals" => {
+                if self.base_screen().has_pending_tool_approvals() {
+                    self.base_screen_mut()
+                        .record_event("local slash command opened approval overlay");
+                    self.open_approval_overlay();
+                    self.last_status = String::from("opened approval overlay");
+                } else {
+                    self.base_screen_mut()
+                        .record_event("local slash command found no pending approvals");
+                    self.last_status = String::from("no pending approvals");
+                }
+            }
+            "reasoning" => {
+                if self.base_screen().has_active_runtime_work() {
+                    self.base_screen_mut()
+                        .record_event("reasoning change blocked by active runtime work");
+                    self.last_status = String::from(
+                        "wait for the active turn to finish before changing Codex reasoning",
+                    );
+                } else if !self.cycle_codex_reasoning_level() {
+                    self.base_screen_mut()
+                        .record_event("reasoning command ignored for current backend");
+                    self.last_status =
+                        String::from("active backend does not expose reasoning controls");
+                }
+            }
+            "clear" => {
+                if self.base_screen().has_pending_tool_approvals() {
+                    self.base_screen_mut()
+                        .record_event("runtime clear blocked by pending approvals");
+                    self.last_status =
+                        String::from("resolve pending approvals before clearing runtime context");
+                } else if self.base_screen().has_active_runtime_work() {
+                    self.base_screen_mut()
+                        .record_event("runtime clear blocked by active runtime work");
+                    self.last_status =
+                        String::from("wait for the active turn to finish before clearing context");
+                } else {
+                    self.reset_active_runtime_context();
+                }
+            }
+            _ => return false,
+        }
+
+        true
     }
 
     pub fn submit_background_task(&mut self, request: BackgroundTaskRequest) -> Result<(), String> {
@@ -577,6 +633,40 @@ impl AppShell {
         }
     }
 
+    fn open_help_modal(&mut self) {
+        if self.active_screen_id() != ScreenId::Help {
+            self.screens.push(ScreenState::Help(HelpScreen::new()));
+        }
+    }
+
+    fn open_setup_overlay(&mut self) {
+        if self.active_screen_id() != ScreenId::SetupOverlay {
+            self.screens.push(ScreenState::Setup(SetupOverlay::new()));
+        }
+    }
+
+    fn open_approval_overlay(&mut self) {
+        let Some(approval) = self.base_screen().current_pending_tool_approval().cloned() else {
+            self.last_status = String::from("no pending approvals");
+            return;
+        };
+        self.open_approval_overlay_for(approval);
+    }
+
+    fn open_approval_overlay_for(
+        &mut self,
+        approval: probe_protocol::session::PendingToolApproval,
+    ) {
+        if self.active_screen_id() == ScreenId::ApprovalOverlay {
+            if let Some(ScreenState::Approval(screen)) = self.screens.last_mut() {
+                *screen = ApprovalOverlay::new(approval);
+            }
+        } else {
+            self.screens
+                .push(ScreenState::Approval(ApprovalOverlay::new(approval)));
+        }
+    }
+
     fn active_chat_runtime(&self) -> &ProbeRuntimeTurnConfig {
         &self.backend_lanes[self.active_backend_index].chat_runtime
     }
@@ -656,6 +746,13 @@ impl AppShell {
         if self.active_backend_kind() != BackendKind::OpenAiCodexSubscription {
             return false;
         }
+        if self.base_screen().has_active_runtime_work() {
+            self.last_status =
+                String::from("wait for the active turn to finish before changing Codex reasoning");
+            self.base_screen_mut()
+                .record_event("codex reasoning change blocked by active runtime work");
+            return true;
+        }
         if self.base_screen().has_pending_tool_approvals() {
             self.last_status =
                 String::from("resolve pending approvals before changing Codex reasoning");
@@ -686,7 +783,16 @@ impl AppShell {
         }
 
         let active_tab = ActiveTab::from_index(lane_index);
-        let mut refreshed_lane = build_chat_lane(&self.backend_lanes, lane_index, active_tab);
+        let mut refreshed_lane = self.base_screen().clone();
+        refreshed_lane.set_backend_selector(self.backend_selector_labels(), active_tab);
+        refreshed_lane.set_probe_home(
+            self.backend_lanes[lane_index]
+                .chat_runtime
+                .probe_home
+                .clone(),
+        );
+        refreshed_lane
+            .set_operator_backend(self.backend_lanes[lane_index].operator_backend.clone());
         refreshed_lane.record_event(format!("codex reasoning level set to {next_level}"));
         self.chat_lanes[lane_index] = refreshed_lane.clone();
         self.screens[0] = ScreenState::Chat(refreshed_lane);
@@ -698,6 +804,25 @@ impl AppShell {
             self.last_status = error;
         }
         true
+    }
+
+    fn reset_active_runtime_context(&mut self) {
+        let lane_index = self.active_backend_index;
+        let active_tab = ActiveTab::from_index(lane_index);
+        if let Err(error) = self.submit_background_task(
+            BackgroundTaskRequest::clear_probe_runtime_context(self.active_chat_runtime().clone()),
+        ) {
+            self.last_status = error;
+            return;
+        }
+
+        let mut refreshed_lane = build_chat_lane(&self.backend_lanes, lane_index, active_tab);
+        refreshed_lane.record_event("runtime context cleared");
+        self.chat_lanes[lane_index] = refreshed_lane.clone();
+        self.screens[0] = ScreenState::Chat(refreshed_lane);
+        self.screens.truncate(1);
+        self.sync_backend_selector();
+        self.last_status = String::from("cleared current runtime context");
     }
 }
 
@@ -892,6 +1017,14 @@ fn submission_preview(
         return format!("attachment-only ({})", attachment.label);
     }
     String::from("[empty]")
+}
+
+fn exact_local_slash_command(submission: &ComposerSubmission) -> Option<&str> {
+    if !submission.attachments.is_empty() {
+        return None;
+    }
+    let command = submission.slash_command.as_deref()?;
+    (submission.text.trim() == format!("/{command}")).then_some(command)
 }
 
 pub fn run_probe_tui() -> io::Result<()> {
@@ -1091,6 +1224,17 @@ mod tests {
         }
     }
 
+    fn submit_draft(app: &mut AppShell, value: &str) {
+        for ch in value.chars() {
+            let event = match ch {
+                '\n' => UiEvent::ComposerNewline,
+                other => UiEvent::ComposerInsert(other),
+            };
+            app.dispatch(event);
+        }
+        app.dispatch(UiEvent::ComposerSubmit);
+    }
+
     #[test]
     fn tui_chat_profile_prefers_saved_codex_backend_snapshot() {
         let probe_home = tempdir().expect("temp probe home");
@@ -1213,6 +1357,45 @@ mod tests {
         app.dispatch(UiEvent::Dismiss);
         assert_eq!(app.active_screen_id(), ScreenId::Chat);
         assert_eq!(app.screen_depth(), 1);
+    }
+
+    #[test]
+    fn local_help_and_backend_slash_commands_stay_out_of_the_transcript() {
+        let mut app = AppShell::new_for_tests();
+
+        submit_draft(&mut app, "/help");
+        assert_eq!(app.active_screen_id(), ScreenId::Help);
+        let rendered = app.render_to_string(120, 36);
+        assert!(rendered.contains("/help /backend /approvals /reasoning /clear"));
+        assert!(!rendered.contains("[user] You"));
+
+        app.dispatch(UiEvent::Dismiss);
+        submit_draft(&mut app, "/backend");
+        assert_eq!(app.active_screen_id(), ScreenId::SetupOverlay);
+        let rendered = app.render_to_string(120, 36);
+        assert!(rendered.contains("backend_kind:"));
+        assert!(!rendered.contains("[user] You"));
+    }
+
+    #[test]
+    fn local_reasoning_slash_command_updates_footer_without_resetting_transcript() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+        app.apply_message(AppMessage::TranscriptEntryCommitted {
+            entry: TranscriptEntry::new(
+                TranscriptRole::User,
+                "You",
+                vec![String::from("keep transcript")],
+            ),
+        });
+
+        submit_draft(&mut app, "/reasoning");
+
+        let rendered = app.render_to_string(140, 36);
+        assert!(rendered.contains("keep transcript"));
+        assert!(rendered.contains("gpt-5.4 | low | ."));
+        assert_eq!(app.last_status(), "codex reasoning level: low");
     }
 
     #[test]
@@ -1587,6 +1770,104 @@ mod tests {
         });
 
         assert_eq!(app.runtime_session_id(), Some(session_id.as_str()));
+    }
+
+    #[test]
+    fn clear_slash_command_drops_runtime_context_before_the_next_turn() {
+        let environment = ProbeTestEnvironment::new();
+        let server = FakeOpenAiServer::from_json_responses(vec![
+            json!({
+                "id": "chatcmpl_probe_tui_turn_1",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "First turn complete."
+                    },
+                    "finish_reason": "stop"
+                }]
+            }),
+            json!({
+                "id": "chatcmpl_probe_tui_turn_2",
+                "model": "qwen3.5-2b-q8_0-registry.gguf",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Second turn started from a fresh session."
+                    },
+                    "finish_reason": "stop"
+                }]
+            }),
+        ]);
+        let mut app = AppShell::new_for_tests_with_chat_config(runtime_test_config(
+            &environment,
+            server.base_url(),
+        ));
+
+        submit_draft(&mut app, "first");
+        wait_for_app_condition(&mut app, Duration::from_secs(5), |app| {
+            app.render_to_string(120, 32)
+                .contains("First turn complete.")
+        });
+        let first_session = app
+            .runtime_session_id()
+            .expect("runtime session should exist after the first turn")
+            .to_string();
+
+        submit_draft(&mut app, "/clear");
+        assert_eq!(app.last_status(), "cleared current runtime context");
+        assert_eq!(app.runtime_session_id(), None);
+        let rendered = app.render_to_string(120, 32);
+        assert!(!rendered.contains("First turn complete."));
+        assert!(
+            app.recent_events()
+                .iter()
+                .any(|entry| entry.contains("runtime context cleared"))
+        );
+
+        submit_draft(&mut app, "second");
+        wait_for_app_condition(&mut app, Duration::from_secs(5), |app| {
+            app.render_to_string(120, 32)
+                .contains("Second turn started from a fresh session.")
+        });
+        let second_session = app
+            .runtime_session_id()
+            .expect("runtime session should exist after the second turn")
+            .to_string();
+
+        assert_ne!(first_session, second_session);
+    }
+
+    #[test]
+    fn codex_stream_failures_render_guidance_and_keep_partial_output() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+
+        app.apply_message(AppMessage::AssistantStreamStarted {
+            session_id: String::from("sess_codex"),
+            round_trip: 1,
+            response_id: String::from("resp_codex"),
+            response_model: String::from("gpt-5.4"),
+        });
+        app.apply_message(AppMessage::AssistantDeltaAppended {
+            session_id: String::from("sess_codex"),
+            round_trip: 1,
+            delta: String::from("Partial answer before auth failed."),
+        });
+        app.apply_message(AppMessage::AssistantStreamFailed {
+            session_id: String::from("sess_codex"),
+            round_trip: 1,
+            backend_kind: BackendKind::OpenAiCodexSubscription,
+            error: String::from("backend returned http 401 unauthorized"),
+        });
+
+        let rendered = app.render_to_string(140, 36);
+        assert!(rendered.contains("[active status] Authentication Needed"));
+        assert!(rendered.contains("probe codex login"));
+        assert!(rendered.contains("Partial answer before auth failed."));
     }
 
     #[test]

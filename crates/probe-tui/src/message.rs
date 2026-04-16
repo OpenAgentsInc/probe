@@ -21,6 +21,9 @@ pub enum BackgroundTaskRequest {
         prompt: String,
         config: ProbeRuntimeTurnConfig,
     },
+    ClearProbeRuntimeContext {
+        config: ProbeRuntimeTurnConfig,
+    },
     SelectGithubIssue {
         priority: String,
         cwd: PathBuf,
@@ -59,6 +62,11 @@ impl BackgroundTaskRequest {
     }
 
     #[must_use]
+    pub fn clear_probe_runtime_context(config: ProbeRuntimeTurnConfig) -> Self {
+        Self::ClearProbeRuntimeContext { config }
+    }
+
+    #[must_use]
     pub fn select_github_issue(priority: impl Into<String>, cwd: PathBuf) -> Self {
         Self::SelectGithubIssue {
             priority: priority.into(),
@@ -87,6 +95,7 @@ impl BackgroundTaskRequest {
             Self::AppleFmSetup { profile } => Some(AppleFmBackendSummary::from_profile(profile)),
             Self::AttachProbeRuntimeSession { .. }
             | Self::ProbeRuntimeTurn { .. }
+            | Self::ClearProbeRuntimeContext { .. }
             | Self::SelectGithubIssue { .. }
             | Self::ResolvePendingToolApproval { .. } => None,
         }
@@ -98,6 +107,7 @@ impl BackgroundTaskRequest {
             Self::AppleFmSetup { .. } => "Apple FM setup check",
             Self::AttachProbeRuntimeSession { .. } => "Probe runtime attach",
             Self::ProbeRuntimeTurn { .. } => "Probe runtime turn",
+            Self::ClearProbeRuntimeContext { .. } => "Probe runtime context reset",
             Self::SelectGithubIssue { .. } => "GitHub issue selection",
             Self::ResolvePendingToolApproval { .. } => "pending approval decision",
         }

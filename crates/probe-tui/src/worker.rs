@@ -146,6 +146,9 @@ fn run_request(
         BackgroundTaskRequest::ProbeRuntimeTurn { prompt, config } => {
             run_probe_runtime_turn(prompt, config, message_tx, state)
         }
+        BackgroundTaskRequest::ClearProbeRuntimeContext { config } => {
+            state.remove_runtime_session_for_config(&config)
+        }
         BackgroundTaskRequest::SelectGithubIssue { priority, cwd } => {
             run_github_issue_selection(priority, cwd, message_tx)
         }
@@ -819,6 +822,11 @@ impl WorkerState {
             return;
         }
         self.runtime_sessions.push(new_session);
+    }
+
+    fn remove_runtime_session_for_config(&mut self, config: &ProbeRuntimeTurnConfig) {
+        self.runtime_sessions
+            .retain(|session| !session.matches_config(config));
     }
 }
 
