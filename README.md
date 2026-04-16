@@ -92,6 +92,10 @@ Run a one-shot turn:
 cargo run -p probe-cli -- exec "Explain what this repository does."
 ```
 
+Probe now also carries the first checked-in npm wrapper surface for a future
+global install path under `npm/`. The current packaging work is mac-first and
+is documented in `docs/82-mac-first-npm-global-install-packaging.md`.
+
 Start an interactive session:
 
 ```bash

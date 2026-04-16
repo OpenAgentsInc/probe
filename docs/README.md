@@ -285,3 +285,7 @@ This folder holds technical planning docs for the Probe runtime.
     GCE baseline scripts, persistent `PROBE_HOME`, systemd-managed
     `probe forge run-loop`, Codex headless auth, bootstrap reattach flow, and
     the retained local smoke validation path
+- `82-mac-first-npm-global-install-packaging.md`
+  - checked-in npm wrapper shape for the first macOS global install surface,
+    including the thin meta package, the first platform payload package, and
+    the `probe` launcher that spawns the native binary from `vendor/`

@@ -1,0 +1,20 @@
+{
+  "name": "@openagentsinc/probe",
+  "version": "0.0.0-dev",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "probe": "bin/probe.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OpenAgentsInc/probe.git",
+    "directory": "npm"
+  }
+}
