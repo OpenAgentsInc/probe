@@ -27,6 +27,7 @@ use psionic_apple_fm::AppleFmSystemLanguageModelAvailability;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::failure::{classify_runtime_failure, summarize_runtime_note};
 use crate::message::{
     AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
     AppleFmFailureSummary, AppleFmUsageSummary, BackgroundTaskRequest, ProbeRuntimeTurnConfig,
@@ -459,11 +460,7 @@ fn run_attach_probe_runtime_session(
         Ok(client) => client,
         Err(error) => {
             let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                entry: TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Runtime Error",
-                    vec![error.to_string()],
-                ),
+                entry: runtime_error_entry(error.to_string().as_str()),
             });
             return;
         }
@@ -473,11 +470,7 @@ fn run_attach_probe_runtime_session(
         Ok(response) => response,
         Err(error) => {
             let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                entry: TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Runtime Error",
-                    vec![error.to_string()],
-                ),
+                entry: runtime_error_entry(error.to_string().as_str()),
             });
             return;
         }
@@ -522,11 +515,7 @@ fn run_probe_runtime_turn(
         Ok(client) => client,
         Err(error) => {
             let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                entry: TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Runtime Error",
-                    vec![error.to_string()],
-                ),
+                entry: runtime_error_entry(error.to_string().as_str()),
             });
             return;
         }
@@ -603,11 +592,7 @@ fn run_probe_runtime_turn(
                     .map(|session| session.session_id.clone())
             }) else {
                 let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                    entry: TranscriptEntry::new(
-                        TranscriptRole::Status,
-                        "Runtime Error",
-                        vec![error.to_string()],
-                    ),
+                    entry: runtime_error_entry(error.to_string().as_str()),
                 });
                 return;
             };
@@ -643,11 +628,7 @@ fn run_probe_runtime_turn(
             }
             if had_no_new_turns {
                 let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                    entry: TranscriptEntry::new(
-                        TranscriptRole::Status,
-                        "Runtime Error",
-                        vec![error.to_string()],
-                    ),
+                    entry: runtime_error_entry(error.to_string().as_str()),
                 });
             }
         }
@@ -666,11 +647,7 @@ fn run_pending_tool_approval_resolution(
         Ok(client) => client,
         Err(error) => {
             let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                entry: TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Runtime Error",
-                    vec![error.to_string()],
-                ),
+                entry: runtime_error_entry(error.to_string().as_str()),
             });
             return;
         }
@@ -681,10 +658,8 @@ fn run_pending_tool_approval_resolution(
         .map(|metadata| metadata.id)
     else {
         let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-            entry: TranscriptEntry::new(
-                TranscriptRole::Status,
-                "Runtime Error",
-                vec![format!("runtime session `{session_id}` was not found")],
+            entry: runtime_error_entry(
+                format!("runtime session `{session_id}` was not found").as_str(),
             ),
         });
         return;
@@ -694,12 +669,8 @@ fn run_pending_tool_approval_resolution(
         Some(tool_loop) => tool_loop,
         None => {
             let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                entry: TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Runtime Error",
-                    vec![String::from(
-                        "pending approval resolution requires an active tool loop config",
-                    )],
+                entry: runtime_error_entry(
+                    "pending approval resolution requires an active tool loop config",
                 ),
             });
             return;
@@ -785,11 +756,7 @@ fn run_pending_tool_approval_resolution(
         Err(error) => {
             let _ = emit_pending_tool_approvals(message_tx, &mut client, &session_id);
             let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
-                entry: TranscriptEntry::new(
-                    TranscriptRole::Status,
-                    "Runtime Error",
-                    vec![error.to_string()],
-                ),
+                entry: runtime_error_entry(error.to_string().as_str()),
             });
         }
     }
@@ -1050,12 +1017,26 @@ fn transcript_entry_from_item(turn_index: u64, item: &TranscriptItem) -> Option<
                 }
             },
         ),
-        TranscriptItemKind::Note => Some(TranscriptEntry::new(
-            TranscriptRole::Status,
-            "Runtime Note",
-            split_body_lines(item.text.as_str()),
-        )),
+        TranscriptItemKind::Note => Some(runtime_note_entry(item.text.as_str())),
     }
+}
+
+fn runtime_note_entry(note: &str) -> TranscriptEntry {
+    summarize_runtime_note(note, None).map_or_else(
+        || {
+            TranscriptEntry::new(
+                TranscriptRole::Status,
+                "Runtime Note",
+                split_body_lines(note),
+            )
+        },
+        |summary| TranscriptEntry::new(TranscriptRole::Status, summary.title, summary.body_lines()),
+    )
+}
+
+fn runtime_error_entry(error: &str) -> TranscriptEntry {
+    let summary = classify_runtime_failure(error, None);
+    TranscriptEntry::new(TranscriptRole::Status, summary.title, summary.body_lines())
 }
 
 fn tool_call_lines(turn_index: u64, item: &TranscriptItem) -> Vec<String> {
@@ -1305,7 +1286,10 @@ fn split_body_lines(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProbeRuntimeSessionState, WorkerState, tool_call_lines, tool_result_lines};
+    use super::{
+        ProbeRuntimeSessionState, WorkerState, runtime_note_entry, tool_call_lines,
+        tool_result_lines,
+    };
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
     use probe_protocol::session::{
         ItemId, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
@@ -1334,6 +1318,41 @@ mod tests {
             arguments,
             tool_execution,
         }
+    }
+
+    #[test]
+    fn runtime_failure_notes_render_as_structured_metadata() {
+        let entry = runtime_note_entry(
+            r#"backend request failed for session sess_123: backend returned http 429: {"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"pro","resets_in_seconds":451864}}"#,
+        );
+
+        assert_eq!(entry.title(), "Usage Limit Reached");
+        assert!(entry.body().contains(&String::from(
+            "The active backend refused this turn because the current account hit its usage limit."
+        )));
+        assert!(entry.body().contains(&String::from("session: sess_123")));
+        assert!(entry.body().contains(&String::from("status: 429")));
+        assert!(entry.body().contains(&String::from("plan: pro")));
+        assert!(
+            entry
+                .body()
+                .contains(&String::from("reset_in: about 5d 5h"))
+        );
+    }
+
+    #[test]
+    fn ordinary_runtime_notes_stay_plain() {
+        let entry = runtime_note_entry(
+            "session exceeded the configured tool loop bound of 8 controller round trips",
+        );
+
+        assert_eq!(entry.title(), "Runtime Note");
+        assert_eq!(
+            entry.body(),
+            &[String::from(
+                "session exceeded the configured tool loop bound of 8 controller round trips"
+            )]
+        );
     }
 
     #[test]

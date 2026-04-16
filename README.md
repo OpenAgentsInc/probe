@@ -108,6 +108,9 @@ code; magenta slash commands and reasoning metadata; green quote/status accents;
 syntax-highlighted fenced code blocks via a Probe-owned Rust renderer; and
 bullet-led `Calling` / `Called` tool history rows with dim `  └ ` detail lines
 instead of bracketed log labels.
+Committed runtime/backend failures now render as structured multi-line status
+rows with typed metadata like `session`, `status`, `plan`, and `reset_in`
+instead of dumping one raw backend error blob into the transcript.
 
 Run the TUI:
 
