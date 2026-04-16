@@ -39,6 +39,9 @@ the prompt-as-priority path. That request discovers GitHub-backed sibling repos
 from the current workspace, fetches open issues with `gh issue list`, and runs
 the typed issue-selection signature from `probe-decisions`.
 
+That path is now gated before dispatch. Probe only queues GitHub issue lookup
+for work-shaped prompts, not for casual chat such as `who are you`.
+
 Issue lookup deliberately runs on a detached helper thread so the TUI can queue
 issue selection before the runtime turn without stalling the actual coding
 roundtrip.

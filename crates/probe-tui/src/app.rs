@@ -37,6 +37,76 @@ const BACKEND_SELECTOR_ORDER: [BackendKind; 3] = [
     BackendKind::OpenAiChatCompletions,
     BackendKind::AppleFmBridge,
 ];
+const GITHUB_ISSUE_SELECTION_REPO_HINTS: &[&str] = &[
+    "probe",
+    "forge",
+    "openagents",
+    "psionic",
+    "workspace",
+    "control",
+    "dataroom",
+    "treasury",
+    "alpha",
+    "backroom",
+];
+const GITHUB_ISSUE_SELECTION_SCOPE_HINTS: &[&str] = &[
+    "issue",
+    "issues",
+    "pr",
+    "repo",
+    "repository",
+    "tui",
+    "cli",
+    "ui",
+    "docs",
+    "readme",
+    "runtime",
+    "worker",
+    "backend",
+    "footer",
+    "transcript",
+    "approval",
+    "approvals",
+    "session",
+    "release",
+    "deploy",
+    "deployment",
+    "npm",
+    "install",
+    "color",
+    "colors",
+    "syntax",
+    "highlight",
+    "highlighting",
+];
+const GITHUB_ISSUE_SELECTION_WORK_VERBS: &[&str] = &[
+    "add",
+    "build",
+    "building",
+    "clean",
+    "cleanup",
+    "close",
+    "copy",
+    "debug",
+    "deploy",
+    "document",
+    "finish",
+    "fix",
+    "implement",
+    "improve",
+    "investigate",
+    "polish",
+    "port",
+    "refactor",
+    "release",
+    "remove",
+    "ship",
+    "support",
+    "test",
+    "track",
+    "update",
+    "wire",
+];
 
 #[derive(Debug, Clone)]
 struct BackendLaneConfig {
@@ -296,12 +366,14 @@ impl AppShell {
                         "submitted chat turn ({} chars)",
                         submitted.text.chars().count()
                     );
-                    if let Err(error) = self.submit_background_task(
-                        BackgroundTaskRequest::select_github_issue(issue_priority, issue_cwd),
-                    ) {
-                        self.last_status = error;
-                        self.poll_background_messages();
-                        return;
+                    if should_attempt_github_issue_selection(issue_priority.as_str()) {
+                        if let Err(error) = self.submit_background_task(
+                            BackgroundTaskRequest::select_github_issue(issue_priority, issue_cwd),
+                        ) {
+                            self.last_status = error;
+                            self.poll_background_messages();
+                            return;
+                        }
                     }
                     if let Err(error) =
                         self.submit_background_task(BackgroundTaskRequest::probe_runtime_turn(
@@ -1027,6 +1099,93 @@ fn exact_local_slash_command(submission: &ComposerSubmission) -> Option<&str> {
     (submission.text.trim() == format!("/{command}")).then_some(command)
 }
 
+fn should_attempt_github_issue_selection(prompt: &str) -> bool {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    if has_explicit_issue_reference(lowered.as_str()) {
+        return true;
+    }
+
+    let tokens = prompt_tokens(lowered.as_str());
+    let has_repo_hint = tokens
+        .iter()
+        .any(|token| GITHUB_ISSUE_SELECTION_REPO_HINTS.contains(token));
+    let has_scope_hint = tokens
+        .iter()
+        .any(|token| GITHUB_ISSUE_SELECTION_SCOPE_HINTS.contains(token));
+    let has_work_verb = tokens
+        .iter()
+        .any(|token| GITHUB_ISSUE_SELECTION_WORK_VERBS.contains(token));
+
+    if has_work_verb && (has_repo_hint || has_scope_hint) {
+        return true;
+    }
+
+    if looks_casual_chat_prompt(lowered.as_str()) || looks_general_question(lowered.as_str()) {
+        return false;
+    }
+
+    has_repo_hint && has_scope_hint
+}
+
+fn has_explicit_issue_reference(value: &str) -> bool {
+    if value
+        .chars()
+        .zip(value.chars().skip(1))
+        .any(|(left, right)| left == '#' && right.is_ascii_digit())
+    {
+        return true;
+    }
+
+    let tokens = prompt_tokens(value);
+    tokens
+        .windows(2)
+        .any(|window| matches!(window, ["issue" | "issues" | "pr", digits] if digits.chars().all(|ch| ch.is_ascii_digit())))
+        || value.contains("pull request")
+}
+
+fn prompt_tokens(value: &str) -> Vec<&str> {
+    value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn looks_casual_chat_prompt(value: &str) -> bool {
+    let trimmed = value.trim_matches(|ch: char| ch.is_ascii_punctuation() || ch.is_whitespace());
+    [
+        "hello",
+        "hi",
+        "hey",
+        "thanks",
+        "thank you",
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "who are you",
+        "what are you",
+        "what can you do",
+        "how are you",
+    ]
+    .iter()
+    .any(|prefix| trimmed == *prefix || trimmed.starts_with(&format!("{prefix} ")))
+}
+
+fn looks_general_question(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.ends_with('?')
+        || [
+            "who ", "what ", "when ", "where ", "why ", "how ", "are ", "is ", "do ", "did ",
+            "can ", "could ", "would ", "will ", "should ",
+        ]
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+}
+
 pub fn run_probe_tui() -> io::Result<()> {
     run_probe_tui_with_config(AppShell::default_launch_config())
 }
@@ -1128,7 +1287,10 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{AppShell, profile_from_server_config, resolve_tui_chat_profile};
+    use super::{
+        AppShell, profile_from_server_config, resolve_tui_chat_profile,
+        should_attempt_github_issue_selection,
+    };
     use crate::event::UiEvent;
     use crate::message::{
         AppMessage, AppleFmAvailabilitySummary, AppleFmBackendSummary, AppleFmCallRecord,
@@ -1329,6 +1491,28 @@ mod tests {
     }
 
     #[test]
+    fn conversational_prompts_skip_github_issue_selection() {
+        assert!(!should_attempt_github_issue_selection("who are you"));
+        assert!(!should_attempt_github_issue_selection("hello"));
+        assert!(!should_attempt_github_issue_selection(
+            "what issue are we on in probe?"
+        ));
+    }
+
+    #[test]
+    fn work_priorities_still_trigger_github_issue_selection() {
+        assert!(should_attempt_github_issue_selection(
+            "we're building out Probe"
+        ));
+        assert!(should_attempt_github_issue_selection(
+            "Probe issue #119 codex syntax highlighting colors"
+        ));
+        assert!(should_attempt_github_issue_selection(
+            "copy Codex syntax highlighting and color treatment into Probe TUI"
+        ));
+    }
+
+    #[test]
     fn backend_navigation_hotkeys_are_noops_on_the_chat_shell() {
         let mut app = AppShell::new_for_tests();
         let active_tab = app.active_tab();
@@ -1477,6 +1661,40 @@ mod tests {
             app.recent_events()
                 .iter()
                 .any(|entry| entry.contains("queued Probe runtime turn: hi"))
+        );
+    }
+
+    #[test]
+    fn conversational_prompt_does_not_render_issue_selection_status() {
+        let environment = ProbeTestEnvironment::new();
+        let server = FakeOpenAiServer::from_json_responses(vec![json!({
+            "id": "chatcmpl_probe_tui_identity_1",
+            "model": "qwen3.5-2b-q8_0-registry.gguf",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "I am Probe."
+                },
+                "finish_reason": "stop"
+            }]
+        })]);
+        let mut app = AppShell::new_for_tests_with_chat_config(runtime_test_config(
+            &environment,
+            server.base_url(),
+        ));
+
+        submit_draft(&mut app, "who are you");
+        wait_for_app_condition(&mut app, Duration::from_secs(5), |app| {
+            app.render_to_string(120, 32).contains("I am Probe.")
+        });
+
+        let rendered = app.render_to_string(140, 36);
+        assert!(!rendered.contains("[status] GitHub Issue"));
+        assert!(
+            !app.worker_events()
+                .iter()
+                .any(|entry| entry.contains("GitHub issue selection"))
         );
     }
 

@@ -96,11 +96,11 @@ and `docs/83-mac-first-npm-release-staging.md`.
 
 Bare `probe` now opens the TUI by default. The default TUI path is Codex-first
 and no longer exposes the old backend selector strip in the primary shell.
-Each submitted prompt is also treated as a priority string for background
-GitHub issue selection across discoverable local sibling repos. When `gh`
-finds a match, the footer and transcript show the selected issue metadata.
-When no issue matches, the transcript records that cleanly instead of
-pretending a selection exists.
+Work-shaped submitted prompts are treated as priority strings for background
+GitHub issue selection across discoverable local sibling repos. Casual chat or
+identity questions no longer hit that path. When `gh` finds a match, the
+footer and transcript show the selected issue metadata. When no issue matches,
+the transcript records that cleanly instead of pretending a selection exists.
 Transcript rows, tool output, and the footer/composer metadata now use the same
 semantic color direction as Codex: cyan links, paths, issue refs, and inline
 code; magenta slash commands and reasoning metadata; green quote/status accents;
