@@ -1,3 +1,5 @@
+use std::fs;
+
 use assert_cmd::prelude::*;
 use insta::{assert_json_snapshot, assert_snapshot};
 use predicates::prelude::*;
@@ -202,6 +204,34 @@ fn codex_status_uses_saved_reasoning_level_override() {
 }
 
 #[test]
+fn codex_status_autoloads_workspace_secret_and_prefers_api_key_route_without_auth_state() {
+    let environment = ProbeTestEnvironment::new();
+    environment.write_workspace_file(
+        ".secrets/probe-openai.env",
+        "PROBE_OPENAI_API_KEY=probe-secret-key\n",
+    );
+    let nested = environment.workspace().join("nested/worktree");
+    fs::create_dir_all(&nested).expect("create nested worktree");
+
+    std::process::Command::cargo_bin("probe-cli")
+        .expect("probe-cli binary should build for tests")
+        .current_dir(&nested)
+        .env_remove("PROBE_OPENAI_API_KEY")
+        .arg("codex")
+        .arg("status")
+        .arg("--probe-home")
+        .arg(environment.probe_home())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("authenticated=false"))
+        .stdout(predicate::str::contains("api_key_fallback_available=true"))
+        .stdout(predicate::str::contains(
+            "selected_route=api_key_fallback:PROBE_OPENAI_API_KEY",
+        ))
+        .stdout(predicate::str::contains("api_key_source=workspace_secret:"));
+}
+
+#[test]
 fn codex_logout_removes_persisted_auth_state() {
     let environment = ProbeTestEnvironment::new();
     let store = OpenAiCodexAuthStore::new(environment.probe_home());
@@ -273,11 +303,14 @@ fn codex_logout_can_remove_one_account_without_clearing_the_store() {
 }
 
 #[test]
-fn exec_codex_profile_requires_login_before_request_execution() {
+fn exec_codex_profile_requires_login_before_request_execution_when_api_key_is_absent() {
     let environment = ProbeTestEnvironment::new();
     environment.seed_coding_workspace();
 
-    probe_cli_command()
+    std::process::Command::cargo_bin("probe-cli")
+        .expect("probe-cli binary should build for tests")
+        .current_dir(environment.workspace())
+        .env_remove("PROBE_OPENAI_API_KEY")
         .arg("exec")
         .arg("--profile")
         .arg("openai-codex-subscription")

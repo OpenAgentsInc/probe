@@ -61,7 +61,7 @@ Current header set:
 - `User-Agent: probe/<version> (<os>; <arch>)`
 - `session_id: <probe session id>` when the runtime has a session id
 
-If all connected subscription accounts are rate-limited and
+If subscription auth is missing, unusable, or rate-limited and
 `PROBE_OPENAI_API_KEY` is present, Probe now rewrites the target to the public
 Responses API at:
 
@@ -71,7 +71,8 @@ In that fallback mode Probe keeps the same model and Responses body shape, but:
 
 - auth comes from `PROBE_OPENAI_API_KEY`
 - `ChatGPT-Account-Id` is omitted
-- the fallback is only used after the saved subscription accounts are exhausted
+- the fallback can also be used when no viable saved subscription account is
+  present
 
 Current hosted-body contract:
 
@@ -159,8 +160,8 @@ Expected behavior:
 - Probe includes the subscription headers listed above.
 - Probe sends `instructions` plus `input` instead of `messages`.
 - Probe refuses unsupported non-Codex models before the HTTP call is made.
-- If every saved subscription account is rate-limited and
-  `PROBE_OPENAI_API_KEY` is exported, Probe falls back to
+- If every saved subscription account is rate-limited, missing, or otherwise
+  unusable and `PROBE_OPENAI_API_KEY` is exported, Probe falls back to
   `https://api.openai.com/v1/responses`.
 
 ## Contrast With The OpenAI-compatible Psionic Lane
@@ -169,9 +170,10 @@ The Codex subscription lane still does not require `PROBE_OPENAI_API_KEY` for
 normal attached subscription usage.
 
 The built-in OpenAI-compatible Psionic-backed profiles still require that env
-var directly. Probe now also treats it as an optional last-resort fallback for
-the Codex subscription lane after the saved subscription accounts are
-rate-limited.
+var directly. Probe now also treats it as an optional fallback for the Codex
+subscription lane when the saved subscription accounts are not usable. The CLI
+autoloads that key from `.secrets/probe-openai.env` when Probe starts inside a
+workspace tree containing that file.
 
 ## Tests
 

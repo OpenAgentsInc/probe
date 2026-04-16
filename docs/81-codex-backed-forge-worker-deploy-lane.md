@@ -40,8 +40,8 @@ Preferred first path:
 
 This path does **not** require `PROBE_OPENAI_API_KEY`.
 
-Use `PROBE_OPENAI_API_KEY` only when you intentionally deploy an
-OpenAI-compatible env-backed profile instead of the Codex subscription lane.
+`PROBE_OPENAI_API_KEY` is now an optional fallback for the Codex lane as well,
+but a healthy worker with valid saved subscription auth still does not need it.
 
 ### 2. Probe worker auth to Forge
 

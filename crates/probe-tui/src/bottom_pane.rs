@@ -524,6 +524,7 @@ fn is_reasoning_segment(segment: &str) -> bool {
 
 fn looks_draft_meta_segment(segment: &str) -> bool {
     segment == "plain"
+        || segment == "api key"
         || segment.starts_with("attach ")
         || segment.starts_with("hist ")
         || segment == "paste"
@@ -690,9 +691,11 @@ mod tests {
     fn footer_segments_pick_up_model_reasoning_and_status_styles() {
         let model = styled_footer_segment("gpt-5.4");
         let reasoning = styled_footer_segment("high");
+        let route = styled_footer_segment("api key");
         let status = styled_footer_segment("*");
         assert_eq!(model[0].style.fg, Some(Color::Cyan));
         assert_eq!(reasoning[0].style.fg, Some(Color::Magenta));
+        assert_eq!(route[0].style.fg, Some(Color::DarkGray));
         assert_eq!(status[0].style.fg, Some(Color::Cyan));
     }
 }

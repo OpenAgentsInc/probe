@@ -60,8 +60,9 @@ Probe currently ships four backend profiles across three backend families:
   - model: `gpt-5.4`
   - reasoning level: `backend_default`
   - auth source: versioned multi-account state at `PROBE_HOME/auth/openai-codex.json`
-  - optional fallback env: `PROBE_OPENAI_API_KEY` after all connected
-    subscription accounts are rate-limited
+  - optional fallback env: `PROBE_OPENAI_API_KEY`
+  - workspace secret autoload: `.secrets/probe-openai.env` when Probe starts
+    inside that workspace tree
 - `psionic-apple-fm-bridge`
   - default base URL: `http://127.0.0.1:11435`
   - model: `apple-foundation-model`
@@ -74,8 +75,10 @@ endpoint rather than a local Psionic server.
 Probe now supports multiple saved Codex subscription accounts in one auth file,
 refreshes them independently, polls the hosted usage endpoint to estimate
 headroom, prefers the account with the most remaining capacity, and can fall
-back to `PROBE_OPENAI_API_KEY` only after the saved subscription accounts are
-rate-limited.
+back to `PROBE_OPENAI_API_KEY` when the saved subscription accounts are
+missing, unusable, or rate-limited. If Probe starts inside a workspace tree
+that contains `.secrets/probe-openai.env`, it autoloads that key into the CLI
+process before the TUI, `exec`, `chat`, or `codex status` paths run.
 The mesh profile is attach-only as well. Probe discovers live routed inventory
 from `GET /psionic/management/status`, picks the effective model from that
 inventory, prints the mesh role or fallback posture in operator output, and
@@ -99,6 +102,22 @@ npm i -g @openagentsinc/probe
 probe
 probe exec --profile openai-codex-subscription "hello"
 ```
+
+If you want bare `probe` to auto-use an OpenAI API key inside this workspace,
+create:
+
+```bash
+mkdir -p .secrets
+chmod 700 .secrets
+cat > .secrets/probe-openai.env <<'EOF'
+PROBE_OPENAI_API_KEY=sk-...
+EOF
+chmod 600 .secrets/probe-openai.env
+```
+
+Probe walks upward from the current working directory looking for that file. If
+you launch Probe outside that workspace tree, export `PROBE_OPENAI_API_KEY`
+normally instead.
 
 The npm install path is currently mac-first for Apple silicon. Packaging and
 release details live in `docs/82-mac-first-npm-global-install-packaging.md`
@@ -242,7 +261,7 @@ cargo run -p probe-cli -- exec \
 ## Auth With ChatGPT
 
 Probe can use your ChatGPT subscription for the hosted Codex lane. This does
-not use `PROBE_OPENAI_API_KEY`.
+not require `PROBE_OPENAI_API_KEY` when subscription auth is healthy.
 
 Prerequisite:
 
@@ -288,6 +307,47 @@ Probe persists this state at `PROBE_HOME/auth/openai-codex.json` with private
 file permissions. The current TUI backend overlay also shows whether that auth
 state exists and whether it is expired. `probe codex status` now also prints a
 worker-oriented hint for the headless device flow.
+
+## OpenAI API Key
+
+Probe can also drive the default Codex-first lane with a plain OpenAI API key.
+
+Preferred workspace-local setup:
+
+```bash
+mkdir -p .secrets
+chmod 700 .secrets
+cat > .secrets/probe-openai.env <<'EOF'
+PROBE_OPENAI_API_KEY=sk-...
+EOF
+chmod 600 .secrets/probe-openai.env
+```
+
+Then run Probe from anywhere inside that workspace tree:
+
+```bash
+probe
+```
+
+Probe autoloads `.secrets/probe-openai.env`, exposes the key as
+`PROBE_OPENAI_API_KEY` inside the CLI process, and lets the default
+`openai-codex-subscription` lane route to the public Responses API when
+subscription auth is missing, expired, or rate-limited.
+
+If you are not running inside that workspace tree, use a normal shell export:
+
+```bash
+export PROBE_OPENAI_API_KEY=sk-...
+probe
+```
+
+Operator surfaces now make that route visible:
+
+- `probe codex status` prints `api_key_source=...` and `selected_route=...`
+- the TUI footer shows `api key` when the active Codex lane is currently using
+  the key-backed route
+- the backend overlay shows `selected_route`, `api_key_fallback`, and the key
+  source summary
 
 ## Forge Worker Auth
 
@@ -377,7 +437,8 @@ and keeps the auth split explicit:
 
 - Codex subscription auth lives at `PROBE_HOME/auth/openai-codex.json`
 - Forge worker-session auth lives at `PROBE_HOME/auth/forge-worker.json`
-- `PROBE_OPENAI_API_KEY` stays empty for the default Codex lane
+- `PROBE_OPENAI_API_KEY` is optional for the default Codex lane and is only
+  needed when Probe should use the Responses API fallback path
 
 After auth succeeds, use the ChatGPT-backed Codex profile directly:
 
@@ -393,16 +454,21 @@ cargo run -p probe-cli -- exec \
 
 In the TUI, launch `cargo probe` or `probe`. The default path now prefers the
 Codex-backed TUI automatically and drops you straight into the transcript
-shell.
+shell. When the active Codex route is running on `PROBE_OPENAI_API_KEY`, the
+footer picks up an `api key` badge so the operator can see that the session is
+not currently using subscription bearer auth.
 
-The canonical Codex backend profile sends requests to
-`https://chatgpt.com/backend-api/codex/responses` with subscription bearer auth
-instead of using `PROBE_OPENAI_API_KEY`.
+The canonical Codex backend profile prefers
+`https://chatgpt.com/backend-api/codex/responses` with subscription bearer
+auth, but now falls through to the public Responses API when
+`PROBE_OPENAI_API_KEY` is available and the saved subscription route is not
+usable.
 
 The OpenAI-compatible Psionic-backed profiles are different: they use the env
 var named by the profile, currently `PROBE_OPENAI_API_KEY`. Probe now resolves
-that env var explicitly and fails early if the profile requires it and the env
-var is missing or empty.
+that env var explicitly, including the workspace-secret autoload path above,
+and fails early if the profile requires it and the key is still missing or
+empty.
 
 ## TUI
 

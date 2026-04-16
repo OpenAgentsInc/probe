@@ -65,6 +65,8 @@ upgrades its rendering semantics:
 - footer metadata segments are styled by meaning instead of one plain string
 - footer metadata is split into explicit segments and separated with Codex-like
   ` · ` separators instead of one pipe-delimited blob
+- when the active Codex lane is routed through `PROBE_OPENAI_API_KEY`, the
+  footer now shows an explicit `api key` segment
 - slash commands and typed mentions render in magenta
 - model ids, issue refs, paths, links, and inline code render in cyan
 - reasoning metadata stays visible in magenta instead of getting buried in a

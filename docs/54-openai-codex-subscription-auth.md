@@ -117,10 +117,14 @@ When Probe executes against the `openai-codex-subscription` backend now, it:
 3. ranks non-expired accounts by remaining headroom
 4. prefers the account with the lowest `used_percent`
 5. rotates to the next account if the chosen account still returns `429`
-6. optionally falls back to `PROBE_OPENAI_API_KEY` only after the connected
-   subscription accounts are rate-limited
+6. optionally falls back to `PROBE_OPENAI_API_KEY` when the connected
+   subscription accounts are missing, unusable, or rate-limited
 
 That keeps one exhausted or stale account from blocking the others.
+
+Probe CLI startup now also autoloads `PROBE_OPENAI_API_KEY` from a workspace
+secret file named `.secrets/probe-openai.env` when the current working
+directory is inside that workspace tree.
 
 ## Status And Logout
 

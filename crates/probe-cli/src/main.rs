@@ -80,6 +80,10 @@ use probe_tui::{AppShell, TuiLaunchConfig, UiEvent, run_probe_tui_with_config};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+const OPENAI_API_KEY_ENV: &str = "PROBE_OPENAI_API_KEY";
+const OPENAI_API_KEY_SOURCE_ENV: &str = "PROBE_OPENAI_API_KEY_SOURCE";
+const WORKSPACE_OPENAI_SECRET_RELATIVE_PATH: &str = ".secrets/probe-openai.env";
+
 #[derive(Parser, Debug)]
 #[command(name = "probe")]
 #[command(bin_name = "probe")]
@@ -773,6 +777,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
+    prime_workspace_openai_api_key()?;
     let cli = Cli::parse();
     match cli.command.unwrap_or(Commands::Tui(TuiArgs::default())) {
         Commands::Exec(args) => run_exec(args),
@@ -799,6 +804,75 @@ fn run() -> Result<(), String> {
         Commands::OptimizeSkillPacks(args) => run_optimize_skill_packs(args),
         Commands::AdoptCandidate(args) => run_adopt_candidate(args),
     }
+}
+
+fn prime_workspace_openai_api_key() -> Result<(), String> {
+    if let Some(source) = openai_api_key_process_env_source() {
+        // SAFETY: Probe sets this process-local metadata once during CLI startup.
+        unsafe {
+            std::env::set_var(OPENAI_API_KEY_SOURCE_ENV, source);
+        }
+        return Ok(());
+    }
+
+    let Some(secret_path) = find_workspace_openai_secret() else {
+        return Ok(());
+    };
+    let Some(api_key) = parse_secret_file_value(secret_path.as_path(), OPENAI_API_KEY_ENV)? else {
+        return Ok(());
+    };
+    // SAFETY: Probe sets these process-local env vars once during CLI startup.
+    unsafe {
+        std::env::set_var(OPENAI_API_KEY_ENV, api_key);
+        std::env::set_var(
+            OPENAI_API_KEY_SOURCE_ENV,
+            format!("workspace_secret:{}", secret_path.display()),
+        );
+    }
+    Ok(())
+}
+
+fn openai_api_key_process_env_source() -> Option<String> {
+    std::env::var(OPENAI_API_KEY_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|_| format!("env:{OPENAI_API_KEY_ENV}"))
+}
+
+fn find_workspace_openai_secret() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    for ancestor in cwd.ancestors() {
+        let candidate = ancestor.join(WORKSPACE_OPENAI_SECRET_RELATIVE_PATH);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn parse_secret_file_value(path: &Path, key: &str) -> Result<Option<String>, String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed reading {}: {error}", path.display()))?;
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((raw_key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        if raw_key.trim() != key {
+            continue;
+        }
+        let value = raw_value.trim().trim_matches('"').trim_matches('\'').trim();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(value.to_string()));
+    }
+    Ok(None)
 }
 
 fn run_codex(args: CodexArgs) -> Result<(), String> {
@@ -3238,6 +3312,9 @@ fn print_codex_auth_status(
         status.selected_account_label.as_deref().unwrap_or("none")
     );
     println!("api_key_fallback_available={api_key_fallback_available}");
+    if let Some(source) = current_openai_api_key_source() {
+        println!("api_key_source={source}");
+    }
     if let Some(plan) = routing_plan {
         println!("selected_route={}", render_codex_route_summary(plan));
     }
@@ -3305,6 +3382,13 @@ fn render_codex_route_summary(plan: &probe_openai_auth::OpenAiCodexRoutingPlan) 
         }
         None => String::from("none"),
     }
+}
+
+fn current_openai_api_key_source() -> Option<String> {
+    std::env::var(OPENAI_API_KEY_SOURCE_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn try_open_browser(url: &str) -> bool {

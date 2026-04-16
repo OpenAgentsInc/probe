@@ -7,7 +7,7 @@ use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_core::server_control::ServerOperatorSummary;
 use probe_core::tools::tool_result_model_text;
 use probe_decisions::SelectedGithubIssue;
-use probe_openai_auth::OpenAiCodexAuthStore;
+use probe_openai_auth::{OpenAiCodexAuthController, OpenAiCodexAuthStore, OpenAiCodexRoute};
 use probe_protocol::session::{PendingToolApproval, ToolApprovalResolution};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -27,6 +27,8 @@ use crate::widgets::ModalCard;
 const MAX_EVENT_LOG: usize = 16;
 const LINE_SCROLL_STEP: u16 = 3;
 const PAGE_SCROLL_STEP: u16 = 12;
+const OPENAI_API_KEY_ENV: &str = "PROBE_OPENAI_API_KEY";
+const OPENAI_API_KEY_SOURCE_ENV: &str = "PROBE_OPENAI_API_KEY_SOURCE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenId {
@@ -322,6 +324,7 @@ pub struct ChatScreen {
     selected_issue: Option<SelectedGithubIssue>,
     operator_backend: Option<ServerOperatorSummary>,
     probe_home: Option<PathBuf>,
+    codex_route_badge: Option<String>,
     setup: AppleFmSetupState,
 }
 
@@ -341,6 +344,7 @@ impl Default for ChatScreen {
             selected_issue: None,
             operator_backend: None,
             probe_home: None,
+            codex_route_badge: None,
             setup: AppleFmSetupState::default(),
         };
         screen.record_event("probe tui ready");
@@ -363,6 +367,7 @@ impl ChatScreen {
 
     pub fn set_probe_home(&mut self, probe_home: Option<PathBuf>) {
         self.probe_home = probe_home;
+        self.refresh_codex_route_badge();
     }
 
     pub fn emphasized_copy(&self) -> bool {
@@ -421,6 +426,7 @@ impl ChatScreen {
         self.runtime.backend_kind = Some(render_backend_kind(summary.backend_kind).to_string());
         self.runtime.model_id = summary.model_id.clone();
         self.operator_backend = Some(summary.clone());
+        self.refresh_codex_route_badge();
         self.record_event(format!(
             "backend target: {} {} {} model={}",
             render_backend_kind(summary.backend_kind),
@@ -544,6 +550,9 @@ impl ChatScreen {
         let mut parts = vec![preview(model, 24)];
         if let Some(reasoning) = reasoning {
             parts.push(display_reasoning_level(reasoning).to_string());
+        }
+        if let Some(route_badge) = self.codex_route_badge.as_ref() {
+            parts.push(route_badge.clone());
         }
         if let Some(issue) = self.selected_issue.as_ref() {
             parts.push(preview(
@@ -1139,6 +1148,7 @@ impl ChatScreen {
                     self.record_worker_event(format!("committed {label} row: {title}"));
                 }
                 self.snap_transcript_to_latest();
+                self.refresh_codex_route_badge();
                 format!("committed {entry_count} transcript entries")
             }
             AppMessage::TranscriptEntryCommitted { entry } => {
@@ -1149,6 +1159,7 @@ impl ChatScreen {
                 self.transcript.commit_live_entries();
                 self.transcript.push_entry(entry);
                 self.snap_transcript_to_latest();
+                self.refresh_codex_route_badge();
                 self.record_worker_event(format!("committed {label} row: {title}"));
                 format!("committed {label} row")
             }
@@ -1169,6 +1180,7 @@ impl ChatScreen {
                     active_tool: self.runtime.active_tool.clone(),
                     pending_approvals: self.runtime.pending_approvals.clone(),
                 };
+                self.refresh_codex_route_badge();
                 self.record_worker_event(format!(
                     "runtime session ready: {} via {}",
                     short_session_id(session_id.as_str()),
@@ -1809,32 +1821,80 @@ impl ChatScreen {
             ];
         };
         let store = OpenAiCodexAuthStore::new(probe_home);
+        let route_summary = codex_route_summary(probe_home.as_path());
+        let api_key_source = current_openai_api_key_source();
         match store.status() {
-            Ok(status) if status.authenticated => vec![
-                String::from("status: connected"),
-                format!("path: {}", status.path.display()),
-                format!("accounts: {}", status.account_count),
-                format!("expired: {}", status.expired),
-                format!(
-                    "account_id: {}",
-                    status.account_id.as_deref().unwrap_or("none")
-                ),
-                format!(
-                    "selected: {}",
-                    status.selected_account_label.as_deref().unwrap_or_else(|| {
-                        status.selected_account_key.as_deref().unwrap_or("none")
-                    })
-                ),
-                String::from("manage: `probe codex status` / `probe codex logout`"),
-            ],
-            Ok(status) => vec![
-                String::from("status: disconnected"),
-                format!("path: {}", status.path.display()),
-                String::from("connect: `probe codex login --method browser`"),
-                String::from("headless: `probe codex login --method headless`"),
-            ],
+            Ok(status) if status.authenticated => {
+                let mut lines = vec![
+                    String::from("status: connected"),
+                    format!("path: {}", status.path.display()),
+                    format!("accounts: {}", status.account_count),
+                    format!("expired: {}", status.expired),
+                    format!(
+                        "account_id: {}",
+                        status.account_id.as_deref().unwrap_or("none")
+                    ),
+                    format!(
+                        "selected: {}",
+                        status.selected_account_label.as_deref().unwrap_or_else(|| {
+                            status.selected_account_key.as_deref().unwrap_or("none")
+                        })
+                    ),
+                ];
+                if let Some(route_summary) = route_summary.as_ref() {
+                    lines.push(format!("selected_route: {}", route_summary.route_label));
+                    if route_summary.api_key_fallback_available {
+                        lines.push(String::from("api_key_fallback: available"));
+                    }
+                }
+                if let Some(source) = api_key_source.as_deref() {
+                    lines.push(format!("api_key_source: {source}"));
+                }
+                lines.push(String::from(
+                    "manage: `probe codex status` / `probe codex logout`",
+                ));
+                lines
+            }
+            Ok(status) => {
+                let mut lines = vec![
+                    String::from("status: disconnected"),
+                    format!("path: {}", status.path.display()),
+                ];
+                if let Some(route_summary) = route_summary.as_ref() {
+                    lines.push(format!("selected_route: {}", route_summary.route_label));
+                    if route_summary.api_key_fallback_available {
+                        lines.push(String::from("api_key_fallback: available"));
+                    }
+                }
+                if let Some(source) = api_key_source.as_deref() {
+                    lines.push(format!("api_key_source: {source}"));
+                }
+                lines.push(String::from(
+                    "connect: `probe codex login --method browser`",
+                ));
+                lines.push(String::from(
+                    "headless: `probe codex login --method headless`",
+                ));
+                lines
+            }
             Err(error) => vec![String::from("status: error"), format!("detail: {error}")],
         }
+    }
+
+    fn refresh_codex_route_badge(&mut self) {
+        self.codex_route_badge = self
+            .operator_backend
+            .as_ref()
+            .filter(|summary| {
+                summary.backend_kind
+                    == probe_protocol::backend::BackendKind::OpenAiCodexSubscription
+            })
+            .and_then(|_| {
+                self.probe_home.as_deref().and_then(|probe_home| {
+                    codex_route_summary(probe_home).map(|summary| summary.footer_badge)
+                })
+            })
+            .flatten();
     }
 
     fn render_phase_label(&self) -> &'static str {
@@ -2492,6 +2552,44 @@ fn display_reasoning_level(value: &str) -> &str {
     match value {
         "backend_default" => "auto",
         other => other,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexRouteSummary {
+    route_label: String,
+    footer_badge: Option<String>,
+    api_key_fallback_available: bool,
+}
+
+fn codex_route_summary(probe_home: &std::path::Path) -> Option<CodexRouteSummary> {
+    let controller = OpenAiCodexAuthController::new(probe_home).ok()?;
+    let plan = controller.routing_plan(Some(OPENAI_API_KEY_ENV)).ok()?;
+    let route_label = match plan.routes.first() {
+        Some(OpenAiCodexRoute::SubscriptionAccount(_)) => String::from("subscription"),
+        Some(OpenAiCodexRoute::ApiKeyFallback(_)) => String::from("api key"),
+        None => String::from("none"),
+    };
+    let footer_badge = matches!(
+        plan.routes.first(),
+        Some(OpenAiCodexRoute::ApiKeyFallback(_))
+    )
+    .then(|| String::from("api key"));
+    Some(CodexRouteSummary {
+        route_label,
+        footer_badge,
+        api_key_fallback_available: plan.api_key_fallback_available,
+    })
+}
+
+fn current_openai_api_key_source() -> Option<&'static str> {
+    let source = std::env::var(OPENAI_API_KEY_SOURCE_ENV).ok()?;
+    if source.starts_with("workspace_secret:") {
+        Some("workspace secret")
+    } else if source.starts_with("env:") {
+        Some("env")
+    } else {
+        Some("configured")
     }
 }
 

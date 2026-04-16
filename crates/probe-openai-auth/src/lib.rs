@@ -564,10 +564,19 @@ impl OpenAiCodexAuthController {
         &self,
         api_key_env: Option<&str>,
     ) -> Result<OpenAiCodexRoutingPlan, OpenAiAuthError> {
+        let fallback = api_key_env.and_then(|env_var| {
+            read_env_token(env_var).map(|api_key| {
+                OpenAiCodexRoute::ApiKeyFallback(OpenAiCodexApiKeyFallbackRoute {
+                    env_var: env_var.to_string(),
+                    api_key,
+                })
+            })
+        });
+        let api_key_fallback_available = fallback.is_some();
         let Some(mut state) = self.store.load_state()? else {
             return Ok(OpenAiCodexRoutingPlan {
-                routes: Vec::new(),
-                api_key_fallback_available: api_key_env.and_then(read_env_token).is_some(),
+                routes: fallback.into_iter().collect(),
+                api_key_fallback_available,
             });
         };
         self.refresh_state_for_routing(&mut state)?;
@@ -596,15 +605,6 @@ impl OpenAiCodexAuthController {
             .collect::<Vec<_>>();
         routes.sort_by(|left, right| compare_routes(left, right, selected_key.as_deref()));
 
-        let fallback = api_key_env.and_then(|env_var| {
-            read_env_token(env_var).map(|api_key| {
-                OpenAiCodexRoute::ApiKeyFallback(OpenAiCodexApiKeyFallbackRoute {
-                    env_var: env_var.to_string(),
-                    api_key,
-                })
-            })
-        });
-        let api_key_fallback_available = fallback.is_some();
         if routes.is_empty() {
             let has_limited_account = state.accounts.iter().any(|account| {
                 !account.is_expired_at(now_millis)
@@ -623,9 +623,13 @@ impl OpenAiCodexAuthController {
                     });
                 }
             } else if !state.accounts.is_empty() {
-                return Err(OpenAiAuthError::NoUsableCodexAccounts {
-                    path: self.store.path().display().to_string(),
-                });
+                if let Some(fallback) = fallback {
+                    routes.push(fallback);
+                } else {
+                    return Err(OpenAiAuthError::NoUsableCodexAccounts {
+                        path: self.store.path().display().to_string(),
+                    });
+                }
             }
         } else if let Some(fallback) = fallback {
             routes.push(fallback);
@@ -1835,6 +1839,31 @@ mod tests {
         // SAFETY: this test removes the unique env key it created.
         unsafe {
             std::env::remove_var("PROBE_TEST_OPENAI_API_KEY_FALLBACK");
+        }
+    }
+
+    #[test]
+    fn routing_plan_uses_optional_api_key_fallback_when_auth_state_is_missing() {
+        let temp = tempdir().expect("temp dir");
+        let controller = OpenAiCodexAuthController::new(temp.path()).expect("controller");
+        // SAFETY: this test uses a unique env var and restores process state before exit.
+        unsafe {
+            std::env::set_var("PROBE_TEST_OPENAI_API_KEY_ONLY", "probe-test-key");
+        }
+        let plan = controller
+            .routing_plan(Some("PROBE_TEST_OPENAI_API_KEY_ONLY"))
+            .expect("routing plan");
+        assert!(plan.api_key_fallback_available);
+        match plan.routes.first() {
+            Some(OpenAiCodexRoute::ApiKeyFallback(route)) => {
+                assert_eq!(route.env_var, "PROBE_TEST_OPENAI_API_KEY_ONLY");
+                assert_eq!(route.api_key, "probe-test-key");
+            }
+            other => panic!("unexpected first route: {other:?}"),
+        }
+        // SAFETY: this test removes the unique env key it created.
+        unsafe {
+            std::env::remove_var("PROBE_TEST_OPENAI_API_KEY_ONLY");
         }
     }
 

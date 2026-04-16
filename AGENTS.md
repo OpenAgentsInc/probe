@@ -32,6 +32,21 @@ This repo should not quietly absorb unrelated product-shell concerns.
 - Keep validation and release discipline in repo scripts and local operator
   commands, not in `.github/workflows`.
 
+## API Key Setup
+
+- Probe can run the default Codex-first lane with `PROBE_OPENAI_API_KEY`.
+- Inside the shared workspace, the canonical workspace-local secret file is
+  `../.secrets/probe-openai.env` from this repo root, which resolves to
+  `/Users/christopherdavid/work/.secrets/probe-openai.env` in the default
+  layout.
+- The installed `probe` CLI now walks upward from the current working
+  directory looking for `.secrets/probe-openai.env` and autoloads
+  `PROBE_OPENAI_API_KEY` from that file before command dispatch.
+- Outside that workspace tree, use a normal shell export for
+  `PROBE_OPENAI_API_KEY`.
+- Keep the raw key out of tracked files, commits, issue comments, and normal
+  terminal output.
+
 ## Early Priorities
 
 - establish a Rust workspace
