@@ -283,6 +283,8 @@ impl AppShell {
                 let pane_state = self.bottom_pane_state();
                 if let Some(submitted) = self.bottom_pane.handle_event(event, &pane_state) {
                     let preview = submission_preview(&submitted, 48);
+                    let issue_priority = submitted.text.clone();
+                    let issue_cwd = self.active_chat_runtime().cwd.clone();
                     self.base_screen_mut().submit_user_turn(&submitted);
                     self.base_screen_mut()
                         .record_event(format!("queued Probe runtime turn: {preview}"));
@@ -290,6 +292,13 @@ impl AppShell {
                         "submitted chat turn ({} chars)",
                         submitted.text.chars().count()
                     );
+                    if let Err(error) = self.submit_background_task(
+                        BackgroundTaskRequest::select_github_issue(issue_priority, issue_cwd),
+                    ) {
+                        self.last_status = error;
+                        self.poll_background_messages();
+                        return;
+                    }
                     if let Err(error) =
                         self.submit_background_task(BackgroundTaskRequest::probe_runtime_turn(
                             submitted.text.clone(),
@@ -975,6 +984,7 @@ mod tests {
     use probe_core::runtime::RuntimeEvent;
     use probe_core::server_control::PsionicServerConfig;
     use probe_core::tools::{ExecutedToolCall, ProbeToolChoice, ToolLoopConfig};
+    use probe_decisions::{GithubIssueSelectionDecision, SelectedGithubIssue};
     use probe_protocol::backend::BackendKind;
     use probe_protocol::session::{
         SessionId, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
@@ -1136,6 +1146,42 @@ mod tests {
         assert!(!rendered.contains("status:"));
         assert!(!rendered.contains("Composer"));
         assert!(!rendered.contains("cmd: plain"));
+    }
+
+    #[test]
+    fn github_issue_selection_renders_in_footer_and_transcript() {
+        let mut app = AppShell::new_for_tests();
+        app.apply_message(AppMessage::GithubIssueSelectionResolved {
+            priority: String::from("build out Probe issue selection"),
+            decision: GithubIssueSelectionDecision {
+                selected_issue: Some(SelectedGithubIssue {
+                    repo_owner: String::from("OpenAgentsInc"),
+                    repo_name: String::from("probe"),
+                    issue_number: 118,
+                    title: String::from("Add typed GitHub issue selection for Probe priorities"),
+                    url: Some(String::from(
+                        "https://github.com/OpenAgentsInc/probe/issues/118",
+                    )),
+                    match_score_bps: 9_600,
+                    reason: String::from(
+                        "priority explicitly targeted probe; title overlapped on issue, selection",
+                    ),
+                }),
+                ranked_candidates: Vec::new(),
+                reason: String::from(
+                    "priority explicitly targeted probe; title overlapped on issue, selection",
+                ),
+            },
+        });
+        let rendered = app.render_to_string(140, 36);
+
+        assert!(rendered.contains("probe#118 Add typed GitHub issue selection"));
+        assert!(rendered.contains("[status] GitHub Issue"));
+        assert!(
+            rendered.contains(
+                "selected: probe#118 Add typed GitHub issue selection for Probe priorities"
+            )
+        );
     }
 
     #[test]

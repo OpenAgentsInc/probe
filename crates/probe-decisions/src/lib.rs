@@ -7,6 +7,7 @@ use probe_core::dataset_export::{
 use probe_core::long_context::{LongContextEscalationContext, LongContextEscalationDecision};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
 pub trait DecisionModule<Input, Output> {
     fn id(&self) -> &'static str;
@@ -47,6 +48,60 @@ pub struct PatchReadinessDecision {
     pub confidence_bps: u16,
     pub reason: String,
     pub suggested_next_steps: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubRepoContext {
+    pub owner: String,
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub current_repo: bool,
+    pub issue_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueCandidate {
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    pub labels: Vec<String>,
+    pub url: Option<String>,
+    pub updated_at: Option<String>,
+    pub current_repo: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueSelectionContext {
+    pub priority: String,
+    pub repos: Vec<GithubRepoContext>,
+    pub issues: Vec<GithubIssueCandidate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectedGithubIssue {
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub issue_number: u64,
+    pub title: String,
+    pub url: Option<String>,
+    pub match_score_bps: u16,
+    pub reason: String,
+}
+
+impl SelectedGithubIssue {
+    #[must_use]
+    pub fn repo_slug(&self) -> String {
+        format!("{}/{}", self.repo_owner, self.repo_name)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueSelectionDecision {
+    pub selected_issue: Option<SelectedGithubIssue>,
+    pub ranked_candidates: Vec<SelectedGithubIssue>,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,6 +344,7 @@ pub struct LongContextRule {
 pub struct HeuristicToolRouteModule;
 pub struct AggressiveToolRouteModule;
 pub struct HeuristicLongContextEscalationModule;
+pub struct HeuristicGithubIssueSelectionModule;
 
 #[must_use]
 pub fn builtin_decision_module_manifests() -> Vec<DecisionModuleCandidateManifest> {
@@ -1182,6 +1238,84 @@ impl DecisionModule<LongContextEscalationContext, LongContextEscalationDecision>
     }
 }
 
+impl DecisionModule<GithubIssueSelectionContext, GithubIssueSelectionDecision>
+    for HeuristicGithubIssueSelectionModule
+{
+    fn id(&self) -> &'static str {
+        "heuristic_github_issue_selection_v1"
+    }
+
+    fn decide(&self, input: &GithubIssueSelectionContext) -> GithubIssueSelectionDecision {
+        let priority = input.priority.trim();
+        if priority.is_empty() {
+            return GithubIssueSelectionDecision {
+                selected_issue: None,
+                ranked_candidates: Vec::new(),
+                reason: String::from("priority text is empty"),
+            };
+        }
+
+        if input.issues.is_empty() {
+            return GithubIssueSelectionDecision {
+                selected_issue: None,
+                ranked_candidates: Vec::new(),
+                reason: String::from(
+                    "no open GitHub issues were available across discovered repos",
+                ),
+            };
+        }
+
+        let priority_lower = priority.to_lowercase();
+        let priority_tokens = tokenize(priority);
+        let requested_issue_numbers = parse_issue_numbers(priority);
+        let mut scored = input
+            .issues
+            .iter()
+            .map(|issue| {
+                score_github_issue(
+                    issue,
+                    input.repos.as_slice(),
+                    &priority_lower,
+                    &priority_tokens,
+                    &requested_issue_numbers,
+                )
+            })
+            .filter(|score| score.meaningful)
+            .collect::<Vec<_>>();
+
+        scored.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| right.issue.updated_at.cmp(&left.issue.updated_at))
+                .then_with(|| right.issue.number.cmp(&left.issue.number))
+                .then_with(|| left.issue.repo_name.cmp(&right.issue.repo_name))
+        });
+
+        let ranked_candidates = scored
+            .iter()
+            .take(5)
+            .map(GithubIssueCandidateScore::as_selected_issue)
+            .collect::<Vec<_>>();
+
+        let Some(best) = scored.first() else {
+            return GithubIssueSelectionDecision {
+                selected_issue: None,
+                ranked_candidates,
+                reason: String::from(
+                    "no open GitHub issue matched the requested priority across discovered repos",
+                ),
+            };
+        };
+
+        GithubIssueSelectionDecision {
+            selected_issue: Some(best.as_selected_issue()),
+            ranked_candidates,
+            reason: best.decision_reason(),
+        }
+    }
+}
+
 pub fn evaluate_candidate_manifest(
     cases: &[DecisionCaseRecord],
     manifest: &DecisionModuleCandidateManifest,
@@ -1397,6 +1531,214 @@ fn matches_long_context_rule(rule: &LongContextRule, input: &LongContextEscalati
             .unwrap_or(true)
 }
 
+#[derive(Debug, Clone)]
+struct GithubIssueCandidateScore<'a> {
+    issue: &'a GithubIssueCandidate,
+    score: u32,
+    meaningful: bool,
+    exact_issue_match: bool,
+    explicit_repo_match: bool,
+    repo_overlap_tokens: Vec<String>,
+    title_overlap_tokens: Vec<String>,
+    label_overlap_tokens: Vec<String>,
+    body_overlap_tokens: Vec<String>,
+}
+
+impl GithubIssueCandidateScore<'_> {
+    fn as_selected_issue(&self) -> SelectedGithubIssue {
+        SelectedGithubIssue {
+            repo_owner: self.issue.repo_owner.clone(),
+            repo_name: self.issue.repo_name.clone(),
+            issue_number: self.issue.number,
+            title: self.issue.title.clone(),
+            url: self.issue.url.clone(),
+            match_score_bps: self.score.min(10_000) as u16,
+            reason: self.decision_reason(),
+        }
+    }
+
+    fn decision_reason(&self) -> String {
+        let mut reasons = Vec::new();
+        if self.exact_issue_match {
+            reasons.push(String::from("matched the requested issue number"));
+        }
+        if self.explicit_repo_match {
+            reasons.push(format!(
+                "priority explicitly targeted {}",
+                self.issue.repo_name
+            ));
+        } else if !self.repo_overlap_tokens.is_empty() {
+            reasons.push(format!(
+                "repo context overlapped on {}",
+                preview_token_list(self.repo_overlap_tokens.as_slice())
+            ));
+        }
+        if !self.title_overlap_tokens.is_empty() {
+            reasons.push(format!(
+                "title overlapped on {}",
+                preview_token_list(self.title_overlap_tokens.as_slice())
+            ));
+        }
+        if !self.label_overlap_tokens.is_empty() {
+            reasons.push(format!(
+                "labels overlapped on {}",
+                preview_token_list(self.label_overlap_tokens.as_slice())
+            ));
+        }
+        if !self.body_overlap_tokens.is_empty() {
+            reasons.push(format!(
+                "body overlapped on {}",
+                preview_token_list(self.body_overlap_tokens.as_slice())
+            ));
+        }
+        if reasons.is_empty() {
+            reasons.push(String::from(
+                "repo matched broadly; preferring the freshest open issue",
+            ));
+        }
+        reasons.join("; ")
+    }
+}
+
+fn score_github_issue<'a>(
+    issue: &'a GithubIssueCandidate,
+    repos: &[GithubRepoContext],
+    priority_lower: &str,
+    priority_tokens: &BTreeSet<String>,
+    requested_issue_numbers: &BTreeSet<u64>,
+) -> GithubIssueCandidateScore<'a> {
+    let repo_context = repos
+        .iter()
+        .find(|repo| repo.owner == issue.repo_owner && repo.name == issue.repo_name);
+    let mut repo_aliases = vec![
+        issue.repo_name.clone(),
+        format!("{}/{}", issue.repo_owner, issue.repo_name),
+    ];
+    if let Some(repo_context) = repo_context {
+        repo_aliases.extend(repo_context.aliases.iter().cloned());
+    }
+
+    let explicit_repo_match = repo_aliases.iter().any(|alias| {
+        let alias = alias.trim().to_lowercase();
+        alias.len() >= 3 && priority_lower.contains(alias.as_str())
+    });
+    let repo_tokens = repo_aliases
+        .iter()
+        .flat_map(|alias| tokenize(alias))
+        .collect::<BTreeSet<_>>();
+    let title_tokens = tokenize(issue.title.as_str());
+    let label_tokens = issue
+        .labels
+        .iter()
+        .flat_map(|label| tokenize(label))
+        .collect::<BTreeSet<_>>();
+    let body_tokens = tokenize(issue.body.as_str());
+
+    let repo_overlap_tokens = overlapping_tokens(priority_tokens, &repo_tokens, usize::MAX);
+    let title_overlap_tokens = overlapping_tokens(priority_tokens, &title_tokens, usize::MAX);
+    let label_overlap_tokens = overlapping_tokens(priority_tokens, &label_tokens, usize::MAX);
+    let body_overlap_tokens = overlapping_tokens(priority_tokens, &body_tokens, 6);
+
+    let exact_issue_match = requested_issue_numbers.contains(&issue.number);
+    let repo_score = (repo_overlap_tokens.len() as u32) * 900
+        + if explicit_repo_match { 4_000 } else { 0 }
+        + if issue.current_repo { 250 } else { 0 };
+    let issue_score = (title_overlap_tokens.len() as u32) * 1_100
+        + (label_overlap_tokens.len() as u32) * 700
+        + (body_overlap_tokens.len() as u32) * 180
+        + if exact_issue_match { 6_000 } else { 0 };
+    let repo_only_fallback = if (explicit_repo_match || !repo_overlap_tokens.is_empty())
+        && title_overlap_tokens.is_empty()
+        && label_overlap_tokens.is_empty()
+        && body_overlap_tokens.is_empty()
+    {
+        600
+    } else {
+        0
+    };
+    let score = repo_score + issue_score + repo_only_fallback;
+    let meaningful = exact_issue_match
+        || explicit_repo_match
+        || !repo_overlap_tokens.is_empty()
+        || !title_overlap_tokens.is_empty()
+        || !label_overlap_tokens.is_empty()
+        || !body_overlap_tokens.is_empty();
+
+    GithubIssueCandidateScore {
+        issue,
+        score,
+        meaningful,
+        exact_issue_match,
+        explicit_repo_match,
+        repo_overlap_tokens,
+        title_overlap_tokens,
+        label_overlap_tokens,
+        body_overlap_tokens,
+    }
+}
+
+fn tokenize(value: &str) -> BTreeSet<String> {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .filter(|token| token.len() >= 2 || *token == "p0" || *token == "p1")
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn parse_issue_numbers(value: &str) -> BTreeSet<u64> {
+    let mut numbers = BTreeSet::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '#' {
+            continue;
+        }
+        let mut digits = String::new();
+        while let Some(next) = chars.peek() {
+            if next.is_ascii_digit() {
+                digits.push(*next);
+                let _ = chars.next();
+            } else {
+                break;
+            }
+        }
+        if let Ok(number) = digits.parse::<u64>() {
+            numbers.insert(number);
+        }
+    }
+    numbers
+}
+
+fn overlapping_tokens(
+    priority_tokens: &BTreeSet<String>,
+    candidate_tokens: &BTreeSet<String>,
+    limit: usize,
+) -> Vec<String> {
+    priority_tokens
+        .iter()
+        .filter(|token| candidate_tokens.contains(*token))
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
+fn preview_token_list(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn matches_optional_range(value: usize, min: Option<usize>, max: Option<usize>) -> bool {
     min.is_none_or(|minimum| value >= minimum) && max.is_none_or(|maximum| value <= maximum)
 }
@@ -1593,7 +1935,8 @@ mod tests {
     };
 
     use super::{
-        AggressiveToolRouteModule, DecisionModule, DecisionModuleEvalSpec,
+        AggressiveToolRouteModule, DecisionModule, DecisionModuleEvalSpec, GithubIssueCandidate,
+        GithubIssueSelectionContext, GithubRepoContext, HeuristicGithubIssueSelectionModule,
         HeuristicLongContextEscalationModule, HeuristicPatchReadinessModule,
         HeuristicToolRouteModule, StrictPatchReadinessModule, evaluate_candidate_manifest,
         evaluate_long_context_module, evaluate_patch_readiness_module, evaluate_tool_route_module,
@@ -1742,5 +2085,131 @@ mod tests {
         .expect("evaluate manifest against exported case");
         assert_eq!(scorecard.total_cases, 1);
         assert_eq!(scorecard.matched_cases, 1);
+    }
+
+    #[test]
+    fn github_issue_selection_prefers_explicit_repo_and_title_overlap() {
+        let module = HeuristicGithubIssueSelectionModule;
+        let decision = module.decide(&GithubIssueSelectionContext {
+            priority: String::from("build out Probe issue selection in the tui"),
+            repos: vec![GithubRepoContext {
+                owner: String::from("OpenAgentsInc"),
+                name: String::from("probe"),
+                aliases: vec![
+                    String::from("Probe"),
+                    String::from("/Users/christopherdavid/work/probe"),
+                ],
+                current_repo: true,
+                issue_count: 2,
+            }],
+            issues: vec![
+                GithubIssueCandidate {
+                    repo_owner: String::from("OpenAgentsInc"),
+                    repo_name: String::from("probe"),
+                    number: 118,
+                    title: String::from("Add typed GitHub issue selection for Probe priorities"),
+                    body: String::from(
+                        "Wire issue selection into the Probe TUI footer and transcript.",
+                    ),
+                    labels: vec![String::from("enhancement")],
+                    url: Some(String::from(
+                        "https://github.com/OpenAgentsInc/probe/issues/118",
+                    )),
+                    updated_at: Some(String::from("2026-04-15T18:00:00Z")),
+                    current_repo: true,
+                },
+                GithubIssueCandidate {
+                    repo_owner: String::from("OpenAgentsInc"),
+                    repo_name: String::from("probe"),
+                    number: 90,
+                    title: String::from("Polish detached session export flow"),
+                    body: String::from("This is unrelated to issue selection."),
+                    labels: vec![String::from("maintenance")],
+                    url: None,
+                    updated_at: Some(String::from("2026-04-14T18:00:00Z")),
+                    current_repo: true,
+                },
+            ],
+        });
+
+        let selected = decision.selected_issue.expect("matching issue");
+        assert_eq!(selected.repo_name, "probe");
+        assert_eq!(selected.issue_number, 118);
+        assert!(
+            selected
+                .reason
+                .contains("priority explicitly targeted probe")
+        );
+    }
+
+    #[test]
+    fn github_issue_selection_falls_back_to_freshest_issue_for_repo_only_priority() {
+        let module = HeuristicGithubIssueSelectionModule;
+        let decision = module.decide(&GithubIssueSelectionContext {
+            priority: String::from("we are building out Probe"),
+            repos: vec![GithubRepoContext {
+                owner: String::from("OpenAgentsInc"),
+                name: String::from("probe"),
+                aliases: vec![String::from("probe")],
+                current_repo: true,
+                issue_count: 2,
+            }],
+            issues: vec![
+                GithubIssueCandidate {
+                    repo_owner: String::from("OpenAgentsInc"),
+                    repo_name: String::from("probe"),
+                    number: 117,
+                    title: String::from("Polish footer"),
+                    body: String::new(),
+                    labels: Vec::new(),
+                    url: None,
+                    updated_at: Some(String::from("2026-04-14T18:00:00Z")),
+                    current_repo: true,
+                },
+                GithubIssueCandidate {
+                    repo_owner: String::from("OpenAgentsInc"),
+                    repo_name: String::from("probe"),
+                    number: 118,
+                    title: String::from("Add typed GitHub issue selection for Probe priorities"),
+                    body: String::new(),
+                    labels: Vec::new(),
+                    url: None,
+                    updated_at: Some(String::from("2026-04-15T18:00:00Z")),
+                    current_repo: true,
+                },
+            ],
+        });
+
+        let selected = decision.selected_issue.expect("repo-only fallback issue");
+        assert_eq!(selected.issue_number, 118);
+    }
+
+    #[test]
+    fn github_issue_selection_reports_no_match_when_priority_is_unrelated() {
+        let module = HeuristicGithubIssueSelectionModule;
+        let decision = module.decide(&GithubIssueSelectionContext {
+            priority: String::from("investor portal allowlist flow"),
+            repos: vec![GithubRepoContext {
+                owner: String::from("OpenAgentsInc"),
+                name: String::from("probe"),
+                aliases: vec![String::from("probe")],
+                current_repo: true,
+                issue_count: 1,
+            }],
+            issues: vec![GithubIssueCandidate {
+                repo_owner: String::from("OpenAgentsInc"),
+                repo_name: String::from("probe"),
+                number: 118,
+                title: String::from("Add typed GitHub issue selection for Probe priorities"),
+                body: String::from("Probe TUI issue metadata"),
+                labels: vec![String::from("enhancement")],
+                url: None,
+                updated_at: Some(String::from("2026-04-15T18:00:00Z")),
+                current_repo: true,
+            }],
+        });
+
+        assert!(decision.selected_issue.is_none());
+        assert!(decision.reason.contains("no open GitHub issue matched"));
     }
 }

@@ -6,6 +6,7 @@ use probe_core::provider::normalize_openai_stream_display_text;
 use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_core::server_control::ServerOperatorSummary;
 use probe_core::tools::tool_result_model_text;
+use probe_decisions::SelectedGithubIssue;
 use probe_openai_auth::OpenAiCodexAuthStore;
 use probe_protocol::session::{PendingToolApproval, ToolApprovalResolution};
 use ratatui::Frame;
@@ -317,6 +318,7 @@ pub struct ChatScreen {
     transcript_line_count: usize,
     runtime: ProbeRuntimeState,
     stream: Option<AssistantStreamState>,
+    selected_issue: Option<SelectedGithubIssue>,
     operator_backend: Option<ServerOperatorSummary>,
     probe_home: Option<PathBuf>,
     setup: AppleFmSetupState,
@@ -335,6 +337,7 @@ impl Default for ChatScreen {
             transcript_line_count: 0,
             runtime: ProbeRuntimeState::default(),
             stream: None,
+            selected_issue: None,
             operator_backend: None,
             probe_home: None,
             setup: AppleFmSetupState::default(),
@@ -524,6 +527,12 @@ impl ChatScreen {
         let mut parts = vec![preview(model, 24)];
         if let Some(reasoning) = reasoning {
             parts.push(display_reasoning_level(reasoning).to_string());
+        }
+        if let Some(issue) = self.selected_issue.as_ref() {
+            parts.push(preview(
+                format!("{}#{} {}", issue.repo_name, issue.issue_number, issue.title).as_str(),
+                52,
+            ));
         }
         parts.push(status_marker(self).to_string());
         parts.join(" | ")
@@ -1152,6 +1161,55 @@ impl ChatScreen {
                 )
             }
             AppMessage::ProbeRuntimeEvent { event } => self.apply_runtime_event(event),
+            AppMessage::GithubIssueSelectionResolved { priority, decision } => {
+                self.selected_issue = decision.selected_issue.clone();
+                let entry = if let Some(issue) = decision.selected_issue.as_ref() {
+                    TranscriptEntry::new(
+                        TranscriptRole::Status,
+                        "GitHub Issue",
+                        vec![
+                            format!("priority: {}", preview(priority.as_str(), 72)),
+                            format!(
+                                "selected: {}#{} {}",
+                                issue.repo_name, issue.issue_number, issue.title
+                            ),
+                            format!("repo: {}", issue.repo_slug()),
+                            format!("reason: {}", issue.reason),
+                        ],
+                    )
+                } else {
+                    TranscriptEntry::new(
+                        TranscriptRole::Status,
+                        "GitHub Issue",
+                        vec![
+                            format!("priority: {}", preview(priority.as_str(), 72)),
+                            format!("result: {}", decision.reason),
+                        ],
+                    )
+                };
+                self.transcript.push_entry(entry);
+                self.snap_transcript_to_latest();
+                self.record_worker_event(String::from("GitHub issue selection updated"));
+                decision.reason
+            }
+            AppMessage::GithubIssueSelectionFailed {
+                priority,
+                error,
+                selected_issue,
+            } => {
+                self.selected_issue = selected_issue;
+                self.transcript.push_entry(TranscriptEntry::new(
+                    TranscriptRole::Status,
+                    "GitHub Issue",
+                    vec![
+                        format!("priority: {}", preview(priority.as_str(), 72)),
+                        format!("result: {error}"),
+                    ],
+                ));
+                self.snap_transcript_to_latest();
+                self.record_worker_event(String::from("GitHub issue selection failed"));
+                error
+            }
             AppMessage::PendingToolApprovalsUpdated {
                 session_id,
                 approvals,

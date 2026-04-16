@@ -272,6 +272,25 @@ Current families:
 - `PatchReadiness`
 - `LongContextEscalation`
 
+Probe also now has a runtime-only typed `GitHubIssueSelection` signature in
+`crates/probe-decisions`.
+
+That signature takes:
+
+- priority text
+- repo contexts
+- open GitHub issue candidates
+
+and returns either:
+
+- selected owner or repo or issue number or title metadata
+- or a typed no-match result
+
+The current TUI uses it online through `gh issue list` against discoverable
+workspace repos. It is intentionally not yet part of the offline
+decision-case export family, because we do not have the grounded issue-choice
+dataset yet.
+
 Current built-in candidate ids:
 
 - `heuristic_tool_route_v1`

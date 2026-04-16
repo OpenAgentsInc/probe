@@ -8,11 +8,13 @@ license.workspace = true
 crossterm.workspace = true
 probe-client.workspace = true
 probe-core.workspace = true
+probe-decisions.workspace = true
 probe-openai-auth.workspace = true
 probe-protocol.workspace = true
 probe-provider-apple-fm.workspace = true
 psionic-apple-fm.workspace = true
 ratatui.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

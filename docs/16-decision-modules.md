@@ -43,6 +43,32 @@ Rust still stays authoritative for evaluation and decision execution. The
 manifests make the candidate family optimizer-visible without moving runtime
 truth out of Probe.
 
+## Runtime-Only Signatures
+
+Not every DSPy-style signature needs to become an offline-eval family on day
+one.
+
+Probe now also carries a typed GitHub issue-selection signature in
+`crates/probe-decisions`:
+
+- input:
+  - priority text
+  - discovered repo contexts
+  - open GitHub issue candidates
+- output:
+  - selected repo owner
+  - selected repo name
+  - selected issue number
+  - selected issue title
+  - typed no-match when nothing is relevant
+
+The current TUI uses that signature online, not through the decision-case
+export path yet.
+
+That is intentional. The signature is real and typed now, while the offline
+dataset and optimizer lane for issue selection can come later after we have
+enough grounded traces.
+
 ## Offline Evaluation Path
 
 Probe now supports an offline evaluation loop:

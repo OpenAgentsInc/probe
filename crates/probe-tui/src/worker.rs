@@ -1,3 +1,6 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
@@ -11,12 +14,17 @@ use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ResolvePendingToolApprovalOutcome,
     ResolvePendingToolApprovalRequest, RuntimeEvent, RuntimeEventSink,
 };
+use probe_decisions::{
+    DecisionModule, GithubIssueCandidate, GithubIssueSelectionContext, GithubRepoContext,
+    HeuristicGithubIssueSelectionModule,
+};
 use probe_protocol::session::{
     SessionId, SessionMetadata, ToolApprovalResolution, ToolPolicyDecision, TranscriptEvent,
     TranscriptItem, TranscriptItemKind,
 };
 use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError};
 use psionic_apple_fm::AppleFmSystemLanguageModelAvailability;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::message::{
@@ -138,6 +146,9 @@ fn run_request(
         BackgroundTaskRequest::ProbeRuntimeTurn { prompt, config } => {
             run_probe_runtime_turn(prompt, config, message_tx, state)
         }
+        BackgroundTaskRequest::SelectGithubIssue { priority, cwd } => {
+            run_github_issue_selection(priority, cwd, message_tx)
+        }
         BackgroundTaskRequest::ResolvePendingToolApproval {
             session_id,
             call_id,
@@ -147,6 +158,292 @@ fn run_request(
             session_id, call_id, resolution, config, message_tx, state,
         ),
     }
+}
+
+fn run_github_issue_selection(priority: String, cwd: PathBuf, message_tx: &Sender<AppMessage>) {
+    let message_tx = message_tx.clone();
+    let _ = thread::Builder::new()
+        .name(String::from("probe-tui-issue-selection"))
+        .spawn(
+            move || match select_github_issue(priority.as_str(), cwd.as_path()) {
+                Ok((decision, _)) => {
+                    let _ = message_tx
+                        .send(AppMessage::GithubIssueSelectionResolved { priority, decision });
+                }
+                Err(error) => {
+                    let _ = message_tx.send(AppMessage::GithubIssueSelectionFailed {
+                        priority,
+                        error,
+                        selected_issue: None,
+                    });
+                }
+            },
+        );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GithubRepoHandle {
+    owner: String,
+    name: String,
+    local_path: PathBuf,
+    aliases: Vec<String>,
+    current_repo: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubIssueListEntry {
+    number: u64,
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    labels: Vec<GithubIssueLabelEntry>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default, rename = "updatedAt")]
+    updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubIssueLabelEntry {
+    name: String,
+}
+
+fn select_github_issue(
+    priority: &str,
+    cwd: &Path,
+) -> Result<
+    (
+        probe_decisions::GithubIssueSelectionDecision,
+        Vec<GithubRepoHandle>,
+    ),
+    String,
+> {
+    let repos = discover_github_repos(cwd)?;
+    if repos.is_empty() {
+        return Err(String::from(
+            "no GitHub-backed repos were discoverable from the current workspace",
+        ));
+    }
+
+    let mut repo_contexts = Vec::new();
+    let mut issues = Vec::new();
+    let mut repo_failures = Vec::new();
+    for repo in &repos {
+        match load_open_issues(repo) {
+            Ok(repo_issues) => {
+                repo_contexts.push(GithubRepoContext {
+                    owner: repo.owner.clone(),
+                    name: repo.name.clone(),
+                    aliases: repo.aliases.clone(),
+                    current_repo: repo.current_repo,
+                    issue_count: repo_issues.len(),
+                });
+                issues.extend(repo_issues);
+            }
+            Err(error) => repo_failures.push(format!("{}/{}: {error}", repo.owner, repo.name)),
+        }
+    }
+
+    if repo_contexts.is_empty() {
+        let detail = if repo_failures.is_empty() {
+            String::from("issue discovery returned no queryable repos")
+        } else {
+            format!(
+                "issue discovery failed for all repos ({})",
+                repo_failures.join("; ")
+            )
+        };
+        return Err(detail);
+    }
+
+    let decision = HeuristicGithubIssueSelectionModule.decide(&GithubIssueSelectionContext {
+        priority: priority.to_string(),
+        repos: repo_contexts,
+        issues,
+    });
+    Ok((decision, repos))
+}
+
+fn discover_github_repos(cwd: &Path) -> Result<Vec<GithubRepoHandle>, String> {
+    let current_repo_root = git_toplevel(cwd);
+    let mut search_roots = Vec::new();
+    push_unique_path(&mut search_roots, cwd.to_path_buf());
+    if let Some(repo_root) = current_repo_root.as_ref() {
+        push_unique_path(&mut search_roots, repo_root.clone());
+        if let Some(parent) = repo_root.parent() {
+            push_unique_path(&mut search_roots, parent.to_path_buf());
+        }
+    }
+
+    let mut repo_roots = Vec::new();
+    for root in search_roots {
+        for repo_root in discover_repo_roots_under(root.as_path()) {
+            push_unique_path(&mut repo_roots, repo_root);
+        }
+    }
+    if repo_roots.is_empty()
+        && let Some(repo_root) = current_repo_root.as_ref()
+    {
+        repo_roots.push(repo_root.clone());
+    }
+
+    let mut repos = Vec::new();
+    for repo_root in repo_roots {
+        let Some(remote_url) = run_git_string(
+            repo_root.as_path(),
+            &["config", "--get", "remote.origin.url"],
+        ) else {
+            continue;
+        };
+        let Some((owner, name)) = parse_github_remote(remote_url.as_str()) else {
+            continue;
+        };
+        let alias = repo_root
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| name.clone());
+        repos.push(GithubRepoHandle {
+            owner,
+            name,
+            local_path: repo_root.clone(),
+            aliases: vec![alias, repo_root.display().to_string()],
+            current_repo: current_repo_root
+                .as_ref()
+                .is_some_and(|current| current == &repo_root),
+        });
+    }
+
+    repos.sort_by(|left, right| {
+        right
+            .current_repo
+            .cmp(&left.current_repo)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    repos.dedup_by(|left, right| left.owner == right.owner && left.name == right.name);
+    Ok(repos)
+}
+
+fn discover_repo_roots_under(root: &Path) -> Vec<PathBuf> {
+    let mut repos = Vec::new();
+    if git_toplevel(root).is_some() && !contains_child_git_repos(root) {
+        repos.push(root.to_path_buf());
+        return repos;
+    }
+
+    let Ok(entries) = fs::read_dir(root) else {
+        return repos;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with('.'))
+        {
+            continue;
+        }
+        if let Some(repo_root) = git_toplevel(path.as_path()) {
+            push_unique_path(&mut repos, repo_root);
+        }
+    }
+    repos
+}
+
+fn contains_child_git_repos(root: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(root) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        path.is_dir() && git_toplevel(path.as_path()).is_some()
+    })
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if !paths.iter().any(|path| path == &candidate) {
+        paths.push(candidate);
+    }
+}
+
+fn git_toplevel(path: &Path) -> Option<PathBuf> {
+    run_git_string(path, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+}
+
+fn run_git_string(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn parse_github_remote(remote: &str) -> Option<(String, String)> {
+    let trimmed = remote.trim().trim_end_matches(".git");
+    let suffix = trimmed
+        .strip_prefix("git@github.com:")
+        .or_else(|| trimmed.strip_prefix("https://github.com/"))
+        .or_else(|| trimmed.strip_prefix("git://github.com/"))?;
+    let mut parts = suffix.split('/');
+    let owner = parts.next()?.trim().to_string();
+    let name = parts.next()?.trim().to_string();
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((owner, name))
+}
+
+fn load_open_issues(repo: &GithubRepoHandle) -> Result<Vec<GithubIssueCandidate>, String> {
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "list",
+            "--repo",
+            format!("{}/{}", repo.owner, repo.name).as_str(),
+            "--state",
+            "open",
+            "--limit",
+            "50",
+            "--json",
+            "number,title,body,labels,url,updatedAt",
+        ])
+        .output()
+        .map_err(|error| format!("failed to execute gh: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            String::from("gh issue list failed")
+        } else {
+            stderr
+        };
+        return Err(detail);
+    }
+
+    let parsed = serde_json::from_slice::<Vec<GithubIssueListEntry>>(&output.stdout)
+        .map_err(|error| format!("failed to parse gh issue list output: {error}"))?;
+    Ok(parsed
+        .into_iter()
+        .map(|issue| GithubIssueCandidate {
+            repo_owner: repo.owner.clone(),
+            repo_name: repo.name.clone(),
+            number: issue.number,
+            title: issue.title,
+            body: issue.body,
+            labels: issue.labels.into_iter().map(|label| label.name).collect(),
+            url: issue.url,
+            updated_at: issue.updated_at,
+            current_repo: repo.current_repo,
+        })
+        .collect())
 }
 
 fn run_attach_probe_runtime_session(

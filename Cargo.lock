@@ -1505,7 +1505,7 @@ dependencies = [
 
 [[package]]
 name = "probe-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "probe-client"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "assert_cmd",
  "probe-core",
@@ -1538,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "probe-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "hex",
  "probe-openai-auth",
@@ -1557,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "probe-daemon"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "probe-client",
  "probe-core",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "probe-decisions"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "hex",
  "probe-core",
@@ -1580,7 +1580,7 @@ dependencies = [
 
 [[package]]
 name = "probe-openai-auth"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64",
  "probe-test-support",
@@ -1594,7 +1594,7 @@ dependencies = [
 
 [[package]]
 name = "probe-optimizer"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "hex",
  "probe-core",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "probe-protocol"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "probe-provider-apple-fm"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "probe-protocol",
  "probe-test-support",
@@ -1629,7 +1629,7 @@ dependencies = [
 
 [[package]]
 name = "probe-provider-openai"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "probe-protocol",
  "probe-test-support",
@@ -1640,7 +1640,7 @@ dependencies = [
 
 [[package]]
 name = "probe-server"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "probe-core",
  "probe-protocol",
@@ -1653,7 +1653,7 @@ dependencies = [
 
 [[package]]
 name = "probe-test-support"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "assert_cmd",
  "reqwest",
@@ -1663,18 +1663,20 @@ dependencies = [
 
 [[package]]
 name = "probe-tui"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "crossterm",
  "insta",
  "probe-client",
  "probe-core",
+ "probe-decisions",
  "probe-openai-auth",
  "probe-protocol",
  "probe-provider-apple-fm",
  "probe-test-support",
  "psionic-apple-fm",
  "ratatui",
+ "serde",
  "serde_json",
  "tempfile",
 ]

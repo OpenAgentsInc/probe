@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_core::tools::ToolLoopConfig;
+use probe_decisions::{GithubIssueSelectionDecision, SelectedGithubIssue};
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_protocol::session::{PendingToolApproval, SessionHarnessProfile, ToolApprovalResolution};
 
@@ -19,6 +20,10 @@ pub enum BackgroundTaskRequest {
     ProbeRuntimeTurn {
         prompt: String,
         config: ProbeRuntimeTurnConfig,
+    },
+    SelectGithubIssue {
+        priority: String,
+        cwd: PathBuf,
     },
     ResolvePendingToolApproval {
         session_id: String,
@@ -54,6 +59,14 @@ impl BackgroundTaskRequest {
     }
 
     #[must_use]
+    pub fn select_github_issue(priority: impl Into<String>, cwd: PathBuf) -> Self {
+        Self::SelectGithubIssue {
+            priority: priority.into(),
+            cwd,
+        }
+    }
+
+    #[must_use]
     pub fn resolve_pending_tool_approval(
         session_id: impl Into<String>,
         call_id: impl Into<String>,
@@ -74,6 +87,7 @@ impl BackgroundTaskRequest {
             Self::AppleFmSetup { profile } => Some(AppleFmBackendSummary::from_profile(profile)),
             Self::AttachProbeRuntimeSession { .. }
             | Self::ProbeRuntimeTurn { .. }
+            | Self::SelectGithubIssue { .. }
             | Self::ResolvePendingToolApproval { .. } => None,
         }
     }
@@ -84,6 +98,7 @@ impl BackgroundTaskRequest {
             Self::AppleFmSetup { .. } => "Apple FM setup check",
             Self::AttachProbeRuntimeSession { .. } => "Probe runtime attach",
             Self::ProbeRuntimeTurn { .. } => "Probe runtime turn",
+            Self::SelectGithubIssue { .. } => "GitHub issue selection",
             Self::ResolvePendingToolApproval { .. } => "pending approval decision",
         }
     }
@@ -216,6 +231,15 @@ pub enum AppMessage {
     },
     ProbeRuntimeEvent {
         event: RuntimeEvent,
+    },
+    GithubIssueSelectionResolved {
+        priority: String,
+        decision: GithubIssueSelectionDecision,
+    },
+    GithubIssueSelectionFailed {
+        priority: String,
+        error: String,
+        selected_issue: Option<SelectedGithubIssue>,
     },
     PendingToolApprovalsUpdated {
         session_id: String,

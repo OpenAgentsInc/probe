@@ -34,6 +34,15 @@ It now queues `ProbeRuntimeTurn`, which carries:
 That request is enough for the worker thread to run a real Probe turn without
 reconstructing shell state inside the UI layer.
 
+The same worker bridge now also accepts a typed `SelectGithubIssue` request for
+the prompt-as-priority path. That request discovers GitHub-backed sibling repos
+from the current workspace, fetches open issues with `gh issue list`, and runs
+the typed issue-selection signature from `probe-decisions`.
+
+Issue lookup deliberately runs on a detached helper thread so the TUI can queue
+issue selection before the runtime turn without stalling the actual coding
+roundtrip.
+
 ### Session-backed runtime loop
 
 The worker now keeps retained runtime session state:
@@ -62,6 +71,11 @@ The TUI now renders committed rows derived from Probe transcript items:
 
 User messages are not duplicated from the session store because the TUI already
 commits the user turn immediately when the composer submits.
+
+GitHub issue selection results are also rendered as first-class status rows in
+the transcript. If the signature selects an issue, the footer header picks up
+`repo#number title`. If no issue matches, the transcript records that outcome
+without inventing stale metadata.
 
 ### Honest error handling
 

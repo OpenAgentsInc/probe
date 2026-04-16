@@ -14,8 +14,9 @@ Current shipped surface:
 - `probe codex login|status|logout` for ChatGPT/Codex subscription auth
 - `probe tui` / `cargo probe` for the local terminal UI plus explicit
   detached-session reattach with `--resume`
-- three inference lanes in the TUI: Codex, Psionic OpenAI-compatible
-  attach targets including Mesh, Qwen or Tailnet, and Apple FM
+- a Codex-first TUI shell with backend autodetection, no interactive backend
+  selector strip on the hot path, and background GitHub issue selection
+  metadata when `gh` is available
 - `probe-server` for the first typed local stdio supervision contract
 - `probe-daemon` for the first long-lived local Unix-socket supervision path
 - `probe daemon run|stop` plus `probe ps|attach|logs|stop` for local detached
@@ -94,6 +95,11 @@ and `docs/83-mac-first-npm-release-staging.md`.
 
 Bare `probe` now opens the TUI by default. The default TUI path is Codex-first
 and no longer exposes the old backend selector strip in the primary shell.
+Each submitted prompt is also treated as a priority string for background
+GitHub issue selection across discoverable local sibling repos. When `gh`
+finds a match, the footer and transcript show the selected issue metadata.
+When no issue matches, the transcript records that cleanly instead of
+pretending a selection exists.
 
 Run the TUI:
 
