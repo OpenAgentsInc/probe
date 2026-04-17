@@ -328,7 +328,10 @@ pub fn complete_apple_fm_plain_text_with_callback(
     Ok(PlainTextProviderResponse {
         response_id: response.id,
         response_model: response.model,
-        assistant_text: response.assistant_text,
+        assistant_text: response
+            .assistant_text
+            .as_deref()
+            .map(normalize_openai_assistant_text),
         usage: response.usage.as_ref().map(provider_usage_from_apple),
         backend_receipt: None,
     })
@@ -540,7 +543,9 @@ fn plain_text_provider_response_from_apple_session(
     PlainTextProviderResponse {
         response_id: response.id,
         response_model: response.model,
-        assistant_text: Some(response.assistant_text),
+        assistant_text: Some(normalize_openai_assistant_text(
+            response.assistant_text.as_str(),
+        )),
         usage: response.usage.as_ref().map(provider_usage_from_apple),
         backend_receipt: response.transcript.and_then(|transcript| {
             transcript
@@ -745,6 +750,7 @@ fn codex_user_agent() -> String {
 #[must_use]
 pub fn strip_leading_probe_response_noise(text: &str) -> &str {
     let mut slice = text;
+    let mut stripped_any = false;
     loop {
         slice = slice.trim_start_matches(|c| c == '\n' || c == '\r');
         if slice.is_empty() {
@@ -752,9 +758,16 @@ pub fn strip_leading_probe_response_noise(text: &str) -> &str {
         }
         let (line, rest) = match slice.find('\n') {
             Some(i) => (&slice[..i], Some(&slice[i + 1..])),
-            None => (slice, None),
+            None => {
+                return if is_partial_leading_response_noise_line(slice, stripped_any) {
+                    ""
+                } else {
+                    slice
+                };
+            }
         };
         if is_leading_response_noise_line(line) {
+            stripped_any = true;
             slice = rest.unwrap_or("");
             continue;
         }
@@ -763,6 +776,23 @@ pub fn strip_leading_probe_response_noise(text: &str) -> &str {
 }
 
 fn is_leading_response_noise_line(line: &str) -> bool {
+    let s = normalized_leading_response_noise_candidate(line);
+    s.starts_with("response_id:") || s.starts_with("model:") || s == "response"
+}
+
+fn is_partial_leading_response_noise_line(line: &str, stripped_any: bool) -> bool {
+    let s = normalized_leading_response_noise_candidate(line);
+    if s.is_empty() {
+        return false;
+    }
+
+    "response_id:".starts_with(s)
+        || "model:".starts_with(s)
+        || s == "response"
+        || (stripped_any && "response".starts_with(s))
+}
+
+fn normalized_leading_response_noise_candidate(line: &str) -> &str {
     let mut s = line.trim().trim_end_matches('\r');
     s = s.trim_start();
     if let Some(rest) = s.strip_prefix('•') {
@@ -772,10 +802,7 @@ fn is_leading_response_noise_line(line: &str) -> bool {
     } else if let Some(rest) = s.strip_prefix('*') {
         s = rest.trim_start();
     }
-    s = s.trim_start();
-    s.starts_with("response_id:")
-        || s.starts_with("model:")
-        || s == "response"
+    s.trim_start()
 }
 
 #[must_use]
@@ -969,6 +996,28 @@ mod tests {
     fn strip_leading_probe_response_noise_strips_bullets() {
         let raw = "• response_id: x\n- model: y\nresponse\n\nHi";
         assert_eq!(strip_leading_probe_response_noise(raw), "Hi");
+    }
+
+    #[test]
+    fn openai_stream_display_text_hides_partial_leading_response_noise() {
+        assert_eq!(normalize_openai_stream_display_text("response_"), "");
+        assert_eq!(
+            normalize_openai_stream_display_text("response_id: resp_1\nmod"),
+            ""
+        );
+        assert_eq!(
+            normalize_openai_stream_display_text("response_id: resp_1\nmodel: gpt-test\nres"),
+            ""
+        );
+    }
+
+    #[test]
+    fn openai_stream_display_text_keeps_real_text_once_it_diverges_from_noise_prefix() {
+        assert_eq!(normalize_openai_stream_display_text("modeling"), "modeling");
+        assert_eq!(
+            normalize_openai_stream_display_text("response_id: resp_1\nhello"),
+            "hello"
+        );
     }
 
     #[test]

@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, Event as CrosstermEvent, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -1196,20 +1197,19 @@ pub fn run_probe_tui() -> io::Result<()> {
 pub fn run_probe_tui_with_config(config: TuiLaunchConfig) -> io::Result<()> {
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    // Kitty progressive keyboard: helps terminals emit distinct events so Shift/Ctrl/etc. show up
-    // on `KeyEvent` (see crossterm `examples/event-read.rs`). Enter routing matches Codex TUI:
-    // only unmodified Enter submits; any modifier bit routes Enter to newline in `event_from_key`.
-    execute!(
+    execute!(stdout, EnableBracketedPaste)?;
+    // Match Codex's terminal setup closely here. We want keyboard enhancement enabled before the
+    // event loop starts, but unsupported terminals should still launch the TUI instead of failing.
+    let _ = execute!(
         stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
         ),
-    )?;
+    );
+    let _ = execute!(stdout, EnableFocusChange);
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -1255,9 +1255,14 @@ fn run_loop(
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
     disable_raw_mode()?;
+    let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    let _ = execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        DisableFocusChange
+    );
     execute!(
         terminal.backend_mut(),
-        PopKeyboardEnhancementFlags,
         DisableMouseCapture,
         LeaveAlternateScreen,
     )?;

@@ -32,7 +32,7 @@ pub enum UiEvent {
 }
 
 pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
-    if key.kind != KeyEventKind::Press {
+    if key.kind == KeyEventKind::Release {
         return None;
     }
 
@@ -50,6 +50,9 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
         // and `textarea.rs` (`KeyCode::Enter, ..` => insert newline).
         KeyCode::Enter if modifiers.is_empty() => Some(UiEvent::ComposerSubmit),
         KeyCode::Enter => Some(UiEvent::ComposerNewline),
+        // Some terminals surface modified Return as a raw CR/LF character instead of `KeyCode::Enter`.
+        // Normalize those to the same newline path Codex's textarea takes for modified Enter.
+        KeyCode::Char('\n') | KeyCode::Char('\r') => Some(UiEvent::ComposerNewline),
         // Codex textarea also maps ^J / ^M to newline for terminals that send C0 controls.
         KeyCode::Char('j') | KeyCode::Char('J') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::ComposerNewline)
@@ -130,6 +133,18 @@ mod tests {
     #[test]
     fn ctrl_m_inserts_newline() {
         let event = event_from_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL));
+        assert_eq!(event, Some(UiEvent::ComposerNewline));
+    }
+
+    #[test]
+    fn carriage_return_char_inserts_newline() {
+        let event = event_from_key(KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::SHIFT));
+        assert_eq!(event, Some(UiEvent::ComposerNewline));
+    }
+
+    #[test]
+    fn line_feed_char_inserts_newline() {
+        let event = event_from_key(KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::SHIFT));
         assert_eq!(event, Some(UiEvent::ComposerNewline));
     }
 }

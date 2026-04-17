@@ -25,8 +25,9 @@ use crate::provider::{
     apple_fm_tool_loop_response, apple_fm_tool_loop_response_with_callback,
     complete_apple_fm_plain_text_with_callback,
     complete_openai_plain_text_with_context_and_callback, complete_plain_text_with_context,
-    normalize_openai_stream_display_text, observability_usage_measurement,
-    openai_tool_loop_response_with_callback, openai_tool_loop_response_with_context,
+    normalize_openai_assistant_text, normalize_openai_stream_display_text,
+    observability_usage_measurement, openai_tool_loop_response_with_callback,
+    openai_tool_loop_response_with_context,
 };
 use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionStoreError};
 use crate::tools::{
@@ -759,7 +760,7 @@ fn emit_apple_fm_stream_events(
         RuntimeEvent::AssistantSnapshot {
             session_id: session_id.clone(),
             round_trip,
-            snapshot: event.output.clone(),
+            snapshot: normalize_openai_assistant_text(event.output.as_str()),
         },
     );
     if event.is_terminal() && !state.stream_finished {
@@ -2614,6 +2615,53 @@ mod tests {
     }
 
     #[test]
+    fn apple_fm_exec_plain_text_strips_probe_response_noise() {
+        let server = FakeAppleFmServer::from_json_responses(vec![serde_json::json!({
+            "id": "apple_fm_exec_noise_test",
+            "model": "apple-foundation-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": concat!(
+                            "response_id: resp_apple_1\n",
+                            "model: apple-foundation-model\n",
+                            "response\n",
+                            "{\"kind\":\"message\",\"content\":\"hello from apple fm\"}"
+                        )
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens_detail": {"value": 9, "truth": "estimated"},
+                "completion_tokens_detail": {"value": 4, "truth": "estimated"},
+                "total_tokens_detail": {"value": 13, "truth": "estimated"}
+            }
+        })]);
+
+        let environment = ProbeTestEnvironment::new();
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = String::from(server.base_url());
+
+        let outcome = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile,
+                prompt: String::from("say hello"),
+                title: Some(String::from("Apple FM Exec Noise Test")),
+                cwd: environment.workspace().to_path_buf(),
+                system_prompt: Some(String::from("You are helpful")),
+                harness_profile: None,
+                tool_loop: None,
+            })
+            .expect("apple fm exec with metadata noise should succeed");
+
+        assert_eq!(outcome.assistant_text, "hello from apple fm");
+    }
+
+    #[test]
     fn eventful_apple_fm_plain_turn_emits_snapshot_events_when_backend_supports_streaming() {
         let environment = ProbeTestEnvironment::new();
         let server = FakeAppleFmServer::from_handler(move |request| {
@@ -2697,6 +2745,96 @@ mod tests {
         assert!(
             matches!(&events[7], RuntimeEvent::AssistantTurnCommitted { session_id: event_session, assistant_text, .. } if event_session == &session_id && assistant_text == "hello world")
         );
+    }
+
+    #[test]
+    fn eventful_apple_fm_plain_turn_strips_streamed_probe_response_noise() {
+        let environment = ProbeTestEnvironment::new();
+        let server = FakeAppleFmServer::from_handler(move |request| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/v1/sessions") => FakeHttpResponse::json_ok(json!({
+                    "session": {
+                        "id": "sess-apple-stream-noise-1",
+                        "model": {
+                            "id": "apple-foundation-model",
+                            "use_case": "general",
+                            "guardrails": "default"
+                        },
+                        "tools": [],
+                        "is_responding": false,
+                        "transcript_json": "{\"version\":1,\"type\":\"FoundationModels.Transcript\",\"transcript\":{\"entries\":[]}}"
+                    }
+                })),
+                ("POST", "/v1/sessions/sess-apple-stream-noise-1/responses/stream") => {
+                    FakeHttpResponse::text_event_stream(
+                        200,
+                        concat!(
+                            "event: snapshot\n",
+                            "data: {\"kind\":\"snapshot\",\"model\":\"apple-foundation-model\",\"output\":\"response_\"}\n\n",
+                            "event: snapshot\n",
+                            "data: {\"kind\":\"snapshot\",\"model\":\"apple-foundation-model\",\"output\":\"response_id: resp_apple_1\\nmodel: apple-foundation-model\\nresponse\\n{\\\"kind\\\":\\\"message\\\",\\\"content\\\":\\\"hello\\\"}\"}\n\n",
+                            "event: completed\n",
+                            "data: {\"kind\":\"completed\",\"model\":\"apple-foundation-model\",\"output\":\"response_id: resp_apple_1\\nmodel: apple-foundation-model\\nresponse\\n{\\\"kind\\\":\\\"message\\\",\\\"content\\\":\\\"hello world\\\"}\",\"session\":{\"id\":\"sess-apple-stream-noise-1\",\"model\":{\"id\":\"apple-foundation-model\",\"use_case\":\"general\",\"guardrails\":\"default\"},\"tools\":[],\"is_responding\":false,\"transcript_json\":\"{\\\"version\\\":1,\\\"type\\\":\\\"FoundationModels.Transcript\\\",\\\"transcript\\\":{\\\"entries\\\":[]}}\"},\"usage\":{\"total_tokens_detail\":{\"value\":13,\"truth\":\"estimated\"}}}\n\n",
+                        ),
+                    )
+                }
+                ("DELETE", "/v1/sessions/sess-apple-stream-noise-1") => {
+                    FakeHttpResponse::json_ok(json!({}))
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+        });
+
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_apple_fm_bridge();
+        profile.base_url = server.base_url().to_string();
+        let collector = Arc::new(TestRuntimeEventCollector::default());
+
+        let outcome = runtime
+            .exec_plain_text_with_events(
+                PlainTextExecRequest {
+                    profile,
+                    prompt: String::from("say hello"),
+                    title: Some(String::from("Apple FM Streamed Noise Turn")),
+                    cwd: environment.workspace().to_path_buf(),
+                    system_prompt: Some(String::from("You are helpful")),
+                    harness_profile: None,
+                    tool_loop: None,
+                },
+                collector.clone(),
+            )
+            .expect("apple fm streamed noise turn should succeed");
+
+        assert_eq!(outcome.assistant_text, "hello world");
+        let events = collector.snapshot();
+        let session_id = outcome.session.id.clone();
+        let snapshots = events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::AssistantSnapshot {
+                    session_id: event_session,
+                    snapshot,
+                    ..
+                } if event_session == &session_id => Some(snapshot.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            snapshots,
+            vec![
+                String::new(),
+                String::from("hello"),
+                String::from("hello world")
+            ]
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::AssistantTurnCommitted {
+                session_id: event_session,
+                assistant_text,
+                ..
+            } if event_session == &session_id && assistant_text == "hello world"
+        )));
     }
 
     #[test]
