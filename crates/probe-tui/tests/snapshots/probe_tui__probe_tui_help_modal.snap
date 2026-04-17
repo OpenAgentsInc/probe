@@ -9,8 +9,7 @@ expression: snapshot
            ┌─ Help ─────────────────────────────────────────────────┐
            │ Probe Chat Shell Keys                                  │
            │                                                        │
-           │ Enter submits. Newline: Shift+Enter · or Ctrl+Enter /  │
-           │ Opt+Enter / Ctrl+J                                     │
+           │ Enter sends · Shift+Enter newline                      │
            │ Up / Down           draft history recall               │
            │ Mouse wheel / PgUp  scroll active panel                │
            │ PgDn                scroll back toward latest          │
@@ -18,6 +17,7 @@ expression: snapshot
            │ Ctrl+R / Ctrl+S     backend check / backend overlay    │
            │ Ctrl+A              approval                           │
            │ Ctrl+T              toggle operator notes              │
+           │ F1 / Esc            toggle or dismiss help             │
            └────────────────────────────────────────────────────────┘
 
 

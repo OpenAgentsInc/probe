@@ -31,13 +31,6 @@ pub enum UiEvent {
     Tick,
 }
 
-fn enter_inserts_newline(modifiers: KeyModifiers) -> bool {
-    // Shift+Enter is the primary binding, but many terminal emulators (notably macOS Terminal.app)
-    // report Shift+Enter as plain Enter with no modifier bits. Ctrl+Enter, Option/Alt+Enter, and
-    // Ctrl+J (Unix line-feed) are reliable fallbacks that still map to "newline in composer".
-    modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT)
-}
-
 pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
     if key.kind != KeyEventKind::Press {
         return None;
@@ -51,7 +44,9 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
         KeyCode::F(1) => Some(UiEvent::OpenHelp),
         KeyCode::PageUp => Some(UiEvent::PageUp),
         KeyCode::PageDown => Some(UiEvent::PageDown),
-        KeyCode::Enter if enter_inserts_newline(modifiers) => Some(UiEvent::ComposerNewline),
+        // Newline only on Shift+Enter. Plain Enter submits. Requires full keyboard protocol flags
+        // in `run_probe_tui_with_config` so Shift is visible on the key event (see app.rs).
+        KeyCode::Enter if modifiers.contains(KeyModifiers::SHIFT) => Some(UiEvent::ComposerNewline),
         KeyCode::Enter => Some(UiEvent::ComposerSubmit),
         KeyCode::Backspace => Some(UiEvent::ComposerBackspace),
         KeyCode::Delete => Some(UiEvent::ComposerDelete),
@@ -76,13 +71,6 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
         }
         KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::ToggleBody)
-        }
-        KeyCode::Char('j') | KeyCode::Char('J') if modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiEvent::ComposerNewline)
-        }
-        // Ctrl+M (carriage return) — some terminals send this instead of Enter+Ctrl for "newline".
-        KeyCode::Char('m') | KeyCode::Char('M') if modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiEvent::ComposerNewline)
         }
         KeyCode::Char(character)
             if !modifiers.contains(KeyModifiers::CONTROL)
@@ -113,27 +101,15 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_enter_inserts_newline() {
+    fn ctrl_enter_submits() {
         let event = event_from_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
-        assert_eq!(event, Some(UiEvent::ComposerNewline));
+        assert_eq!(event, Some(UiEvent::ComposerSubmit));
     }
 
     #[test]
-    fn alt_enter_inserts_newline() {
+    fn alt_enter_submits() {
         let event = event_from_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
-        assert_eq!(event, Some(UiEvent::ComposerNewline));
-    }
-
-    #[test]
-    fn ctrl_j_inserts_newline() {
-        let event = event_from_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
-        assert_eq!(event, Some(UiEvent::ComposerNewline));
-    }
-
-    #[test]
-    fn ctrl_m_inserts_newline() {
-        let event = event_from_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL));
-        assert_eq!(event, Some(UiEvent::ComposerNewline));
+        assert_eq!(event, Some(UiEvent::ComposerSubmit));
     }
 }
 

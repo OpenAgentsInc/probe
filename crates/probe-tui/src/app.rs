@@ -1196,15 +1196,19 @@ pub fn run_probe_tui() -> io::Result<()> {
 pub fn run_probe_tui_with_config(config: TuiLaunchConfig) -> io::Result<()> {
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    // Kitty-style keyboard enhancements: Shift+Enter and other modified keys report modifiers on
-    // iTerm2, WezTerm, Kitty, Alacritty, etc. Without this, many terminals send plain Enter for
-    // Shift+Enter and the composer cannot distinguish newline from submit.
+    // Progressive keyboard protocol (Kitty): `DISAMBIGUATE_ESCAPE_CODES` + `REPORT_EVENT_TYPES`
+    // alone are not enough for Shift+Enter on many terminals (including iTerm2): they still emit
+    // the same byte sequence as plain Enter, so crossterm never sees `SHIFT`. Enabling
+    // `REPORT_ALL_KEYS_AS_ESCAPE_CODES` and `REPORT_ALTERNATE_KEYS` makes Enter vs Shift+Enter
+    // distinct CSI-u style events with correct modifier bits. See crossterm `examples/event-read.rs`.
     execute!(
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
         ),
     )?;

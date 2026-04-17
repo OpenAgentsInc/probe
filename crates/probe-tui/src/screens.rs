@@ -1007,20 +1007,15 @@ impl ChatScreen {
             }
             RuntimeEvent::AssistantTurnCommitted {
                 session_id,
-                response_id,
-                response_model,
+                response_id: _,
+                response_model: _,
                 assistant_text,
             } => {
                 self.clear_stream();
                 self.runtime.session_id = Some(session_id.as_str().to_string());
                 self.runtime.phase = Some(String::from("assistant_committed"));
                 self.runtime.active_tool = None;
-                let mut body = vec![
-                    format!("response_id: {response_id}"),
-                    format!("model: {}", preview(response_model.as_str(), 48)),
-                    String::from("response"),
-                ];
-                body.extend(split_text_lines(assistant_text.as_str()));
+                let body = split_text_lines(assistant_text.as_str());
                 self.transcript.set_active_turn(ActiveTurn::new(
                     TranscriptRole::Assistant,
                     "Probe",
@@ -1998,7 +1993,7 @@ impl HelpScreen {
         let content = Paragraph::new(Text::from(vec![
             Line::from("Probe Chat Shell Keys"),
             Line::from(""),
-            Line::from("Enter submits. Newline: Shift+Enter · or Ctrl+Enter / Opt+Enter / Ctrl+J"),
+            Line::from("Enter sends · Shift+Enter newline"),
             Line::from("Up / Down           draft history recall"),
             Line::from("Mouse wheel / PgUp  scroll active panel"),
             Line::from("PgDn                scroll back toward latest"),
