@@ -1,5 +1,6 @@
 ---
 source: crates/probe-tui/tests/probe_tui.rs
+assertion_line: 53
 expression: snapshot
 ---
 
@@ -9,20 +10,20 @@ expression: snapshot
            ┌─ Help ─────────────────────────────────────────────────┐
            │ Probe Chat Shell Keys                                  │
            │                                                        │
-           │ Plain Enter sends · Shift/Ctrl/Opt+Enter or Ctrl+J     │
-           │ newline                                                │
+           │ Plain Enter sends · Shift+Enter newline                │
+           │ Shift+Tab           cycle Codex reasoning              │
+           │ Ctrl+F              toggle Codex fast mode             │
            │ Up / Down           draft history recall               │
            │ Mouse wheel / PgUp  scroll active panel                │
            │ PgDn                scroll back toward latest          │
            │ Ctrl+O              add attachment placeholder         │
            │ Ctrl+R / Ctrl+S     backend check / backend overlay    │
            │ Ctrl+A              approval                           │
-           │ Ctrl+T              toggle operator notes              │
            └────────────────────────────────────────────────────────┘
 
 
 
 
-┌──────────────────────────── locked · plain · qwen3.5-2b-q8_0-registry... · . ┐
+┌──────────────────────────────────── locked · qwen3.5-2b-q8_0-registry... · . ┐
 │ Input disabled while help owns focus. Esc or F1 returns to chat.             │
 └──────────────────────────────────────────────────────────────────────────────┘

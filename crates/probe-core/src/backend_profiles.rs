@@ -10,14 +10,10 @@ pub const PSIONIC_APPLE_FM_MODEL: &str = "apple-foundation-model";
 pub const DEFAULT_APPLE_FM_BRIDGE_BASE_URL: &str = "http://127.0.0.1:11435";
 pub const OPENAI_CODEX_SUBSCRIPTION_PROFILE: &str = "openai-codex-subscription";
 pub const OPENAI_CODEX_SUBSCRIPTION_MODEL: &str = "gpt-5.4";
-pub const OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL_DEFAULT: &str = "backend_default";
-pub const OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVELS: [&str; 5] = [
-    OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL_DEFAULT,
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-];
+pub const OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL_DEFAULT: &str = "medium";
+pub const OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVELS: [&str; 4] =
+    ["low", "medium", "high", "xhigh"];
+pub const OPENAI_CODEX_SUBSCRIPTION_SERVICE_TIER_FAST: &str = "fast";
 pub const DEFAULT_OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub const PSIONIC_INFERENCE_MESH_PROFILE: &str = "psionic-inference-mesh";
 pub const PSIONIC_INFERENCE_MESH_DEFAULT_MODEL: &str = "psionic-mesh-default";
@@ -51,6 +47,7 @@ pub fn openai_codex_subscription() -> BackendProfile {
         base_url: String::from(DEFAULT_OPENAI_CODEX_BASE_URL),
         model: String::from(OPENAI_CODEX_SUBSCRIPTION_MODEL),
         reasoning_level: None,
+        service_tier: None,
         api_key_env: String::from("PROBE_OPENAI_API_KEY"),
         timeout_secs: 60,
         attach_mode: ServerAttachMode::AttachToExisting,
@@ -68,6 +65,7 @@ pub fn psionic_inference_mesh() -> BackendProfile {
         base_url: String::from("http://127.0.0.1:8080/v1"),
         model: String::from(PSIONIC_INFERENCE_MESH_DEFAULT_MODEL),
         reasoning_level: None,
+        service_tier: None,
         api_key_env: String::from("PROBE_OPENAI_API_KEY"),
         timeout_secs: 45,
         attach_mode: ServerAttachMode::AttachToExisting,
@@ -145,6 +143,32 @@ pub fn next_reasoning_level_for_backend(
 }
 
 #[must_use]
+pub const fn supports_fast_mode_for_backend(backend_kind: BackendKind) -> bool {
+    matches!(backend_kind, BackendKind::OpenAiCodexSubscription)
+}
+
+#[must_use]
+pub fn resolved_service_tier_for_backend(
+    backend_kind: BackendKind,
+    configured: Option<&str>,
+) -> Option<&'static str> {
+    match backend_kind {
+        BackendKind::OpenAiCodexSubscription => configured
+            .filter(|value| *value == OPENAI_CODEX_SUBSCRIPTION_SERVICE_TIER_FAST)
+            .map(|_| OPENAI_CODEX_SUBSCRIPTION_SERVICE_TIER_FAST),
+        BackendKind::OpenAiChatCompletions | BackendKind::AppleFmBridge => None,
+    }
+}
+
+#[must_use]
+pub fn persisted_service_tier_for_backend(
+    backend_kind: BackendKind,
+    configured: Option<&str>,
+) -> Option<String> {
+    resolved_service_tier_for_backend(backend_kind, configured).map(str::to_string)
+}
+
+#[must_use]
 pub fn psionic_apple_fm_bridge() -> BackendProfile {
     BackendProfile {
         name: String::from(PSIONIC_APPLE_FM_BRIDGE_PROFILE),
@@ -152,6 +176,7 @@ pub fn psionic_apple_fm_bridge() -> BackendProfile {
         base_url: resolved_apple_fm_bridge_base_url(),
         model: String::from(PSIONIC_APPLE_FM_MODEL),
         reasoning_level: None,
+        service_tier: None,
         api_key_env: String::new(),
         timeout_secs: 45,
         attach_mode: ServerAttachMode::AttachToExisting,
@@ -169,6 +194,7 @@ pub fn psionic_apple_fm_oracle() -> BackendProfile {
         base_url: resolved_apple_fm_bridge_base_url(),
         model: String::from(PSIONIC_APPLE_FM_MODEL),
         reasoning_level: None,
+        service_tier: None,
         api_key_env: String::new(),
         timeout_secs: 30,
         attach_mode: ServerAttachMode::AttachToExisting,
@@ -186,6 +212,7 @@ pub fn psionic_qwen35_2b_q8_registry() -> BackendProfile {
         base_url: String::from("http://127.0.0.1:8080/v1"),
         model: String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL),
         reasoning_level: None,
+        service_tier: None,
         api_key_env: String::from("PROBE_OPENAI_API_KEY"),
         timeout_secs: 45,
         attach_mode: ServerAttachMode::AttachToExisting,
@@ -203,6 +230,7 @@ pub fn psionic_qwen35_2b_q8_oracle() -> BackendProfile {
         base_url: String::from("http://127.0.0.1:8080/v1"),
         model: String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL),
         reasoning_level: None,
+        service_tier: None,
         api_key_env: String::from("PROBE_OPENAI_API_KEY"),
         timeout_secs: 30,
         attach_mode: ServerAttachMode::AttachToExisting,
@@ -220,6 +248,7 @@ pub fn psionic_qwen35_2b_q8_long_context() -> BackendProfile {
         base_url: String::from("http://127.0.0.1:8080/v1"),
         model: String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL),
         reasoning_level: None,
+        service_tier: None,
         api_key_env: String::from("PROBE_OPENAI_API_KEY"),
         timeout_secs: 60,
         attach_mode: ServerAttachMode::AttachToExisting,
@@ -266,10 +295,12 @@ mod tests {
         PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
         default_reasoning_level_for_backend, named_backend_profile,
         next_reasoning_level_for_backend, openai_codex_subscription,
-        persisted_reasoning_level_for_backend, psionic_apple_fm_bridge, psionic_apple_fm_oracle,
-        psionic_inference_mesh, psionic_qwen35_2b_q8_long_context, psionic_qwen35_2b_q8_oracle,
+        persisted_reasoning_level_for_backend, persisted_service_tier_for_backend,
+        psionic_apple_fm_bridge, psionic_apple_fm_oracle, psionic_inference_mesh,
+        psionic_qwen35_2b_q8_long_context, psionic_qwen35_2b_q8_oracle,
         psionic_qwen35_2b_q8_registry, resolve_apple_fm_bridge_base_url_with,
-        resolved_reasoning_level_for_backend, supported_reasoning_levels_for_backend,
+        resolved_reasoning_level_for_backend, resolved_service_tier_for_backend,
+        supported_reasoning_levels_for_backend, supports_fast_mode_for_backend,
     };
 
     #[test]
@@ -284,6 +315,7 @@ mod tests {
         assert_eq!(profile.model, OPENAI_CODEX_SUBSCRIPTION_MODEL);
         assert_eq!(profile.api_key_env, "PROBE_OPENAI_API_KEY");
         assert_eq!(profile.timeout_secs, 60);
+        assert_eq!(profile.service_tier, None);
     }
 
     #[test]
@@ -352,12 +384,12 @@ mod tests {
                 probe_protocol::backend::BackendKind::OpenAiCodexSubscription,
                 Some("xhigh")
             ),
-            Some(OPENAI_CODEX_SUBSCRIPTION_REASONING_LEVEL_DEFAULT)
+            Some("low")
         );
         assert_eq!(
             persisted_reasoning_level_for_backend(
                 probe_protocol::backend::BackendKind::OpenAiCodexSubscription,
-                Some("backend_default")
+                Some("medium")
             ),
             None
         );
@@ -369,6 +401,31 @@ mod tests {
             .as_deref(),
             Some("xhigh")
         );
+        assert_eq!(
+            resolved_service_tier_for_backend(
+                probe_protocol::backend::BackendKind::OpenAiCodexSubscription,
+                Some("fast")
+            ),
+            Some("fast")
+        );
+        assert_eq!(
+            resolved_service_tier_for_backend(
+                probe_protocol::backend::BackendKind::OpenAiCodexSubscription,
+                Some("invalid")
+            ),
+            None
+        );
+        assert_eq!(
+            persisted_service_tier_for_backend(
+                probe_protocol::backend::BackendKind::OpenAiCodexSubscription,
+                Some("fast")
+            )
+            .as_deref(),
+            Some("fast")
+        );
+        assert!(supports_fast_mode_for_backend(
+            probe_protocol::backend::BackendKind::OpenAiCodexSubscription
+        ));
     }
 
     #[test]

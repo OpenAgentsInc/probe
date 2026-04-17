@@ -71,6 +71,8 @@ pub struct BackendProfile {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
     pub api_key_env: String,
     pub timeout_secs: u64,
     pub attach_mode: ServerAttachMode,

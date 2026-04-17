@@ -35,6 +35,7 @@ pub struct OpenAiProviderConfig {
     pub base_url: String,
     pub model: String,
     pub reasoning_level: Option<String>,
+    pub service_tier: Option<String>,
     pub auth: OpenAiRequestAuth,
     pub timeout: Duration,
     pub stream: bool,
@@ -52,6 +53,7 @@ impl OpenAiProviderConfig {
             base_url: String::from("http://127.0.0.1:8080/v1"),
             model: model.into(),
             reasoning_level: None,
+            service_tier: None,
             auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: Duration::from_secs(30),
             stream: false,
@@ -84,6 +86,7 @@ impl OpenAiProviderConfig {
             base_url: profile.base_url.clone(),
             model: profile.model.clone(),
             reasoning_level: profile.reasoning_level.clone(),
+            service_tier: profile.service_tier.clone(),
             auth: match profile.kind {
                 probe_protocol::backend::BackendKind::OpenAiCodexSubscription => {
                     OpenAiRequestAuth::None
@@ -285,6 +288,8 @@ struct CodexResponsesRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<CodexReasoning>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<CodexToolDefinition>,
@@ -362,6 +367,7 @@ impl CodexResponsesRequest {
             input,
             stream: request.stream,
             reasoning: codex_reasoning_from_level(config.reasoning_level.as_deref()),
+            service_tier: codex_service_tier_from_config(config.service_tier.as_deref()),
             max_output_tokens: None,
             tools: request
                 .tools
@@ -382,10 +388,18 @@ struct CodexReasoning {
 
 fn codex_reasoning_from_level(level: Option<&str>) -> Option<CodexReasoning> {
     match level {
-        Some("backend_default") | None => None,
+        Some("medium") | None => None,
         Some(level) => Some(CodexReasoning {
             effort: level.to_string(),
         }),
+    }
+}
+
+fn codex_service_tier_from_config(service_tier: Option<&str>) -> Option<String> {
+    match service_tier {
+        Some("fast") => Some(String::from("priority")),
+        Some(other) => Some(other.to_string()),
+        None => None,
     }
 }
 
@@ -1398,6 +1412,7 @@ mod tests {
             base_url: String::from("http://127.0.0.1:8080/v1"),
             model: String::from("qwen3.5-2b-q8_0-registry.gguf"),
             reasoning_level: None,
+            service_tier: None,
             api_key_env: String::from("PROBE_OPENAI_API_KEY"),
             timeout_secs: 45,
             attach_mode: ServerAttachMode::AttachToExisting,
@@ -1425,6 +1440,7 @@ mod tests {
             base_url: String::from("https://chatgpt.com/backend-api/codex"),
             model: String::from("gpt-5.4"),
             reasoning_level: Some(String::from("high")),
+            service_tier: Some(String::from("fast")),
             api_key_env: String::new(),
             timeout_secs: 60,
             attach_mode: ServerAttachMode::AttachToExisting,
@@ -1440,6 +1456,7 @@ mod tests {
         assert_eq!(config.transport, OpenAiTransport::CodexResponses);
         assert_eq!(config.auth, OpenAiRequestAuth::None);
         assert_eq!(config.reasoning_level.as_deref(), Some("high"));
+        assert_eq!(config.service_tier.as_deref(), Some("fast"));
     }
 
     fn streaming_config(base_url: &str) -> OpenAiProviderConfig {
@@ -1447,6 +1464,7 @@ mod tests {
             base_url: base_url.to_string(),
             model: String::from("tiny-qwen35"),
             reasoning_level: None,
+            service_tier: None,
             auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: Duration::from_secs(5),
             stream: true,
@@ -1466,6 +1484,7 @@ mod tests {
             base_url: base_url.to_string(),
             model: String::from("gpt-5.4"),
             reasoning_level: None,
+            service_tier: None,
             auth: OpenAiRequestAuth::BearerToken(String::from("access-token")),
             timeout: Duration::from_secs(5),
             stream: false,
@@ -1504,6 +1523,7 @@ mod tests {
             base_url: String::from(server.base_url()),
             model: String::from("tiny-qwen35"),
             reasoning_level: None,
+            service_tier: None,
             auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: std::time::Duration::from_secs(5),
             stream: false,
@@ -1552,6 +1572,7 @@ mod tests {
             base_url: String::from(server.base_url()),
             model: String::from("tiny-qwen35"),
             reasoning_level: None,
+            service_tier: None,
             auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: Duration::from_secs(5),
             stream: false,
@@ -1673,6 +1694,26 @@ mod tests {
         .expect("serialize codex request");
 
         assert_eq!(encoded["reasoning"]["effort"], "xhigh");
+    }
+
+    #[test]
+    fn codex_request_includes_fast_service_tier_when_enabled() {
+        let mut config = codex_config("https://chatgpt.com/backend-api/codex");
+        config.service_tier = Some(String::from("fast"));
+        let request = ChatCompletionRequest::from_config(
+            &config,
+            vec![
+                ChatMessage::system("You are helpful"),
+                ChatMessage::user("hello from probe"),
+            ],
+        );
+
+        let encoded = serde_json::to_value(CodexResponsesRequest::from_chat_completion(
+            &request, &config,
+        ))
+        .expect("serialize codex request");
+
+        assert_eq!(encoded["service_tier"], "priority");
     }
 
     #[test]
@@ -1811,6 +1852,7 @@ mod tests {
             base_url: String::from(server.base_url()),
             model: String::from("tiny-qwen35"),
             reasoning_level: None,
+            service_tier: None,
             auth: OpenAiRequestAuth::BearerToken(String::from("dummy")),
             timeout: std::time::Duration::from_secs(5),
             stream: false,

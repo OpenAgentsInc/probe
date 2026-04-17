@@ -1,5 +1,6 @@
 ---
 source: crates/probe-tui/tests/probe_tui.rs
+assertion_line: 219
 expression: snapshot
 ---
 › Inspect README and summarize Probe.
@@ -27,6 +28,6 @@ expression: snapshot
 
 
 
-┌───────────────────────────────────────────────────────── plain · qwen3.5-2b-q8_0-registry... · * ┐
-│ Type a Probe message. Plain Enter sends. Shift/Ctrl/Opt+Enter or Ctrl+J newline.                 │
+┌───────────────────────────────────────────────────────────────── qwen3.5-2b-q8_0-registry... · * ┐
+│ Type a Probe message. Plain Enter sends. Shift+Enter inserts a newline.                          │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

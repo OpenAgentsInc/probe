@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 use crate::backend_profiles::{
     OPENAI_CODEX_SUBSCRIPTION_MODEL, PSIONIC_APPLE_FM_MODEL, PSIONIC_INFERENCE_MESH_DEFAULT_MODEL,
     PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL, persisted_reasoning_level_for_backend,
-    resolved_reasoning_level_for_backend,
+    persisted_service_tier_for_backend, resolved_reasoning_level_for_backend,
+    resolved_service_tier_for_backend,
 };
 
 const DEFAULT_SERVER_CONFIG_PATH: &str = "server/psionic-local.json";
@@ -55,6 +56,8 @@ pub struct PsionicServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_level: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_plane: Option<BackendControlPlaneKind>,
 }
 
@@ -76,6 +79,7 @@ pub struct ServerOperatorSummary {
     pub base_url: String,
     pub model_id: Option<String>,
     pub reasoning_level: Option<String>,
+    pub service_tier: Option<String>,
     pub control_plane: Option<BackendControlPlaneKind>,
     pub psionic_mesh: Option<PsionicMeshAttachInfo>,
 }
@@ -243,6 +247,7 @@ impl Default for PsionicServerConfig {
             model_id: Some(String::from(PSIONIC_QWEN35_2B_Q8_REGISTRY_MODEL)),
             reasoning_budget: None,
             reasoning_level: None,
+            service_tier: None,
             control_plane: None,
         }
     }
@@ -263,12 +268,15 @@ impl PsionicServerConfig {
             model_id: Some(profile.model.clone()),
             reasoning_budget: None,
             reasoning_level: profile.reasoning_level.clone(),
+            service_tier: profile.service_tier.clone(),
             control_plane: profile.control_plane,
         };
         config.set_api_kind(profile.kind);
         config.model_id = Some(profile.model.clone());
         config.reasoning_level =
             persisted_reasoning_level_for_backend(profile.kind, profile.reasoning_level.as_deref());
+        config.service_tier =
+            persisted_service_tier_for_backend(profile.kind, profile.service_tier.as_deref());
         config
     }
 
@@ -349,6 +357,8 @@ impl PsionicServerConfig {
         }
         self.reasoning_level =
             persisted_reasoning_level_for_backend(self.api_kind, self.reasoning_level.as_deref());
+        self.service_tier =
+            persisted_service_tier_for_backend(self.api_kind, self.service_tier.as_deref());
     }
 
     #[must_use]
@@ -372,6 +382,11 @@ impl PsionicServerConfig {
             reasoning_level: resolved_reasoning_level_for_backend(
                 self.api_kind,
                 self.reasoning_level.as_deref(),
+            )
+            .map(str::to_string),
+            service_tier: resolved_service_tier_for_backend(
+                self.api_kind,
+                self.service_tier.as_deref(),
             )
             .map(str::to_string),
             control_plane: self.control_plane,
@@ -1149,6 +1164,7 @@ mod tests {
             model_id: Some(String::from("gpt-5.3-codex")),
             reasoning_budget: None,
             reasoning_level: Some(String::from("invalid")),
+            service_tier: Some(String::from("invalid")),
             control_plane: None,
         };
         legacy.save(path.as_path()).expect("save legacy config");
@@ -1161,9 +1177,10 @@ mod tests {
 
         assert_eq!(loaded.resolved_model_id().as_deref(), Some("gpt-5.4"));
         assert_eq!(loaded.reasoning_level, None);
+        assert_eq!(loaded.service_tier, None);
         assert_eq!(
             loaded.operator_summary().reasoning_level.as_deref(),
-            Some("backend_default")
+            Some("medium")
         );
     }
 
@@ -1185,6 +1202,7 @@ mod tests {
             model_id: Some(String::from("gpt-5.4")),
             reasoning_budget: None,
             reasoning_level: Some(String::from("xhigh")),
+            service_tier: Some(String::from("fast")),
             control_plane: None,
         };
         config.save(path.as_path()).expect("save codex config");
@@ -1196,9 +1214,14 @@ mod tests {
         .expect("load saved codex config");
 
         assert_eq!(loaded.reasoning_level.as_deref(), Some("xhigh"));
+        assert_eq!(loaded.service_tier.as_deref(), Some("fast"));
         assert_eq!(
             loaded.operator_summary().reasoning_level.as_deref(),
             Some("xhigh")
+        );
+        assert_eq!(
+            loaded.operator_summary().service_tier.as_deref(),
+            Some("fast")
         );
     }
 
@@ -1476,6 +1499,7 @@ cd "$(dirname "$0")" && exec python3 -m http.server "$PORT" --bind "$HOST"
             model_id: Some(String::from("fake.gguf")),
             reasoning_budget: None,
             reasoning_level: None,
+            service_tier: None,
             control_plane: None,
         };
 

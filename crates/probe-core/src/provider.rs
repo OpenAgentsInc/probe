@@ -948,6 +948,7 @@ mod tests {
             base_url: String::from("http://127.0.0.1:8080/v1"),
             model: String::from("tiny-qwen35"),
             reasoning_level: None,
+            service_tier: None,
             api_key_env: env_var.to_string(),
             timeout_secs: 30,
             attach_mode: ServerAttachMode::AttachToExisting,

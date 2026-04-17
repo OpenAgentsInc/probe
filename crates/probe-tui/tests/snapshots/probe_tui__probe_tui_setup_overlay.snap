@@ -1,5 +1,6 @@
 ---
 source: crates/probe-tui/tests/probe_tui.rs
+assertion_line: 63
 expression: snapshot
 ---
 
@@ -23,6 +24,6 @@ expression: snapshot
 
 
 
-┌───────────────────────────────── locked · plain · apple-foundation-model · . ┐
+┌───────────────────────────────────────── locked · apple-foundation-model · . ┐
 │ Input disabled while backend overlay owns focus. Esc returns to chat.        │
 └──────────────────────────────────────────────────────────────────────────────┘

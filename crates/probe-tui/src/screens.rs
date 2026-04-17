@@ -551,6 +551,11 @@ impl ChatScreen {
         if let Some(reasoning) = reasoning {
             parts.push(display_reasoning_level(reasoning).to_string());
         }
+        if let Some(summary) = self.operator_backend.as_ref().filter(|summary| {
+            summary.backend_kind == probe_protocol::backend::BackendKind::OpenAiCodexSubscription
+        }) {
+            parts.push(display_service_tier(summary.service_tier.as_deref()).to_string());
+        }
         if let Some(summary) = self.codex_footer_summary.as_ref() {
             if let Some(account_badge) = summary.account_badge.as_deref() {
                 parts.push(preview(account_badge, 28));
@@ -1369,7 +1374,8 @@ impl ChatScreen {
     fn handle_event(&mut self, event: UiEvent) -> ScreenOutcome {
         match event {
             UiEvent::NextView => ScreenOutcome::idle(),
-            UiEvent::PreviousView => ScreenOutcome::idle(),
+            UiEvent::CycleReasoningLevel => ScreenOutcome::idle(),
+            UiEvent::ToggleFastMode => ScreenOutcome::idle(),
             UiEvent::ToggleBody => {
                 self.emphasized_copy = !self.emphasized_copy;
                 self.resume_transcript_follow();
@@ -2017,7 +2023,9 @@ impl HelpScreen {
         let content = Paragraph::new(Text::from(vec![
             Line::from("Probe Chat Shell Keys"),
             Line::from(""),
-            Line::from("Plain Enter sends · Shift/Ctrl/Opt+Enter or Ctrl+J newline"),
+            Line::from("Plain Enter sends · Shift+Enter newline"),
+            Line::from("Shift+Tab           cycle Codex reasoning"),
+            Line::from("Ctrl+F              toggle Codex fast mode"),
             Line::from("Up / Down           draft history recall"),
             Line::from("Mouse wheel / PgUp  scroll active panel"),
             Line::from("PgDn                scroll back toward latest"),
@@ -2029,7 +2037,7 @@ impl HelpScreen {
             Line::from("Ctrl+C              quit"),
             Line::from(""),
             Line::from("Local slash commands"),
-            Line::from("/help /backend /approvals /reasoning /clear"),
+            Line::from("/help /backend /approvals /reasoning /fast /clear"),
             Line::from("Backend choice on the default TUI path is automatic and Codex-first."),
             Line::from(
                 "Slash commands, typed mentions, attachments, and paste state live in the draft model.",
@@ -2127,7 +2135,7 @@ impl ApprovalOverlay {
                     format!("selected {} in approval overlay", self.selected.label()),
                 )
             }
-            UiEvent::PreviousView => {
+            UiEvent::CycleReasoningLevel => {
                 self.selected = self.selected.previous();
                 ScreenOutcome::with_status(
                     ScreenAction::None,
@@ -2568,9 +2576,13 @@ fn render_backend_kind(value: probe_protocol::backend::BackendKind) -> &'static 
 }
 
 fn display_reasoning_level(value: &str) -> &str {
+    value
+}
+
+fn display_service_tier(value: Option<&str>) -> &'static str {
     match value {
-        "backend_default" => "auto",
-        other => other,
+        Some("fast") => "fast",
+        _ => "normal",
     }
 }
 

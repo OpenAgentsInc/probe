@@ -1,5 +1,6 @@
 ---
 source: crates/probe-tui/tests/probe_tui.rs
+assertion_line: 359
 expression: snapshot
 ---
 › Reply with the next honest proof target.
@@ -27,6 +28,6 @@ expression: snapshot
 
 
 
-┌────────────────────────────────────────────────────────────── plain · apple-foundation-model · * ┐
-│ Type a Probe message. Plain Enter sends. Shift/Ctrl/Opt+Enter or Ctrl+J newline.                 │
+┌────────────────────────────────────────────────────────────────────── apple-foundation-model · * ┐
+│ Type a Probe message. Plain Enter sends. Shift+Enter inserts a newline.                          │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

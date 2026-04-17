@@ -2946,6 +2946,7 @@ fn profile_from_server_config(config: &PsionicServerConfig) -> BackendProfile {
         profile.model = model_id;
     }
     profile.reasoning_level = config.reasoning_level.clone();
+    profile.service_tier = config.service_tier.clone();
     profile
 }
 

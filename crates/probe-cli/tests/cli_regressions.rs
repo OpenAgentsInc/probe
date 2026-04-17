@@ -121,7 +121,7 @@ fn codex_status_reports_missing_auth_state() {
         .assert()
         .success()
         .stdout(predicate::str::contains("model=gpt-5.4"))
-        .stdout(predicate::str::contains("reasoning_level=backend_default"))
+        .stdout(predicate::str::contains("reasoning_level=medium"))
         .stdout(predicate::str::contains("authenticated=false"))
         .stdout(predicate::str::contains("account_count=0"))
         .stdout(predicate::str::contains(
@@ -200,6 +200,7 @@ fn codex_status_uses_saved_reasoning_level_override() {
         model_id: Some(String::from("gpt-5.4")),
         reasoning_budget: None,
         reasoning_level: Some(String::from("xhigh")),
+        service_tier: Some(String::from("fast")),
         control_plane: None,
     }
     .save(config_path.as_path())

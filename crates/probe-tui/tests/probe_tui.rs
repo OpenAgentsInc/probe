@@ -22,6 +22,7 @@ fn apple_fm_chat_config(base_url: &str) -> ProbeRuntimeTurnConfig {
             base_url: base_url.to_string(),
             model: String::from("apple-foundation-model"),
             reasoning_level: None,
+            service_tier: None,
             api_key_env: String::from("OPENAI_API_KEY"),
             timeout_secs: 120,
             attach_mode: probe_protocol::backend::ServerAttachMode::AttachToExisting,

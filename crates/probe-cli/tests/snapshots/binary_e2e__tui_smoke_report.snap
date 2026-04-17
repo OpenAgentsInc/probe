@@ -1,9 +1,10 @@
 ---
 source: crates/probe-cli/tests/binary_e2e.rs
+assertion_line: 349
 expression: report
 ---
 {
-  "final_render": "› hello • Calling read_file └ README.md • Called read_file └ README.md:1-1 Probe acceptance fixture • Probe inspected README.md through the real runtime. ┌──────────────────────────────────────────────────────────────────────────────────── plain · hist 1 · tiny-qwen35 · . ┐ │ Type a Probe message. Plain Enter sends. Shift/Ctrl/Opt+Enter or Ctrl+J newline. │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
+  "final_render": "› hello • Calling read_file └ README.md • Called read_file └ README.md:1-1 Probe acceptance fixture • Probe inspected README.md through the real runtime. ┌──────────────────────────────────────────────────────────────────────────────────────────── hist 1 · tiny-qwen35 · . ┐ │ Type a Probe message. Plain Enter sends. Shift+Enter inserts a newline. │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
   "last_status": "pending approvals cleared",
   "recent_events": [
     "queued Probe runtime turn: hello",

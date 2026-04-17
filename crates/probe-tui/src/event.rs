@@ -3,8 +3,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiEvent {
     NextView,
-    PreviousView,
+    CycleReasoningLevel,
     ToggleBody,
+    ToggleFastMode,
     RunBackgroundTask,
     OpenHelp,
     OpenSetupOverlay,
@@ -39,27 +40,13 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
     let modifiers = key.modifiers;
     match key.code {
         KeyCode::Tab => Some(UiEvent::NextView),
-        KeyCode::BackTab => Some(UiEvent::PreviousView),
+        KeyCode::BackTab => Some(UiEvent::CycleReasoningLevel),
         KeyCode::Esc => Some(UiEvent::Dismiss),
         KeyCode::F(1) => Some(UiEvent::OpenHelp),
         KeyCode::PageUp => Some(UiEvent::PageUp),
         KeyCode::PageDown => Some(UiEvent::PageDown),
-        // Match OpenAI Codex TUI (`codex-rs/tui`): `ChatComposer` submits only on Enter with
-        // **no** modifiers; any other Enter (Shift/Ctrl/Alt/Cmd/…) goes to `TextArea::input`, which
-        // inserts `\n` for Enter with any modifiers. See `chat_composer.rs` (Enter+NONE submit)
-        // and `textarea.rs` (`KeyCode::Enter, ..` => insert newline).
-        KeyCode::Enter if modifiers.is_empty() => Some(UiEvent::ComposerSubmit),
-        KeyCode::Enter => Some(UiEvent::ComposerNewline),
-        // Some terminals surface modified Return as a raw CR/LF character instead of `KeyCode::Enter`.
-        // Normalize those to the same newline path Codex's textarea takes for modified Enter.
-        KeyCode::Char('\n') | KeyCode::Char('\r') => Some(UiEvent::ComposerNewline),
-        // Codex textarea also maps ^J / ^M to newline for terminals that send C0 controls.
-        KeyCode::Char('j') | KeyCode::Char('J') if modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiEvent::ComposerNewline)
-        }
-        KeyCode::Char('m') | KeyCode::Char('M') if modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiEvent::ComposerNewline)
-        }
+        KeyCode::Enter if modifiers.contains(KeyModifiers::SHIFT) => Some(UiEvent::ComposerNewline),
+        KeyCode::Enter => Some(UiEvent::ComposerSubmit),
         KeyCode::Backspace => Some(UiEvent::ComposerBackspace),
         KeyCode::Delete => Some(UiEvent::ComposerDelete),
         KeyCode::Left => Some(UiEvent::ComposerMoveLeft),
@@ -72,6 +59,9 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
             Some(UiEvent::OpenApprovalOverlay)
         }
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => Some(UiEvent::Quit),
+        KeyCode::Char('f') | KeyCode::Char('F') if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiEvent::ToggleFastMode)
+        }
         KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::ComposerAddAttachment)
         }
@@ -113,39 +103,27 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_enter_inserts_newline() {
+    fn ctrl_enter_submits() {
         let event = event_from_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
-        assert_eq!(event, Some(UiEvent::ComposerNewline));
+        assert_eq!(event, Some(UiEvent::ComposerSubmit));
     }
 
     #[test]
-    fn alt_enter_inserts_newline() {
+    fn alt_enter_submits() {
         let event = event_from_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
-        assert_eq!(event, Some(UiEvent::ComposerNewline));
+        assert_eq!(event, Some(UiEvent::ComposerSubmit));
     }
 
     #[test]
-    fn ctrl_j_inserts_newline() {
-        let event = event_from_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
-        assert_eq!(event, Some(UiEvent::ComposerNewline));
+    fn shift_tab_cycles_reasoning() {
+        let event = event_from_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(event, Some(UiEvent::CycleReasoningLevel));
     }
 
     #[test]
-    fn ctrl_m_inserts_newline() {
-        let event = event_from_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL));
-        assert_eq!(event, Some(UiEvent::ComposerNewline));
-    }
-
-    #[test]
-    fn carriage_return_char_inserts_newline() {
-        let event = event_from_key(KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::SHIFT));
-        assert_eq!(event, Some(UiEvent::ComposerNewline));
-    }
-
-    #[test]
-    fn line_feed_char_inserts_newline() {
-        let event = event_from_key(KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::SHIFT));
-        assert_eq!(event, Some(UiEvent::ComposerNewline));
+    fn ctrl_f_toggles_fast_mode() {
+        let event = event_from_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(event, Some(UiEvent::ToggleFastMode));
     }
 }
 

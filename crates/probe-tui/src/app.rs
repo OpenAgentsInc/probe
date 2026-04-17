@@ -14,8 +14,9 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use probe_core::backend_profiles::{
-    next_reasoning_level_for_backend, openai_codex_subscription,
-    persisted_reasoning_level_for_backend, psionic_apple_fm_bridge, psionic_inference_mesh,
+    OPENAI_CODEX_SUBSCRIPTION_SERVICE_TIER_FAST, next_reasoning_level_for_backend,
+    openai_codex_subscription, persisted_reasoning_level_for_backend,
+    persisted_service_tier_for_backend, psionic_apple_fm_bridge, psionic_inference_mesh,
     psionic_qwen35_2b_q8_registry,
 };
 use probe_core::harness::resolve_prompt_contract;
@@ -341,6 +342,22 @@ impl AppShell {
                 self.last_status = String::from("quitting probe tui");
                 self.should_quit = true;
             }
+            UiEvent::CycleReasoningLevel if self.active_screen_id() == ScreenId::Chat => {
+                if !self.cycle_codex_reasoning_level() {
+                    self.base_screen_mut()
+                        .record_event("reasoning key ignored for current backend");
+                    self.last_status =
+                        String::from("active backend does not expose reasoning controls");
+                }
+            }
+            UiEvent::ToggleFastMode if self.active_screen_id() == ScreenId::Chat => {
+                if !self.toggle_codex_fast_mode() {
+                    self.base_screen_mut()
+                        .record_event("fast-mode key ignored for current backend");
+                    self.last_status =
+                        String::from("active backend does not expose fast-mode controls");
+                }
+            }
             UiEvent::Tick => {}
             UiEvent::ComposerInsert(_)
             | UiEvent::ComposerBackspace
@@ -479,7 +496,7 @@ impl AppShell {
     }
 
     fn handle_local_slash_command(&mut self, submitted: &ComposerSubmission) -> bool {
-        let Some(command) = exact_local_slash_command(submitted) else {
+        let Some((command, args)) = local_slash_command(submitted) else {
             return false;
         };
 
@@ -509,19 +526,54 @@ impl AppShell {
                 }
             }
             "reasoning" => {
-                if self.base_screen().has_active_runtime_work() {
-                    self.base_screen_mut()
-                        .record_event("reasoning change blocked by active runtime work");
-                    self.last_status = String::from(
-                        "wait for the active turn to finish before changing Codex reasoning",
-                    );
-                } else if !self.cycle_codex_reasoning_level() {
+                if !self.cycle_codex_reasoning_level() {
                     self.base_screen_mut()
                         .record_event("reasoning command ignored for current backend");
                     self.last_status =
                         String::from("active backend does not expose reasoning controls");
                 }
             }
+            "fast" => match args.to_ascii_lowercase().as_str() {
+                "" => {
+                    if !self.toggle_codex_fast_mode() {
+                        self.base_screen_mut()
+                            .record_event("fast command ignored for current backend");
+                        self.last_status =
+                            String::from("active backend does not expose fast-mode controls");
+                    }
+                }
+                "on" => {
+                    if !self.set_codex_fast_mode(true) {
+                        self.base_screen_mut()
+                            .record_event("fast command ignored for current backend");
+                        self.last_status =
+                            String::from("active backend does not expose fast-mode controls");
+                    }
+                }
+                "off" => {
+                    if !self.set_codex_fast_mode(false) {
+                        self.base_screen_mut()
+                            .record_event("fast command ignored for current backend");
+                        self.last_status =
+                            String::from("active backend does not expose fast-mode controls");
+                    }
+                }
+                "status" => {
+                    let status = if self.codex_fast_mode_enabled().unwrap_or(false) {
+                        "on"
+                    } else {
+                        "off"
+                    };
+                    self.base_screen_mut()
+                        .record_event(format!("codex fast mode is {status}"));
+                    self.last_status = format!("codex fast mode: {status}");
+                }
+                _ => {
+                    self.base_screen_mut()
+                        .record_event("invalid fast command usage");
+                    self.last_status = String::from("usage: /fast [on|off|status]");
+                }
+            },
             "clear" => {
                 if self.base_screen().has_pending_tool_approvals() {
                     self.base_screen_mut()
@@ -887,6 +939,81 @@ impl AppShell {
         true
     }
 
+    #[allow(dead_code)]
+    fn codex_fast_mode_enabled(&self) -> Option<bool> {
+        (self.active_backend_kind() == BackendKind::OpenAiCodexSubscription).then(|| {
+            self.backend_lanes[self.active_backend_index]
+                .chat_runtime
+                .profile
+                .service_tier
+                .as_deref()
+                == Some(OPENAI_CODEX_SUBSCRIPTION_SERVICE_TIER_FAST)
+        })
+    }
+
+    #[allow(dead_code)]
+    fn toggle_codex_fast_mode(&mut self) -> bool {
+        let next_enabled = !self.codex_fast_mode_enabled().unwrap_or(false);
+        self.set_codex_fast_mode(next_enabled)
+    }
+
+    #[allow(dead_code)]
+    fn set_codex_fast_mode(&mut self, enabled: bool) -> bool {
+        if self.active_backend_kind() != BackendKind::OpenAiCodexSubscription {
+            return false;
+        }
+        if self.base_screen().has_active_runtime_work() {
+            self.last_status =
+                String::from("wait for the active turn to finish before changing Codex fast mode");
+            self.base_screen_mut()
+                .record_event("codex fast-mode change blocked by active runtime work");
+            return true;
+        }
+        if self.base_screen().has_pending_tool_approvals() {
+            self.last_status =
+                String::from("resolve pending approvals before changing Codex fast mode");
+            self.base_screen_mut()
+                .record_event("codex fast-mode change blocked by pending approvals");
+            return true;
+        }
+
+        let lane_index = self.active_backend_index;
+        {
+            let lane = &mut self.backend_lanes[lane_index];
+            lane.chat_runtime.profile.service_tier = persisted_service_tier_for_backend(
+                BackendKind::OpenAiCodexSubscription,
+                enabled.then_some(OPENAI_CODEX_SUBSCRIPTION_SERVICE_TIER_FAST),
+            );
+            lane.operator_backend = operator_summary_from_profile(&lane.chat_runtime.profile);
+        }
+
+        let active_tab = ActiveTab::from_index(lane_index);
+        let mut refreshed_lane = self.base_screen().clone();
+        refreshed_lane.set_backend_selector(self.backend_selector_labels(), active_tab);
+        refreshed_lane.set_probe_home(
+            self.backend_lanes[lane_index]
+                .chat_runtime
+                .probe_home
+                .clone(),
+        );
+        refreshed_lane
+            .set_operator_backend(self.backend_lanes[lane_index].operator_backend.clone());
+        refreshed_lane.record_event(format!(
+            "codex fast mode {}",
+            if enabled { "enabled" } else { "disabled" }
+        ));
+        self.chat_lanes[lane_index] = refreshed_lane.clone();
+        self.screens[0] = ScreenState::Chat(refreshed_lane);
+        self.sync_backend_selector();
+        self.last_status = format!("codex fast mode: {}", if enabled { "on" } else { "off" });
+        if let Err(error) = self.persist_backend_lane_snapshot(lane_index) {
+            self.base_screen_mut()
+                .record_event(format!("failed to persist Codex fast mode: {error}"));
+            self.last_status = error;
+        }
+        true
+    }
+
     fn reset_active_runtime_context(&mut self) {
         let lane_index = self.active_backend_index;
         let active_tab = ActiveTab::from_index(lane_index);
@@ -935,6 +1062,7 @@ fn profile_from_server_config(config: &PsionicServerConfig) -> BackendProfile {
         profile.model = model_id;
     }
     profile.reasoning_level = config.reasoning_level.clone();
+    profile.service_tier = config.service_tier.clone();
     profile
 }
 
@@ -1257,12 +1385,17 @@ fn submission_preview(
     String::from("[empty]")
 }
 
-fn exact_local_slash_command(submission: &ComposerSubmission) -> Option<&str> {
+fn local_slash_command(submission: &ComposerSubmission) -> Option<(&str, &str)> {
     if !submission.attachments.is_empty() {
         return None;
     }
     let command = submission.slash_command.as_deref()?;
-    (submission.text.trim() == format!("/{command}")).then_some(command)
+    let trimmed = submission.text.trim();
+    match command {
+        "fast" => Some((command, trimmed.strip_prefix("/fast")?.trim())),
+        _ if trimmed == format!("/{command}") => Some((command, "")),
+        _ => None,
+    }
 }
 
 fn should_attempt_github_issue_selection(prompt: &str) -> bool {
@@ -1726,7 +1859,7 @@ mod tests {
         ));
         let rendered = app.render_to_string(120, 32);
 
-        assert!(rendered.contains("plain · gpt-5.4 · high · ."));
+        assert!(rendered.contains("gpt-5.4 · high · normal · ."));
         assert!(!rendered.contains("status:"));
         assert!(!rendered.contains("Composer"));
         assert!(!rendered.contains("cmd: plain"));
@@ -1750,7 +1883,7 @@ mod tests {
         ));
 
         let rendered = app.render_to_string(160, 32);
-        assert!(rendered.contains("gpt-5.4 · high · arcadecd@gmail.com · weekly 88% · ."));
+        assert!(rendered.contains("gpt-5.4 · high · normal · arcadecd@gmail.com · weekly 88% · ."));
         assert!(!rendered.contains("api key"));
     }
 
@@ -1813,15 +1946,38 @@ mod tests {
     }
 
     #[test]
-    fn backend_navigation_hotkeys_are_noops_on_the_chat_shell() {
+    fn tab_still_leaves_backend_selection_unchanged_on_the_chat_shell() {
         let mut app = AppShell::new_for_tests();
         let active_tab = app.active_tab();
 
         app.dispatch(UiEvent::NextView);
         assert_eq!(app.active_tab(), active_tab);
+    }
 
-        app.dispatch(UiEvent::PreviousView);
-        assert_eq!(app.active_tab(), active_tab);
+    #[test]
+    fn shift_tab_cycles_codex_reasoning_level() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+
+        app.dispatch(UiEvent::CycleReasoningLevel);
+
+        let rendered = app.render_to_string(140, 36);
+        assert!(rendered.contains("gpt-5.4 · high · normal · ."));
+        assert_eq!(app.last_status(), "codex reasoning level: high");
+    }
+
+    #[test]
+    fn ctrl_f_toggles_codex_fast_mode() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+
+        app.dispatch(UiEvent::ToggleFastMode);
+
+        let rendered = app.render_to_string(140, 36);
+        assert!(rendered.contains("gpt-5.4 · medium · fast · ."));
+        assert_eq!(app.last_status(), "codex fast mode: on");
     }
 
     #[test]
@@ -1850,7 +2006,7 @@ mod tests {
         submit_draft(&mut app, "/help");
         assert_eq!(app.active_screen_id(), ScreenId::Help);
         let rendered = app.render_to_string(120, 36);
-        assert!(rendered.contains("/help /backend /approvals /reasoning /clear"));
+        assert!(rendered.contains("/help /backend /approvals /reasoning /fast /clear"));
         assert!(!rendered.contains("› /help"));
 
         app.dispatch(UiEvent::Dismiss);
@@ -1878,8 +2034,8 @@ mod tests {
 
         let rendered = app.render_to_string(140, 36);
         assert!(rendered.contains("keep transcript"));
-        assert!(rendered.contains("gpt-5.4 · low · ."));
-        assert_eq!(app.last_status(), "codex reasoning level: low");
+        assert!(rendered.contains("gpt-5.4 · high · normal · ."));
+        assert_eq!(app.last_status(), "codex reasoning level: high");
     }
 
     #[test]
@@ -1938,7 +2094,7 @@ mod tests {
         app.dispatch(UiEvent::OpenSetupOverlay);
         let rendered = app.render_to_string(120, 48);
         assert!(rendered.contains("OpenAI Subscription Auth"));
-        assert!(rendered.contains("reasoning_level: backend_default"));
+        assert!(rendered.contains("reasoning_level: medium"));
         assert!(rendered.contains("status: disconnected"));
         assert!(rendered.contains("probe codex login --method browser"));
     }

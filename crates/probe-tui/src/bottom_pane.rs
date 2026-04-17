@@ -6,8 +6,7 @@ use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 use crate::event::UiEvent;
 use crate::{rich_text, theme};
 
-const PLACEHOLDER: &str =
-    "Type a Probe message. Plain Enter sends. Shift/Ctrl/Opt+Enter or Ctrl+J newline.";
+const PLACEHOLDER: &str = "Type a Probe message. Plain Enter sends. Shift+Enter inserts a newline.";
 const MAX_VISIBLE_COMPOSER_LINES: usize = 4;
 const MAX_HISTORY_ENTRIES: usize = 24;
 const ATTACHMENT_LIBRARY: [&str; 3] = ["README.md", "Cargo.toml", "docs/README.md"];
@@ -257,10 +256,10 @@ impl ComposerState {
     }
 
     fn title_segments(&self) -> Vec<String> {
-        let mut parts = vec![match slash_command(self.text.as_str()) {
-            Some(command) => format!("/{command}"),
-            None => String::from("plain"),
-        }];
+        let mut parts = Vec::new();
+        if let Some(command) = slash_command(self.text.as_str()) {
+            parts.push(format!("/{command}"));
+        }
         if !self.attachments.is_empty() {
             parts.push(format!("attach {}", self.attachments.len()));
         }
@@ -494,6 +493,10 @@ fn styled_footer_segment(segment: &str) -> Vec<Span<'static>> {
         theme::state_busy()
     } else if segment == "locked" {
         theme::state_locked()
+    } else if segment == "fast" {
+        theme::shell_accent()
+    } else if segment == "normal" {
+        theme::draft_meta()
     } else if is_reasoning_segment(segment) {
         theme::reasoning()
     } else if looks_model_segment(segment) {
@@ -519,13 +522,12 @@ fn looks_model_segment(segment: &str) -> bool {
 fn is_reasoning_segment(segment: &str) -> bool {
     matches!(
         segment,
-        "auto" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+        "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
     )
 }
 
 fn looks_draft_meta_segment(segment: &str) -> bool {
-    segment == "plain"
-        || segment == "api key"
+    segment == "api key"
         || segment.starts_with("attach ")
         || segment.starts_with("hist ")
         || segment == "paste"
