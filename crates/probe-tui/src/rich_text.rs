@@ -341,9 +341,14 @@ fn flush_token(spans: &mut Vec<Span<'static>>, token: &mut String, base: Style) 
         return;
     }
 
-    let prefix = &owned[..start_byte];
-    let core = &owned[start_byte..end_byte];
-    let suffix = &owned[end_byte..];
+    let (Some(prefix), Some(core), Some(suffix)) = (
+        owned.get(..start_byte),
+        owned.get(start_byte..end_byte),
+        owned.get(end_byte..),
+    ) else {
+        spans.push(Span::styled(owned, base));
+        return;
+    };
 
     if !prefix.is_empty() {
         spans.push(Span::styled(prefix.to_string(), base));
@@ -357,12 +362,24 @@ fn flush_token(spans: &mut Vec<Span<'static>>, token: &mut String, base: Style) 
     }
 }
 
+/// Smart quotes and angle quotation marks (often pasted from prose) — treat like ASCII quotes for
+/// leading/trailing trim so the styled core does not split UTF-8 oddly.
+fn unicode_leading_wrapper_punct(ch: char) -> bool {
+    matches!(ch, '\u{201c}' | '\u{2018}' | '\u{00ab}')
+}
+
+fn unicode_trailing_wrapper_punct(ch: char) -> bool {
+    matches!(ch, '\u{201d}' | '\u{2019}' | '\u{00bb}')
+}
+
 fn leading_punctuation(ch: char) -> bool {
-    ch.is_ascii_punctuation() && !matches!(ch, '/' | '@' | '#' | '.' | '~')
+    unicode_leading_wrapper_punct(ch)
+        || (ch.is_ascii_punctuation() && !matches!(ch, '/' | '@' | '#' | '.' | '~'))
 }
 
 fn trailing_punctuation(ch: char) -> bool {
-    ch.is_ascii_punctuation() && !matches!(ch, '/' | '@' | '#' | '.' | '_' | '-')
+    unicode_trailing_wrapper_punct(ch)
+        || (ch.is_ascii_punctuation() && !matches!(ch, '/' | '@' | '#' | '.' | '_' | '-'))
 }
 
 fn classify_token(token: &str) -> Style {
@@ -473,6 +490,12 @@ mod tests {
             !line.spans.is_empty(),
             "expected spans for curly-quote token"
         );
+    }
+
+    #[test]
+    fn inline_highlight_handles_lone_curly_quote_grapheme() {
+        let line = highlight_inline_line("\u{201C}", Style::default());
+        assert!(!line.spans.is_empty());
     }
 
     #[test]

@@ -80,6 +80,10 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
         KeyCode::Char('j') | KeyCode::Char('J') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::ComposerNewline)
         }
+        // Ctrl+M (carriage return) — some terminals send this instead of Enter+Ctrl for "newline".
+        KeyCode::Char('m') | KeyCode::Char('M') if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(UiEvent::ComposerNewline)
+        }
         KeyCode::Char(character)
             if !modifiers.contains(KeyModifiers::CONTROL)
                 && !modifiers.contains(KeyModifiers::ALT) =>
@@ -123,6 +127,12 @@ mod tests {
     #[test]
     fn ctrl_j_inserts_newline() {
         let event = event_from_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        assert_eq!(event, Some(UiEvent::ComposerNewline));
+    }
+
+    #[test]
+    fn ctrl_m_inserts_newline() {
+        let event = event_from_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL));
         assert_eq!(event, Some(UiEvent::ComposerNewline));
     }
 }
