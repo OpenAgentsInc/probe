@@ -241,7 +241,7 @@ fn streaming_message_envelope_stays_condensed_until_plain_text_is_visible() {
     });
 
     let waiting = app.render_to_string(100, 24);
-    assert!(waiting.contains("• Waiting for Reply"));
+    assert!(waiting.contains("• Working"));
     assert!(!waiting.contains("\"kind\""));
     assert!(!waiting.contains("waiting for backend reply"));
 
@@ -321,7 +321,7 @@ fn model_request_placeholder_stays_on_one_line_until_stream_events_arrive() {
     });
 
     let rendered = app.render_to_string(100, 24);
-    assert!(rendered.contains("• Waiting for Reply"));
+    assert!(rendered.contains("• Working"));
     assert!(!rendered.contains("stream_state: awaiting first backend event"));
     assert!(!rendered.contains("round_trip: 1"));
     assert!(!rendered.contains("session: sess_"));
@@ -567,7 +567,7 @@ fn committed_transcript_replaces_live_stream_cell() {
     let rendered = app.render_to_string(120, 30);
     assert!(rendered.contains("Probe owns the runtime."));
     assert!(rendered.contains("Probe owns the runtime."));
-    assert!(!rendered.contains("Waiting for Reply"));
+    assert!(!rendered.contains("Working"));
 }
 
 #[test]

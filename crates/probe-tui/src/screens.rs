@@ -30,6 +30,7 @@ use crate::widgets::ModalCard;
 const MAX_EVENT_LOG: usize = 16;
 const LINE_SCROLL_STEP: u16 = 3;
 const PAGE_SCROLL_STEP: u16 = 12;
+const WORKING_ASSISTANT_TITLE: &str = "Working";
 const OPENAI_API_KEY_ENV: &str = "PROBE_OPENAI_API_KEY";
 const OPENAI_API_KEY_SOURCE_ENV: &str = "PROBE_OPENAI_API_KEY_SOURCE";
 
@@ -827,7 +828,7 @@ impl ChatScreen {
                 self.runtime.active_tool = None;
                 self.transcript.set_active_turn(ActiveTurn::new(
                     TranscriptRole::Assistant,
-                    "Waiting for Reply",
+                    WORKING_ASSISTANT_TITLE,
                     Vec::new(),
                 ));
                 self.snap_transcript_to_latest();
@@ -2273,7 +2274,7 @@ fn render_stream_active_turn(
         TranscriptRole::Assistant
     };
     let title = if is_waiting {
-        "Waiting for Reply"
+        WORKING_ASSISTANT_TITLE
     } else if let Some(summary) = failure.as_ref() {
         summary.title
     } else if display_text.is_empty() && !stream.tool_calls.is_empty() {

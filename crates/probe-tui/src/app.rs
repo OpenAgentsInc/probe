@@ -2238,7 +2238,7 @@ mod tests {
         let mut saw_active_turn = false;
         wait_for_app_condition(&mut app, Duration::from_secs(5), |app| {
             let rendered = app.render_to_string(120, 32);
-            if rendered.contains("• Waiting for Reply")
+            if rendered.contains("• Working")
                 || rendered.contains("• Running read_file")
                 || rendered.contains("• Streaming Tool Call")
             {
