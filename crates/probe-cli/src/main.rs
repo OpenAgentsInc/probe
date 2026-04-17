@@ -3034,6 +3034,8 @@ fn resolve_server_config(
         .map_err(|error| error.to_string())?;
     config.set_api_kind(desired_profile.kind);
     config.control_plane = desired_profile.control_plane;
+    config.reasoning_level = desired_profile.reasoning_level.clone();
+    config.service_tier = desired_profile.service_tier.clone();
     config
         .apply_overrides(&ServerConfigOverrides {
             mode: Some(parse_server_mode(server_args.server_mode.as_str())?),
@@ -4471,6 +4473,56 @@ mod tests {
             .expect("default tui profile should resolve");
         assert_eq!(profile.kind, BackendKind::OpenAiCodexSubscription);
         assert_eq!(profile.reasoning_level.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn resolve_server_config_preserves_saved_codex_reasoning_and_fast_mode() {
+        let probe_home = tempdir().expect("temp probe home");
+
+        let mut saved_default = PsionicServerConfig::default();
+        saved_default.host = String::from("127.0.0.1");
+        saved_default.port = 18080;
+        saved_default.model_id = Some(String::from("custom-qwen.gguf"));
+        saved_default
+            .save(PsionicServerConfig::config_path(probe_home.path()).as_path())
+            .expect("save default qwen config");
+
+        let mut saved_codex =
+            PsionicServerConfig::from_backend_profile(&openai_codex_subscription());
+        saved_codex.reasoning_level = Some(String::from("xhigh"));
+        saved_codex.service_tier = Some(String::from("fast"));
+        saved_codex
+            .save(
+                PsionicServerConfig::backend_config_path(
+                    probe_home.path(),
+                    BackendKind::OpenAiCodexSubscription,
+                )
+                .as_path(),
+            )
+            .expect("save codex backend snapshot");
+
+        let desired_profile = resolve_tui_profile(probe_home.path(), None, &ServerArgs::default())
+            .expect("default tui profile should resolve");
+        assert_eq!(desired_profile.reasoning_level.as_deref(), Some("xhigh"));
+        assert_eq!(desired_profile.service_tier.as_deref(), Some("fast"));
+
+        let resolved =
+            resolve_server_config(probe_home.path(), &ServerArgs::default(), &desired_profile)
+                .expect("codex startup config should resolve");
+        assert_eq!(resolved.api_kind, BackendKind::OpenAiCodexSubscription);
+        assert_eq!(resolved.reasoning_level.as_deref(), Some("xhigh"));
+        assert_eq!(resolved.service_tier.as_deref(), Some("fast"));
+
+        let saved_codex = PsionicServerConfig::load_or_create(
+            PsionicServerConfig::backend_config_path(
+                probe_home.path(),
+                BackendKind::OpenAiCodexSubscription,
+            )
+            .as_path(),
+        )
+        .expect("load saved codex backend snapshot");
+        assert_eq!(saved_codex.reasoning_level.as_deref(), Some("xhigh"));
+        assert_eq!(saved_codex.service_tier.as_deref(), Some("fast"));
     }
 
     #[test]
