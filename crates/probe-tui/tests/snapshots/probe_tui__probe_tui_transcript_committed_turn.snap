@@ -1,26 +1,26 @@
 ---
 source: crates/probe-tui/tests/probe_tui.rs
-assertion_line: 413
+assertion_line: 407
 expression: snapshot
 ---
 › Summarize what Probe owns.
 
-• Calling read_file
-  └ call: call_readme_1
-    args: {"path":"README.md"}
-    turn: 1
+• Reading README.md
 
-• Called read_file
-  └ call: call_readme_1
-    result: read README.md:1-3
-    turn: 2
-    policy: auto_allow
-    risk: read_only
-    approval: not_required
+• Read README.md
+  └ README.md:1-3
+
+    Probe
+
+    runtime
 
 • Probe owns the coding-agent runtime: sessions, transcripts, tools, approvals,
 and CLI/TUI surfaces.
   This reply came back through the persisted runtime session.
+
+
+
+
 
 
 

@@ -29,7 +29,7 @@ fn tui_runtime_suite_renders_runtime_progress_inside_the_transcript() {
         },
     });
     let mid_turn = app.render_to_string(100, 28);
-    assert!(mid_turn.contains("• Calling read_file"));
+    assert!(mid_turn.contains("• Reading README.md"));
     app.apply_message(AppMessage::ProbeRuntimeEvent {
         event: RuntimeEvent::AssistantTurnCommitted {
             session_id: SessionId::new("sess_tui_runtime_suite"),

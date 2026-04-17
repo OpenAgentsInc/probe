@@ -3,6 +3,10 @@ use ratatui::text::{Line, Span, Text};
 
 use crate::{rich_text, theme};
 
+const TOOL_COMMAND_CONTINUATION_MAX_LINES: usize = 2;
+const TOOL_DETAIL_MAX_LINES: usize = 5;
+const TOOL_PREVIEW_MAX_CHARS: usize = 120;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscriptRole {
     System,
@@ -145,41 +149,33 @@ impl TranscriptEntry {
                     )
                 }
             },
-            TranscriptEntryKind::ToolCall => render_history_cell(
+            TranscriptEntryKind::ToolCall => render_compact_tool_cell(
+                TranscriptEntryKind::ToolCall,
                 "•",
                 theme::history_bullet(),
-                Some("Calling"),
                 self.title.as_str(),
-                theme::tool_title(),
                 self.body.as_slice(),
-                theme::history_detail(),
             ),
-            TranscriptEntryKind::ToolResult => render_history_cell(
+            TranscriptEntryKind::ToolResult => render_compact_tool_cell(
+                TranscriptEntryKind::ToolResult,
                 "•",
                 theme::history_success_bullet(),
-                Some("Called"),
                 self.title.as_str(),
-                theme::tool_title(),
                 self.body.as_slice(),
-                theme::history_detail(),
             ),
-            TranscriptEntryKind::ToolRefused => render_history_cell(
+            TranscriptEntryKind::ToolRefused => render_compact_tool_cell(
+                TranscriptEntryKind::ToolRefused,
                 "✖",
                 theme::history_error_bullet(),
-                Some("Blocked"),
                 self.title.as_str(),
-                theme::tool_title(),
                 self.body.as_slice(),
-                theme::history_detail(),
             ),
-            TranscriptEntryKind::ApprovalPending => render_history_cell(
+            TranscriptEntryKind::ApprovalPending => render_compact_tool_cell(
+                TranscriptEntryKind::ApprovalPending,
                 "⚠",
                 theme::history_warning_bullet(),
-                Some("Approval needed for"),
                 self.title.as_str(),
-                theme::tool_title(),
                 self.body.as_slice(),
-                theme::history_detail(),
             ),
         }
     }
@@ -246,29 +242,22 @@ impl ActiveTurn {
                 self.body.as_slice(),
                 theme::history_detail(),
             ),
-            TranscriptRole::Status | TranscriptRole::Tool => {
-                if let Some(tool_name) = self.title.strip_prefix("Running Tool: ") {
-                    render_history_cell(
-                        "•",
-                        theme::history_bullet(),
-                        Some("Running"),
-                        tool_name,
-                        theme::tool_title(),
-                        self.body.as_slice(),
-                        theme::history_detail(),
-                    )
-                } else {
-                    render_history_cell(
-                        "•",
-                        theme::history_bullet(),
-                        Some("Active"),
-                        self.title.as_str(),
-                        entry_title_style(self.role, TranscriptEntryKind::Generic),
-                        self.body.as_slice(),
-                        theme::history_detail(),
-                    )
-                }
-            }
+            TranscriptRole::Tool => render_compact_tool_cell(
+                TranscriptEntryKind::ToolCall,
+                "•",
+                theme::history_bullet(),
+                self.title.as_str(),
+                self.body.as_slice(),
+            ),
+            TranscriptRole::Status => render_history_cell(
+                "•",
+                theme::history_bullet(),
+                Some("Active"),
+                self.title.as_str(),
+                entry_title_style(self.role, TranscriptEntryKind::Generic),
+                self.body.as_slice(),
+                theme::history_detail(),
+            ),
         }
     }
 }
@@ -292,6 +281,14 @@ impl RetainedTranscript {
 
     pub fn push_live_entry(&mut self, entry: TranscriptEntry) {
         self.live_entries.push(entry);
+    }
+
+    pub fn replace_last_live_entry(&mut self, entry: TranscriptEntry) {
+        if let Some(last) = self.live_entries.last_mut() {
+            *last = entry;
+        } else {
+            self.live_entries.push(entry);
+        }
     }
 
     pub fn clear_live_entries(&mut self) {
@@ -434,6 +431,161 @@ fn render_history_cell(
     lines
 }
 
+fn render_compact_tool_cell(
+    kind: TranscriptEntryKind,
+    symbol: &str,
+    bullet_style: Style,
+    title: &str,
+    body: &[String],
+) -> Vec<Line<'static>> {
+    let (action, subject) = compact_tool_header(kind, title, body);
+    let (subject_first, subject_continuation, mut detail_lines) =
+        compact_tool_body_lines(kind, title, body);
+
+    if matches!(kind, TranscriptEntryKind::ToolResult) && detail_lines.is_empty() {
+        detail_lines.push(String::from("(no output)"));
+    }
+
+    let header_target = if subject_first.is_empty() {
+        subject
+    } else if subject.is_empty() {
+        subject_first
+    } else {
+        format!("{subject} {subject_first}")
+    };
+
+    let mut header_spans = vec![
+        Span::styled(symbol.to_string(), bullet_style),
+        Span::raw(" ".to_string()),
+        Span::styled(action.to_string(), theme::history_header()),
+    ];
+    if !header_target.is_empty() {
+        header_spans.push(Span::raw(" ".to_string()));
+        header_spans.extend(rich_text::highlight_inline_spans(
+            header_target.as_str(),
+            theme::tool_title(),
+        ));
+    }
+
+    let mut lines = vec![Line::from(header_spans)];
+    lines.extend(prefixed_body_lines(
+        subject_continuation.as_slice(),
+        vec![Span::styled("  │ ".to_string(), theme::history_detail())],
+        vec![Span::styled("  │ ".to_string(), theme::history_detail())],
+        theme::history_detail(),
+    ));
+    lines.extend(prefixed_body_lines(
+        detail_lines.as_slice(),
+        vec![Span::styled("  └ ".to_string(), theme::history_detail())],
+        vec![Span::styled("    ".to_string(), theme::history_detail())],
+        theme::history_detail(),
+    ));
+    lines
+}
+
+fn compact_tool_header(
+    kind: TranscriptEntryKind,
+    title: &str,
+    body: &[String],
+) -> (&'static str, String) {
+    let _ = body;
+    match (kind, title) {
+        (TranscriptEntryKind::ToolCall, "shell") => ("Running", String::new()),
+        (TranscriptEntryKind::ToolResult, "shell") => ("Ran", String::new()),
+        (TranscriptEntryKind::ToolCall, "read_file") => ("Reading", String::new()),
+        (TranscriptEntryKind::ToolResult, "read_file") => ("Read", String::new()),
+        (TranscriptEntryKind::ToolCall, "list_files") => ("Listing", String::new()),
+        (TranscriptEntryKind::ToolResult, "list_files") => ("Listed", String::new()),
+        (TranscriptEntryKind::ToolCall, "code_search") => ("Searching", String::new()),
+        (TranscriptEntryKind::ToolResult, "code_search") => ("Searched", String::new()),
+        (TranscriptEntryKind::ToolCall, "apply_patch") => ("Applying patch", String::new()),
+        (TranscriptEntryKind::ToolResult, "apply_patch") => ("Applied patch", String::new()),
+        (TranscriptEntryKind::ToolRefused, _) => ("Blocked", humanized_tool_name(title)),
+        (TranscriptEntryKind::ApprovalPending, _) => {
+            ("Approval needed for", humanized_tool_name(title))
+        }
+        (TranscriptEntryKind::ToolCall, _) => ("Calling", humanized_tool_name(title)),
+        (TranscriptEntryKind::ToolResult, _) => ("Called", humanized_tool_name(title)),
+        (TranscriptEntryKind::Generic, _) => ("", String::new()),
+    }
+}
+
+fn compact_tool_body_lines(
+    kind: TranscriptEntryKind,
+    title: &str,
+    body: &[String],
+) -> (String, Vec<String>, Vec<String>) {
+    let mut subject_lines = body
+        .first()
+        .map(|value| compact_tool_text_lines(value, TOOL_PREVIEW_MAX_CHARS))
+        .unwrap_or_default();
+    let subject_first = if subject_lines.is_empty() {
+        String::new()
+    } else {
+        subject_lines.remove(0)
+    };
+    let subject_continuation =
+        truncate_tool_lines(subject_lines, TOOL_COMMAND_CONTINUATION_MAX_LINES);
+    let detail_source = body
+        .iter()
+        .skip(1)
+        .flat_map(|value| compact_tool_text_lines(value, TOOL_PREVIEW_MAX_CHARS))
+        .collect::<Vec<_>>();
+    let detail_lines = truncate_tool_lines(detail_source, TOOL_DETAIL_MAX_LINES);
+
+    let detail_lines = if detail_lines.is_empty()
+        && matches!(kind, TranscriptEntryKind::ToolResult)
+        && !matches!(title, "shell")
+        && subject_first == title
+    {
+        Vec::new()
+    } else {
+        detail_lines
+    };
+
+    (subject_first, subject_continuation, detail_lines)
+}
+
+fn compact_tool_text_lines(value: &str, max_chars: usize) -> Vec<String> {
+    let mut lines = value
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .map(|line| preview_chars(line, max_chars))
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            lines.push(preview_chars(trimmed, max_chars));
+        }
+    }
+    lines
+}
+
+fn truncate_tool_lines(lines: Vec<String>, keep: usize) -> Vec<String> {
+    let len = lines.len();
+    if len <= keep {
+        return lines;
+    }
+    let mut truncated = lines.into_iter().take(keep).collect::<Vec<_>>();
+    truncated.push(format!("… +{} lines", len.saturating_sub(keep)));
+    truncated
+}
+
+fn preview_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let preview = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}
+
+fn humanized_tool_name(value: &str) -> String {
+    value.replace('_', " ")
+}
+
 fn prefixed_body_lines(
     body: &[String],
     initial_prefix: Vec<Span<'static>>,
@@ -515,13 +667,13 @@ mod tests {
         ));
         transcript.set_active_turn(ActiveTurn::new(
             TranscriptRole::Tool,
-            "Sanity Check",
+            "read_file",
             vec![String::from("Reply with exactly READY.")],
         ));
 
         let rendered = lines_to_plain_text(&transcript);
         assert!(rendered.contains("• Shell Ready"));
-        assert!(rendered.contains("• Active Sanity Check"));
+        assert!(rendered.contains("• Reading Reply with exactly READY."));
     }
 
     #[test]
@@ -544,14 +696,14 @@ mod tests {
         ));
         transcript.set_active_turn(ActiveTurn::new(
             TranscriptRole::Tool,
-            "Running Tool: list_files",
-            vec![String::from("risk: read")],
+            "list_files",
+            vec![String::from("src")],
         ));
 
         let rendered = lines_to_plain_text(&transcript);
-        assert!(rendered.contains("• Calling read_file"));
-        assert!(rendered.contains("• Called read_file"));
-        assert!(rendered.contains("• Running list_files"));
+        assert!(rendered.contains("• Reading README.md"));
+        assert!(rendered.contains("• Read README.md:1-2"));
+        assert!(rendered.contains("• Listing src"));
     }
 
     #[test]
@@ -568,12 +720,7 @@ mod tests {
                 .iter()
                 .any(|span| span.style.fg == Some(Color::Cyan))
         );
-        assert!(
-            lines[1]
-                .spans
-                .iter()
-                .any(|span| span.style.fg == Some(Color::Cyan))
-        );
+        assert!(lines[1].to_string().contains("(no output)"));
     }
 
     #[test]

@@ -1152,6 +1152,14 @@ fn successful_tool_result_lines(item: &TranscriptItem, subject: Option<String>) 
     if let Ok(parsed) = serde_json::from_str::<Value>(item.text.as_str())
         && let Some(lines) = structured_tool_result_lines(&parsed)
     {
+        let mut lines = lines;
+        if let Some(subject) = subject.as_ref()
+            && lines
+                .first()
+                .is_none_or(|first| first.as_str() != subject.as_str())
+        {
+            lines.insert(0, subject.clone());
+        }
         return lines;
     }
 

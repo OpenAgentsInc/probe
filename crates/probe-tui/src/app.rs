@@ -2239,8 +2239,8 @@ mod tests {
         wait_for_app_condition(&mut app, Duration::from_secs(5), |app| {
             let rendered = app.render_to_string(120, 32);
             if rendered.contains("• Working")
-                || rendered.contains("• Running read_file")
-                || rendered.contains("• Streaming Tool Call")
+                || rendered.contains("• Reading README.md")
+                || rendered.contains("• Read README.md")
             {
                 saw_active_turn = true;
             }
@@ -2273,15 +2273,15 @@ mod tests {
         assert!(saw_active_turn);
         let mut rendered = app.render_to_string(120, 32);
         for _ in 0..6 {
-            if rendered.contains("• Calling read_file") && rendered.contains("• Called read_file")
+            if rendered.contains("• Reading README.md") && rendered.contains("• Read README.md")
             {
                 break;
             }
             app.dispatch(UiEvent::PageUp);
             rendered = app.render_to_string(120, 32);
         }
-        assert!(rendered.contains("• Calling read_file"));
-        assert!(rendered.contains("• Called read_file"));
+        assert!(rendered.contains("• Reading README.md"));
+        assert!(rendered.contains("• Read README.md"));
         assert!(rendered.contains("README.md"));
         assert!(
             app.worker_events()
@@ -2346,10 +2346,8 @@ mod tests {
         });
 
         let rendered = app.render_to_string(140, 40);
-        assert!(rendered.contains("• Calling read_file"));
-        assert!(rendered.contains("• Called read_file"));
-        assert!(rendered.contains("• Calling list_files"));
-        assert!(rendered.contains("• Running list_files"));
+        assert!(rendered.contains("• Read README.md"));
+        assert!(rendered.contains("• Listing ."));
 
         app.apply_message(AppMessage::TranscriptEntriesCommitted {
             entries: vec![
@@ -2362,6 +2360,7 @@ mod tests {
                 TranscriptEntry::tool_result(
                     "list_files",
                     vec![
+                        String::from("."),
                         String::from("listed 2 entries"),
                         String::from("README.md"),
                         String::from("src"),
@@ -2376,11 +2375,9 @@ mod tests {
         });
 
         let rendered = app.render_to_string(140, 40);
-        assert_eq!(rendered.matches("• Calling read_file").count(), 1);
-        assert_eq!(rendered.matches("• Called read_file").count(), 1);
-        assert_eq!(rendered.matches("• Calling list_files").count(), 1);
-        assert_eq!(rendered.matches("• Called list_files").count(), 1);
-        assert!(!rendered.contains("• Running list_files"));
+        assert_eq!(rendered.matches("• Read README.md").count(), 1);
+        assert_eq!(rendered.matches("• Listed .").count(), 1);
+        assert_eq!(rendered.matches("• Listing .").count(), 1);
         assert!(rendered.contains("Done."));
     }
 
@@ -2653,8 +2650,8 @@ mod tests {
         });
 
         let rendered = app.render_to_string(160, 48);
-        assert!(rendered.contains("⚠ Approval needed for apply_patch"));
-        assert!(rendered.contains("• Called apply_patch"));
+        assert!(rendered.contains("⚠ Approval needed for apply patch"));
+        assert!(rendered.contains("• Applied patch"));
         assert_eq!(
             std::fs::read_to_string(environment.workspace().join("hello.txt"))
                 .expect("read patched file"),

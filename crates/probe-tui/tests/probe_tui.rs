@@ -376,25 +376,16 @@ fn transcript_committed_turn_snapshot_is_stable() {
         ),
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
-        entry: TranscriptEntry::tool_call(
-            "read_file",
-            vec![
-                String::from("call: call_readme_1"),
-                String::from("args: {\"path\":\"README.md\"}"),
-                String::from("turn: 1"),
-            ],
-        ),
+        entry: TranscriptEntry::tool_call("read_file", vec![String::from("README.md")]),
     });
     app.apply_message(AppMessage::TranscriptEntryCommitted {
         entry: TranscriptEntry::tool_result(
             "read_file",
             vec![
-                String::from("call: call_readme_1"),
-                String::from("result: read README.md:1-3"),
-                String::from("turn: 2"),
-                String::from("policy: auto_allow"),
-                String::from("risk: read_only"),
-                String::from("approval: not_required"),
+                String::from("README.md"),
+                String::from("README.md:1-3"),
+                String::from("# Probe"),
+                String::from("runtime"),
             ],
         ),
     });
@@ -531,8 +522,7 @@ fn streamed_tool_call_deltas_render_before_authoritative_tool_row() {
     });
 
     let rendered = app.render_to_string(120, 30);
-    assert!(rendered.contains("Streaming Tool Call"));
-    assert!(rendered.contains("read_file"));
+    assert!(rendered.contains("Reading README.md"));
     assert!(rendered.contains("README.md"));
 }
 

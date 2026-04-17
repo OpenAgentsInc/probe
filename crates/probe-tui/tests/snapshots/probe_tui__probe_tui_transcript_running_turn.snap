@@ -5,8 +5,8 @@ expression: snapshot
 ---
 › Summarize what Probe owns.
 
-• Calling read_file
-  └ README.md
+• Reading README.md
+
 
 
 

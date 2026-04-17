@@ -919,18 +919,14 @@ impl ChatScreen {
                 round_trip,
                 call_id: _call_id,
                 tool_name,
-                risk_class,
+                risk_class: _risk_class,
             } => {
                 self.clear_stream();
                 self.runtime.session_id = Some(session_id.as_str().to_string());
                 self.runtime.phase = Some(String::from("tool_running"));
                 self.runtime.round_trip = Some(round_trip);
                 self.runtime.active_tool = Some(tool_name.clone());
-                self.transcript.set_active_turn(ActiveTurn::new(
-                    TranscriptRole::Status,
-                    format!("Running Tool: {tool_name}"),
-                    vec![format!("risk: {}", render_runtime_risk_class(risk_class))],
-                ));
+                self.transcript.clear_active_turn();
                 self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool execution started: {tool_name}"));
                 format!("tool execution started: {tool_name}")
@@ -947,7 +943,7 @@ impl ChatScreen {
                 self.runtime.active_tool = Some(tool.name.clone());
                 self.transcript.clear_active_turn();
                 self.transcript
-                    .push_live_entry(runtime_tool_result_entry(round_trip, &tool));
+                    .replace_last_live_entry(runtime_tool_result_entry(round_trip, &tool));
                 self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool execution completed: {}", tool.name));
                 format!("tool execution completed: {}", tool.name)
@@ -964,7 +960,7 @@ impl ChatScreen {
                 self.runtime.active_tool = Some(tool.name.clone());
                 self.transcript.clear_active_turn();
                 self.transcript
-                    .push_live_entry(runtime_tool_result_entry(round_trip, &tool));
+                    .replace_last_live_entry(runtime_tool_result_entry(round_trip, &tool));
                 self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool refused: {}", tool.name));
                 format!("tool refused: {}", tool.name)
@@ -981,7 +977,7 @@ impl ChatScreen {
                 self.runtime.active_tool = Some(tool.name.clone());
                 self.transcript.clear_active_turn();
                 self.transcript
-                    .push_live_entry(runtime_tool_result_entry(round_trip, &tool));
+                    .replace_last_live_entry(runtime_tool_result_entry(round_trip, &tool));
                 self.snap_transcript_to_latest();
                 self.record_worker_event(format!("tool paused for approval: {}", tool.name));
                 format!("tool paused for approval: {}", tool.name)
@@ -2242,17 +2238,14 @@ fn render_stream_active_turn(
     }
 
     if !stream.tool_calls.is_empty() {
-        for tool in &stream.tool_calls {
-            body.push(format!(
-                "{} {}",
-                tool.tool_index + 1,
-                tool.tool_name.as_deref().unwrap_or("unknown")
-            ));
-            if let Some(call_id) = tool.call_id.as_deref() {
-                body.push(format!("call: {}", preview(call_id, 48)));
+        if stream.tool_calls.len() == 1 {
+            if let Some(tool) = stream.tool_calls.first() {
+                body.extend(streamed_tool_call_lines(tool));
             }
-            if !tool.arguments.is_empty() {
-                body.push(format!("args: {}", tool.arguments));
+        } else {
+            for tool in &stream.tool_calls {
+                let name = tool.tool_name.as_deref().unwrap_or("unknown");
+                body.push(format!("{name} {}", streamed_tool_call_subject(tool)));
             }
         }
     }
@@ -2278,11 +2271,33 @@ fn render_stream_active_turn(
     } else if let Some(summary) = failure.as_ref() {
         summary.title
     } else if display_text.is_empty() && !stream.tool_calls.is_empty() {
-        "Streaming Tool Call"
+        stream
+            .tool_calls
+            .first()
+            .and_then(|tool| tool.tool_name.as_deref())
+            .unwrap_or("tool")
     } else {
         "Probe"
     };
     ActiveTurn::new(role, title, body)
+}
+
+fn streamed_tool_call_lines(tool: &StreamToolCallState) -> Vec<String> {
+    vec![streamed_tool_call_subject(tool)]
+}
+
+fn streamed_tool_call_subject(tool: &StreamToolCallState) -> String {
+    let arguments = tool.arguments.trim();
+    if arguments.is_empty() {
+        return tool
+            .call_id
+            .as_deref()
+            .map(|call_id| preview(call_id, 48))
+            .unwrap_or_else(|| String::from("pending"));
+    }
+    serde_json::from_str::<serde_json::Value>(arguments)
+        .map(|value| runtime_tool_argument_summary(&value))
+        .unwrap_or_else(|_| preview(arguments, 120))
 }
 
 impl AppleFmUsageSummary {
@@ -2435,20 +2450,18 @@ fn runtime_tool_argument_summary(arguments: &serde_json::Value) -> String {
 }
 
 fn compact_runtime_tool_output_lines(tool: &probe_core::tools::ExecutedToolCall) -> Vec<String> {
+    let subject = runtime_tool_subject(tool);
     if let Some(mut lines) = structured_runtime_tool_output_lines(&tool.output) {
-        let subject = runtime_tool_subject(tool);
-        if lines
-            .first()
-            .is_some_and(|first| first.as_str() == subject.as_str())
+        if !subject.is_empty()
+            && lines
+                .first()
+                .is_none_or(|first| first.as_str() != subject.as_str())
         {
-            lines.remove(0);
+            lines.insert(0, subject.clone());
         }
-        if !lines.is_empty() {
-            return lines;
-        }
+        return lines;
     }
 
-    let subject = runtime_tool_subject(tool);
     let summary = preview(
         tool_result_model_text(tool.name.as_str(), &tool.output).as_str(),
         120,
