@@ -16,6 +16,8 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::Paragraph;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::bottom_pane::ComposerSubmission;
 use crate::event::UiEvent;
@@ -1457,7 +1459,10 @@ impl ChatScreen {
 
     fn render_chat_shell(&self, frame: &mut Frame<'_>, area: Rect, _stack_depth: usize) {
         let body = self.render_primary_body();
-        let scroll_y = self.transcript_scroll_y(body.lines.len(), area.height);
+        let scroll_y = self.transcript_scroll_y(
+            transcript_rendered_line_count(&body, area.width),
+            area.height,
+        );
         frame.render_widget(
             Paragraph::new(body)
                 .scroll((scroll_y, 0))
@@ -2765,6 +2770,93 @@ fn split_text_lines(value: &str) -> Vec<String> {
         return Vec::new();
     }
     value.split('\n').map(ToOwned::to_owned).collect()
+}
+
+fn transcript_rendered_line_count(body: &Text<'_>, width: u16) -> usize {
+    if width == 0 {
+        return 0;
+    }
+
+    body.lines
+        .iter()
+        .map(|line| wrapped_line_count(line.to_string().as_str(), width))
+        .sum()
+}
+
+fn wrapped_line_count(value: &str, width: u16) -> usize {
+    if width == 0 {
+        return 0;
+    }
+    if value.is_empty() {
+        return 1;
+    }
+
+    let max_line_width = width;
+    let mut line_count = 0usize;
+    let mut pending_line_width = 0u16;
+    let mut pending_word_width = 0u16;
+    let mut pending_whitespace_width = 0u16;
+    let mut pending_whitespace = VecDeque::new();
+    let mut non_whitespace_previous = false;
+
+    for grapheme in UnicodeSegmentation::graphemes(value, true) {
+        let is_whitespace = grapheme.chars().all(char::is_whitespace);
+        let symbol_width = UnicodeWidthStr::width(grapheme) as u16;
+
+        if symbol_width > max_line_width {
+            continue;
+        }
+
+        let word_found = non_whitespace_previous && is_whitespace;
+        let untrimmed_overflow = pending_line_width == 0
+            && pending_word_width + pending_whitespace_width + symbol_width > max_line_width;
+
+        if word_found || untrimmed_overflow {
+            pending_line_width += pending_whitespace_width;
+            pending_line_width += pending_word_width;
+            pending_whitespace_width = 0;
+            pending_word_width = 0;
+            pending_whitespace.clear();
+        }
+
+        let line_full = pending_line_width >= max_line_width;
+        let pending_word_overflow = symbol_width > 0
+            && pending_line_width + pending_whitespace_width + pending_word_width >= max_line_width;
+
+        if line_full || pending_word_overflow {
+            let mut remaining_width = max_line_width.saturating_sub(pending_line_width);
+            line_count += 1;
+            pending_line_width = 0;
+
+            while let Some(width) = pending_whitespace.front().copied() {
+                if width > remaining_width {
+                    break;
+                }
+                pending_whitespace.pop_front();
+                pending_whitespace_width = pending_whitespace_width.saturating_sub(width);
+                remaining_width = remaining_width.saturating_sub(width);
+            }
+
+            if is_whitespace && pending_whitespace.is_empty() {
+                continue;
+            }
+        }
+
+        if is_whitespace {
+            pending_whitespace_width += symbol_width;
+            pending_whitespace.push_back(symbol_width);
+        } else {
+            pending_word_width += symbol_width;
+        }
+
+        non_whitespace_previous = !is_whitespace;
+    }
+
+    if pending_line_width > 0 || pending_word_width > 0 || pending_whitespace_width > 0 {
+        line_count += 1;
+    }
+
+    line_count.max(1)
 }
 
 fn short_session_id(value: &str) -> String {

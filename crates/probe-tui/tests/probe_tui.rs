@@ -304,6 +304,30 @@ fn manual_scroll_pauses_stream_follow_until_return_to_bottom() {
 }
 
 #[test]
+fn wrapped_transcript_keeps_latest_numbered_lines_visible() {
+    let mut app = AppShell::new_for_tests();
+    let mut body = (0..12)
+        .map(|index| {
+            format!(
+                "wrapped line {index:02} keeps pushing the rendered transcript height past the viewport width so the newest lines need bottom pinning against visual rows rather than raw newline counts."
+            )
+        })
+        .collect::<Vec<_>>();
+    body.push(String::from("If you want, I can also turn this into:"));
+    body.push(String::from("1. A tracked implementation plan"));
+    body.push(String::from("2. A concrete patch checklist"));
+
+    app.apply_message(AppMessage::TranscriptEntryCommitted {
+        entry: TranscriptEntry::new(TranscriptRole::Assistant, "Probe", body),
+    });
+
+    let rendered = app.render_to_string(100, 24);
+    assert!(rendered.contains("If you want, I can also turn this into:"));
+    assert!(rendered.contains("A tracked implementation plan"));
+    assert!(rendered.contains("A concrete patch checklist"));
+}
+
+#[test]
 fn model_request_placeholder_stays_on_one_line_until_stream_events_arrive() {
     let mut app = AppShell::new_for_tests();
     app.apply_message(AppMessage::ProbeRuntimeSessionReady {
