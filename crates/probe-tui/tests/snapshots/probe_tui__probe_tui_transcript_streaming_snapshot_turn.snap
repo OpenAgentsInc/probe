@@ -28,5 +28,5 @@ expression: snapshot
 
 
 ┌────────────────────────────────────────────────────────────── plain · apple-foundation-model · * ┐
-│ Type a Probe message. Enter sends. Shift+Enter newline.                                          │
+│ Type a Probe message. Enter sends. Newline: Shift+Enter, Opt+Enter, or Ctrl+J.                   │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
