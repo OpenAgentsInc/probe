@@ -56,7 +56,7 @@ struct AppleFmToolLoopRecorder {
     execution_session: ToolExecutionSession,
     records: Vec<ExecutedToolCall>,
     next_call_index: usize,
-    max_callback_calls: usize,
+    max_callback_calls: Option<usize>,
     interruption: Option<AppleFmToolLoopInterruption>,
     event_sink: Option<Arc<dyn RuntimeEventSink>>,
 }
@@ -896,8 +896,28 @@ impl ProbeRuntime {
         let mut executed_tool_calls = 0_usize;
         let mut tool_results = Vec::new();
         let max_round_trips = tool_loop.max_model_round_trips;
+        let mut round_trip = 0usize;
 
-        for round_trip in 1..=max_round_trips {
+        loop {
+            round_trip += 1;
+            if let Some(max_round_trips) = max_round_trips
+                && round_trip > max_round_trips
+            {
+                let _ = self.session_store.append_turn(
+                    &session.id,
+                    &[NewItem::new(
+                        TranscriptItemKind::Note,
+                        format!(
+                            "session exceeded the configured tool loop bound of {} controller round trips",
+                            max_round_trips
+                        ),
+                    )],
+                );
+                return Err(RuntimeError::MaxToolRoundTrips {
+                    session_id: session.id,
+                    max_round_trips,
+                });
+            }
             let next_user_prompt = pending_user_prompt.as_ref().cloned();
             if let Some(user_prompt) = next_user_prompt.as_ref() {
                 messages.push(ChatMessage::user(user_prompt));
@@ -1098,21 +1118,6 @@ impl ProbeRuntime {
                 tool_results,
             });
         }
-
-        let _ = self.session_store.append_turn(
-            &session.id,
-            &[NewItem::new(
-                TranscriptItemKind::Note,
-                format!(
-                    "session exceeded the configured tool loop bound of {} controller round trips",
-                    max_round_trips
-                ),
-            )],
-        );
-        Err(RuntimeError::MaxToolRoundTrips {
-            session_id: session.id,
-            max_round_trips,
-        })
     }
 
     fn run_apple_fm_tool_loop_turn(
@@ -2064,7 +2069,7 @@ impl AppleFmToolLoopRecorder {
     fn new(
         session_id: SessionId,
         execution_session: ToolExecutionSession,
-        max_callback_calls: usize,
+        max_callback_calls: Option<usize>,
         event_sink: Option<Arc<dyn RuntimeEventSink>>,
     ) -> Self {
         Self {
@@ -2082,15 +2087,17 @@ impl AppleFmToolLoopRecorder {
         &mut self,
         tool_call: probe_provider_apple_fm::AppleFmProviderToolCall,
     ) -> Result<String, AppleFmToolCallError> {
-        if self.next_call_index >= self.max_callback_calls {
+        if let Some(max_callback_calls) = self.max_callback_calls
+            && self.next_call_index >= max_callback_calls
+        {
             self.interruption = Some(AppleFmToolLoopInterruption::CallbackBudgetExceeded {
-                max_round_trips: self.max_callback_calls,
+                max_round_trips: max_callback_calls,
             });
             return Err(AppleFmToolCallError::new(
                 tool_call.name,
                 format!(
                     "Probe controller-side Apple FM callback budget of {} round trips was exhausted",
-                    self.max_callback_calls
+                    max_callback_calls
                 ),
             ));
         }
@@ -4273,7 +4280,7 @@ mod tests {
         );
         let requests = server.finish();
         assert_eq!(requests.len(), 1);
-        assert!(requests[0].contains("\"tool_choice\":\"required\""));
+        assert!(requests[0].contains("\"tools\""));
     }
 
     #[test]

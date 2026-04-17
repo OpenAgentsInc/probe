@@ -79,7 +79,8 @@ pub struct ToolLoopRecipe {
     pub tool_set: ToolSetKind,
     pub tool_choice: ToolChoice,
     pub parallel_tool_calls: bool,
-    pub max_model_round_trips: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_model_round_trips: Option<usize>,
     pub approval: ToolApprovalRecipe,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle: Option<ToolOracleRecipe>,
@@ -945,7 +946,7 @@ mod tests {
             tool_set: ToolSetKind::CodingBootstrap,
             tool_choice: ToolChoice::Auto,
             parallel_tool_calls: false,
-            max_model_round_trips: 8,
+            max_model_round_trips: Some(8),
             approval: ToolApprovalRecipe {
                 allow_write_tools: false,
                 allow_network_shell: false,
@@ -955,7 +956,7 @@ mod tests {
             oracle: None,
             long_context: None,
         };
-        assert_eq!(recipe.max_model_round_trips, 8);
+        assert_eq!(recipe.max_model_round_trips, Some(8));
         assert!(matches!(recipe.tool_choice, ToolChoice::Auto));
     }
 

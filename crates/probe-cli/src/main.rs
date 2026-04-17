@@ -4427,6 +4427,7 @@ mod tests {
             .tool_loop
             .expect("tui config should include tool loop");
         assert_eq!(tool_loop.approval, ToolApprovalConfig::allow_all());
+        assert_eq!(tool_loop.max_model_round_trips, None);
     }
 
     #[test]

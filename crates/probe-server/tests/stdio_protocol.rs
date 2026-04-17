@@ -1585,7 +1585,7 @@ fn approval_pause_tool_loop() -> ToolLoopRecipe {
         tool_set: ToolSetKind::CodingBootstrap,
         tool_choice: ToolChoice::Required,
         parallel_tool_calls: false,
-        max_model_round_trips: 4,
+        max_model_round_trips: Some(4),
         approval: ToolApprovalRecipe {
             allow_write_tools: false,
             allow_network_shell: false,

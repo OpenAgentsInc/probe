@@ -5407,10 +5407,10 @@ fn same_path_prefix(path: &Path, prefix: &Path) -> bool {
 }
 
 fn tool_loop_from_recipe(recipe: ToolLoopRecipe) -> Result<ToolLoopConfig, RuntimeProtocolError> {
-    if recipe.max_model_round_trips == 0 {
+    if recipe.max_model_round_trips == Some(0) {
         return Err(protocol_error(
             "invalid_tool_loop",
-            "max_model_round_trips must be at least 1",
+            "max_model_round_trips must be at least 1 when provided",
         ));
     }
 
@@ -5820,7 +5820,7 @@ mod tests {
             tool_set: ToolSetKind::CodingBootstrap,
             tool_choice: ToolChoice::Auto,
             parallel_tool_calls: false,
-            max_model_round_trips: 4,
+            max_model_round_trips: Some(4),
             approval: ToolApprovalRecipe {
                 allow_write_tools: false,
                 allow_network_shell: false,
@@ -5831,7 +5831,7 @@ mod tests {
             long_context: None,
         })
         .expect("tool loop recipe should convert");
-        assert_eq!(config.max_model_round_trips, 4);
+        assert_eq!(config.max_model_round_trips, Some(4));
         assert!(matches!(config.tool_choice, ProbeToolChoice::Auto));
     }
 
@@ -5885,7 +5885,7 @@ mod tests {
             tool_set: ToolSetKind::CodingBootstrap,
             tool_choice: ToolChoice::Auto,
             parallel_tool_calls: false,
-            max_model_round_trips: 8,
+            max_model_round_trips: Some(8),
             approval: ToolApprovalRecipe {
                 allow_write_tools: false,
                 allow_network_shell: false,
