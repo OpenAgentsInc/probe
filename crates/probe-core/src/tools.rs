@@ -931,6 +931,7 @@ fn list_files(
     let requested_path = arguments
         .get("path")
         .and_then(serde_json::Value::as_str)
+        .map(normalize_tool_directory_path)
         .unwrap_or(".");
     let max_depth = expect_u64(arguments, "max_depth").unwrap_or(LIST_FILES_DEFAULT_MAX_DEPTH);
     let max_entries = expect_u64(arguments, "max_entries")
@@ -995,6 +996,7 @@ fn code_search(
     let requested_path = arguments
         .get("path")
         .and_then(serde_json::Value::as_str)
+        .map(normalize_tool_directory_path)
         .unwrap_or(".");
     let glob = arguments
         .get("glob")
@@ -2432,6 +2434,11 @@ fn render_list_files_model_text(output: &serde_json::Value) -> String {
         }
     }
     lines.join("\n")
+}
+
+fn normalize_tool_directory_path(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.is_empty() { "." } else { trimmed }
 }
 
 fn render_code_search_model_text(output: &serde_json::Value) -> String {
