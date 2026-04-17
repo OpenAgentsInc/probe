@@ -1015,9 +1015,9 @@ impl ChatScreen {
                 self.runtime.session_id = Some(session_id.as_str().to_string());
                 self.runtime.phase = Some(String::from("assistant_committed"));
                 self.runtime.active_tool = None;
-                let body = split_text_lines(strip_leading_probe_response_noise(
-                    assistant_text.as_str(),
-                ));
+                let body = split_text_lines(
+                    normalize_openai_stream_display_text(assistant_text.as_str()).as_str(),
+                );
                 self.transcript.set_active_turn(ActiveTurn::new(
                     TranscriptRole::Assistant,
                     "Probe",
@@ -2199,8 +2199,7 @@ fn render_stream_active_turn(
     stream: &AssistantStreamState,
     operator_backend: Option<&ServerOperatorSummary>,
 ) -> ActiveTurn {
-    let normalized = normalize_openai_stream_display_text(stream.assistant_text.as_str());
-    let display_text = strip_leading_probe_response_noise(normalized.as_str());
+    let display_text = normalize_openai_stream_display_text(stream.assistant_text.as_str());
     let failure = stream
         .failure
         .as_deref()
@@ -2231,7 +2230,7 @@ fn render_stream_active_turn(
         if failure.is_some() {
             body.push(String::from("partial_response:"));
         }
-        body.extend(split_text_lines(display_text));
+        body.extend(split_text_lines(display_text.as_str()));
     }
 
     let role = if is_waiting {
@@ -2643,65 +2642,11 @@ fn render_usage_value(value: Option<u64>, truth: Option<&str>) -> String {
     }
 }
 
-/// Strips leading `response_id` / `model` / `response` rows sometimes echoed into streamed text,
-/// legacy UI rows, or provider output so they never flash above the real reply.
-fn strip_leading_probe_response_noise(text: &str) -> &str {
-    let mut slice = text;
-    loop {
-        slice = slice.trim_start_matches(|c| c == '\n' || c == '\r');
-        if slice.is_empty() {
-            return "";
-        }
-        let (line, rest) = match slice.find('\n') {
-            Some(i) => (&slice[..i], Some(&slice[i + 1..])),
-            None => (slice, None),
-        };
-        if is_leading_response_noise_line(line) {
-            slice = rest.unwrap_or("");
-            continue;
-        }
-        return slice;
-    }
-}
-
-fn is_leading_response_noise_line(line: &str) -> bool {
-    let mut s = line.trim().trim_end_matches('\r');
-    s = s.trim_start();
-    if let Some(rest) = s.strip_prefix('•') {
-        s = rest.trim_start();
-    } else if let Some(rest) = s.strip_prefix('-') {
-        s = rest.trim_start();
-    } else if let Some(rest) = s.strip_prefix('*') {
-        s = rest.trim_start();
-    }
-    s = s.trim_start();
-    s.starts_with("response_id:")
-        || s.starts_with("model:")
-        || s == "response"
-}
-
 fn split_text_lines(value: &str) -> Vec<String> {
     if value.is_empty() {
         return Vec::new();
     }
     value.split('\n').map(ToOwned::to_owned).collect()
-}
-
-#[cfg(test)]
-mod response_noise_tests {
-    use super::strip_leading_probe_response_noise;
-
-    #[test]
-    fn strips_prefixed_metadata_block() {
-        let raw = "response_id: resp_abc\nmodel: gpt-test\nresponse\nHello";
-        assert_eq!(strip_leading_probe_response_noise(raw), "Hello");
-    }
-
-    #[test]
-    fn strips_bullet_prefixed_lines() {
-        let raw = "• response_id: x\n- model: y\nresponse\n\nHi";
-        assert_eq!(strip_leading_probe_response_noise(raw), "Hi");
-    }
 }
 
 fn short_session_id(value: &str) -> String {

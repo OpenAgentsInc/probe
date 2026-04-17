@@ -739,6 +739,45 @@ fn codex_user_agent() -> String {
     )
 }
 
+/// Strips leading `response_id` / `model` / `response` rows that some providers echo ahead of the
+/// real assistant body. Applied in [`normalize_openai_stream_display_text`] so streaming deltas
+/// never surface that prefix (fixes one-frame flashes in the TUI before JSON envelope parsing).
+#[must_use]
+pub fn strip_leading_probe_response_noise(text: &str) -> &str {
+    let mut slice = text;
+    loop {
+        slice = slice.trim_start_matches(|c| c == '\n' || c == '\r');
+        if slice.is_empty() {
+            return "";
+        }
+        let (line, rest) = match slice.find('\n') {
+            Some(i) => (&slice[..i], Some(&slice[i + 1..])),
+            None => (slice, None),
+        };
+        if is_leading_response_noise_line(line) {
+            slice = rest.unwrap_or("");
+            continue;
+        }
+        return slice;
+    }
+}
+
+fn is_leading_response_noise_line(line: &str) -> bool {
+    let mut s = line.trim().trim_end_matches('\r');
+    s = s.trim_start();
+    if let Some(rest) = s.strip_prefix('•') {
+        s = rest.trim_start();
+    } else if let Some(rest) = s.strip_prefix('-') {
+        s = rest.trim_start();
+    } else if let Some(rest) = s.strip_prefix('*') {
+        s = rest.trim_start();
+    }
+    s = s.trim_start();
+    s.starts_with("response_id:")
+        || s.starts_with("model:")
+        || s == "response"
+}
+
 #[must_use]
 pub fn normalize_openai_assistant_text(raw: &str) -> String {
     normalize_openai_stream_display_text(raw)
@@ -746,9 +785,14 @@ pub fn normalize_openai_assistant_text(raw: &str) -> String {
 
 #[must_use]
 pub fn normalize_openai_stream_display_text(raw: &str) -> String {
-    normalized_message_envelope_content(raw)
-        .or_else(|| partial_message_envelope_content(raw))
-        .unwrap_or_else(|| raw.to_string())
+    let head = strip_leading_probe_response_noise(raw);
+    let middle = normalized_message_envelope_content(head)
+        .or_else(|| partial_message_envelope_content(head));
+    let text = match middle {
+        Some(s) => s,
+        None => head.to_string(),
+    };
+    strip_leading_probe_response_noise(text.as_str()).to_string()
 }
 
 fn normalized_message_envelope_content(raw: &str) -> Option<String> {
@@ -867,6 +911,7 @@ mod tests {
         DEFAULT_OPENAI_API_BASE_URL, OpenAiRequestAuth, OpenAiRequestContext, PlainTextMessage,
         ProviderError, complete_plain_text_with_context, normalize_openai_assistant_text,
         normalize_openai_stream_display_text, openai_provider_config_from_profile,
+        strip_leading_probe_response_noise,
     };
 
     fn explicit_openai_env_profile(env_var: &str) -> BackendProfile {
@@ -907,6 +952,23 @@ mod tests {
             normalize_openai_stream_display_text(r#"{"kind":"message","content":"hello\nwor"#),
             "hello\nwor"
         );
+    }
+
+    #[test]
+    fn openai_stream_strips_provider_metadata_lines_before_envelope() {
+        let raw = concat!(
+            "response_id: resp_1\n",
+            "model: gpt-test\n",
+            "response\n",
+            r#"{"kind":"message","content":"Hi"}"#
+        );
+        assert_eq!(normalize_openai_stream_display_text(raw), "Hi");
+    }
+
+    #[test]
+    fn strip_leading_probe_response_noise_strips_bullets() {
+        let raw = "• response_id: x\n- model: y\nresponse\n\nHi";
+        assert_eq!(strip_leading_probe_response_noise(raw), "Hi");
     }
 
     #[test]
