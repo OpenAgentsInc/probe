@@ -507,6 +507,11 @@ impl ChatScreen {
         }
         self.transcript
             .push_entry(TranscriptEntry::new(TranscriptRole::User, "You", body));
+        self.transcript.set_active_turn(ActiveTurn::new(
+            TranscriptRole::Assistant,
+            WORKING_ASSISTANT_TITLE,
+            Vec::new(),
+        ));
         self.snap_transcript_to_latest();
         self.record_event(format!(
             "submitted chat turn ({} chars)",

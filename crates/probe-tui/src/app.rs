@@ -388,10 +388,7 @@ impl AppShell {
                     self.base_screen_mut().submit_user_turn(&submitted);
                     self.base_screen_mut()
                         .record_event(format!("queued Probe runtime turn: {preview}"));
-                    self.last_status = format!(
-                        "submitted chat turn ({} chars)",
-                        submitted.text.chars().count()
-                    );
+                    self.last_status = String::from("Working");
                     if should_attempt_github_issue_selection(issue_priority.as_str()) {
                         if let Err(error) = self.submit_background_task(
                             BackgroundTaskRequest::select_github_issue(issue_priority, issue_cwd),
@@ -599,7 +596,11 @@ impl AppShell {
         if let Some(backend) = request.setup_backend() {
             self.base_screen_mut().prepare_for_setup(backend);
         }
-        self.last_status = format!("queued {}", request.title());
+        self.last_status = match &request {
+            BackgroundTaskRequest::ProbeRuntimeTurn { .. }
+            | BackgroundTaskRequest::ResolvePendingToolApproval { .. } => String::from("Working"),
+            _ => format!("queued {}", request.title()),
+        };
         self.worker.submit(request)
     }
 
@@ -1716,6 +1717,33 @@ mod tests {
             app.dispatch(event);
         }
         app.dispatch(UiEvent::ComposerSubmit);
+    }
+
+    #[test]
+    fn composer_submit_immediately_shows_working_state() {
+        let environment = ProbeTestEnvironment::new();
+        let server = FakeOpenAiServer::from_json_responses(vec![json!({
+            "id": "chatcmpl_probe_tui_working",
+            "model": "qwen3.5-2b-q8_0-registry.gguf",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Done."
+                },
+                "finish_reason": "stop"
+            }]
+        })]);
+        let mut app = AppShell::new_for_tests_with_chat_config(runtime_test_config(
+            &environment,
+            server.base_url(),
+        ));
+
+        submit_draft(&mut app, "hi");
+
+        let rendered = app.render_to_string(120, 32);
+        assert!(rendered.contains("• Working"));
+        assert_eq!(app.last_status(), "Working");
     }
 
     fn init_git_repo(path: &Path, remote: &str) {
