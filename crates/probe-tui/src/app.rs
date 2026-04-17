@@ -1287,10 +1287,13 @@ fn buffer_to_string(buffer: &Buffer) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use probe_core::backend_profiles::{
         openai_codex_subscription, psionic_apple_fm_bridge, psionic_qwen35_2b_q8_registry,
     };
@@ -1419,6 +1422,74 @@ mod tests {
         app.dispatch(UiEvent::ComposerSubmit);
     }
 
+    fn signed_token(payload: serde_json::Value) -> String {
+        format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(payload.to_string())
+        )
+    }
+
+    fn unix_time_millis() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("current time should be after unix epoch")
+            .as_millis() as u64
+    }
+
+    fn seed_codex_auth_state(
+        environment: &ProbeTestEnvironment,
+        email: &str,
+        account_id: &str,
+        used_percent: u32,
+        limit_window_seconds: u64,
+    ) {
+        let auth_path = environment.probe_home().join("auth/openai-codex.json");
+        fs::create_dir_all(
+            auth_path
+                .parent()
+                .expect("auth path should have a parent directory"),
+        )
+        .expect("create auth directory");
+        fs::write(
+            auth_path,
+            serde_json::to_vec_pretty(&json!({
+                "version": 2,
+                "selected_account_key": format!("acct:{account_id}"),
+                "accounts": [{
+                    "key": format!("acct:{account_id}"),
+                    "refresh": "refresh-codex",
+                    "access": signed_token(json!({
+                        "exp": u64::MAX / 2,
+                        "https://api.openai.com/auth": {
+                            "chatgpt_account_id": account_id
+                        },
+                        "https://api.openai.com/profile": {
+                            "email": email
+                        }
+                    })),
+                    "expires": u64::MAX / 2,
+                    "account_id": account_id,
+                    "added_at_ms": unix_time_millis(),
+                    "last_selected_at_ms": unix_time_millis(),
+                    "rate_limits": {
+                        "fetched_at_ms": unix_time_millis(),
+                        "plan_type": "pro",
+                        "allowed": true,
+                        "limit_reached": false,
+                        "primary_window": {
+                            "used_percent": used_percent,
+                            "limit_window_seconds": limit_window_seconds,
+                            "reset_after_seconds": 3600,
+                            "reset_at": 1777259458_u64
+                        }
+                    }
+                }]
+            }))
+            .expect("serialize auth state"),
+        )
+        .expect("write auth state");
+    }
+
     #[test]
     fn tui_chat_profile_prefers_saved_codex_backend_snapshot() {
         let probe_home = tempdir().expect("temp probe home");
@@ -1474,6 +1545,28 @@ mod tests {
         assert!(!rendered.contains("status:"));
         assert!(!rendered.contains("Composer"));
         assert!(!rendered.contains("cmd: plain"));
+    }
+
+    #[test]
+    fn codex_footer_shows_selected_account_and_weekly_limit() {
+        let environment = ProbeTestEnvironment::new();
+        seed_codex_auth_state(
+            &environment,
+            "arcadecd@gmail.com",
+            "acct-codex",
+            /*used_percent*/ 12,
+            /*limit_window_seconds*/ 7 * 24 * 60 * 60,
+        );
+        let mut config = openai_codex_subscription();
+        config.reasoning_level = Some(String::from("high"));
+        let app = AppShell::new_for_tests_with_chat_config(AppShell::build_chat_runtime_config(
+            Some(environment.probe_home().to_path_buf()),
+            config,
+        ));
+
+        let rendered = app.render_to_string(160, 32);
+        assert!(rendered.contains("gpt-5.4 · high · arcadecd@gmail.com · weekly 88% · ."));
+        assert!(!rendered.contains("api key"));
     }
 
     #[test]

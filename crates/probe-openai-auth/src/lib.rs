@@ -1569,7 +1569,13 @@ fn decode_json_response<T: for<'de> Deserialize<'de>>(
 }
 
 fn join_url(base: &str, path: &str) -> Result<String, OpenAiAuthError> {
-    let base = Url::parse(base).map_err(|error| OpenAiAuthError::Protocol(error.to_string()))?;
+    let normalized_base = if base.ends_with('/') {
+        base.to_string()
+    } else {
+        format!("{base}/")
+    };
+    let base = Url::parse(normalized_base.as_str())
+        .map_err(|error| OpenAiAuthError::Protocol(error.to_string()))?;
     let joined = base
         .join(path.trim_start_matches('/'))
         .map_err(|error| OpenAiAuthError::Protocol(error.to_string()))?;
@@ -1640,7 +1646,7 @@ mod tests {
     use super::{
         DEFAULT_OPENAI_CLIENT_ID, OpenAiAuthConfig, OpenAiAuthError, OpenAiCodexAuthController,
         OpenAiCodexAuthRecord, OpenAiCodexAuthStore, OpenAiCodexRoute, build_authorize_url,
-        extract_account_id, html_error, html_success, unix_time_millis,
+        extract_account_id, html_error, html_success, join_url, unix_time_millis,
     };
 
     #[test]
@@ -2100,6 +2106,20 @@ mod tests {
             status.selected_account_email.as_deref(),
             Some("arcadecd@gmail.com")
         );
+    }
+
+    #[test]
+    fn join_url_preserves_base_path_segments_without_trailing_slash() {
+        let joined = join_url("https://chatgpt.com/backend-api", "/wham/usage")
+            .expect("join backend-api path");
+        assert_eq!(joined, "https://chatgpt.com/backend-api/wham/usage");
+    }
+
+    #[test]
+    fn join_url_keeps_root_hosts_stable() {
+        let joined =
+            join_url("https://auth.openai.com", "/oauth/token").expect("join auth issuer path");
+        assert_eq!(joined, "https://auth.openai.com/oauth/token");
     }
 
     #[test]

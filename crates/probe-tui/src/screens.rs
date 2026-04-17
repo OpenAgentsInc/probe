@@ -7,7 +7,10 @@ use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_core::server_control::ServerOperatorSummary;
 use probe_core::tools::tool_result_model_text;
 use probe_decisions::SelectedGithubIssue;
-use probe_openai_auth::{OpenAiCodexAuthController, OpenAiCodexRoute};
+use probe_openai_auth::{
+    OpenAiCodexAuthAccountStatus, OpenAiCodexAuthController, OpenAiCodexAuthStatus,
+    OpenAiCodexRateLimitSnapshot, OpenAiCodexRateLimitWindow, OpenAiCodexRoute,
+};
 use probe_protocol::session::{PendingToolApproval, ToolApprovalResolution};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -324,7 +327,7 @@ pub struct ChatScreen {
     selected_issue: Option<SelectedGithubIssue>,
     operator_backend: Option<ServerOperatorSummary>,
     probe_home: Option<PathBuf>,
-    codex_route_badge: Option<String>,
+    codex_footer_summary: Option<CodexFooterSummary>,
     setup: AppleFmSetupState,
 }
 
@@ -344,7 +347,7 @@ impl Default for ChatScreen {
             selected_issue: None,
             operator_backend: None,
             probe_home: None,
-            codex_route_badge: None,
+            codex_footer_summary: None,
             setup: AppleFmSetupState::default(),
         };
         screen.record_event("probe tui ready");
@@ -367,7 +370,7 @@ impl ChatScreen {
 
     pub fn set_probe_home(&mut self, probe_home: Option<PathBuf>) {
         self.probe_home = probe_home;
-        self.refresh_codex_route_badge();
+        self.refresh_codex_footer_summary();
     }
 
     pub fn emphasized_copy(&self) -> bool {
@@ -426,7 +429,7 @@ impl ChatScreen {
         self.runtime.backend_kind = Some(render_backend_kind(summary.backend_kind).to_string());
         self.runtime.model_id = summary.model_id.clone();
         self.operator_backend = Some(summary.clone());
-        self.refresh_codex_route_badge();
+        self.refresh_codex_footer_summary();
         self.record_event(format!(
             "backend target: {} {} {} model={}",
             render_backend_kind(summary.backend_kind),
@@ -551,8 +554,16 @@ impl ChatScreen {
         if let Some(reasoning) = reasoning {
             parts.push(display_reasoning_level(reasoning).to_string());
         }
-        if let Some(route_badge) = self.codex_route_badge.as_ref() {
-            parts.push(route_badge.clone());
+        if let Some(summary) = self.codex_footer_summary.as_ref() {
+            if let Some(account_badge) = summary.account_badge.as_deref() {
+                parts.push(preview(account_badge, 28));
+            }
+            if let Some(limit_badge) = summary.limit_badge.as_ref() {
+                parts.push(limit_badge.clone());
+            }
+            if let Some(route_badge) = summary.route_badge.as_ref() {
+                parts.push(route_badge.clone());
+            }
         }
         if let Some(issue) = self.selected_issue.as_ref() {
             parts.push(preview(
@@ -1145,7 +1156,7 @@ impl ChatScreen {
                     self.record_worker_event(format!("committed {label} row: {title}"));
                 }
                 self.snap_transcript_to_latest();
-                self.refresh_codex_route_badge();
+                self.refresh_codex_footer_summary();
                 format!("committed {entry_count} transcript entries")
             }
             AppMessage::TranscriptEntryCommitted { entry } => {
@@ -1156,7 +1167,7 @@ impl ChatScreen {
                 self.transcript.commit_live_entries();
                 self.transcript.push_entry(entry);
                 self.snap_transcript_to_latest();
-                self.refresh_codex_route_badge();
+                self.refresh_codex_footer_summary();
                 self.record_worker_event(format!("committed {label} row: {title}"));
                 format!("committed {label} row")
             }
@@ -1177,7 +1188,7 @@ impl ChatScreen {
                     active_tool: self.runtime.active_tool.clone(),
                     pending_approvals: self.runtime.pending_approvals.clone(),
                 };
-                self.refresh_codex_route_badge();
+                self.refresh_codex_footer_summary();
                 self.record_worker_event(format!(
                     "runtime session ready: {} via {}",
                     short_session_id(session_id.as_str()),
@@ -1826,7 +1837,7 @@ impl ChatScreen {
                 ];
             }
         };
-        let route_summary = codex_route_summary(probe_home.as_path());
+        let route_summary = codex_footer_summary(probe_home.as_path());
         let api_key_source = current_openai_api_key_source();
         match controller.status() {
             Ok(status) if status.authenticated => {
@@ -1852,6 +1863,9 @@ impl ChatScreen {
                 ];
                 if let Some(route_summary) = route_summary.as_ref() {
                     lines.push(format!("selected_route: {}", route_summary.route_label));
+                    if let Some(limit_badge) = route_summary.limit_badge.as_deref() {
+                        lines.push(format!("selected_limit: {limit_badge}"));
+                    }
                     if route_summary.api_key_fallback_available {
                         lines.push(String::from("api_key_fallback: available"));
                     }
@@ -1890,8 +1904,8 @@ impl ChatScreen {
         }
     }
 
-    fn refresh_codex_route_badge(&mut self) {
-        self.codex_route_badge = self
+    fn refresh_codex_footer_summary(&mut self) {
+        self.codex_footer_summary = self
             .operator_backend
             .as_ref()
             .filter(|summary| {
@@ -1899,11 +1913,10 @@ impl ChatScreen {
                     == probe_protocol::backend::BackendKind::OpenAiCodexSubscription
             })
             .and_then(|_| {
-                self.probe_home.as_deref().and_then(|probe_home| {
-                    codex_route_summary(probe_home).map(|summary| summary.footer_badge)
-                })
-            })
-            .flatten();
+                self.probe_home
+                    .as_deref()
+                    .and_then(|probe_home| codex_footer_summary(probe_home))
+            });
     }
 
     fn render_phase_label(&self) -> &'static str {
@@ -2565,30 +2578,100 @@ fn display_reasoning_level(value: &str) -> &str {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CodexRouteSummary {
+struct CodexFooterSummary {
     route_label: String,
-    footer_badge: Option<String>,
+    account_badge: Option<String>,
+    limit_badge: Option<String>,
+    route_badge: Option<String>,
     api_key_fallback_available: bool,
 }
 
-fn codex_route_summary(probe_home: &std::path::Path) -> Option<CodexRouteSummary> {
+fn codex_footer_summary(probe_home: &std::path::Path) -> Option<CodexFooterSummary> {
     let controller = OpenAiCodexAuthController::new(probe_home).ok()?;
-    let plan = controller.routing_plan(Some(OPENAI_API_KEY_ENV)).ok()?;
-    let route_label = match plan.routes.first() {
+    let _ = controller.refresh_accounts_for_routing();
+    let status = controller.status().ok()?;
+    let plan = controller.routing_plan(Some(OPENAI_API_KEY_ENV)).ok();
+    let route_label = match plan.as_ref().and_then(|plan| plan.routes.first()) {
         Some(OpenAiCodexRoute::SubscriptionAccount(_)) => String::from("subscription"),
         Some(OpenAiCodexRoute::ApiKeyFallback(_)) => String::from("api key"),
+        None if status.authenticated => String::from("unavailable"),
         None => String::from("none"),
     };
-    let footer_badge = matches!(
-        plan.routes.first(),
+    let route_badge = matches!(
+        plan.as_ref().and_then(|plan| plan.routes.first()),
         Some(OpenAiCodexRoute::ApiKeyFallback(_))
     )
     .then(|| String::from("api key"));
-    Some(CodexRouteSummary {
+    let account_badge = status
+        .selected_account_email
+        .clone()
+        .or(status.selected_account_label.clone())
+        .or(status.selected_account_key.clone());
+    let limit_badge = selected_codex_account(&status)
+        .and_then(|account| account.rate_limits.as_ref())
+        .and_then(codex_limit_badge);
+    Some(CodexFooterSummary {
         route_label,
-        footer_badge,
-        api_key_fallback_available: plan.api_key_fallback_available,
+        account_badge,
+        limit_badge,
+        route_badge,
+        api_key_fallback_available: plan
+            .as_ref()
+            .map(|plan| plan.api_key_fallback_available)
+            .unwrap_or(false),
     })
+}
+
+fn selected_codex_account(status: &OpenAiCodexAuthStatus) -> Option<&OpenAiCodexAuthAccountStatus> {
+    status.accounts.iter().find(|account| account.selected)
+}
+
+fn codex_limit_badge(snapshot: &OpenAiCodexRateLimitSnapshot) -> Option<String> {
+    let window = preferred_codex_limit_window(snapshot)?;
+    let remaining_percent = 100_u32.saturating_sub(window.used_percent.min(100));
+    Some(format!(
+        "{} {}%",
+        codex_limit_window_label(window.limit_window_seconds),
+        remaining_percent
+    ))
+}
+
+fn preferred_codex_limit_window(
+    snapshot: &OpenAiCodexRateLimitSnapshot,
+) -> Option<&OpenAiCodexRateLimitWindow> {
+    snapshot
+        .secondary_window
+        .as_ref()
+        .or_else(|| {
+            snapshot
+                .primary_window
+                .as_ref()
+                .filter(|window| is_weekly_window(window.limit_window_seconds))
+        })
+        .or(snapshot.primary_window.as_ref())
+}
+
+fn codex_limit_window_label(limit_window_seconds: u64) -> String {
+    if is_weekly_window(limit_window_seconds) {
+        return String::from("weekly");
+    }
+    if (4 * 60 * 60..=6 * 60 * 60).contains(&limit_window_seconds) {
+        return String::from("5h");
+    }
+    if limit_window_seconds >= 24 * 60 * 60 && limit_window_seconds % (24 * 60 * 60) == 0 {
+        return format!("{}d", limit_window_seconds / (24 * 60 * 60));
+    }
+    if limit_window_seconds >= 60 * 60 && limit_window_seconds % (60 * 60) == 0 {
+        return format!("{}h", limit_window_seconds / (60 * 60));
+    }
+    if limit_window_seconds >= 60 && limit_window_seconds % 60 == 0 {
+        return format!("{}m", limit_window_seconds / 60);
+    }
+    format!("{limit_window_seconds}s")
+}
+
+fn is_weekly_window(limit_window_seconds: u64) -> bool {
+    (6 * 24 * 60 * 60..=8 * 24 * 60 * 60).contains(&limit_window_seconds)
 }
 
 fn current_openai_api_key_source() -> Option<&'static str> {

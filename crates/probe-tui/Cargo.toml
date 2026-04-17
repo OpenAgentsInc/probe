@@ -21,6 +21,7 @@ syntect.workspace = true
 two-face.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 insta.workspace = true
 probe-test-support.workspace = true
 tempfile.workspace = true
