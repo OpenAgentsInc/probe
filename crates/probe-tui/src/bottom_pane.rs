@@ -7,7 +7,7 @@ use crate::event::UiEvent;
 use crate::{rich_text, theme};
 
 const PLACEHOLDER: &str =
-    "Type a Probe message. Enter sends. Newline: Shift+Enter, Opt+Enter, or Ctrl+J.";
+    "Type a Probe message. Plain Enter sends. Shift/Ctrl/Opt+Enter or Ctrl+J newline.";
 const MAX_VISIBLE_COMPOSER_LINES: usize = 4;
 const MAX_HISTORY_ENTRIES: usize = 24;
 const ATTACHMENT_LIBRARY: [&str; 3] = ["README.md", "Cargo.toml", "docs/README.md"];

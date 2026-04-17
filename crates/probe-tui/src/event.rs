@@ -44,16 +44,17 @@ pub fn event_from_key(key: KeyEvent) -> Option<UiEvent> {
         KeyCode::F(1) => Some(UiEvent::OpenHelp),
         KeyCode::PageUp => Some(UiEvent::PageUp),
         KeyCode::PageDown => Some(UiEvent::PageDown),
-        // Newline: Shift+Enter or Option/Alt+Enter when the terminal reports modifiers.
-        // Ctrl+J (ASCII LF) is the reliable fallback when Shift is not distinguishable from Enter.
-        // Plain Enter submits.
-        KeyCode::Enter
-            if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
-        {
+        // Match OpenAI Codex TUI (`codex-rs/tui`): `ChatComposer` submits only on Enter with
+        // **no** modifiers; any other Enter (Shift/Ctrl/Alt/Cmd/…) goes to `TextArea::input`, which
+        // inserts `\n` for Enter with any modifiers. See `chat_composer.rs` (Enter+NONE submit)
+        // and `textarea.rs` (`KeyCode::Enter, ..` => insert newline).
+        KeyCode::Enter if modifiers.is_empty() => Some(UiEvent::ComposerSubmit),
+        KeyCode::Enter => Some(UiEvent::ComposerNewline),
+        // Codex textarea also maps ^J / ^M to newline for terminals that send C0 controls.
+        KeyCode::Char('j') | KeyCode::Char('J') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::ComposerNewline)
         }
-        KeyCode::Enter => Some(UiEvent::ComposerSubmit),
-        KeyCode::Char('j') | KeyCode::Char('J') if modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('m') | KeyCode::Char('M') if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UiEvent::ComposerNewline)
         }
         KeyCode::Backspace => Some(UiEvent::ComposerBackspace),
@@ -109,9 +110,9 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_enter_submits() {
+    fn ctrl_enter_inserts_newline() {
         let event = event_from_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
-        assert_eq!(event, Some(UiEvent::ComposerSubmit));
+        assert_eq!(event, Some(UiEvent::ComposerNewline));
     }
 
     #[test]
@@ -123,6 +124,12 @@ mod tests {
     #[test]
     fn ctrl_j_inserts_newline() {
         let event = event_from_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        assert_eq!(event, Some(UiEvent::ComposerNewline));
+    }
+
+    #[test]
+    fn ctrl_m_inserts_newline() {
+        let event = event_from_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL));
         assert_eq!(event, Some(UiEvent::ComposerNewline));
     }
 }
