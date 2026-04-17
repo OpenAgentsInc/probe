@@ -18,9 +18,10 @@ use probe_decisions::{
     DecisionModule, GithubIssueCandidate, GithubIssueSelectionContext, GithubRepoContext,
     HeuristicGithubIssueSelectionModule,
 };
+use probe_protocol::backend::BackendKind;
 use probe_protocol::session::{
-    SessionId, SessionMetadata, ToolApprovalResolution, ToolPolicyDecision, TranscriptEvent,
-    TranscriptItem, TranscriptItemKind,
+    SessionId, SessionMetadata, SessionTurn, ToolApprovalResolution, ToolPolicyDecision,
+    TranscriptEvent, TranscriptItem, TranscriptItemKind,
 };
 use probe_provider_apple_fm::{AppleFmProviderClient, AppleFmProviderConfig, AppleFmProviderError};
 use psionic_apple_fm::AppleFmSystemLanguageModelAvailability;
@@ -456,7 +457,7 @@ fn run_attach_probe_runtime_session(
     message_tx: &Sender<AppMessage>,
     state: &mut WorkerState,
 ) {
-    let mut client = match resolve_probe_client(config.probe_home.clone()) {
+    let mut client = match resolve_probe_client(config.probe_home.clone(), config.profile.kind) {
         Ok(client) => client,
         Err(error) => {
             let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
@@ -511,7 +512,7 @@ fn run_probe_runtime_turn(
     message_tx: &Sender<AppMessage>,
     state: &mut WorkerState,
 ) {
-    let mut client = match resolve_probe_client(config.probe_home.clone()) {
+    let mut client = match resolve_probe_client(config.probe_home.clone(), config.profile.kind) {
         Ok(client) => client,
         Err(error) => {
             let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
@@ -523,21 +524,31 @@ fn run_probe_runtime_turn(
 
     let previous_session = state.session_for_config(&config).cloned();
 
+    let use_eventful_turn_path = config.profile.kind != BackendKind::OpenAiCodexSubscription;
     let result = if let Some(session) = previous_session.as_ref() {
-        let event_tx = message_tx.clone();
-        let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
-            forward_runtime_event(&event_tx, event);
-        });
-        client.continue_plain_text_session_with_events(
-            PlainTextResumeRequest {
+        if use_eventful_turn_path {
+            let event_tx = message_tx.clone();
+            let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
+                forward_runtime_event(&event_tx, event);
+            });
+            client.continue_plain_text_session_with_events(
+                PlainTextResumeRequest {
+                    session_id: session.session_id.clone(),
+                    profile: config.profile.clone(),
+                    prompt,
+                    tool_loop: config.tool_loop.clone(),
+                },
+                event_sink,
+            )
+        } else {
+            client.continue_plain_text_session(PlainTextResumeRequest {
                 session_id: session.session_id.clone(),
                 profile: config.profile.clone(),
                 prompt,
                 tool_loop: config.tool_loop.clone(),
-            },
-            event_sink,
-        )
-    } else {
+            })
+        }
+    } else if use_eventful_turn_path {
         let event_tx = message_tx.clone();
         let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
             forward_runtime_event(&event_tx, event);
@@ -554,6 +565,16 @@ fn run_probe_runtime_turn(
             },
             event_sink,
         )
+    } else {
+        client.exec_plain_text(PlainTextExecRequest {
+            profile: config.profile.clone(),
+            prompt,
+            title: Some(String::from("Probe TUI Session")),
+            cwd: config.cwd.clone(),
+            system_prompt: config.system_prompt.clone(),
+            harness_profile: config.harness_profile.clone(),
+            tool_loop: config.tool_loop.clone(),
+        })
     };
 
     match result {
@@ -564,25 +585,17 @@ fn run_probe_runtime_turn(
             if emit_session_ready(message_tx, &outcome.session, &config).is_err() {
                 return;
             }
-            if emit_transcript_delta(
+            let rendered_turns = emit_completed_turn_state_from_turn(
                 message_tx,
-                client.read_transcript(&outcome.session.id),
+                &outcome.session.id,
+                &outcome.turn,
                 previous_turns,
-            )
-            .is_err()
-            {
-                return;
-            }
-            if emit_pending_tool_approvals(message_tx, &mut client, &outcome.session.id).is_err() {
-                return;
-            }
+                !use_eventful_turn_path,
+            );
             state.upsert_runtime_session(ProbeRuntimeSessionState::from_metadata(
                 &outcome.session,
                 &config,
-                client
-                    .read_transcript(&outcome.session.id)
-                    .map(|events| events.len())
-                    .unwrap_or(previous_turns),
+                rendered_turns,
             ));
         }
         Err(error) => {
@@ -643,7 +656,7 @@ fn run_pending_tool_approval_resolution(
     message_tx: &Sender<AppMessage>,
     state: &mut WorkerState,
 ) {
-    let mut client = match resolve_probe_client(config.probe_home.clone()) {
+    let mut client = match resolve_probe_client(config.probe_home.clone(), config.profile.kind) {
         Ok(client) => client,
         Err(error) => {
             let _ = message_tx.send(AppMessage::TranscriptEntryCommitted {
@@ -678,20 +691,30 @@ fn run_pending_tool_approval_resolution(
     };
 
     let previous_turns = state.rendered_turns_for_session(&session_id);
-    let event_tx = message_tx.clone();
-    let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
-        forward_runtime_event(&event_tx, event);
-    });
-    let result = client.resolve_pending_tool_approval_with_events(
-        ResolvePendingToolApprovalRequest {
+    let result = if config.profile.kind == BackendKind::OpenAiCodexSubscription {
+        client.resolve_pending_tool_approval(ResolvePendingToolApprovalRequest {
             session_id: session_id.clone(),
             profile: config.profile.clone(),
             tool_loop,
             call_id,
             resolution,
-        },
-        event_sink,
-    );
+        })
+    } else {
+        let event_tx = message_tx.clone();
+        let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(move |event| {
+            forward_runtime_event(&event_tx, event);
+        });
+        client.resolve_pending_tool_approval_with_events(
+            ResolvePendingToolApprovalRequest {
+                session_id: session_id.clone(),
+                profile: config.profile.clone(),
+                tool_loop,
+                call_id,
+                resolution,
+            },
+            event_sink,
+        )
+    };
 
     match result {
         Ok(ResolvePendingToolApprovalOutcome::StillPending {
@@ -732,25 +755,17 @@ fn run_pending_tool_approval_resolution(
             if emit_session_ready(message_tx, &outcome.session, &config).is_err() {
                 return;
             }
-            if emit_transcript_delta(
+            let rendered_turns = emit_completed_turn_state_from_turn(
                 message_tx,
-                client.read_transcript(&outcome.session.id),
+                &outcome.session.id,
+                &outcome.turn,
                 previous_turns,
-            )
-            .is_err()
-            {
-                return;
-            }
-            if emit_pending_tool_approvals(message_tx, &mut client, &outcome.session.id).is_err() {
-                return;
-            }
+                config.profile.kind == BackendKind::OpenAiCodexSubscription,
+            );
             state.upsert_runtime_session(ProbeRuntimeSessionState::from_metadata(
                 &outcome.session,
                 &config,
-                client
-                    .read_transcript(&outcome.session.id)
-                    .map(|events| events.len())
-                    .unwrap_or(previous_turns),
+                rendered_turns,
             ));
         }
         Err(error) => {
@@ -855,6 +870,14 @@ fn emit_pending_tool_approvals(
     session_id: &SessionId,
 ) -> Result<(), ()> {
     let approvals = client.pending_tool_approvals(session_id).map_err(|_| ())?;
+    emit_pending_tool_approvals_update(message_tx, session_id, approvals)
+}
+
+fn emit_pending_tool_approvals_update(
+    message_tx: &Sender<AppMessage>,
+    session_id: &SessionId,
+    approvals: Vec<probe_protocol::session::PendingToolApproval>,
+) -> Result<(), ()> {
     message_tx
         .send(AppMessage::PendingToolApprovalsUpdated {
             session_id: session_id.as_str().to_string(),
@@ -865,6 +888,7 @@ fn emit_pending_tool_approvals(
 
 fn resolve_probe_client(
     probe_home: Option<std::path::PathBuf>,
+    backend_kind: BackendKind,
 ) -> Result<ProbeClient, ProbeClientError> {
     let probe_home = match probe_home {
         Some(probe_home) => probe_home,
@@ -873,8 +897,25 @@ fn resolve_probe_client(
     };
     let mut config = ProbeClientConfig::new(probe_home, "probe-tui");
     config.client_version = Some(String::from(env!("CARGO_PKG_VERSION")));
-    config.transport = ProbeClientTransportConfig::LocalDaemon { socket_path: None };
-    ProbeClient::connect_or_autostart_local_daemon(config, std::time::Duration::from_secs(3))
+    config.transport = tui_client_transport(backend_kind);
+    match config.transport {
+        ProbeClientTransportConfig::LocalDaemon { .. } => {
+            ProbeClient::connect_or_autostart_local_daemon(
+                config,
+                std::time::Duration::from_secs(3),
+            )
+        }
+        ProbeClientTransportConfig::SpawnStdio => ProbeClient::connect(config),
+        ProbeClientTransportConfig::HostedTcp { .. }
+        | ProbeClientTransportConfig::HostedGcpIap(_) => ProbeClient::connect(config),
+    }
+}
+
+fn tui_client_transport(backend_kind: BackendKind) -> ProbeClientTransportConfig {
+    match backend_kind {
+        BackendKind::OpenAiCodexSubscription => ProbeClientTransportConfig::SpawnStdio,
+        _ => ProbeClientTransportConfig::LocalDaemon { socket_path: None },
+    }
 }
 
 fn forward_runtime_event(message_tx: &Sender<AppMessage>, event: RuntimeEvent) {
@@ -974,13 +1015,57 @@ fn emit_transcript_delta(
         .map_err(|_| ())
 }
 
-fn transcript_entries_from_event(event: &TranscriptEvent) -> Vec<TranscriptEntry> {
-    event
-        .turn
-        .items
+fn emit_turn_entries(message_tx: &Sender<AppMessage>, turn: &SessionTurn) -> Result<(), ()> {
+    let entries = transcript_entries_from_turn(turn);
+    if entries.is_empty() {
+        return Ok(());
+    }
+    message_tx
+        .send(AppMessage::TranscriptEntriesCommitted { entries })
+        .map_err(|_| ())
+}
+
+fn transcript_entries_from_turn(turn: &SessionTurn) -> Vec<TranscriptEntry> {
+    turn.items
         .iter()
-        .filter_map(|item| transcript_entry_from_item(event.turn.index, item))
+        .filter_map(|item| transcript_entry_from_item(turn.index, item))
         .collect()
+}
+
+fn transcript_entries_from_event(event: &TranscriptEvent) -> Vec<TranscriptEntry> {
+    transcript_entries_from_turn(&event.turn)
+}
+
+fn emit_completed_turn_state_from_turn(
+    message_tx: &Sender<AppMessage>,
+    session_id: &SessionId,
+    turn: &SessionTurn,
+    previous_turns: usize,
+    include_tool_entries: bool,
+) -> usize {
+    let _ = if include_tool_entries {
+        emit_turn_entries(message_tx, turn)
+    } else {
+        emit_assistant_entry_from_turn(message_tx, turn)
+            .or_else(|_| emit_turn_entries(message_tx, turn))
+    };
+    let _ = emit_pending_tool_approvals_update(message_tx, session_id, Vec::new());
+    previous_turns.saturating_add(1)
+}
+
+fn emit_assistant_entry_from_turn(
+    message_tx: &Sender<AppMessage>,
+    turn: &SessionTurn,
+) -> Result<(), ()> {
+    let Some(entry) = turn.items.iter().rev().find_map(|item| match item.kind {
+        TranscriptItemKind::AssistantMessage => transcript_entry_from_item(turn.index, item),
+        _ => None,
+    }) else {
+        return Err(());
+    };
+    message_tx
+        .send(AppMessage::TranscriptEntryCommitted { entry })
+        .map_err(|_| ())
 }
 
 fn transcript_entry_from_item(turn_index: u64, item: &TranscriptItem) -> Option<TranscriptEntry> {
@@ -1296,12 +1381,13 @@ fn split_body_lines(value: &str) -> Vec<String> {
 mod tests {
     use super::{
         ProbeRuntimeSessionState, WorkerState, runtime_note_entry, tool_call_lines,
-        tool_result_lines,
+        tool_result_lines, transcript_entries_from_turn, tui_client_transport,
     };
+    use probe_client::ProbeClientTransportConfig;
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
     use probe_protocol::session::{
-        ItemId, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision, ToolRiskClass,
-        TranscriptItem, TranscriptItemKind, TurnId,
+        ItemId, SessionTurn, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision,
+        ToolRiskClass, TranscriptItem, TranscriptItemKind, TurnId,
     };
     use serde_json::{Value, json};
     use std::path::PathBuf;
@@ -1403,6 +1489,71 @@ mod tests {
                 String::from("whoami"),
                 String::from("blocked: write approval")
             ]
+        );
+    }
+
+    #[test]
+    fn completed_turn_entries_render_without_reloading_the_session() {
+        let tool_call = transcript_item(
+            TranscriptItemKind::ToolCall,
+            "shell",
+            "",
+            Some(json!({ "command": "pwd" })),
+            None,
+        );
+        let tool_result = transcript_item(
+            TranscriptItemKind::ToolResult,
+            "shell",
+            "/tmp/workspace",
+            Some(json!({ "command": "pwd" })),
+            Some(ToolExecutionRecord {
+                risk_class: ToolRiskClass::ReadOnly,
+                policy_decision: ToolPolicyDecision::AutoAllow,
+                approval_state: ToolApprovalState::NotRequired,
+                command: Some(String::from("pwd")),
+                exit_code: Some(0),
+                timed_out: Some(false),
+                truncated: Some(false),
+                bytes_returned: Some(14),
+                files_touched: Vec::new(),
+                reason: None,
+            }),
+        );
+        let assistant = transcript_item(
+            TranscriptItemKind::AssistantMessage,
+            "assistant",
+            "Done.",
+            None,
+            None,
+        );
+        let turn = SessionTurn {
+            id: TurnId(7),
+            index: 7,
+            started_at_ms: 1,
+            completed_at_ms: Some(2),
+            observability: None,
+            backend_receipt: None,
+            items: vec![tool_call, tool_result, assistant],
+        };
+
+        let entries = transcript_entries_from_turn(&turn);
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].title(), "shell");
+        assert_eq!(entries[1].title(), "shell");
+        assert_eq!(entries[2].title(), "Probe");
+        assert_eq!(entries[2].body(), &[String::from("Done.")]);
+    }
+
+    #[test]
+    fn codex_tui_transport_uses_stdio_instead_of_local_daemon() {
+        assert_eq!(
+            tui_client_transport(BackendKind::OpenAiCodexSubscription),
+            ProbeClientTransportConfig::SpawnStdio
+        );
+        assert_eq!(
+            tui_client_transport(BackendKind::OpenAiChatCompletions),
+            ProbeClientTransportConfig::LocalDaemon { socket_path: None }
         );
     }
 

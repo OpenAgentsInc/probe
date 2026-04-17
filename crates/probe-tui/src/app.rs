@@ -2286,14 +2286,6 @@ mod tests {
                 && app
                     .worker_events()
                     .iter()
-                    .any(|entry| entry.contains("committed tool call row: read_file"))
-                && app
-                    .worker_events()
-                    .iter()
-                    .any(|entry| entry.contains("committed tool result row: read_file"))
-                && app
-                    .worker_events()
-                    .iter()
                     .any(|entry| entry.contains("committed assistant row: Probe"))
                 && app.runtime_session_id().is_some()
         });
@@ -2301,14 +2293,12 @@ mod tests {
         assert!(saw_active_turn);
         let mut rendered = app.render_to_string(120, 32);
         for _ in 0..6 {
-            if rendered.contains("• Reading README.md") && rendered.contains("• Read README.md")
-            {
+            if rendered.contains("• Read README.md") {
                 break;
             }
             app.dispatch(UiEvent::PageUp);
             rendered = app.render_to_string(120, 32);
         }
-        assert!(rendered.contains("• Reading README.md"));
         assert!(rendered.contains("• Read README.md"));
         assert!(rendered.contains("README.md"));
         assert!(

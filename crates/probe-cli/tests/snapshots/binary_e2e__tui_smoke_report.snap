@@ -4,7 +4,7 @@ assertion_line: 349
 expression: report
 ---
 {
-  "final_render": "› hello • Reading README.md • Read README.md:1-1 └ Probe acceptance fixture • Probe inspected README.md through the real runtime. ┌──────────────────────────────────────────────────────────────────────────────────────────── hist 1 · tiny-qwen35 · . ┐ │ Type a Probe message. Plain Enter sends. Shift+Enter inserts a newline. │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
+  "final_render": "› hello • Read README.md └ README.md:1-1 Probe acceptance fixture • Probe inspected README.md through the real runtime. ┌──────────────────────────────────────────────────────────────────────────────────────────── hist 1 · tiny-qwen35 · . ┐ │ Type a Probe message. Plain Enter sends. Shift+Enter inserts a newline. │ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
   "last_status": "pending approvals cleared",
   "recent_events": [
     "queued Probe runtime turn: hello",
@@ -22,8 +22,6 @@ expression: report
   "worker_events": [
     "pending approvals cleared",
     "committed assistant row: Probe",
-    "committed tool result row: read_file",
-    "committed tool call row: read_file",
     "runtime session ready: <session-id> via psionic-qwen35-2b-q8-registry",
     "assistant turn committed",
     "model request started: round 2",
