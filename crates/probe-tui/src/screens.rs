@@ -1998,7 +1998,7 @@ impl HelpScreen {
         let content = Paragraph::new(Text::from(vec![
             Line::from("Probe Chat Shell Keys"),
             Line::from(""),
-            Line::from("Enter / Shift+Enter submit / newline"),
+            Line::from("Enter submits. Newline: Shift+Enter · or Ctrl+Enter / Opt+Enter / Ctrl+J"),
             Line::from("Up / Down           draft history recall"),
             Line::from("Mouse wheel / PgUp  scroll active panel"),
             Line::from("PgDn                scroll back toward latest"),
