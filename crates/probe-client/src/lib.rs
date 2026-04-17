@@ -1,5 +1,6 @@
 use std::env;
 use std::fmt::{Display, Formatter};
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -33,6 +34,7 @@ use probe_protocol::runtime::{
     ToolOracleRecipe, ToolSetKind, TurnAuthor, TurnCompleted, TurnPaused, TurnRequest,
     TurnResponse, UpdateSessionControllerRequest, UpdateSessionControllerResponse,
     WatchDetachedSessionRequest, WatchDetachedSessionResponse,
+    unbounded_tool_loop_round_trips_sentinel,
 };
 use probe_protocol::session::{
     PendingToolApproval, SessionControllerAction, SessionId, SessionMetadata, UsageMeasurement,
@@ -258,6 +260,16 @@ impl ProbeClient {
         config: ProbeClientConfig,
         wait_timeout: Duration,
     ) -> Result<Self, ProbeClientError> {
+        if let ProbeClientTransportConfig::LocalDaemon { socket_path } = &config.transport
+            && local_daemon_restart_required(config.probe_home.as_path(), socket_path.as_ref())?
+        {
+            terminate_local_daemon_process(
+                config.probe_home.as_path(),
+                socket_path.as_ref(),
+                wait_timeout,
+            )?;
+            wait_for_local_daemon_shutdown(&config, wait_timeout)?;
+        }
         match Self::connect(config.clone()) {
             Ok(client) => Ok(client),
             Err(error) if is_missing_local_daemon_error(&error) => {
@@ -1153,6 +1165,20 @@ fn build_daemon_command() -> Result<Command, ProbeClientError> {
     Ok(command)
 }
 
+fn local_daemon_binary_path() -> Result<PathBuf, ProbeClientError> {
+    if let Some(path) = env::var_os("PROBE_DAEMON_BIN").map(PathBuf::from) {
+        return Ok(path);
+    }
+
+    let current_exe = env::current_exe().map_err(ProbeClientError::CurrentExecutable)?;
+    let sibling_daemon = sibling_named_binary_path(current_exe.as_path(), "probe-daemon");
+    if sibling_daemon.exists() {
+        return Ok(sibling_daemon);
+    }
+
+    Ok(current_exe)
+}
+
 fn wait_for_local_daemon(
     config: &ProbeClientConfig,
     wait_timeout: Duration,
@@ -1170,6 +1196,139 @@ fn wait_for_local_daemon(
             Err(error) => return Err(error),
         }
     }
+}
+
+fn local_daemon_restart_required(
+    probe_home: &Path,
+    socket_path: Option<&PathBuf>,
+) -> Result<bool, ProbeClientError> {
+    let socket_path = socket_path
+        .cloned()
+        .unwrap_or_else(|| default_local_daemon_socket_path(probe_home));
+    let socket_metadata = match fs::metadata(&socket_path) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(ProbeClientError::ConnectDaemon(error)),
+    };
+    let daemon_binary = local_daemon_binary_path()?;
+    let daemon_metadata =
+        fs::metadata(daemon_binary).map_err(ProbeClientError::CurrentExecutable)?;
+    let socket_modified = socket_metadata
+        .modified()
+        .map_err(ProbeClientError::ConnectDaemon)?;
+    let daemon_modified = daemon_metadata
+        .modified()
+        .map_err(ProbeClientError::CurrentExecutable)?;
+    Ok(daemon_modified > socket_modified)
+}
+
+fn wait_for_local_daemon_shutdown(
+    config: &ProbeClientConfig,
+    wait_timeout: Duration,
+) -> Result<(), ProbeClientError> {
+    let deadline = Instant::now() + wait_timeout;
+    loop {
+        match ProbeClient::connect(config.clone()) {
+            Err(error) if is_missing_local_daemon_error(&error) => return Ok(()),
+            Ok(client) if Instant::now() < deadline => {
+                drop(client);
+                thread::sleep(Duration::from_millis(50));
+            }
+            Ok(_) => {
+                return Err(ProbeClientError::UnexpectedServerMessage(String::from(
+                    "probe-daemon did not shut down in time",
+                )));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn terminate_local_daemon_process(
+    probe_home: &Path,
+    socket_path: Option<&PathBuf>,
+    wait_timeout: Duration,
+) -> Result<(), ProbeClientError> {
+    let socket_path = socket_path
+        .cloned()
+        .unwrap_or_else(|| default_local_daemon_socket_path(probe_home));
+    let Some(pid) = local_daemon_pid(socket_path.as_path())? else {
+        return Ok(());
+    };
+    signal_process(pid, "-TERM")?;
+    let soft_deadline = Instant::now() + wait_timeout.min(Duration::from_secs(2));
+    while Instant::now() < soft_deadline {
+        if local_daemon_pid(socket_path.as_path())?.is_none() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    signal_process(pid, "-KILL")
+}
+
+#[cfg(not(unix))]
+fn terminate_local_daemon_process(
+    _probe_home: &Path,
+    _socket_path: Option<&PathBuf>,
+    _wait_timeout: Duration,
+) -> Result<(), ProbeClientError> {
+    Err(ProbeClientError::UnexpectedServerMessage(String::from(
+        "stale probe-daemon refresh is only implemented on unix platforms",
+    )))
+}
+
+#[cfg(unix)]
+fn local_daemon_pid(socket_path: &Path) -> Result<Option<u32>, ProbeClientError> {
+    let output = Command::new("lsof")
+        .args(["-t", socket_path.to_string_lossy().as_ref()])
+        .output()
+        .map_err(ProbeClientError::Spawn)?;
+    if !output.status.success() && output.stdout.is_empty() {
+        return Ok(None);
+    }
+    let pid = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .and_then(|value| value.trim().parse::<u32>().ok());
+    Ok(pid)
+}
+
+#[cfg(unix)]
+fn signal_process(pid: u32, signal: &str) -> Result<(), ProbeClientError> {
+    let status = Command::new("kill")
+        .args([signal, pid.to_string().as_str()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(ProbeClientError::Spawn)?;
+    if status.success() {
+        Ok(())
+    } else if !process_is_alive(pid) {
+        Ok(())
+    } else {
+        Err(ProbeClientError::UnexpectedServerMessage(format!(
+            "failed to send {signal} to stale probe-daemon pid {pid}"
+        )))
+    }
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", pid.to_string().as_str()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 fn explicit_server_binary(config: &ProbeClientConfig) -> Option<PathBuf> {
@@ -1208,7 +1367,9 @@ fn tool_loop_recipe_from_config(
         tool_set,
         tool_choice: tool_choice_from_config(&config.tool_choice),
         parallel_tool_calls: config.parallel_tool_calls,
-        max_model_round_trips: config.max_model_round_trips,
+        max_model_round_trips: config
+            .max_model_round_trips
+            .unwrap_or_else(unbounded_tool_loop_round_trips_sentinel),
         approval: ToolApprovalRecipe {
             allow_write_tools: config.approval.allow_write_tools,
             allow_network_shell: config.approval.allow_network_shell,

@@ -44,6 +44,7 @@ use probe_protocol::runtime::{
     TransportKind, TurnAuthor, TurnCompleted, TurnPaused, TurnRequest, TurnResponse,
     TurnSubmissionKind, UpdateSessionControllerRequest, UpdateSessionControllerResponse,
     WatchDetachedSessionRequest, WatchDetachedSessionResponse,
+    unbounded_tool_loop_round_trips_sentinel,
 };
 use probe_protocol::session::{
     SessionAttachTransport, SessionBackendTarget, SessionBranchState, SessionChildClosureSummary,
@@ -5407,10 +5408,10 @@ fn same_path_prefix(path: &Path, prefix: &Path) -> bool {
 }
 
 fn tool_loop_from_recipe(recipe: ToolLoopRecipe) -> Result<ToolLoopConfig, RuntimeProtocolError> {
-    if recipe.max_model_round_trips == Some(0) {
+    if recipe.max_model_round_trips == 0 {
         return Err(protocol_error(
             "invalid_tool_loop",
-            "max_model_round_trips must be at least 1 when provided",
+            "max_model_round_trips must be at least 1",
         ));
     }
 
@@ -5420,7 +5421,9 @@ fn tool_loop_from_recipe(recipe: ToolLoopRecipe) -> Result<ToolLoopConfig, Runti
             ToolLoopConfig::coding_bootstrap(tool_choice, recipe.parallel_tool_calls)
         }
     };
-    config.max_model_round_trips = recipe.max_model_round_trips;
+    config.max_model_round_trips = (recipe.max_model_round_trips
+        != unbounded_tool_loop_round_trips_sentinel())
+    .then_some(recipe.max_model_round_trips);
     config.approval = approval_from_recipe(recipe.approval);
     if let Some(oracle) = recipe.oracle {
         config = config.with_oracle(oracle_from_recipe(oracle)?);
@@ -5820,7 +5823,7 @@ mod tests {
             tool_set: ToolSetKind::CodingBootstrap,
             tool_choice: ToolChoice::Auto,
             parallel_tool_calls: false,
-            max_model_round_trips: Some(4),
+            max_model_round_trips: 4,
             approval: ToolApprovalRecipe {
                 allow_write_tools: false,
                 allow_network_shell: false,
@@ -5885,7 +5888,7 @@ mod tests {
             tool_set: ToolSetKind::CodingBootstrap,
             tool_choice: ToolChoice::Auto,
             parallel_tool_calls: false,
-            max_model_round_trips: Some(8),
+            max_model_round_trips: 8,
             approval: ToolApprovalRecipe {
                 allow_write_tools: false,
                 allow_network_shell: false,
