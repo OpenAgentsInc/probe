@@ -1,6 +1,8 @@
 use std::fs;
 
 use assert_cmd::prelude::*;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use insta::{assert_json_snapshot, assert_snapshot};
 use predicates::prelude::*;
 use probe_core::server_control::{PsionicServerConfig, PsionicServerMode};
@@ -239,6 +241,74 @@ fn codex_status_autoloads_workspace_secret_and_prefers_api_key_route_without_aut
             "selected_route=api_key_fallback:PROBE_OPENAI_API_KEY",
         ))
         .stdout(predicate::str::contains("api_key_source=workspace_secret:"));
+}
+
+#[test]
+fn codex_status_reports_selected_account_email_and_api_key_fallback_reason() {
+    let environment = ProbeTestEnvironment::new();
+    let store = OpenAiCodexAuthStore::new(environment.probe_home());
+    fs::create_dir_all(
+        store
+            .path()
+            .parent()
+            .expect("auth file should have parent directory"),
+    )
+    .expect("create auth dir");
+    fs::write(
+        store.path(),
+        serde_json::to_vec_pretty(&json!({
+            "version": 2,
+            "selected_account_key": "acct:acct-rate-limited",
+            "accounts": [{
+                "key": "acct:acct-rate-limited",
+                "refresh": "refresh-rate-limited",
+                "access": signed_token(json!({
+                    "https://api.openai.com/profile": {
+                        "email": "chris@openagents.com"
+                    }
+                })),
+                "expires": u64::MAX / 2,
+                "account_id": "acct-rate-limited",
+                "added_at_ms": 1,
+                "last_selected_at_ms": 1,
+                "rate_limits": {
+                    "fetched_at_ms": u64::MAX / 2,
+                    "plan_type": "pro",
+                    "allowed": false,
+                    "limit_reached": true,
+                    "primary_window": {
+                        "used_percent": 100,
+                        "limit_window_seconds": 604800,
+                        "reset_after_seconds": 1800,
+                        "reset_at": 1776793745
+                    }
+                }
+            }]
+        }))
+        .expect("auth json"),
+    )
+    .expect("write auth json");
+
+    probe_cli_command()
+        .env("PROBE_OPENAI_API_KEY", "probe-secret-key")
+        .arg("codex")
+        .arg("status")
+        .arg("--probe-home")
+        .arg(environment.probe_home())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "selected_account_email=chris@openagents.com",
+        ))
+        .stdout(predicate::str::contains(
+            "selected_route=api_key_fallback:PROBE_OPENAI_API_KEY",
+        ))
+        .stdout(predicate::str::contains(
+            "selected_route_reason=selected subscription account chris@openagents.com is rate-limited",
+        ))
+        .stdout(predicate::str::contains(
+            "account key=acct:acct-rate-limited label=none email=chris@openagents.com",
+        ));
 }
 
 #[test]
@@ -481,4 +551,11 @@ fn acceptance_response_sequence() -> Vec<Value> {
     }
 
     responses
+}
+
+fn signed_token(payload: Value) -> String {
+    format!(
+        "header.{}.signature",
+        URL_SAFE_NO_PAD.encode(payload.to_string())
+    )
 }

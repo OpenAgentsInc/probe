@@ -3271,8 +3271,16 @@ fn print_codex_auth_record(
         status.selected_account_key.as_deref().unwrap_or("none")
     );
     println!(
+        "selected_account_email={}",
+        status.selected_account_email.as_deref().unwrap_or("none")
+    );
+    println!(
         "selected_route={}",
         render_codex_route_summary(routing_plan)
+    );
+    println!(
+        "selected_route_reason={}",
+        render_codex_route_reason(status, Some(routing_plan), None)
     );
 }
 
@@ -3312,6 +3320,10 @@ fn print_codex_auth_status(
         "selected_account_label={}",
         status.selected_account_label.as_deref().unwrap_or("none")
     );
+    println!(
+        "selected_account_email={}",
+        status.selected_account_email.as_deref().unwrap_or("none")
+    );
     println!("api_key_fallback_available={api_key_fallback_available}");
     if let Some(source) = current_openai_api_key_source() {
         println!("api_key_source={source}");
@@ -3319,6 +3331,10 @@ fn print_codex_auth_status(
     if let Some(plan) = routing_plan {
         println!("selected_route={}", render_codex_route_summary(plan));
     }
+    println!(
+        "selected_route_reason={}",
+        render_codex_route_reason(status, routing_plan, routing_error.as_deref())
+    );
     if let Some(error) = routing_error.as_deref() {
         println!("routing_error={error}");
     }
@@ -3351,9 +3367,10 @@ fn print_codex_auth_status(
             .map(|snapshot| snapshot.limit_reached.to_string())
             .unwrap_or_else(|| String::from("unknown"));
         println!(
-            "account key={} label={} selected={} expired={} account_id={} expires_ms={} plan={} allowed={} limit_reached={} used_percent={} reset_after_seconds={}",
+            "account key={} label={} email={} selected={} expired={} account_id={} expires_ms={} plan={} allowed={} limit_reached={} used_percent={} reset_after_seconds={}",
             account.key,
             account.label.as_deref().unwrap_or("none"),
+            account.user_email.as_deref().unwrap_or("none"),
             account.selected,
             account.expired,
             account.account_id.as_deref().unwrap_or("none"),
@@ -3383,6 +3400,85 @@ fn render_codex_route_summary(plan: &probe_openai_auth::OpenAiCodexRoutingPlan) 
         }
         None => String::from("none"),
     }
+}
+
+fn render_codex_route_reason(
+    status: &OpenAiCodexAuthStatus,
+    plan: Option<&probe_openai_auth::OpenAiCodexRoutingPlan>,
+    routing_error: Option<&str>,
+) -> String {
+    if let Some(plan) = plan {
+        match plan.routes.first() {
+            Some(probe_openai_auth::OpenAiCodexRoute::SubscriptionAccount(route)) => {
+                let identity = status
+                    .accounts
+                    .iter()
+                    .find(|account| account.key == route.account_key)
+                    .map(render_codex_account_identity)
+                    .unwrap_or_else(|| {
+                        route
+                            .label
+                            .clone()
+                            .unwrap_or_else(|| route.account_key.clone())
+                    });
+                return format!("subscription account {identity} is active");
+            }
+            Some(probe_openai_auth::OpenAiCodexRoute::ApiKeyFallback(route)) => {
+                if let Some(selected) = status.accounts.iter().find(|account| account.selected) {
+                    if let Some(snapshot) = selected.rate_limits.as_ref() {
+                        if snapshot.is_limited() {
+                            return format!(
+                                "selected subscription account {} is rate-limited (allowed={} limit_reached={} used_percent={} reset_after_seconds={}), falling back to {}",
+                                render_codex_account_identity(selected),
+                                snapshot.allowed,
+                                snapshot.limit_reached,
+                                snapshot
+                                    .used_percent()
+                                    .map(|value| value.to_string())
+                                    .unwrap_or_else(|| String::from("unknown")),
+                                snapshot
+                                    .reset_after_seconds()
+                                    .map(|value| value.to_string())
+                                    .unwrap_or_else(|| String::from("unknown")),
+                                route.env_var
+                            );
+                        }
+                    }
+                }
+                if !status.authenticated {
+                    return format!(
+                        "no authenticated Codex subscription account, using {}",
+                        route.env_var
+                    );
+                }
+                return format!(
+                    "no usable Codex subscription account, using {}",
+                    route.env_var
+                );
+            }
+            None => {}
+        }
+    }
+
+    if let Some(error) = routing_error {
+        return error.to_string();
+    }
+    if !status.authenticated {
+        return String::from("no authenticated Codex subscription account");
+    }
+    String::from("no usable Codex subscription account")
+}
+
+fn render_codex_account_identity(
+    account: &probe_openai_auth::OpenAiCodexAuthAccountStatus,
+) -> String {
+    account
+        .label
+        .as_ref()
+        .cloned()
+        .or_else(|| account.user_email.clone())
+        .or_else(|| account.account_id.clone())
+        .unwrap_or_else(|| account.key.clone())
 }
 
 fn current_openai_api_key_source() -> Option<String> {

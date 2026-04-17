@@ -1605,6 +1605,7 @@ name = "probe-cli"
 version = "0.1.22"
 dependencies = [
  "assert_cmd",
+ "base64",
  "clap",
  "insta",
  "predicates",

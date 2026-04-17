@@ -156,6 +156,7 @@ impl Default for OpenAiCodexAuthState {
 pub struct OpenAiCodexAuthAccountStatus {
     pub key: String,
     pub label: Option<String>,
+    pub user_email: Option<String>,
     pub expires: u64,
     pub expired: bool,
     pub account_id: Option<String>,
@@ -172,6 +173,7 @@ pub struct OpenAiCodexAuthStatus {
     pub account_id: Option<String>,
     pub selected_account_key: Option<String>,
     pub selected_account_label: Option<String>,
+    pub selected_account_email: Option<String>,
     pub account_count: usize,
     pub accounts: Vec<OpenAiCodexAuthAccountStatus>,
 }
@@ -345,6 +347,7 @@ impl OpenAiCodexAuthStore {
                     .map(|account| OpenAiCodexAuthAccountStatus {
                         key: account.key.clone(),
                         label: account.label.clone(),
+                        user_email: parse_profile_email_from_jwt(account.record.access.as_str()),
                         expires: account.record.expires,
                         expired: account.is_expired_at(now_millis),
                         account_id: account.record.account_id.clone(),
@@ -363,6 +366,9 @@ impl OpenAiCodexAuthStore {
                     account_id: selected.and_then(|account| account.record.account_id.clone()),
                     selected_account_key: state.selected_account_key.clone(),
                     selected_account_label: selected.and_then(|account| account.label.clone()),
+                    selected_account_email: selected.and_then(|account| {
+                        parse_profile_email_from_jwt(account.record.access.as_str())
+                    }),
                     account_count: state.accounts.len(),
                     accounts,
                 }
@@ -375,6 +381,7 @@ impl OpenAiCodexAuthStore {
                 account_id: None,
                 selected_account_key: None,
                 selected_account_label: None,
+                selected_account_email: None,
                 account_count: 0,
                 accounts: Vec::new(),
             },
@@ -1368,9 +1375,7 @@ fn extract_account_id(tokens: &TokenResponse) -> Option<String> {
 }
 
 fn parse_account_id_from_jwt(token: &str) -> Option<String> {
-    let payload = token.split('.').nth(1)?;
-    let decoded = URL_SAFE_NO_PAD.decode(payload.as_bytes()).ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    let claims = decode_jwt_claims(token)?;
     claims
         .get("chatgpt_account_id")
         .and_then(serde_json::Value::as_str)
@@ -1391,6 +1396,31 @@ fn parse_account_id_from_jwt(token: &str) -> Option<String> {
                 .and_then(serde_json::Value::as_str)
                 .map(String::from)
         })
+}
+
+fn parse_profile_email_from_jwt(token: &str) -> Option<String> {
+    let claims = decode_jwt_claims(token)?;
+    claims
+        .get("email")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            claims
+                .get("https://api.openai.com/profile")
+                .and_then(|value| value.get("email"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(String::from)
+        })
+}
+
+fn decode_jwt_claims(token: &str) -> Option<serde_json::Value> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload.as_bytes()).ok()?;
+    serde_json::from_slice(&decoded).ok()
 }
 
 fn decode_json_response<T: for<'de> Deserialize<'de>>(
@@ -1702,6 +1732,34 @@ mod tests {
         assert_eq!(
             status.selected_account_key.as_deref(),
             Some("acct:acct-legacy")
+        );
+    }
+
+    #[test]
+    fn status_derives_account_email_from_access_token() {
+        let temp = tempdir().expect("temp dir");
+        let store = OpenAiCodexAuthStore::new(temp.path());
+        store
+            .save(&OpenAiCodexAuthRecord {
+                refresh: String::from("refresh-email"),
+                access: signed_token(serde_json::json!({
+                    "https://api.openai.com/profile": {
+                        "email": "chris@openagents.com"
+                    }
+                })),
+                expires: unix_time_millis().expect("now") + 60_000,
+                account_id: Some(String::from("acct-email")),
+            })
+            .expect("save auth");
+
+        let status = store.status().expect("status");
+        assert_eq!(
+            status.selected_account_email.as_deref(),
+            Some("chris@openagents.com")
+        );
+        assert_eq!(
+            status.accounts[0].user_email.as_deref(),
+            Some("chris@openagents.com")
         );
     }
 
