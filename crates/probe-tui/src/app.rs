@@ -1,5 +1,7 @@
+use std::fs;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use crossterm::event::{
@@ -34,6 +36,7 @@ use crate::screens::{
     ScreenState, SetupOverlay, TaskPhase,
 };
 use crate::worker::BackgroundWorker;
+use probe_decisions::parse_github_issue_targets;
 
 const TICK_RATE: Duration = Duration::from_millis(33);
 const BACKEND_SELECTOR_ORDER: [BackendKind; 3] = [
@@ -361,8 +364,10 @@ impl AppShell {
                         return;
                     }
                     let preview = submission_preview(&submitted, 48);
+                    let turn_config =
+                        runtime_for_submission(self.active_chat_runtime(), submitted.text.as_str());
                     let issue_priority = submitted.text.clone();
-                    let issue_cwd = self.active_chat_runtime().cwd.clone();
+                    let issue_cwd = turn_config.cwd.clone();
                     self.base_screen_mut().submit_user_turn(&submitted);
                     self.base_screen_mut()
                         .record_event(format!("queued Probe runtime turn: {preview}"));
@@ -382,7 +387,7 @@ impl AppShell {
                     if let Err(error) =
                         self.submit_background_task(BackgroundTaskRequest::probe_runtime_turn(
                             submitted.text.clone(),
-                            self.active_chat_runtime().clone(),
+                            turn_config,
                         ))
                     {
                         self.last_status = error;
@@ -945,22 +950,179 @@ fn runtime_for_profile(
     base: &ProbeRuntimeTurnConfig,
     profile: BackendProfile,
 ) -> ProbeRuntimeTurnConfig {
+    runtime_for_profile_at_cwd(base, profile, base.cwd.clone())
+}
+
+fn runtime_for_profile_at_cwd(
+    base: &ProbeRuntimeTurnConfig,
+    profile: BackendProfile,
+    cwd: PathBuf,
+) -> ProbeRuntimeTurnConfig {
     let (system_prompt, harness_profile) = resolve_prompt_contract(
         Some("coding_bootstrap"),
         None,
-        base.cwd.as_path(),
+        cwd.as_path(),
         None,
         profile.kind,
     )
     .unwrap_or((None, None));
     ProbeRuntimeTurnConfig {
         probe_home: base.probe_home.clone(),
-        cwd: base.cwd.clone(),
+        cwd,
         profile,
         system_prompt,
         harness_profile,
         tool_loop: base.tool_loop.clone(),
     }
+}
+
+fn runtime_for_submission(base: &ProbeRuntimeTurnConfig, prompt: &str) -> ProbeRuntimeTurnConfig {
+    let Some(cwd) = prompt_issue_repo_root(base.cwd.as_path(), prompt) else {
+        return base.clone();
+    };
+    if cwd == base.cwd {
+        return base.clone();
+    }
+    runtime_for_profile_at_cwd(base, base.profile.clone(), cwd)
+}
+
+fn prompt_issue_repo_root(cwd: &Path, prompt: &str) -> Option<PathBuf> {
+    let issue_target = parse_github_issue_targets(prompt).into_iter().next()?;
+    discover_local_github_repos(cwd)
+        .into_iter()
+        .find(|repo| repo.owner == issue_target.repo_owner && repo.name == issue_target.repo_name)
+        .map(|repo| repo.local_path)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalGithubRepo {
+    owner: String,
+    name: String,
+    local_path: PathBuf,
+}
+
+fn discover_local_github_repos(cwd: &Path) -> Vec<LocalGithubRepo> {
+    let current_repo_root = git_toplevel_for_tui(cwd);
+    let mut search_roots = Vec::new();
+    push_unique_path_for_tui(&mut search_roots, cwd.to_path_buf());
+    if let Some(repo_root) = current_repo_root.as_ref() {
+        push_unique_path_for_tui(&mut search_roots, repo_root.clone());
+        if let Some(parent) = repo_root.parent() {
+            push_unique_path_for_tui(&mut search_roots, parent.to_path_buf());
+        }
+    }
+
+    let mut repo_roots = Vec::new();
+    for root in search_roots {
+        for repo_root in discover_repo_roots_under_for_tui(root.as_path()) {
+            push_unique_path_for_tui(&mut repo_roots, repo_root);
+        }
+    }
+    if repo_roots.is_empty()
+        && let Some(repo_root) = current_repo_root.as_ref()
+    {
+        repo_roots.push(repo_root.clone());
+    }
+
+    let mut repos = Vec::new();
+    for repo_root in repo_roots {
+        let Some(remote_url) = run_git_string_for_tui(
+            repo_root.as_path(),
+            &["config", "--get", "remote.origin.url"],
+        ) else {
+            continue;
+        };
+        let Some((owner, name)) = parse_github_remote_for_tui(remote_url.as_str()) else {
+            continue;
+        };
+        repos.push(LocalGithubRepo {
+            owner,
+            name,
+            local_path: repo_root,
+        });
+    }
+
+    repos.sort_by(|left, right| left.local_path.cmp(&right.local_path));
+    repos.dedup_by(|left, right| left.owner == right.owner && left.name == right.name);
+    repos
+}
+
+fn discover_repo_roots_under_for_tui(root: &Path) -> Vec<PathBuf> {
+    let mut repos = Vec::new();
+    if git_toplevel_for_tui(root).is_some() && !contains_child_git_repos_for_tui(root) {
+        repos.push(root.to_path_buf());
+        return repos;
+    }
+
+    let Ok(entries) = fs::read_dir(root) else {
+        return repos;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with('.'))
+        {
+            continue;
+        }
+        if let Some(repo_root) = git_toplevel_for_tui(path.as_path()) {
+            push_unique_path_for_tui(&mut repos, repo_root);
+        }
+    }
+    repos
+}
+
+fn contains_child_git_repos_for_tui(root: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(root) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        path.is_dir() && git_toplevel_for_tui(path.as_path()).is_some()
+    })
+}
+
+fn push_unique_path_for_tui(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if !paths.iter().any(|path| path == &candidate) {
+        paths.push(candidate);
+    }
+}
+
+fn git_toplevel_for_tui(path: &Path) -> Option<PathBuf> {
+    run_git_string_for_tui(path, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+}
+
+fn run_git_string_for_tui(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn parse_github_remote_for_tui(remote: &str) -> Option<(String, String)> {
+    let trimmed = remote.trim().trim_end_matches(".git");
+    let suffix = trimmed
+        .strip_prefix("git@github.com:")
+        .or_else(|| trimmed.strip_prefix("https://github.com/"))
+        .or_else(|| trimmed.strip_prefix("git://github.com/"))?;
+    let mut parts = suffix.split('/');
+    let owner = parts.next()?.trim().to_ascii_lowercase();
+    let name = parts.next()?.trim().to_ascii_lowercase();
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((owner, name))
 }
 
 fn default_profile_for_backend_kind(kind: BackendKind) -> BackendProfile {
@@ -1288,7 +1450,8 @@ fn buffer_to_string(buffer: &Buffer) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1420,6 +1583,28 @@ mod tests {
             app.dispatch(event);
         }
         app.dispatch(UiEvent::ComposerSubmit);
+    }
+
+    fn init_git_repo(path: &Path, remote: &str) {
+        fs::create_dir_all(path).expect("create repo dir");
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .arg("-q")
+                .arg(path)
+                .status()
+                .expect("git init")
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(["remote", "add", "origin", remote])
+                .status()
+                .expect("git remote add")
+                .success()
+        );
     }
 
     fn signed_token(payload: serde_json::Value) -> String {
@@ -1771,6 +1956,7 @@ mod tests {
         let rendered = app.render_to_string(120, 32);
         assert!(rendered.contains("› hi"));
         assert!(rendered.contains("!"));
+        assert!(!rendered.contains("paste_mode: multiline"));
         assert!(
             app.recent_events()
                 .iter()
@@ -1809,6 +1995,29 @@ mod tests {
             !app.worker_events()
                 .iter()
                 .any(|entry| entry.contains("GitHub issue selection"))
+        );
+    }
+
+    #[test]
+    fn explicit_github_issue_url_scopes_runtime_to_matching_local_repo() {
+        let environment = ProbeTestEnvironment::new();
+        let openagents_repo = environment.workspace().join("openagents");
+        init_git_repo(
+            openagents_repo.as_path(),
+            "https://github.com/OpenAgentsInc/openagents.git",
+        );
+
+        let config = runtime_test_config(&environment, "http://127.0.0.1:1");
+        let scoped = super::runtime_for_submission(
+            &config,
+            "https://github.com/OpenAgentsInc/openagents/issues/4368 - what do u know about it",
+        );
+
+        assert_eq!(
+            scoped.cwd.canonicalize().expect("canonical scoped cwd"),
+            openagents_repo
+                .canonicalize()
+                .expect("canonical openagents repo path")
         );
     }
 

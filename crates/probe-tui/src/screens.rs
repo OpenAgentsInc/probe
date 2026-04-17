@@ -502,9 +502,6 @@ impl ChatScreen {
                     .join(", ")
             ));
         }
-        if submission.pasted_multiline {
-            body.push(String::from("paste_mode: multiline"));
-        }
         self.transcript
             .push_entry(TranscriptEntry::new(TranscriptRole::User, "You", body));
         self.snap_transcript_to_latest();

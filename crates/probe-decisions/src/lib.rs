@@ -97,6 +97,20 @@ impl SelectedGithubIssue {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct GithubIssueTarget {
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub issue_number: u64,
+}
+
+impl GithubIssueTarget {
+    #[must_use]
+    pub fn repo_slug(&self) -> String {
+        format!("{}/{}", self.repo_owner, self.repo_name)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GithubIssueSelectionDecision {
     pub selected_issue: Option<SelectedGithubIssue>,
@@ -1268,6 +1282,7 @@ impl DecisionModule<GithubIssueSelectionContext, GithubIssueSelectionDecision>
         let priority_lower = priority.to_lowercase();
         let priority_tokens = tokenize(priority);
         let requested_issue_numbers = parse_issue_numbers(priority);
+        let requested_issue_targets = parse_github_issue_targets(priority);
         let mut scored = input
             .issues
             .iter()
@@ -1278,6 +1293,7 @@ impl DecisionModule<GithubIssueSelectionContext, GithubIssueSelectionDecision>
                     &priority_lower,
                     &priority_tokens,
                     &requested_issue_numbers,
+                    &requested_issue_targets,
                 )
             })
             .filter(|score| score.meaningful)
@@ -1536,6 +1552,7 @@ struct GithubIssueCandidateScore<'a> {
     issue: &'a GithubIssueCandidate,
     score: u32,
     meaningful: bool,
+    explicit_issue_target_match: bool,
     exact_issue_match: bool,
     explicit_repo_match: bool,
     repo_overlap_tokens: Vec<String>,
@@ -1559,6 +1576,9 @@ impl GithubIssueCandidateScore<'_> {
 
     fn decision_reason(&self) -> String {
         let mut reasons = Vec::new();
+        if self.explicit_issue_target_match {
+            reasons.push(String::from("matched the explicit GitHub issue reference"));
+        }
         if self.exact_issue_match {
             reasons.push(String::from("matched the requested issue number"));
         }
@@ -1606,6 +1626,7 @@ fn score_github_issue<'a>(
     priority_lower: &str,
     priority_tokens: &BTreeSet<String>,
     requested_issue_numbers: &BTreeSet<u64>,
+    requested_issue_targets: &BTreeSet<GithubIssueTarget>,
 ) -> GithubIssueCandidateScore<'a> {
     let repo_context = repos
         .iter()
@@ -1640,12 +1661,22 @@ fn score_github_issue<'a>(
     let body_overlap_tokens = overlapping_tokens(priority_tokens, &body_tokens, 6);
 
     let exact_issue_match = requested_issue_numbers.contains(&issue.number);
+    let explicit_issue_target_match = requested_issue_targets.iter().any(|target| {
+        target.issue_number == issue.number
+            && target.repo_owner.eq_ignore_ascii_case(&issue.repo_owner)
+            && target.repo_name.eq_ignore_ascii_case(&issue.repo_name)
+    });
     let repo_score = (repo_overlap_tokens.len() as u32) * 900
         + if explicit_repo_match { 4_000 } else { 0 }
         + if issue.current_repo { 250 } else { 0 };
     let issue_score = (title_overlap_tokens.len() as u32) * 1_100
         + (label_overlap_tokens.len() as u32) * 700
         + (body_overlap_tokens.len() as u32) * 180
+        + if explicit_issue_target_match {
+            20_000
+        } else {
+            0
+        }
         + if exact_issue_match { 6_000 } else { 0 };
     let repo_only_fallback = if (explicit_repo_match || !repo_overlap_tokens.is_empty())
         && title_overlap_tokens.is_empty()
@@ -1657,7 +1688,8 @@ fn score_github_issue<'a>(
         0
     };
     let score = repo_score + issue_score + repo_only_fallback;
-    let meaningful = exact_issue_match
+    let meaningful = explicit_issue_target_match
+        || exact_issue_match
         || explicit_repo_match
         || !repo_overlap_tokens.is_empty()
         || !title_overlap_tokens.is_empty()
@@ -1668,6 +1700,7 @@ fn score_github_issue<'a>(
         issue,
         score,
         meaningful,
+        explicit_issue_target_match,
         exact_issue_match,
         explicit_repo_match,
         repo_overlap_tokens,
@@ -1694,6 +1727,14 @@ fn tokenize(value: &str) -> BTreeSet<String> {
         .collect()
 }
 
+#[must_use]
+pub fn parse_github_issue_targets(value: &str) -> BTreeSet<GithubIssueTarget> {
+    value
+        .split_whitespace()
+        .filter_map(parse_github_issue_target_token)
+        .collect()
+}
+
 fn parse_issue_numbers(value: &str) -> BTreeSet<u64> {
     let mut numbers = BTreeSet::new();
     let mut chars = value.chars().peekable();
@@ -1715,6 +1756,58 @@ fn parse_issue_numbers(value: &str) -> BTreeSet<u64> {
         }
     }
     numbers
+}
+
+fn parse_github_issue_target_token(token: &str) -> Option<GithubIssueTarget> {
+    let trimmed = token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | '.' | ';' | '!'
+        )
+    });
+
+    parse_github_issue_url_target(trimmed).or_else(|| parse_github_issue_slug_target(trimmed))
+}
+
+fn parse_github_issue_url_target(token: &str) -> Option<GithubIssueTarget> {
+    let suffix = token
+        .strip_prefix("https://github.com/")
+        .or_else(|| token.strip_prefix("http://github.com/"))
+        .or_else(|| token.strip_prefix("github.com/"))?;
+    let suffix = suffix.split(['?', '#']).next().unwrap_or(suffix);
+    let mut parts = suffix.split('/');
+    let owner = parts.next()?.trim().to_ascii_lowercase();
+    let repo = parts
+        .next()?
+        .trim()
+        .trim_end_matches(".git")
+        .to_ascii_lowercase();
+    let kind = parts.next()?;
+    if kind != "issues" && kind != "pull" {
+        return None;
+    }
+    let issue_number = parts.next()?.trim().parse::<u64>().ok()?;
+    Some(GithubIssueTarget {
+        repo_owner: owner,
+        repo_name: repo,
+        issue_number,
+    })
+}
+
+fn parse_github_issue_slug_target(token: &str) -> Option<GithubIssueTarget> {
+    let (slug, issue_number) = token.rsplit_once('#')?;
+    let issue_number = issue_number.trim().parse::<u64>().ok()?;
+    let (owner, repo) = slug.split_once('/')?;
+    let owner = owner.trim().to_ascii_lowercase();
+    let repo = repo.trim().trim_end_matches(".git").to_ascii_lowercase();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(GithubIssueTarget {
+        repo_owner: owner,
+        repo_name: repo,
+        issue_number,
+    })
 }
 
 fn overlapping_tokens(
@@ -1936,10 +2029,11 @@ mod tests {
 
     use super::{
         AggressiveToolRouteModule, DecisionModule, DecisionModuleEvalSpec, GithubIssueCandidate,
-        GithubIssueSelectionContext, GithubRepoContext, HeuristicGithubIssueSelectionModule,
-        HeuristicLongContextEscalationModule, HeuristicPatchReadinessModule,
-        HeuristicToolRouteModule, StrictPatchReadinessModule, evaluate_candidate_manifest,
-        evaluate_long_context_module, evaluate_patch_readiness_module, evaluate_tool_route_module,
+        GithubIssueSelectionContext, GithubIssueTarget, GithubRepoContext,
+        HeuristicGithubIssueSelectionModule, HeuristicLongContextEscalationModule,
+        HeuristicPatchReadinessModule, HeuristicToolRouteModule, StrictPatchReadinessModule,
+        evaluate_candidate_manifest, evaluate_long_context_module, evaluate_patch_readiness_module,
+        evaluate_tool_route_module, parse_github_issue_targets,
     };
 
     fn sample_summary() -> DecisionSessionSummary {
@@ -2211,5 +2305,79 @@ mod tests {
 
         assert!(decision.selected_issue.is_none());
         assert!(decision.reason.contains("no open GitHub issue matched"));
+    }
+
+    #[test]
+    fn parse_github_issue_targets_extracts_urls_and_repo_slugs() {
+        let parsed = parse_github_issue_targets(
+            "see https://github.com/OpenAgentsInc/openagents/issues/4368 and OpenAgentsInc/probe#118",
+        );
+        assert!(parsed.contains(&GithubIssueTarget {
+            repo_owner: String::from("openagentsinc"),
+            repo_name: String::from("openagents"),
+            issue_number: 4368,
+        }));
+        assert!(parsed.contains(&GithubIssueTarget {
+            repo_owner: String::from("openagentsinc"),
+            repo_name: String::from("probe"),
+            issue_number: 118,
+        }));
+    }
+
+    #[test]
+    fn github_issue_selection_prefers_explicit_issue_url_target() {
+        let module = HeuristicGithubIssueSelectionModule;
+        let decision = module.decide(&GithubIssueSelectionContext {
+            priority: String::from(
+                "https://github.com/OpenAgentsInc/openagents/issues/4368 - what do u know about it",
+            ),
+            repos: vec![GithubRepoContext {
+                owner: String::from("OpenAgentsInc"),
+                name: String::from("openagents"),
+                aliases: vec![String::from("openagents")],
+                current_repo: true,
+                issue_count: 2,
+            }],
+            issues: vec![
+                GithubIssueCandidate {
+                    repo_owner: String::from("OpenAgentsInc"),
+                    repo_name: String::from("openagents"),
+                    number: 4355,
+                    title: String::from(
+                        "Suggested updates to agent install instructions to include Windows with WSL/Ubuntu installation",
+                    ),
+                    body: String::from(
+                        "Suggested updates to agent install instructions to include Windows with WSL/Ubuntu installation",
+                    ),
+                    labels: vec![String::from("docs")],
+                    url: Some(String::from(
+                        "https://github.com/OpenAgentsInc/openagents/issues/4355",
+                    )),
+                    updated_at: Some(String::from("2026-04-16T03:00:00Z")),
+                    current_repo: true,
+                },
+                GithubIssueCandidate {
+                    repo_owner: String::from("OpenAgentsInc"),
+                    repo_name: String::from("openagents"),
+                    number: 4368,
+                    title: String::from("System status update"),
+                    body: String::from("Diagnose the current openagents status issue."),
+                    labels: vec![String::from("triage")],
+                    url: Some(String::from(
+                        "https://github.com/OpenAgentsInc/openagents/issues/4368",
+                    )),
+                    updated_at: Some(String::from("2026-04-16T02:00:00Z")),
+                    current_repo: true,
+                },
+            ],
+        });
+
+        let selected = decision.selected_issue.expect("matching issue");
+        assert_eq!(selected.issue_number, 4368);
+        assert!(
+            selected
+                .reason
+                .contains("matched the explicit GitHub issue reference")
+        );
     }
 }
