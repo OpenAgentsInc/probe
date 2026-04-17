@@ -98,6 +98,16 @@ fn tui_help_is_available() {
 }
 
 #[test]
+fn version_flag_is_available() {
+    probe_cli_command()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("probe"))
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn codex_status_reports_missing_auth_state() {
     let environment = ProbeTestEnvironment::new();
 

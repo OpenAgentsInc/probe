@@ -88,6 +88,7 @@ const WORKSPACE_OPENAI_SECRET_RELATIVE_PATH: &str = ".secrets/probe-openai.env";
 #[command(name = "probe")]
 #[command(bin_name = "probe")]
 #[command(about = "Probe coding-agent runtime CLI")]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
