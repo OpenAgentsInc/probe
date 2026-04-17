@@ -224,10 +224,12 @@ fn codex_status_autoloads_workspace_secret_and_prefers_api_key_route_without_aut
     );
     let nested = environment.workspace().join("nested/worktree");
     fs::create_dir_all(&nested).expect("create nested worktree");
+    let codex_home = isolated_codex_home(&environment);
 
     std::process::Command::cargo_bin("probe-cli")
         .expect("probe-cli binary should build for tests")
         .current_dir(&nested)
+        .env("CODEX_HOME", codex_home.as_os_str())
         .env_remove("PROBE_OPENAI_API_KEY")
         .arg("codex")
         .arg("status")
@@ -241,6 +243,51 @@ fn codex_status_autoloads_workspace_secret_and_prefers_api_key_route_without_aut
             "selected_route=api_key_fallback:PROBE_OPENAI_API_KEY",
         ))
         .stdout(predicate::str::contains("api_key_source=workspace_secret:"));
+}
+
+#[test]
+fn codex_status_imports_local_codex_auth() {
+    let environment = ProbeTestEnvironment::new();
+    let codex_home = environment.workspace().join("codex-home");
+    fs::create_dir_all(&codex_home).expect("create codex home");
+    fs::write(
+        codex_home.join("auth.json"),
+        serde_json::to_vec_pretty(&json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": signed_token(json!({
+                    "exp": u64::MAX / 2,
+                    "https://api.openai.com/auth": {
+                        "chatgpt_account_id": "acct-codex"
+                    },
+                    "https://api.openai.com/profile": {
+                        "email": "arcadecd@gmail.com"
+                    }
+                })),
+                "refresh_token": "refresh-codex",
+                "account_id": "acct-codex"
+            }
+        }))
+        .expect("auth json"),
+    )
+    .expect("write auth json");
+
+    probe_cli_command()
+        .env("CODEX_HOME", codex_home.as_os_str())
+        .env_remove("PROBE_OPENAI_API_KEY")
+        .arg("codex")
+        .arg("status")
+        .arg("--probe-home")
+        .arg(environment.probe_home())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("authenticated=true"))
+        .stdout(predicate::str::contains(
+            "selected_account_email=arcadecd@gmail.com",
+        ))
+        .stdout(predicate::str::contains(
+            "selected_route=subscription:acct:acct-codex:none",
+        ));
 }
 
 #[test]
@@ -386,10 +433,12 @@ fn codex_logout_can_remove_one_account_without_clearing_the_store() {
 fn exec_codex_profile_requires_login_before_request_execution_when_api_key_is_absent() {
     let environment = ProbeTestEnvironment::new();
     environment.seed_coding_workspace();
+    let codex_home = isolated_codex_home(&environment);
 
     std::process::Command::cargo_bin("probe-cli")
         .expect("probe-cli binary should build for tests")
         .current_dir(environment.workspace())
+        .env("CODEX_HOME", codex_home.as_os_str())
         .env_remove("PROBE_OPENAI_API_KEY")
         .arg("exec")
         .arg("--profile")
@@ -558,4 +607,10 @@ fn signed_token(payload: Value) -> String {
         "header.{}.signature",
         URL_SAFE_NO_PAD.encode(payload.to_string())
     )
+}
+
+fn isolated_codex_home(environment: &ProbeTestEnvironment) -> std::path::PathBuf {
+    let path = environment.workspace().join("isolated-codex-home");
+    fs::create_dir_all(&path).expect("create isolated CODEX_HOME");
+    path
 }

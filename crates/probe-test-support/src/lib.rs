@@ -6,6 +6,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Once;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -13,6 +14,8 @@ use std::time::Duration;
 use assert_cmd::cargo::CommandCargoExt;
 use serde_json::Value;
 use tempfile::TempDir;
+
+static TEST_CODEX_HOME_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Debug)]
 pub struct FakeHttpResponse {
@@ -370,7 +373,18 @@ pub fn probe_cli_command() -> Command {
     let mut command =
         Command::cargo_bin("probe-cli").expect("probe-cli binary should build for tests");
     command.env("PROBE_OPENAI_API_KEY", "probe-test-openai-key");
+    command.env("CODEX_HOME", fresh_test_codex_home());
     command
+}
+
+fn fresh_test_codex_home() -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "probe-test-codex-home-{}-{}",
+        std::process::id(),
+        TEST_CODEX_HOME_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&path).expect("create isolated CODEX_HOME for tests");
+    path
 }
 
 pub fn write_openai_attach_server_config(

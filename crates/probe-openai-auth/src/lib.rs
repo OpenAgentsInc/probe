@@ -20,11 +20,15 @@ pub const DEFAULT_OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const DEFAULT_OPENAI_BROWSER_OAUTH_PORT: u16 = 1455;
 pub const DEFAULT_POLLING_SAFETY_MARGIN_MS: u64 = 3_000;
 pub const DEFAULT_CHATGPT_BACKEND_API_BASE_URL: &str = "https://chatgpt.com/backend-api";
+pub const DEFAULT_CODEX_HOME_RELATIVE_PATH: &str = ".codex";
+pub const DEFAULT_PROBE_HOME_RELATIVE_PATH: &str = ".probe";
 
 const DEFAULT_BROWSER_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_RATE_LIMIT_CACHE_TTL_MS: u64 = 60_000;
 const AUTH_FILE_FORMAT_VERSION: u32 = 2;
 const AUTH_FILE_RELATIVE_PATH: &str = "auth/openai-codex.json";
+const CODEX_HOME_ENV: &str = "CODEX_HOME";
+const CODEX_AUTH_FILE_NAME: &str = "auth.json";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenAiCodexAuthRecord {
@@ -227,6 +231,7 @@ pub struct OpenAiAuthConfig {
     pub polling_safety_margin: Duration,
     pub backend_api_base_url: String,
     pub rate_limit_cache_ttl: Duration,
+    pub local_codex_auth_path: Option<PathBuf>,
 }
 
 impl Default for OpenAiAuthConfig {
@@ -239,8 +244,25 @@ impl Default for OpenAiAuthConfig {
             polling_safety_margin: Duration::from_millis(DEFAULT_POLLING_SAFETY_MARGIN_MS),
             backend_api_base_url: String::from(DEFAULT_CHATGPT_BACKEND_API_BASE_URL),
             rate_limit_cache_ttl: Duration::from_millis(DEFAULT_RATE_LIMIT_CACHE_TTL_MS),
+            local_codex_auth_path: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct LocalCodexAuthFile {
+    #[serde(default)]
+    auth_mode: Option<String>,
+    #[serde(default)]
+    tokens: Option<LocalCodexTokenData>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct LocalCodexTokenData {
+    access_token: String,
+    refresh_token: String,
+    #[serde(default)]
+    account_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -456,10 +478,12 @@ impl OpenAiCodexAuthController {
     }
 
     pub fn status(&self) -> Result<OpenAiCodexAuthStatus, OpenAiAuthError> {
+        self.sync_local_codex_auth_if_available()?;
         self.store.status()
     }
 
     pub fn refresh_accounts_for_routing(&self) -> Result<(), OpenAiAuthError> {
+        self.sync_local_codex_auth_if_available()?;
         let Some(mut state) = self.store.load_state()? else {
             return Ok(());
         };
@@ -468,6 +492,7 @@ impl OpenAiCodexAuthController {
     }
 
     pub fn load(&self) -> Result<Option<OpenAiCodexAuthRecord>, OpenAiAuthError> {
+        self.sync_local_codex_auth_if_available()?;
         self.store.load()
     }
 
@@ -540,6 +565,7 @@ impl OpenAiCodexAuthController {
     }
 
     pub fn refresh_now(&self) -> Result<Option<OpenAiCodexAuthRecord>, OpenAiAuthError> {
+        self.sync_local_codex_auth_if_available()?;
         let Some(mut state) = self.store.load_state()? else {
             return Ok(None);
         };
@@ -552,6 +578,7 @@ impl OpenAiCodexAuthController {
     }
 
     pub fn refresh_if_needed(&self) -> Result<Option<OpenAiCodexAuthRecord>, OpenAiAuthError> {
+        self.sync_local_codex_auth_if_available()?;
         let Some(mut state) = self.store.load_state()? else {
             return Ok(None);
         };
@@ -571,6 +598,7 @@ impl OpenAiCodexAuthController {
         &self,
         api_key_env: Option<&str>,
     ) -> Result<OpenAiCodexRoutingPlan, OpenAiAuthError> {
+        self.sync_local_codex_auth_if_available()?;
         let fallback = api_key_env.and_then(|env_var| {
             read_env_token(env_var).map(|api_key| {
                 OpenAiCodexRoute::ApiKeyFallback(OpenAiCodexApiKeyFallbackRoute {
@@ -646,6 +674,67 @@ impl OpenAiCodexAuthController {
             routes,
             api_key_fallback_available,
         })
+    }
+
+    fn sync_local_codex_auth_if_available(&self) -> Result<(), OpenAiAuthError> {
+        let Some(record) = self.load_local_codex_auth_record()? else {
+            return Ok(());
+        };
+        if self.store.load()?.as_ref() == Some(&record) {
+            return Ok(());
+        }
+        self.store.save_account(&record, None)?;
+        Ok(())
+    }
+
+    fn load_local_codex_auth_record(
+        &self,
+    ) -> Result<Option<OpenAiCodexAuthRecord>, OpenAiAuthError> {
+        let Some(auth_path) = self.local_codex_auth_path() else {
+            return Ok(None);
+        };
+        if !auth_path.exists() {
+            return Ok(None);
+        }
+        let raw = fs::read_to_string(auth_path.as_path()).map_err(OpenAiAuthError::Io)?;
+        let auth: LocalCodexAuthFile = serde_json::from_str(&raw).map_err(OpenAiAuthError::Json)?;
+        if !auth_mode_uses_chatgpt_tokens(auth.auth_mode.as_deref()) {
+            return Ok(None);
+        }
+        let Some(tokens) = auth.tokens else {
+            return Ok(None);
+        };
+        let expires = parse_expiry_ms_from_jwt(tokens.access_token.as_str()).ok_or_else(|| {
+            OpenAiAuthError::Store(format!(
+                "local Codex auth at {} is missing a JWT exp claim",
+                auth_path.display()
+            ))
+        })?;
+        let account_id = tokens
+            .account_id
+            .or_else(|| parse_account_id_from_jwt(tokens.access_token.as_str()));
+        Ok(Some(OpenAiCodexAuthRecord {
+            refresh: tokens.refresh_token,
+            access: tokens.access_token,
+            expires,
+            account_id,
+        }))
+    }
+
+    fn local_codex_auth_path(&self) -> Option<PathBuf> {
+        if let Some(path) = self.config.local_codex_auth_path.clone() {
+            return Some(path);
+        }
+        if std::env::var_os(CODEX_HOME_ENV).is_none() && !self.uses_default_probe_home() {
+            return None;
+        }
+        default_local_codex_auth_path()
+    }
+
+    fn uses_default_probe_home(&self) -> bool {
+        default_probe_auth_path()
+            .as_ref()
+            .is_some_and(|path| self.store.path() == path)
     }
 
     pub fn mark_selected_account(&self, account_key: &str) -> Result<(), OpenAiAuthError> {
@@ -1417,10 +1506,53 @@ fn parse_profile_email_from_jwt(token: &str) -> Option<String> {
         })
 }
 
+fn parse_expiry_ms_from_jwt(token: &str) -> Option<u64> {
+    let claims = decode_jwt_claims(token)?;
+    claims
+        .get("exp")
+        .and_then(serde_json::Value::as_u64)
+        .map(|seconds| seconds.saturating_mul(1000))
+}
+
 fn decode_jwt_claims(token: &str) -> Option<serde_json::Value> {
     let payload = token.split('.').nth(1)?;
     let decoded = URL_SAFE_NO_PAD.decode(payload.as_bytes()).ok()?;
     serde_json::from_slice(&decoded).ok()
+}
+
+fn auth_mode_uses_chatgpt_tokens(mode: Option<&str>) -> bool {
+    matches!(mode, Some("chatgpt") | Some("chatgptAuthTokens"))
+}
+
+fn default_local_codex_auth_path() -> Option<PathBuf> {
+    codex_home_dir().map(|dir| dir.join(CODEX_AUTH_FILE_NAME))
+}
+
+fn default_probe_auth_path() -> Option<PathBuf> {
+    home_dir().map(|dir| {
+        dir.join(DEFAULT_PROBE_HOME_RELATIVE_PATH)
+            .join(AUTH_FILE_RELATIVE_PATH)
+    })
+}
+
+fn codex_home_dir() -> Option<PathBuf> {
+    std::env::var_os(CODEX_HOME_ENV)
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|dir| dir.join(DEFAULT_CODEX_HOME_RELATIVE_PATH)))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from).or_else(|| {
+        std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .or_else(|| {
+                let drive = std::env::var_os("HOMEDRIVE")?;
+                let path = std::env::var_os("HOMEPATH")?;
+                let mut combined = PathBuf::from(drive);
+                combined.push(path);
+                Some(combined)
+            })
+    })
 }
 
 fn decode_json_response<T: for<'de> Deserialize<'de>>(
@@ -1494,6 +1626,7 @@ mod tests {
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpStream;
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
@@ -1561,6 +1694,7 @@ mod tests {
                 polling_safety_margin: Duration::from_millis(1),
                 backend_api_base_url: auth_server.base_url().to_string(),
                 rate_limit_cache_ttl: Duration::from_secs(60),
+                local_codex_auth_path: None,
             },
         )
         .expect("controller");
@@ -1640,6 +1774,7 @@ mod tests {
                 polling_safety_margin: Duration::from_millis(1),
                 backend_api_base_url: auth_server.base_url().to_string(),
                 rate_limit_cache_ttl: Duration::from_secs(60),
+                local_codex_auth_path: None,
             },
         )
         .expect("controller");
@@ -1680,6 +1815,7 @@ mod tests {
                 polling_safety_margin: Duration::from_millis(1),
                 backend_api_base_url: auth_server.base_url().to_string(),
                 rate_limit_cache_ttl: Duration::from_secs(60),
+                local_codex_auth_path: None,
             },
         )
         .expect("controller");
@@ -1764,6 +1900,43 @@ mod tests {
     }
 
     #[test]
+    fn status_imports_local_codex_auth_when_probe_store_is_missing() {
+        let temp = tempdir().expect("temp dir");
+        let local_codex_auth_path = temp.path().join("codex-auth.json");
+        write_local_codex_auth(
+            local_codex_auth_path.as_path(),
+            "arcadecd@gmail.com",
+            "acct-codex",
+            "pro",
+        );
+        let controller = OpenAiCodexAuthController::with_config(
+            temp.path(),
+            OpenAiAuthConfig {
+                local_codex_auth_path: Some(local_codex_auth_path),
+                ..OpenAiAuthConfig::default()
+            },
+        )
+        .expect("controller");
+
+        let status = controller.status().expect("status");
+        assert!(status.authenticated);
+        assert_eq!(status.account_count, 1);
+        assert_eq!(status.account_id.as_deref(), Some("acct-codex"));
+        assert_eq!(
+            status.selected_account_email.as_deref(),
+            Some("arcadecd@gmail.com")
+        );
+        assert_eq!(
+            controller
+                .store()
+                .load()
+                .expect("persisted auth")
+                .and_then(|record| record.account_id),
+            Some(String::from("acct-codex"))
+        );
+    }
+
+    #[test]
     fn routing_plan_prefers_account_with_more_headroom() {
         let temp = tempdir().expect("temp dir");
         let backend = FakeAppleFmServer::from_handler(|request: FakeHttpRequest| {
@@ -1799,6 +1972,7 @@ mod tests {
                 polling_safety_margin: Duration::from_millis(1),
                 backend_api_base_url: backend.base_url().to_string(),
                 rate_limit_cache_ttl: Duration::from_secs(0),
+                local_codex_auth_path: None,
             },
         )
         .expect("controller");
@@ -1838,6 +2012,97 @@ mod tests {
     }
 
     #[test]
+    fn routing_plan_prefers_local_codex_auth_over_stale_probe_account() {
+        let temp = tempdir().expect("temp dir");
+        let local_codex_auth_path = temp.path().join("codex-auth.json");
+        write_local_codex_auth(
+            local_codex_auth_path.as_path(),
+            "arcadecd@gmail.com",
+            "acct-codex",
+            "pro",
+        );
+        let backend = FakeAppleFmServer::from_handler(|request: FakeHttpRequest| {
+            assert_eq!(request.path, "/wham/usage");
+            if request.raw.contains("chatgpt-account-id: acct-codex") {
+                FakeHttpResponse::json_ok(serde_json::json!({
+                    "plan_type": "pro",
+                    "rate_limit": {
+                        "allowed": true,
+                        "limit_reached": false,
+                        "primary_window": {
+                            "used_percent": 12,
+                            "limit_window_seconds": 604800,
+                            "reset_after_seconds": 3600,
+                            "reset_at": 1776793745
+                        }
+                    }
+                }))
+            } else if request.raw.contains("chatgpt-account-id: acct-stale") {
+                FakeHttpResponse::json_ok(serde_json::json!({
+                    "plan_type": "pro",
+                    "rate_limit": {
+                        "allowed": false,
+                        "limit_reached": true,
+                        "primary_window": {
+                            "used_percent": 100,
+                            "limit_window_seconds": 604800,
+                            "reset_after_seconds": 1800,
+                            "reset_at": 1776793745
+                        }
+                    }
+                }))
+            } else {
+                panic!("missing account header in request: {}", request.raw);
+            }
+        });
+        let controller = OpenAiCodexAuthController::with_config(
+            temp.path(),
+            OpenAiAuthConfig {
+                issuer: String::from("https://auth.openai.test"),
+                client_id: String::from(DEFAULT_OPENAI_CLIENT_ID),
+                oauth_port: 0,
+                browser_timeout: Duration::from_secs(2),
+                polling_safety_margin: Duration::from_millis(1),
+                backend_api_base_url: backend.base_url().to_string(),
+                rate_limit_cache_ttl: Duration::from_secs(0),
+                local_codex_auth_path: Some(local_codex_auth_path),
+            },
+        )
+        .expect("controller");
+        controller
+            .store()
+            .save(&OpenAiCodexAuthRecord {
+                refresh: String::from("refresh-stale"),
+                access: signed_token(serde_json::json!({
+                    "exp": 4_200,
+                    "https://api.openai.com/auth": {
+                        "chatgpt_account_id": "acct-stale"
+                    },
+                    "https://api.openai.com/profile": {
+                        "email": "chris@openagents.com"
+                    }
+                })),
+                expires: unix_time_millis().expect("now") + 60_000,
+                account_id: Some(String::from("acct-stale")),
+            })
+            .expect("save stale auth");
+
+        let plan = controller.routing_plan(None).expect("routing plan");
+        match plan.routes.first() {
+            Some(OpenAiCodexRoute::SubscriptionAccount(route)) => {
+                assert_eq!(route.account_key, "acct:acct-codex");
+            }
+            other => panic!("unexpected first route: {other:?}"),
+        }
+
+        let status = controller.status().expect("status");
+        assert_eq!(
+            status.selected_account_email.as_deref(),
+            Some("arcadecd@gmail.com")
+        );
+    }
+
+    #[test]
     fn routing_plan_uses_optional_api_key_fallback_when_accounts_are_limited() {
         let temp = tempdir().expect("temp dir");
         let backend = FakeAppleFmServer::from_handler(|request: FakeHttpRequest| {
@@ -1866,6 +2131,7 @@ mod tests {
                 polling_safety_margin: Duration::from_millis(1),
                 backend_api_base_url: backend.base_url().to_string(),
                 rate_limit_cache_ttl: Duration::from_secs(0),
+                local_codex_auth_path: None,
             },
         )
         .expect("controller");
@@ -1954,6 +2220,7 @@ mod tests {
                 polling_safety_margin: Duration::from_millis(1),
                 backend_api_base_url: backend.base_url().to_string(),
                 rate_limit_cache_ttl: Duration::from_secs(0),
+                local_codex_auth_path: None,
             },
         )
         .expect("controller");
@@ -2043,6 +2310,27 @@ mod tests {
         signed_token(serde_json::json!({
             "chatgpt_account_id": account_id
         }))
+    }
+
+    fn write_local_codex_auth(path: &Path, email: &str, account_id: &str, plan_type: &str) {
+        let auth = serde_json::json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": signed_token(serde_json::json!({
+                    "exp": 4_200_000_000_u64,
+                    "https://api.openai.com/auth": {
+                        "chatgpt_account_id": account_id,
+                        "chatgpt_plan_type": plan_type
+                    },
+                    "https://api.openai.com/profile": {
+                        "email": email
+                    }
+                })),
+                "refresh_token": "refresh-token",
+                "account_id": account_id
+            }
+        });
+        fs::write(path, serde_json::to_vec_pretty(&auth).expect("auth json")).expect("write auth");
     }
 
     fn signed_token(payload: serde_json::Value) -> String {

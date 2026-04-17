@@ -7,7 +7,7 @@ use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_core::server_control::ServerOperatorSummary;
 use probe_core::tools::tool_result_model_text;
 use probe_decisions::SelectedGithubIssue;
-use probe_openai_auth::{OpenAiCodexAuthController, OpenAiCodexAuthStore, OpenAiCodexRoute};
+use probe_openai_auth::{OpenAiCodexAuthController, OpenAiCodexRoute};
 use probe_protocol::session::{PendingToolApproval, ToolApprovalResolution};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -1817,10 +1817,18 @@ impl ChatScreen {
                 String::from("reason: no probe_home configured for this lane"),
             ];
         };
-        let store = OpenAiCodexAuthStore::new(probe_home);
+        let controller = match OpenAiCodexAuthController::new(probe_home) {
+            Ok(controller) => controller,
+            Err(error) => {
+                return vec![
+                    String::from("status: unavailable"),
+                    format!("reason: failed to load Codex auth controller: {error}"),
+                ];
+            }
+        };
         let route_summary = codex_route_summary(probe_home.as_path());
         let api_key_source = current_openai_api_key_source();
-        match store.status() {
+        match controller.status() {
             Ok(status) if status.authenticated => {
                 let mut lines = vec![
                     String::from("status: connected"),
@@ -1833,9 +1841,13 @@ impl ChatScreen {
                     ),
                     format!(
                         "selected: {}",
-                        status.selected_account_label.as_deref().unwrap_or_else(|| {
-                            status.selected_account_key.as_deref().unwrap_or("none")
-                        })
+                        status
+                            .selected_account_label
+                            .as_deref()
+                            .or(status.selected_account_email.as_deref())
+                            .unwrap_or_else(|| {
+                                status.selected_account_key.as_deref().unwrap_or("none")
+                            })
                     ),
                 ];
                 if let Some(route_summary) = route_summary.as_ref() {
