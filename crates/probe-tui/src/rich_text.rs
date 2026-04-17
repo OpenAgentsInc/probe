@@ -321,22 +321,29 @@ fn flush_token(spans: &mut Vec<Span<'static>>, token: &mut String, base: Style) 
     }
 
     let owned = mem::take(token);
-    let trimmed_start = owned
-        .find(|ch: char| !leading_punctuation(ch))
+    // Use character boundaries only. The previous logic used `rfind(..) + 1` as an exclusive
+    // end byte index, which is only valid for ASCII; multi-byte punctuation (e.g. U+201C “)
+    // would slice inside a UTF-8 character and panic.
+    let start_byte = owned
+        .char_indices()
+        .find(|&(_, ch)| !leading_punctuation(ch))
+        .map(|(bi, _)| bi)
         .unwrap_or(owned.len());
-    let trimmed_end = owned
-        .rfind(|ch: char| !trailing_punctuation(ch))
-        .map(|index| index + 1)
+    let end_byte = owned
+        .char_indices()
+        .rev()
+        .find(|&(_, ch)| !trailing_punctuation(ch))
+        .map(|(bi, ch)| bi + ch.len_utf8())
         .unwrap_or(0);
 
-    if trimmed_start >= trimmed_end {
+    if start_byte >= end_byte {
         spans.push(Span::styled(owned, base));
         return;
     }
 
-    let prefix = &owned[..trimmed_start];
-    let core = &owned[trimmed_start..trimmed_end];
-    let suffix = &owned[trimmed_end..];
+    let prefix = &owned[..start_byte];
+    let core = &owned[start_byte..end_byte];
+    let suffix = &owned[end_byte..];
 
     if !prefix.is_empty() {
         spans.push(Span::styled(prefix.to_string(), base));
@@ -458,6 +465,15 @@ mod tests {
     use ratatui::style::{Color, Modifier, Style};
 
     use super::{highlight_inline_line, render_markdownish_lines};
+
+    #[test]
+    fn inline_highlight_does_not_panic_on_unicode_quote_tokens() {
+        let line = highlight_inline_line("\u{201C}panic?\u{201D}", Style::default());
+        assert!(
+            !line.spans.is_empty(),
+            "expected spans for curly-quote token"
+        );
+    }
 
     #[test]
     fn inline_highlighting_styles_commands_mentions_paths_and_issues() {
