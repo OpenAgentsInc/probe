@@ -9,8 +9,8 @@ use forge_eval::{IssueThreadEvalReport, fetch_issue_thread, run_issue_thread_eva
 use forge_policy::ExecutionPolicyBundle;
 use forge_rlm_core::{IssueBody, IssueComment, IssueThreadCorpus};
 use forge_runtime_protocol::{
-    CorpusKind, CorpusLocator, ExecutionBudget, ExecutionStatus, OutputSchema, RuntimeAssignment,
-    RuntimeExecutionResult,
+    CorpusKind, CorpusLocator, ExecutionBudget, ExecutionStatus, OutputSchema, PublishedArtifact,
+    RuntimeAssignment, RuntimeExecutionResult,
 };
 use forge_signatures::StrategyFamily;
 use serde::{Deserialize, Serialize};
@@ -56,7 +56,13 @@ impl ForgeRlmExecutionPlan {
                     max_iterations: bundle.max_iterations,
                     max_loaded_chunks: bundle.max_loaded_chunks,
                     max_duration_seconds: DEFAULT_MAX_DURATION_SECONDS,
+                    max_sub_lm_calls: 0,
+                    max_loaded_bytes: 2_000_000,
+                    max_stdout_bytes: 16_384,
+                    max_observation_bytes: 65_536,
                 },
+                model_roles: bundle.model_roles,
+                repl_policy: bundle.repl_policy,
                 output_schema: OutputSchema::IssueThreadAnalysisV1,
             },
             workspace_ref: None,
@@ -402,6 +408,44 @@ pub fn execute_forge_rlm_plan_with_events(
             artifacts.runtime_result_path.clone(),
             artifacts.brief_path.clone(),
         ],
+        artifacts: vec![
+            PublishedArtifact {
+                artifact_name: String::from("assignment"),
+                storage_ref: artifacts.assignment_path.clone(),
+            },
+            PublishedArtifact {
+                artifact_name: String::from("corpus_json"),
+                storage_ref: artifacts.corpus_json_path.clone(),
+            },
+            PublishedArtifact {
+                artifact_name: String::from("corpus_markdown"),
+                storage_ref: artifacts.corpus_markdown_path.clone(),
+            },
+            PublishedArtifact {
+                artifact_name: String::from("chunk_manifest"),
+                storage_ref: artifacts.chunk_manifest_path.clone(),
+            },
+            PublishedArtifact {
+                artifact_name: String::from("report"),
+                storage_ref: artifacts.report_path.clone(),
+            },
+            PublishedArtifact {
+                artifact_name: String::from("trace"),
+                storage_ref: artifacts.trace_path.clone(),
+            },
+            PublishedArtifact {
+                artifact_name: String::from("event_log"),
+                storage_ref: artifacts.event_log_path.clone(),
+            },
+            PublishedArtifact {
+                artifact_name: String::from("runtime_result"),
+                storage_ref: artifacts.runtime_result_path.clone(),
+            },
+            PublishedArtifact {
+                artifact_name: String::from("brief"),
+                storage_ref: artifacts.brief_path.clone(),
+            },
+        ],
         summary: Some(build_execution_summary(&report, chunk_manifest.len())),
     };
 
@@ -631,6 +675,8 @@ fn strategy_family_name(strategy_family: StrategyFamily) -> &'static str {
 fn output_schema_name(output_schema: &OutputSchema) -> &'static str {
     match output_schema {
         OutputSchema::IssueThreadAnalysisV1 => "issue_thread_analysis_v1",
+        OutputSchema::RlmFinalTextV1 => "rlm_final_text_v1",
+        OutputSchema::RlmFinalJsonV1 => "rlm_final_json_v1",
     }
 }
 
@@ -753,7 +799,13 @@ mod tests {
                     max_iterations: 24,
                     max_loaded_chunks: 8,
                     max_duration_seconds: 300,
+                    max_sub_lm_calls: 0,
+                    max_loaded_bytes: 2_000_000,
+                    max_stdout_bytes: 16_384,
+                    max_observation_bytes: 65_536,
                 },
+                model_roles: bundle.model_roles,
+                repl_policy: bundle.repl_policy,
                 output_schema: OutputSchema::IssueThreadAnalysisV1,
             },
             workspace_ref: Some(String::from("workspace://probe/test")),
@@ -823,7 +875,13 @@ mod tests {
                         max_iterations: 24,
                         max_loaded_chunks: 8,
                         max_duration_seconds: 300,
+                        max_sub_lm_calls: 0,
+                        max_loaded_bytes: 2_000_000,
+                        max_stdout_bytes: 16_384,
+                        max_observation_bytes: 65_536,
                     },
+                    model_roles: bundle.model_roles,
+                    repl_policy: bundle.repl_policy,
                     output_schema: OutputSchema::IssueThreadAnalysisV1,
                 },
                 workspace_ref: None,
@@ -867,7 +925,13 @@ mod tests {
                         max_iterations: 24,
                         max_loaded_chunks: 1,
                         max_duration_seconds: 300,
+                        max_sub_lm_calls: 0,
+                        max_loaded_bytes: 2_000_000,
+                        max_stdout_bytes: 16_384,
+                        max_observation_bytes: 65_536,
                     },
+                    model_roles: bundle.model_roles,
+                    repl_policy: bundle.repl_policy,
                     output_schema: OutputSchema::IssueThreadAnalysisV1,
                 },
                 workspace_ref: None,

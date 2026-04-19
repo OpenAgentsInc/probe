@@ -17,6 +17,7 @@ probe-provider-openai.workspace = true
 probe-openai-auth.workspace = true
 psionic-apple-fm.workspace = true
 reqwest.workspace = true
+rhai.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -5,6 +5,7 @@ pub mod forge_run_worker;
 pub mod forge_worker;
 pub mod harness;
 pub mod long_context;
+pub mod paper_rlm;
 pub mod provider;
 pub mod runtime;
 pub mod server_control;
