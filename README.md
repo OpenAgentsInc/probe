@@ -33,6 +33,9 @@ Current shipped surface:
 - local acceptance/eval and module-optimization tooling
 - private Forge worker-attachment support in `probe-core::forge_worker` for
   persisted worker-session state, attach, heartbeat, and revocation handling
+- Forge-owned RLM assignment execution in `probe-core::forge_rlm` plus
+  `probe forge rlm execute|proof-openagents-4368` for large-corpus issue-thread
+  analysis with chunk manifests, trace artifacts, and grounded outputs
 
 ## Backends
 
@@ -386,6 +389,54 @@ That runtime path is still deliberately subordinate to Forge:
 
 Probe still does not become the authority for Work Orders, Runs, Leases,
 Evidence, Verification, or Delivery.
+
+Probe now also has a private Forge-owned RLM execution lane in
+`probe-core::forge_rlm`.
+
+That lane keeps the split explicit:
+
+- Forge owns the canonical strategy family, policy bundle, runtime-assignment
+  contract, and issue-thread evaluator crates
+- Probe consumes the typed Forge assignment and execution plan
+- Probe materializes large corpora as local inputs, builds a chunk manifest,
+  emits explicit execution events, and writes replayable artifacts
+- Probe returns structured outputs, trace refs, and artifact refs without
+  pretending the runtime is now the policy authority
+
+The first operator proof is the full live GitHub issue thread for
+`OpenAgentsInc/openagents#4368`.
+
+Run an arbitrary Forge RLM plan:
+
+```bash
+cargo run -p probe-cli -- forge rlm execute \
+  --plan /path/to/forge-rlm-plan.json \
+  --output-dir var/forge-rlm
+```
+
+Run the checked-in live `#4368` proof:
+
+```bash
+GH_TOKEN=$(gh auth token) cargo run -p probe-cli -- \
+  forge rlm proof-openagents-4368 \
+  --output-dir var/forge-rlm
+```
+
+That command writes ignored artifacts under `var/forge-rlm/<label>-<timestamp>/`:
+
+- `assignment.json`
+- `corpus.json`
+- `corpus.md`
+- `chunk_manifest.json`
+- `report.json`
+- `trace.json`
+- `events.json`
+- `runtime_result.json`
+- `brief.md`
+
+See
+[`docs/84-forge-rlm-assignment-execution.md`](docs/84-forge-rlm-assignment-execution.md)
+for the execution envelope, chunking rules, and live-proof validation path.
 
 The first-party worker CLI now sits on top of that runtime layer:
 

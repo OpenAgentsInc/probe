@@ -1,5 +1,6 @@
 mod acceptance;
 
+use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::path::PathBuf;
@@ -26,6 +27,10 @@ use probe_core::backend_profiles::{
 };
 use probe_core::dataset_export::{
     DatasetExportConfig, DatasetKind, DecisionCaseRecord, DecisionSessionSummary, export_dataset,
+};
+use probe_core::forge_rlm::{
+    ForgeRlmExecutionOutcome, ForgeRlmExecutionPlan, ForgeRlmExecutionRequest,
+    execute_forge_rlm_plan,
 };
 use probe_core::forge_run_worker::{
     ForgeAssignedRunExecutionOutcome, ForgeAssignedRunExecutionRequest, ForgeAssignedRunExecutor,
@@ -159,6 +164,38 @@ enum ForgeCommands {
     Detach(ForgeDetachArgs),
     RunOnce(ForgeRunOnceArgs),
     RunLoop(ForgeRunLoopArgs),
+    Rlm(ForgeRlmArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct ForgeRlmArgs {
+    #[command(subcommand)]
+    command: ForgeRlmCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum ForgeRlmCommands {
+    Execute(ForgeRlmExecuteArgs),
+    #[command(name = "proof-openagents-4368")]
+    ProofOpenagents4368(ForgeRlmProofOpenagents4368Args),
+}
+
+#[derive(clap::Args, Debug)]
+struct ForgeRlmExecuteArgs {
+    #[arg(long)]
+    plan: PathBuf,
+    #[arg(long, default_value = "var/forge-rlm")]
+    output_dir: PathBuf,
+    #[arg(long, default_value_t = 48)]
+    max_lines_per_chunk: usize,
+}
+
+#[derive(clap::Args, Debug)]
+struct ForgeRlmProofOpenagents4368Args {
+    #[arg(long, default_value = "var/forge-rlm")]
+    output_dir: PathBuf,
+    #[arg(long, default_value_t = 48)]
+    max_lines_per_chunk: usize,
 }
 
 #[derive(Subcommand, Debug)]
@@ -895,6 +932,14 @@ fn run_forge(args: ForgeArgs) -> Result<(), String> {
         ForgeCommands::Detach(args) => run_forge_detach(args),
         ForgeCommands::RunOnce(args) => run_forge_run_once(args),
         ForgeCommands::RunLoop(args) => run_forge_run_loop(args),
+        ForgeCommands::Rlm(args) => run_forge_rlm(args),
+    }
+}
+
+fn run_forge_rlm(args: ForgeRlmArgs) -> Result<(), String> {
+    match args.command {
+        ForgeRlmCommands::Execute(args) => run_forge_rlm_execute(args),
+        ForgeRlmCommands::ProofOpenagents4368(args) => run_forge_rlm_proof_openagents_4368(args),
     }
 }
 
@@ -1088,6 +1133,26 @@ fn run_forge_run_loop(args: ForgeRunLoopArgs) -> Result<(), String> {
 
         std::thread::sleep(Duration::from_millis(args.poll_interval_ms));
     }
+}
+
+fn run_forge_rlm_execute(args: ForgeRlmExecuteArgs) -> Result<(), String> {
+    let plan = load_forge_rlm_plan(args.plan.as_path())?;
+    let mut request = ForgeRlmExecutionRequest::with_defaults(plan, args.output_dir);
+    request.max_lines_per_chunk = args.max_lines_per_chunk;
+    let outcome = execute_forge_rlm_plan(request).map_err(stringify_error)?;
+    print_forge_rlm_execution_outcome(&outcome)
+}
+
+fn run_forge_rlm_proof_openagents_4368(
+    args: ForgeRlmProofOpenagents4368Args,
+) -> Result<(), String> {
+    let mut request = ForgeRlmExecutionRequest::with_defaults(
+        ForgeRlmExecutionPlan::openagents_4368_issue_thread_proof(),
+        args.output_dir,
+    );
+    request.max_lines_per_chunk = args.max_lines_per_chunk;
+    let outcome = execute_forge_rlm_plan(request).map_err(stringify_error)?;
+    print_forge_rlm_execution_outcome(&outcome)
 }
 
 fn run_codex_login(args: CodexLoginArgs) -> Result<(), String> {
@@ -1973,6 +2038,26 @@ fn parse_optional_json_value(raw: Option<&str>) -> Result<Option<Value>, String>
         .transpose()
 }
 
+fn load_forge_rlm_plan(path: &Path) -> Result<ForgeRlmExecutionPlan, String> {
+    let raw = fs::read_to_string(path)
+        .map_err(|error| format!("failed reading {}: {error}", path.display()))?;
+    let mut plan: ForgeRlmExecutionPlan =
+        serde_json::from_str(&raw).map_err(|error| format!("invalid plan json: {error}"))?;
+
+    if plan.assignment.corpus.kind == forge_runtime_protocol::CorpusKind::LocalPath {
+        let corpus_path = PathBuf::from(&plan.assignment.corpus.storage_ref);
+        if corpus_path.is_relative() {
+            let resolved = path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(corpus_path);
+            plan.assignment.corpus.storage_ref = resolved.to_string_lossy().into_owned();
+        }
+    }
+
+    Ok(plan)
+}
+
 fn print_forge_assignment(assignment: &ForgeAssignedRunRecord) -> Result<(), String> {
     print_kv("request_id", assignment.request_id.as_str())?;
     print_kv("run_id", assignment.run.id.as_str())?;
@@ -2043,6 +2128,43 @@ fn print_forge_execution_outcome(outcome: &ForgeAssignedRunExecutionOutcome) -> 
         }
     }
 
+    Ok(())
+}
+
+fn print_forge_rlm_execution_outcome(outcome: &ForgeRlmExecutionOutcome) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct ForgeRlmCliManifest<'a> {
+        assignment_id: &'a str,
+        strategy_family: &'a str,
+        output_schema: &'a str,
+        issue_url: &'a str,
+        total_items: usize,
+        fetched_comment_count: usize,
+        chunk_count: usize,
+        passed: bool,
+        output_dir: &'a str,
+        summary: Option<&'a str>,
+        artifact_refs: &'a [String],
+    }
+
+    let manifest = ForgeRlmCliManifest {
+        assignment_id: outcome.plan.assignment.assignment_id.as_str(),
+        strategy_family: outcome.plan.assignment.strategy_family.as_str(),
+        output_schema: "issue_thread_analysis_v1",
+        issue_url: outcome.report.corpus_stats.issue_url.as_str(),
+        total_items: outcome.report.corpus_stats.total_items,
+        fetched_comment_count: outcome.report.corpus_stats.fetched_comment_count,
+        chunk_count: outcome.chunk_manifest.len(),
+        passed: outcome.report.summary.passed,
+        output_dir: outcome.artifacts.output_dir.as_str(),
+        summary: outcome.runtime_result.summary.as_deref(),
+        artifact_refs: outcome.runtime_result.artifact_refs.as_slice(),
+    };
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?
+    );
     Ok(())
 }
 

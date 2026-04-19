@@ -26,6 +26,11 @@ assert_cmd = "2.0"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.29"
+forge-eval = { git = "https://github.com/OpenAgentsInc/forge.git", rev = "f39f7036f0364267d5eb7edd7687b4c67b59b8a2", package = "forge-eval" }
+forge-policy = { git = "https://github.com/OpenAgentsInc/forge.git", rev = "f39f7036f0364267d5eb7edd7687b4c67b59b8a2", package = "forge-policy" }
+forge-rlm-core = { git = "https://github.com/OpenAgentsInc/forge.git", rev = "f39f7036f0364267d5eb7edd7687b4c67b59b8a2", package = "forge-rlm-core" }
+forge-runtime-protocol = { git = "https://github.com/OpenAgentsInc/forge.git", rev = "f39f7036f0364267d5eb7edd7687b4c67b59b8a2", package = "forge-runtime-protocol" }
+forge-signatures = { git = "https://github.com/OpenAgentsInc/forge.git", rev = "f39f7036f0364267d5eb7edd7687b4c67b59b8a2", package = "forge-signatures" }
 hex = "0.4"
 insta = { version = "1.43", features = ["json"] }
 predicates = "3.1"

@@ -49,6 +49,29 @@ The first canonical backend path is:
 - local Qwen3.5 GGUF
 - `chat.completions`
 
+## Forge Boundary
+
+Probe also consumes Forge-issued runtime work above the coding lane.
+
+That boundary is explicit:
+
+- Forge owns policy, signatures, assignment authority, and lifecycle truth
+- Probe owns execution, local materialization, chunk planning, runtime events,
+  and artifact publication
+
+For the first RLM lane, Probe consumes Forge-owned types from the private
+Forge repo:
+
+- `forge-runtime-protocol` for the canonical assignment and execution-result
+  contract
+- `forge-policy` and `forge-signatures` for policy references and strategy
+  families
+- `forge-rlm-core` and `forge-eval` for the current issue-thread analysis
+  contract
+
+Probe still does not become the home for promotion state, signature catalogs,
+trace-mining authority, or Forge lifecycle policy.
+
 ## Early Design Rule
 
 Do not reimplement substrate work in Probe before the controller exists.

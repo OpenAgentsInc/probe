@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 clap.workspace = true
+forge-runtime-protocol.workspace = true
 probe-client.workspace = true
 probe-core.workspace = true
 probe-decisions.workspace = true

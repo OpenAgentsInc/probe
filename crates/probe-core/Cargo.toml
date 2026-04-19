@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+forge-eval.workspace = true
+forge-policy.workspace = true
+forge-rlm-core.workspace = true
+forge-runtime-protocol.workspace = true
+forge-signatures.workspace = true
 hex.workspace = true
 probe-protocol.workspace = true
 probe-provider-apple-fm.workspace = true
@@ -15,6 +20,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tokio.workspace = true
 wait-timeout.workspace = true
 
 [dev-dependencies]
