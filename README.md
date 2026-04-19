@@ -470,6 +470,29 @@ for the execution envelope, chunking rules, and live-proof validation path, and
 [`docs/85-issue-thread-strategy-routing.md`](docs/85-issue-thread-strategy-routing.md)
 for the direct-versus-RLM route receipt and TUI override surface.
 
+Probe now also has a retained paper-RLM comparison report in
+`probe-core::issue_thread_eval`.
+
+Run the synthetic acceptance report:
+
+```bash
+CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test -p probe-core \
+  comparison_report_requires_externalization_and_recursive_subcalls \
+  -- --nocapture
+```
+
+Run the gated live `OpenAgentsInc/openagents#4368` comparison:
+
+```bash
+GH_TOKEN=$(gh auth token) PROBE_OPENAI_API_KEY=... \
+  CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test -p probe-core \
+  live_openagents_4368_comparison_reads_the_full_current_thread \
+  -- --ignored --nocapture
+```
+
+See [`docs/86-paper-rlm-evals.md`](docs/86-paper-rlm-evals.md) for the report
+shape and the externalization checks.
+
 The first-party worker CLI now sits on top of that runtime layer:
 
 ```bash

@@ -604,7 +604,7 @@ fn execute_paper_issue_thread_analysis(
     })
 }
 
-fn materialize_issue_thread_corpus(
+pub(crate) fn materialize_issue_thread_corpus(
     source: &IssueThreadCorpusSource,
     github_token: Option<&str>,
 ) -> Result<(IssueThreadCorpus, Option<GithubIssueThreadHandle>), IssueThreadAnalysisError> {
