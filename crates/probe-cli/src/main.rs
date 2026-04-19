@@ -20,17 +20,18 @@ use probe_client::{
     is_missing_local_daemon_error,
 };
 use probe_core::backend_profiles::{
-    PSIONIC_APPLE_FM_BRIDGE_PROFILE, PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE,
-    PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE, PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE,
-    named_backend_profile, openai_codex_subscription, psionic_apple_fm_bridge,
-    psionic_inference_mesh, psionic_qwen35_2b_q8_registry, resolved_reasoning_level_for_backend,
+    OPENAI_CODEX_SUBSCRIPTION_PROFILE, PSIONIC_APPLE_FM_BRIDGE_PROFILE,
+    PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE, PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE,
+    PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE, named_backend_profile, openai_codex_subscription,
+    psionic_apple_fm_bridge, psionic_inference_mesh, psionic_qwen35_2b_q8_registry,
+    resolved_reasoning_level_for_backend,
 };
 use probe_core::dataset_export::{
     DatasetExportConfig, DatasetKind, DecisionCaseRecord, DecisionSessionSummary, export_dataset,
 };
 use probe_core::forge_rlm::{
     ForgeRlmExecutionOutcome, ForgeRlmExecutionPlan, ForgeRlmExecutionRequest,
-    execute_forge_rlm_plan,
+    execute_forge_rlm_plan, resolve_github_token,
 };
 use probe_core::forge_run_worker::{
     ForgeAssignedRunExecutionOutcome, ForgeAssignedRunExecutionRequest, ForgeAssignedRunExecutor,
@@ -39,6 +40,10 @@ use probe_core::forge_worker::{ForgeAssignedRunRecord, ForgeWorkerAuthController
 use probe_core::harness::{
     HarnessCandidateManifest, builtin_harness_candidate_manifests, render_harness_profile,
     resolve_prompt_contract,
+};
+use probe_core::issue_thread_analysis::{
+    GithubIssueThreadHandle, IssueThreadAnalysisRequest, IssueThreadCorpusSource,
+    IssueThreadStrategyMode, execute_issue_thread_analysis, plan_issue_thread_analysis,
 };
 use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, current_working_dir,
@@ -176,8 +181,27 @@ struct ForgeRlmArgs {
 #[derive(Subcommand, Debug)]
 enum ForgeRlmCommands {
     Execute(ForgeRlmExecuteArgs),
+    #[command(name = "analyze-issue-thread")]
+    AnalyzeIssueThread(ForgeRlmAnalyzeIssueThreadArgs),
     #[command(name = "proof-openagents-4368")]
     ProofOpenagents4368(ForgeRlmProofOpenagents4368Args),
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum IssueThreadStrategyModeArg {
+    Auto,
+    Direct,
+    Rlm,
+}
+
+impl From<IssueThreadStrategyModeArg> for IssueThreadStrategyMode {
+    fn from(value: IssueThreadStrategyModeArg) -> Self {
+        match value {
+            IssueThreadStrategyModeArg::Auto => Self::Auto,
+            IssueThreadStrategyModeArg::Direct => Self::Direct,
+            IssueThreadStrategyModeArg::Rlm => Self::Rlm,
+        }
+    }
 }
 
 #[derive(clap::Args, Debug)]
@@ -188,6 +212,36 @@ struct ForgeRlmExecuteArgs {
     output_dir: PathBuf,
     #[arg(long, default_value_t = 48)]
     max_lines_per_chunk: usize,
+}
+
+#[derive(clap::Args, Debug)]
+struct ForgeRlmAnalyzeIssueThreadArgs {
+    #[arg(long)]
+    query: String,
+    #[arg(long)]
+    issue_url: Option<String>,
+    #[arg(long)]
+    repo_owner: Option<String>,
+    #[arg(long)]
+    repo_name: Option<String>,
+    #[arg(long)]
+    issue_number: Option<u64>,
+    #[arg(long)]
+    corpus_json: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = IssueThreadStrategyModeArg::Auto)]
+    strategy: IssueThreadStrategyModeArg,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[arg(long, default_value = "var/forge-rlm")]
+    output_dir: PathBuf,
+    #[arg(long, default_value = PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE)]
+    direct_profile: String,
+    #[arg(long, default_value = OPENAI_CODEX_SUBSCRIPTION_PROFILE)]
+    controller_profile: String,
+    #[arg(long, default_value = OPENAI_CODEX_SUBSCRIPTION_PROFILE)]
+    sub_lm_profile: String,
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -939,6 +993,7 @@ fn run_forge(args: ForgeArgs) -> Result<(), String> {
 fn run_forge_rlm(args: ForgeRlmArgs) -> Result<(), String> {
     match args.command {
         ForgeRlmCommands::Execute(args) => run_forge_rlm_execute(args),
+        ForgeRlmCommands::AnalyzeIssueThread(args) => run_forge_rlm_analyze_issue_thread(args),
         ForgeRlmCommands::ProofOpenagents4368(args) => run_forge_rlm_proof_openagents_4368(args),
     }
 }
@@ -1143,6 +1198,38 @@ fn run_forge_rlm_execute(args: ForgeRlmExecuteArgs) -> Result<(), String> {
     print_forge_rlm_execution_outcome(&outcome)
 }
 
+fn run_forge_rlm_analyze_issue_thread(args: ForgeRlmAnalyzeIssueThreadArgs) -> Result<(), String> {
+    let source = parse_issue_thread_corpus_source(&args)?;
+    let request = IssueThreadAnalysisRequest {
+        source,
+        question: args.query,
+        strategy_mode: args.strategy.into(),
+        has_explicit_issue_reference: args.issue_url.is_some() || args.issue_number.is_some(),
+        direct_profile: named_profile(args.direct_profile.as_str())?,
+        controller_profile: named_profile(args.controller_profile.as_str())?,
+        sub_lm_profile: named_profile(args.sub_lm_profile.as_str())?,
+        probe_home: args.probe_home,
+        output_root: args.output_dir,
+        github_token: resolve_github_token(),
+    };
+
+    if args.dry_run {
+        let plan = plan_issue_thread_analysis(&request).map_err(stringify_error)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&plan).map_err(|error| error.to_string())?
+        );
+        return Ok(());
+    }
+
+    let outcome = execute_issue_thread_analysis(request).map_err(stringify_error)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&outcome).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
 fn run_forge_rlm_proof_openagents_4368(
     args: ForgeRlmProofOpenagents4368Args,
 ) -> Result<(), String> {
@@ -1153,6 +1240,78 @@ fn run_forge_rlm_proof_openagents_4368(
     request.max_lines_per_chunk = args.max_lines_per_chunk;
     let outcome = execute_forge_rlm_plan(request).map_err(stringify_error)?;
     print_forge_rlm_execution_outcome(&outcome)
+}
+
+fn parse_issue_thread_corpus_source(
+    args: &ForgeRlmAnalyzeIssueThreadArgs,
+) -> Result<IssueThreadCorpusSource, String> {
+    if let Some(path) = args.corpus_json.as_ref() {
+        if args.issue_url.is_some()
+            || args.repo_owner.is_some()
+            || args.repo_name.is_some()
+            || args.issue_number.is_some()
+        {
+            return Err(String::from(
+                "cannot combine --corpus-json with --issue-url or --repo-*/--issue-number",
+            ));
+        }
+        return Ok(IssueThreadCorpusSource::LocalPath {
+            path: path.display().to_string(),
+        });
+    }
+
+    if let Some(issue_url) = args.issue_url.as_ref() {
+        return parse_github_issue_url(issue_url);
+    }
+
+    match (
+        args.repo_owner.as_ref(),
+        args.repo_name.as_ref(),
+        args.issue_number,
+    ) {
+        (Some(repo_owner), Some(repo_name), Some(issue_number)) => {
+            Ok(IssueThreadCorpusSource::GithubIssue {
+                handle: GithubIssueThreadHandle {
+                    repo_owner: repo_owner.clone(),
+                    repo_name: repo_name.clone(),
+                    issue_number,
+                    issue_url: Some(format!(
+                        "https://github.com/{repo_owner}/{repo_name}/issues/{issue_number}"
+                    )),
+                },
+            })
+        }
+        _ => Err(String::from(
+            "provide either --corpus-json, --issue-url, or --repo-owner/--repo-name/--issue-number",
+        )),
+    }
+}
+
+fn parse_github_issue_url(raw: &str) -> Result<IssueThreadCorpusSource, String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let prefix = "https://github.com/";
+    let Some(rest) = trimmed.strip_prefix(prefix) else {
+        return Err(String::from(
+            "--issue-url must look like https://github.com/<owner>/<repo>/issues/<number>",
+        ));
+    };
+    let parts = rest.split('/').collect::<Vec<_>>();
+    if parts.len() != 4 || parts[2] != "issues" {
+        return Err(String::from(
+            "--issue-url must look like https://github.com/<owner>/<repo>/issues/<number>",
+        ));
+    }
+    let issue_number = parts[3]
+        .parse::<u64>()
+        .map_err(|_| String::from("issue number in --issue-url must be numeric"))?;
+    Ok(IssueThreadCorpusSource::GithubIssue {
+        handle: GithubIssueThreadHandle {
+            repo_owner: parts[0].to_string(),
+            repo_name: parts[1].to_string(),
+            issue_number,
+            issue_url: Some(trimmed.to_string()),
+        },
+    })
 }
 
 fn run_codex_login(args: CodexLoginArgs) -> Result<(), String> {

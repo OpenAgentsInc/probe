@@ -291,6 +291,18 @@ workspace repos. It is intentionally not yet part of the offline
 decision-case export family, because we do not have the grounded issue-choice
 dataset yet.
 
+Probe now also has a runtime-only typed `RlmTrigger` signature for issue-thread
+analysis routing:
+
+- operator override (`auto`, `direct`, `rlm`)
+- selected GitHub issue-thread handle
+- explicit issue-reference signal
+- corpus-pressure hints
+- selected execution strategy id plus trigger reason
+
+That signature is what keeps the issue-thread route visible to the operator and
+to later optimizer work without hiding the decision inside prompt text.
+
 Current built-in candidate ids:
 
 - `heuristic_tool_route_v1`

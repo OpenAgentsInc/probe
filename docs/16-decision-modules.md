@@ -69,6 +69,25 @@ That is intentional. The signature is real and typed now, while the offline
 dataset and optimizer lane for issue selection can come later after we have
 enough grounded traces.
 
+Probe also now carries a typed runtime-only `rlm_trigger` signature for
+issue-thread routing:
+
+- input:
+  - operator override (`auto`, `direct`, `rlm`)
+  - explicit issue-reference signal
+  - selected GitHub issue-thread handle
+  - coarse corpus-size / long-context pressure hints
+- output:
+  - selected strategy (`direct`, `compact`, `rlm`)
+  - concrete execution strategy id
+  - trigger reason
+  - optional RLM budget envelope
+
+That signature is the current Probe-side integration point between GitHub
+issue selection and the paper RLM runtime. It stays typed and replayable
+without pretending the offline decision-case export already has grounded
+issue-thread route labels.
+
 ## Offline Evaluation Path
 
 Probe now supports an offline evaluation loop:

@@ -4,6 +4,9 @@ use probe_core::dataset_export::{
     LongContextObservedLabel, PatchReadinessDecisionCaseContext, PatchReadinessObservedLabel,
     ToolRouteDecisionCaseContext, ToolRouteObservedLabel,
 };
+use probe_core::issue_thread_analysis::{
+    RlmTriggerContext, RlmTriggerDecision, heuristic_rlm_trigger,
+};
 use probe_core::long_context::{LongContextEscalationContext, LongContextEscalationDecision};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -359,6 +362,7 @@ pub struct HeuristicToolRouteModule;
 pub struct AggressiveToolRouteModule;
 pub struct HeuristicLongContextEscalationModule;
 pub struct HeuristicGithubIssueSelectionModule;
+pub struct HeuristicRlmTriggerModule;
 
 #[must_use]
 pub fn builtin_decision_module_manifests() -> Vec<DecisionModuleCandidateManifest> {
@@ -1332,6 +1336,16 @@ impl DecisionModule<GithubIssueSelectionContext, GithubIssueSelectionDecision>
     }
 }
 
+impl DecisionModule<RlmTriggerContext, RlmTriggerDecision> for HeuristicRlmTriggerModule {
+    fn id(&self) -> &'static str {
+        "heuristic_rlm_trigger_v1"
+    }
+
+    fn decide(&self, input: &RlmTriggerContext) -> RlmTriggerDecision {
+        heuristic_rlm_trigger(input)
+    }
+}
+
 pub fn evaluate_candidate_manifest(
     cases: &[DecisionCaseRecord],
     manifest: &DecisionModuleCandidateManifest,
@@ -2026,14 +2040,17 @@ mod tests {
         DecisionCaseSplit, DecisionSessionSummary, ToolRouteDecisionCaseContext,
         ToolRouteObservedLabel,
     };
+    use probe_core::issue_thread_analysis::{
+        GithubIssueThreadHandle, IssueThreadStrategyMode, LongContextStrategy, RlmTriggerContext,
+    };
 
     use super::{
         AggressiveToolRouteModule, DecisionModule, DecisionModuleEvalSpec, GithubIssueCandidate,
         GithubIssueSelectionContext, GithubIssueTarget, GithubRepoContext,
         HeuristicGithubIssueSelectionModule, HeuristicLongContextEscalationModule,
-        HeuristicPatchReadinessModule, HeuristicToolRouteModule, StrictPatchReadinessModule,
-        evaluate_candidate_manifest, evaluate_long_context_module, evaluate_patch_readiness_module,
-        evaluate_tool_route_module, parse_github_issue_targets,
+        HeuristicPatchReadinessModule, HeuristicRlmTriggerModule, HeuristicToolRouteModule,
+        StrictPatchReadinessModule, evaluate_candidate_manifest, evaluate_long_context_module,
+        evaluate_patch_readiness_module, evaluate_tool_route_module, parse_github_issue_targets,
     };
 
     fn sample_summary() -> DecisionSessionSummary {
@@ -2379,5 +2396,29 @@ mod tests {
                 .reason
                 .contains("matched the explicit GitHub issue reference")
         );
+    }
+
+    #[test]
+    fn rlm_trigger_prefers_paper_rlm_for_explicit_large_issue_threads() {
+        let module = HeuristicRlmTriggerModule;
+        let decision = module.decide(&RlmTriggerContext {
+            operator_strategy: IssueThreadStrategyMode::Auto,
+            requested_task_kind: String::from("issue_thread_analysis"),
+            has_explicit_issue_reference: true,
+            long_context_should_escalate: true,
+            selected_issue: Some(GithubIssueThreadHandle {
+                repo_owner: String::from("OpenAgentsInc"),
+                repo_name: String::from("openagents"),
+                issue_number: 4368,
+                issue_url: Some(String::from(
+                    "https://github.com/OpenAgentsInc/openagents/issues/4368",
+                )),
+            }),
+            corpus_total_items: Some(131),
+            corpus_total_chars: Some(72_000),
+        });
+        assert_eq!(decision.selected_strategy, LongContextStrategy::Rlm);
+        assert_eq!(decision.execution_strategy_id, "paper_rlm_issue_thread_v1");
+        assert!(decision.reason.contains("explicit GitHub issue reference"));
     }
 }

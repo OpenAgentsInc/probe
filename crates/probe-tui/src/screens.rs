@@ -2,11 +2,14 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use probe_core::backend_profiles::resolved_reasoning_level_for_backend;
+use probe_core::issue_thread_analysis::{
+    GithubIssueThreadHandle, IssueThreadStrategyMode, RlmTriggerContext, RlmTriggerDecision,
+};
 use probe_core::provider::normalize_openai_stream_display_text;
 use probe_core::runtime::{RuntimeEvent, StreamedToolCallDelta};
 use probe_core::server_control::ServerOperatorSummary;
 use probe_core::tools::tool_result_model_text;
-use probe_decisions::SelectedGithubIssue;
+use probe_decisions::{DecisionModule, HeuristicRlmTriggerModule, SelectedGithubIssue};
 use probe_openai_auth::{
     OpenAiCodexAuthAccountStatus, OpenAiCodexAuthController, OpenAiCodexAuthStatus,
     OpenAiCodexRateLimitSnapshot, OpenAiCodexRateLimitWindow, OpenAiCodexRoute,
@@ -328,6 +331,8 @@ pub struct ChatScreen {
     runtime: ProbeRuntimeState,
     stream: Option<AssistantStreamState>,
     selected_issue: Option<SelectedGithubIssue>,
+    rlm_operator_strategy: IssueThreadStrategyMode,
+    rlm_strategy_decision: Option<RlmTriggerDecision>,
     operator_backend: Option<ServerOperatorSummary>,
     probe_home: Option<PathBuf>,
     codex_footer_summary: Option<CodexFooterSummary>,
@@ -348,6 +353,8 @@ impl Default for ChatScreen {
             runtime: ProbeRuntimeState::default(),
             stream: None,
             selected_issue: None,
+            rlm_operator_strategy: IssueThreadStrategyMode::Auto,
+            rlm_strategy_decision: None,
             operator_backend: None,
             probe_home: None,
             codex_footer_summary: None,
@@ -374,6 +381,19 @@ impl ChatScreen {
     pub fn set_probe_home(&mut self, probe_home: Option<PathBuf>) {
         self.probe_home = probe_home;
         self.refresh_codex_footer_summary();
+    }
+
+    pub fn set_rlm_operator_strategy(&mut self, strategy: IssueThreadStrategyMode) {
+        self.rlm_operator_strategy = strategy;
+        self.rlm_strategy_decision = None;
+    }
+
+    pub fn rlm_operator_strategy(&self) -> IssueThreadStrategyMode {
+        self.rlm_operator_strategy
+    }
+
+    pub fn rlm_strategy_decision(&self) -> Option<&RlmTriggerDecision> {
+        self.rlm_strategy_decision.as_ref()
     }
 
     pub fn emphasized_copy(&self) -> bool {
@@ -579,6 +599,25 @@ impl ChatScreen {
             parts.push(preview(
                 format!("{}#{} {}", issue.repo_name, issue.issue_number, issue.title).as_str(),
                 52,
+            ));
+        }
+        if let Some(decision) = self.rlm_strategy_decision.as_ref() {
+            parts.push(format!(
+                "rlm:{}",
+                match decision.selected_strategy {
+                    probe_core::issue_thread_analysis::LongContextStrategy::Direct => "direct",
+                    probe_core::issue_thread_analysis::LongContextStrategy::Compact => "compact",
+                    probe_core::issue_thread_analysis::LongContextStrategy::Rlm => "rlm",
+                }
+            ));
+        } else if self.rlm_operator_strategy != IssueThreadStrategyMode::Auto {
+            parts.push(format!(
+                "rlm:{}",
+                match self.rlm_operator_strategy {
+                    IssueThreadStrategyMode::Auto => "auto",
+                    IssueThreadStrategyMode::Direct => "direct",
+                    IssueThreadStrategyMode::Rlm => "rlm",
+                }
             ));
         }
         parts.push(status_marker(self).to_string());
@@ -1233,6 +1272,18 @@ impl ChatScreen {
                     )
                 };
                 self.transcript.push_entry(entry);
+                self.rlm_strategy_decision = plan_issue_thread_strategy(
+                    self.rlm_operator_strategy,
+                    priority.as_str(),
+                    decision.selected_issue.as_ref(),
+                );
+                if let Some(route) = self.rlm_strategy_decision.as_ref() {
+                    self.transcript.push_entry(TranscriptEntry::new(
+                        TranscriptRole::Status,
+                        "RLM Strategy",
+                        render_rlm_strategy_lines(route),
+                    ));
+                }
                 self.snap_transcript_to_latest();
                 self.record_worker_event(String::from("GitHub issue selection updated"));
                 decision.reason
@@ -1243,6 +1294,7 @@ impl ChatScreen {
                 selected_issue,
             } => {
                 self.selected_issue = selected_issue;
+                self.rlm_strategy_decision = None;
                 self.transcript.push_entry(TranscriptEntry::new(
                     TranscriptRole::Status,
                     "GitHub Issue",
@@ -2044,7 +2096,7 @@ impl HelpScreen {
             Line::from("Ctrl+C              quit"),
             Line::from(""),
             Line::from("Local slash commands"),
-            Line::from("/help /backend /approvals /reasoning /fast /clear"),
+            Line::from("/help /backend /approvals /reasoning /fast /rlm /clear"),
             Line::from("Backend choice on the default TUI path is automatic and Codex-first."),
             Line::from(
                 "Slash commands, typed mentions, attachments, and paste state live in the draft model.",
@@ -2882,4 +2934,70 @@ fn preview(value: &str, max_chars: usize) -> String {
     } else {
         preview
     }
+}
+
+fn plan_issue_thread_strategy(
+    operator_strategy: IssueThreadStrategyMode,
+    priority: &str,
+    selected_issue: Option<&SelectedGithubIssue>,
+) -> Option<RlmTriggerDecision> {
+    let selected_issue = selected_issue.map(|issue| GithubIssueThreadHandle {
+        repo_owner: issue.repo_owner.clone(),
+        repo_name: issue.repo_name.clone(),
+        issue_number: issue.issue_number,
+        issue_url: issue.url.clone(),
+    });
+    let has_issue_handle = selected_issue.is_some();
+    let should_escalate = has_issue_handle
+        && (priority_has_explicit_issue_reference(priority) || priority.len() >= 160);
+    has_issue_handle.then(|| {
+        HeuristicRlmTriggerModule.decide(&RlmTriggerContext {
+            operator_strategy,
+            requested_task_kind: String::from("issue_thread_analysis"),
+            has_explicit_issue_reference: priority_has_explicit_issue_reference(priority),
+            long_context_should_escalate: should_escalate,
+            selected_issue,
+            corpus_total_items: None,
+            corpus_total_chars: None,
+        })
+    })
+}
+
+fn render_rlm_strategy_lines(decision: &RlmTriggerDecision) -> Vec<String> {
+    let mut lines = vec![
+        format!("strategy: {}", decision.execution_strategy_id),
+        format!(
+            "selected: {}",
+            match decision.selected_strategy {
+                probe_core::issue_thread_analysis::LongContextStrategy::Direct => "direct",
+                probe_core::issue_thread_analysis::LongContextStrategy::Compact => "compact",
+                probe_core::issue_thread_analysis::LongContextStrategy::Rlm => "rlm",
+            }
+        ),
+        format!("reason: {}", decision.reason),
+    ];
+    if let Some(corpus_ref) = decision.corpus_ref.as_deref() {
+        lines.push(format!("corpus: {corpus_ref}"));
+    }
+    if let Some(budget) = decision.budget.as_ref() {
+        lines.push(format!(
+            "budgets: iterations={} sub_lm_calls={} loaded_chunks={} loaded_bytes={}",
+            budget.max_iterations,
+            budget.max_sub_lm_calls,
+            budget.max_loaded_chunks,
+            budget.max_loaded_bytes
+        ));
+    }
+    lines
+}
+
+fn priority_has_explicit_issue_reference(value: &str) -> bool {
+    let trimmed = value.trim().to_ascii_lowercase();
+    if trimmed.contains("https://github.com/") && trimmed.contains("/issues/") {
+        return true;
+    }
+    trimmed
+        .chars()
+        .zip(trimmed.chars().skip(1))
+        .any(|(left, right)| left == '#' && right.is_ascii_digit())
 }

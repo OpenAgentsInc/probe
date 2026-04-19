@@ -20,6 +20,7 @@ use probe_core::backend_profiles::{
     psionic_qwen35_2b_q8_registry,
 };
 use probe_core::harness::resolve_prompt_contract;
+use probe_core::issue_thread_analysis::IssueThreadStrategyMode;
 use probe_core::runtime::{current_working_dir, default_probe_home};
 use probe_core::server_control::{PsionicServerConfig, ServerOperatorSummary};
 use probe_core::tools::{ProbeToolChoice, ToolApprovalConfig, ToolLoopConfig};
@@ -569,6 +570,51 @@ impl AppShell {
                     self.base_screen_mut()
                         .record_event("invalid fast command usage");
                     self.last_status = String::from("usage: /fast [on|off|status]");
+                }
+            },
+            "rlm" => match args.to_ascii_lowercase().as_str() {
+                "" | "auto" => {
+                    self.base_screen_mut()
+                        .set_rlm_operator_strategy(IssueThreadStrategyMode::Auto);
+                    self.base_screen_mut()
+                        .record_event("RLM strategy override set to auto");
+                    self.last_status = String::from("RLM strategy override: auto");
+                }
+                "on" | "rlm" => {
+                    self.base_screen_mut()
+                        .set_rlm_operator_strategy(IssueThreadStrategyMode::Rlm);
+                    self.base_screen_mut()
+                        .record_event("RLM strategy override set to rlm");
+                    self.last_status = String::from("RLM strategy override: rlm");
+                }
+                "off" | "direct" => {
+                    self.base_screen_mut()
+                        .set_rlm_operator_strategy(IssueThreadStrategyMode::Direct);
+                    self.base_screen_mut()
+                        .record_event("RLM strategy override set to direct");
+                    self.last_status = String::from("RLM strategy override: direct");
+                }
+                "status" => {
+                    let configured = match self.base_screen().rlm_operator_strategy() {
+                        IssueThreadStrategyMode::Auto => "auto",
+                        IssueThreadStrategyMode::Direct => "direct",
+                        IssueThreadStrategyMode::Rlm => "rlm",
+                    };
+                    let selected = self
+                        .base_screen()
+                        .rlm_strategy_decision()
+                        .map(|decision| decision.execution_strategy_id.clone())
+                        .unwrap_or_else(|| String::from("none"));
+                    self.base_screen_mut()
+                        .record_event(format!("RLM strategy override is {configured}"));
+                    self.last_status = format!(
+                        "RLM strategy override: {configured}; selected strategy: {selected}"
+                    );
+                }
+                _ => {
+                    self.base_screen_mut()
+                        .record_event("invalid rlm command usage");
+                    self.last_status = String::from("usage: /rlm [auto|on|off|status]");
                 }
             },
             "clear" => {
@@ -1394,6 +1440,7 @@ fn local_slash_command(submission: &ComposerSubmission) -> Option<(&str, &str)> 
     let trimmed = submission.text.trim();
     match command {
         "fast" => Some((command, trimmed.strip_prefix("/fast")?.trim())),
+        "rlm" => Some((command, trimmed.strip_prefix("/rlm")?.trim())),
         _ if trimmed == format!("/{command}") => Some((command, "")),
         _ => None,
     }
@@ -2034,7 +2081,7 @@ mod tests {
         submit_draft(&mut app, "/help");
         assert_eq!(app.active_screen_id(), ScreenId::Help);
         let rendered = app.render_to_string(120, 36);
-        assert!(rendered.contains("/help /backend /approvals /reasoning /fast /clear"));
+        assert!(rendered.contains("/help /backend /approvals /reasoning /fast /rlm /clear"));
         assert!(!rendered.contains("› /help"));
 
         app.dispatch(UiEvent::Dismiss);
@@ -2064,6 +2111,27 @@ mod tests {
         assert!(rendered.contains("keep transcript"));
         assert!(rendered.contains("gpt-5.4 · high · normal · ."));
         assert_eq!(app.last_status(), "codex reasoning level: high");
+    }
+
+    #[test]
+    fn local_rlm_slash_command_updates_route_override_without_touching_transcript() {
+        let mut app = AppShell::new_for_tests_with_chat_config(
+            AppShell::build_chat_runtime_config(None, openai_codex_subscription()),
+        );
+        app.apply_message(AppMessage::TranscriptEntryCommitted {
+            entry: TranscriptEntry::new(
+                TranscriptRole::User,
+                "You",
+                vec![String::from("keep transcript")],
+            ),
+        });
+
+        submit_draft(&mut app, "/rlm on");
+
+        let rendered = app.render_to_string(140, 36);
+        assert!(rendered.contains("keep transcript"));
+        assert!(rendered.contains("rlm:rlm"));
+        assert_eq!(app.last_status(), "RLM strategy override: rlm");
     }
 
     #[test]

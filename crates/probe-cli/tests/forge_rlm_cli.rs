@@ -85,6 +85,40 @@ fn forge_rlm_execute_plan_writes_grounded_artifacts() {
     assert_eq!(produced_dirs.len(), 1);
 }
 
+#[test]
+fn forge_rlm_analyze_issue_thread_dry_run_emits_strategy_receipt() {
+    let tempdir = tempdir().expect("tempdir");
+    let corpus_path = tempdir.path().join("corpus.json");
+
+    std::fs::write(
+        corpus_path.as_path(),
+        serde_json::to_vec_pretty(&synthetic_issue_thread()).expect("serialize corpus"),
+    )
+    .expect("write corpus");
+
+    probe_cli_command()
+        .args([
+            "forge",
+            "rlm",
+            "analyze-issue-thread",
+            "--corpus-json",
+            corpus_path.to_str().expect("corpus path utf-8"),
+            "--query",
+            "What is the current blocker?",
+            "--strategy",
+            "auto",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"strategy_decision\""))
+        .stdout(predicate::str::contains("\"execution_strategy_id\""))
+        .stdout(predicate::str::contains("\"source_ref\""))
+        .stdout(predicate::str::contains(
+            "\"question\": \"What is the current blocker?\"",
+        ));
+}
+
 fn synthetic_issue_thread() -> serde_json::Value {
     json!({
         "repository_owner": "OpenAgentsInc",

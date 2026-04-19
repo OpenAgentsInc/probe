@@ -406,6 +406,36 @@ That lane keeps the split explicit:
 The first operator proof is the full live GitHub issue thread for
 `OpenAgentsInc/openagents#4368`.
 
+Probe now also has a typed issue-thread strategy route above that execution
+lane:
+
+- `issue_thread_direct_v1`
+  - direct single-shot issue-thread analysis
+- `paper_rlm_issue_thread_v1`
+  - paper-style recursive issue-thread analysis
+- `heuristic_rlm_trigger_v1`
+  - typed trigger receipt that chooses between them
+
+Dry-run the route decision without executing a model:
+
+```bash
+cargo run -p probe-cli -- forge rlm analyze-issue-thread \
+  --issue-url https://github.com/OpenAgentsInc/openagents/issues/4368 \
+  --query "What is the current blocker?" \
+  --strategy auto \
+  --dry-run
+```
+
+Force execution under the paper RLM lane:
+
+```bash
+cargo run -p probe-cli -- forge rlm analyze-issue-thread \
+  --issue-url https://github.com/OpenAgentsInc/openagents/issues/4368 \
+  --query "What is the current blocker?" \
+  --strategy rlm \
+  --output-dir var/forge-rlm
+```
+
 Run an arbitrary Forge RLM plan:
 
 ```bash
@@ -436,7 +466,9 @@ That command writes ignored artifacts under `var/forge-rlm/<label>-<timestamp>/`
 
 See
 [`docs/84-forge-rlm-assignment-execution.md`](docs/84-forge-rlm-assignment-execution.md)
-for the execution envelope, chunking rules, and live-proof validation path.
+for the execution envelope, chunking rules, and live-proof validation path, and
+[`docs/85-issue-thread-strategy-routing.md`](docs/85-issue-thread-strategy-routing.md)
+for the direct-versus-RLM route receipt and TUI override surface.
 
 The first-party worker CLI now sits on top of that runtime layer:
 

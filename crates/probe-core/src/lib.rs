@@ -4,6 +4,7 @@ pub mod forge_rlm;
 pub mod forge_run_worker;
 pub mod forge_worker;
 pub mod harness;
+pub mod issue_thread_analysis;
 pub mod long_context;
 pub mod paper_rlm;
 pub mod provider;
