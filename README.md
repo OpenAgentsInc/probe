@@ -447,10 +447,13 @@ cargo run -p probe-cli -- forge rlm execute \
 Run the checked-in live `#4368` proof:
 
 ```bash
-GH_TOKEN=$(gh auth token) cargo run -p probe-cli -- \
-  forge rlm proof-openagents-4368 \
+cargo run -p probe-cli -- forge rlm proof-openagents-4368 \
   --output-dir var/forge-rlm
 ```
+
+For GitHub issue-thread commands, Probe first uses `GITHUB_TOKEN` or `GH_TOKEN`
+when either is set, then falls back to the existing `gh` CLI login via
+`gh auth token --hostname github.com`.
 
 That command writes ignored artifacts under `var/forge-rlm/<label>-<timestamp>/`:
 
@@ -484,8 +487,8 @@ CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test -p probe-core \
 Run the gated live `OpenAgentsInc/openagents#4368` comparison:
 
 ```bash
-GH_TOKEN=$(gh auth token) PROBE_OPENAI_API_KEY=... \
-  CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test -p probe-core \
+CARGO_NET_GIT_FETCH_WITH_CLI=true PROBE_OPENAI_API_KEY=... \
+  cargo test -p probe-core \
   live_openagents_4368_comparison_reads_the_full_current_thread \
   -- --ignored --nocapture
 ```

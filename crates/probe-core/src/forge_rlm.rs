@@ -2,6 +2,7 @@ use std::env;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -271,6 +272,29 @@ pub fn resolve_github_token() -> Option<String> {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
+        .or_else(|| resolve_github_token_from_gh_cli("github.com"))
+}
+
+fn resolve_github_token_from_gh_cli(hostname: &str) -> Option<String> {
+    resolve_github_token_from_gh_cli_command(Path::new("gh"), hostname)
+}
+
+fn resolve_github_token_from_gh_cli_command(program: &Path, hostname: &str) -> Option<String> {
+    let trimmed_hostname = hostname.trim();
+    let mut command = Command::new(program);
+    command.args(["auth", "token"]);
+    if !trimmed_hostname.is_empty() {
+        command.args(["--hostname", trimmed_hostname]);
+    }
+
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let token = String::from_utf8(output.stdout).ok()?;
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
 }
 
 pub fn execute_forge_rlm_plan(
@@ -770,7 +794,38 @@ mod tests {
     use super::{
         ForgeRlmExecutionError, ForgeRlmExecutionPlan, ForgeRlmExecutionRequest,
         default_required_artifacts, execute_forge_rlm_plan, resolve_github_token,
+        resolve_github_token_from_gh_cli_command,
     };
+
+    #[test]
+    #[cfg(unix)]
+    fn github_token_resolver_can_use_gh_cli_auth() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempdir().expect("tempdir");
+        let fake_gh = tempdir.path().join("gh");
+        std::fs::write(
+            fake_gh.as_path(),
+            r#"#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "token" ] && [ "$3" = "--hostname" ] && [ "$4" = "github.com" ]; then
+  printf '%s\n' 'fake-gh-cli-token'
+  exit 0
+fi
+exit 1
+"#,
+        )
+        .expect("write fake gh");
+        let mut permissions = std::fs::metadata(fake_gh.as_path())
+            .expect("metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(fake_gh.as_path(), permissions).expect("chmod fake gh");
+
+        assert_eq!(
+            resolve_github_token_from_gh_cli_command(fake_gh.as_path(), "github.com").as_deref(),
+            Some("fake-gh-cli-token")
+        );
+    }
 
     #[test]
     fn local_issue_thread_plan_executes_and_writes_artifacts() {
@@ -964,10 +1019,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires GH_TOKEN or GITHUB_TOKEN and live GitHub access"]
+    #[ignore = "requires a GitHub token from GH_TOKEN/GITHUB_TOKEN or gh auth token plus live GitHub access"]
     fn live_openagents_4368_plan_executes_full_thread() {
         let github_token = resolve_github_token();
-        assert!(github_token.is_some(), "set GH_TOKEN or GITHUB_TOKEN");
+        assert!(
+            github_token.is_some(),
+            "set GH_TOKEN/GITHUB_TOKEN or run `gh auth login`"
+        );
 
         let tempdir = tempdir().expect("tempdir");
         let request = ForgeRlmExecutionRequest {

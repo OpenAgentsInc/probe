@@ -1200,6 +1200,7 @@ fn run_forge_rlm_execute(args: ForgeRlmExecuteArgs) -> Result<(), String> {
 
 fn run_forge_rlm_analyze_issue_thread(args: ForgeRlmAnalyzeIssueThreadArgs) -> Result<(), String> {
     let source = parse_issue_thread_corpus_source(&args)?;
+    let probe_home = resolve_probe_home_path(args.probe_home.clone())?;
     let request = IssueThreadAnalysisRequest {
         source,
         question: args.query,
@@ -1208,7 +1209,7 @@ fn run_forge_rlm_analyze_issue_thread(args: ForgeRlmAnalyzeIssueThreadArgs) -> R
         direct_profile: named_profile(args.direct_profile.as_str())?,
         controller_profile: named_profile(args.controller_profile.as_str())?,
         sub_lm_profile: named_profile(args.sub_lm_profile.as_str())?,
-        probe_home: args.probe_home,
+        probe_home: Some(probe_home),
         output_root: args.output_dir,
         github_token: resolve_github_token(),
     };

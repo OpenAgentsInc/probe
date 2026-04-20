@@ -52,8 +52,8 @@ That case forces:
 Gated live `OpenAgentsInc/openagents#4368` comparison:
 
 ```bash
-GH_TOKEN=... PROBE_OPENAI_API_KEY=... \
-CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test -p probe-core \
+CARGO_NET_GIT_FETCH_WITH_CLI=true PROBE_OPENAI_API_KEY=... \
+cargo test -p probe-core \
   live_openagents_4368_comparison_reads_the_full_current_thread \
   -- --ignored --nocapture
 ```
@@ -62,6 +62,9 @@ Optional environment:
 
 - `PROBE_LIVE_RLM_MODEL`
   - defaults to `gpt-4.1-mini`
+- `GITHUB_TOKEN` or `GH_TOKEN`
+  - optional when the local `gh` CLI is already logged in; Probe falls back to
+    `gh auth token --hostname github.com`
 
 The live case fetches the current full issue body plus all comments, requires a
 minimum corpus size floor, runs both direct and paper-RLM strategies over that

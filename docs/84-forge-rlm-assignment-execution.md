@@ -78,13 +78,15 @@ cargo run -p probe-cli -- forge rlm execute \
 Run the live proof for `OpenAgentsInc/openagents#4368`:
 
 ```bash
-GH_TOKEN=$(gh auth token) cargo run -p probe-cli -- \
-  forge rlm proof-openagents-4368 \
+cargo run -p probe-cli -- forge rlm proof-openagents-4368 \
   --output-dir var/forge-rlm
 ```
 
 The live proof plan is generated from Forge-owned defaults in
 `ForgeRlmExecutionPlan::openagents_4368_issue_thread_proof()`.
+For live GitHub issue corpora, Probe uses `GITHUB_TOKEN` or `GH_TOKEN` when
+set, and otherwise asks the existing `gh` CLI login for a token without
+printing it.
 
 ## Artifacts
 

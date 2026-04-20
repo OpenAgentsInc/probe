@@ -287,6 +287,15 @@ pub fn complete_openai_plain_text_with_context_and_callback(
                     );
                     provider.send_chat_completion_with_callback(&request, &mut **callback)
                 }
+                None if profile.kind == BackendKind::OpenAiCodexSubscription => {
+                    let mut streaming_config = provider_config.clone();
+                    streaming_config.stream = true;
+                    let request = probe_provider_openai::ChatCompletionRequest::from_config(
+                        &streaming_config,
+                        request_messages.clone(),
+                    );
+                    provider.send_chat_completion(&request)
+                }
                 None => provider.chat_completion(request_messages.clone()),
             }
         })?;
@@ -459,7 +468,7 @@ pub fn openai_tool_loop_response_with_callback(
                 messages.clone(),
             )
             .with_tools(tools.clone(), tool_choice.clone(), parallel_tool_calls);
-            if callback.is_some() {
+            if callback.is_some() || profile.kind == BackendKind::OpenAiCodexSubscription {
                 request.stream = true;
             }
             match callback.as_mut() {

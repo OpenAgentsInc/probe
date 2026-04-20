@@ -484,6 +484,7 @@ fn write_json_file(path: &Path, value: &impl Serialize) -> Result<(), IssueThrea
 #[cfg(test)]
 mod tests {
     use super::{IssueThreadComparisonRequest, compare_issue_thread_strategies};
+    use crate::forge_rlm::resolve_github_token;
     use crate::issue_thread_analysis::{GithubIssueThreadHandle, IssueThreadCorpusSource};
     use forge_rlm_core::{IssueBody, IssueComment, IssueThreadCorpus};
     use probe_protocol::backend::{BackendKind, BackendProfile, PrefixCacheMode, ServerAttachMode};
@@ -627,12 +628,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires GH_TOKEN/GITHUB_TOKEN, PROBE_OPENAI_API_KEY, and a paid live OpenAI-compatible model"]
+    #[ignore = "requires GitHub auth from GH_TOKEN/GITHUB_TOKEN or gh auth token, PROBE_OPENAI_API_KEY, and a paid live OpenAI-compatible model"]
     fn live_openagents_4368_comparison_reads_the_full_current_thread() {
-        let github_token = std::env::var("GITHUB_TOKEN")
-            .ok()
-            .or_else(|| std::env::var("GH_TOKEN").ok())
-            .expect("GH_TOKEN or GITHUB_TOKEN is required");
+        let github_token =
+            resolve_github_token().expect("set GH_TOKEN/GITHUB_TOKEN or run `gh auth login`");
         let _openai_key =
             std::env::var("PROBE_OPENAI_API_KEY").expect("PROBE_OPENAI_API_KEY is required");
         let model =

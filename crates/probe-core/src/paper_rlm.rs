@@ -636,6 +636,17 @@ fn build_engine(
             guard.printed_output.push_str(text);
         }
     });
+    engine.register_fn(
+        "join",
+        move |values: Array, separator: ImmutableString| -> ImmutableString {
+            values
+                .iter()
+                .map(dynamic_context_text)
+                .collect::<Vec<_>>()
+                .join(separator.as_str())
+                .into()
+        },
+    );
 
     if allowed_helpers.contains(&HelperSurface::ContextMetadata) {
         let metadata_state = shared_state.clone();
@@ -661,27 +672,15 @@ fn build_engine(
         let preview_state = shared_state.clone();
         engine.register_fn(
             "context_preview",
+            move || -> Result<ImmutableString, Box<EvalAltResult>> {
+                context_preview_from_state(&preview_state, None)
+            },
+        );
+        let preview_state_with_limit = shared_state.clone();
+        engine.register_fn(
+            "context_preview",
             move |max_chars: i64| -> Result<ImmutableString, Box<EvalAltResult>> {
-                let mut guard = preview_state.lock().expect("paper RLM shared state");
-                let max_chars = max_chars.max(0) as usize;
-                let mut preview = String::new();
-                let mut loaded_bytes = 0_u64;
-                let items = guard.corpus.items.clone();
-                for item in items {
-                    if preview.len() >= max_chars {
-                        break;
-                    }
-                    guard.touch_item(item.item_ref.as_str());
-                    let header = format!("## {}\n", item.item_ref);
-                    preview.push_str(header.as_str());
-                    let remaining = max_chars.saturating_sub(preview.len());
-                    let snippet = truncate_chars(item.text.as_str(), remaining);
-                    loaded_bytes = loaded_bytes.saturating_add(snippet.len() as u64);
-                    preview.push_str(snippet.as_str());
-                    preview.push('\n');
-                }
-                guard.note_loaded(loaded_bytes, 1)?;
-                Ok(preview.into())
+                context_preview_from_state(&preview_state_with_limit, Some(max_chars))
             },
         );
     }
@@ -690,30 +689,15 @@ fn build_engine(
         let search_state = shared_state.clone();
         engine.register_fn(
             "context_search",
+            move |query: ImmutableString| -> Result<Array, Box<EvalAltResult>> {
+                context_search_from_state(&search_state, query, None)
+            },
+        );
+        let search_state_with_limit = shared_state.clone();
+        engine.register_fn(
+            "context_search",
             move |query: ImmutableString, limit: i64| -> Result<Array, Box<EvalAltResult>> {
-                let mut guard = search_state.lock().expect("paper RLM shared state");
-                let limit = limit.max(0) as usize;
-                let query_lower = query.to_lowercase();
-                let mut matches = Vec::new();
-                let items = guard.corpus.items.clone();
-                for item in items {
-                    if matches.len() >= limit {
-                        break;
-                    }
-                    let item_lower = item.text.to_lowercase();
-                    if let Some(index) = item_lower.find(query_lower.as_str()) {
-                        guard.touch_item(item.item_ref.as_str());
-                        let excerpt = excerpt_around(item.text.as_str(), index, query.len(), 160);
-                        let mut map = Map::new();
-                        map.insert("item_ref".into(), Dynamic::from(item.item_ref.clone()));
-                        map.insert("item_kind".into(), Dynamic::from(item.item_kind.clone()));
-                        map.insert("label".into(), Dynamic::from(item.label.clone()));
-                        map.insert("excerpt".into(), Dynamic::from(excerpt));
-                        matches.push(Dynamic::from_map(map));
-                    }
-                }
-                guard.search_matches = matches.len();
-                Ok(matches)
+                context_search_from_state(&search_state_with_limit, query, Some(limit))
             },
         );
     }
@@ -743,29 +727,17 @@ fn build_engine(
         engine.register_fn(
             "context_chunk",
             move |start_index: i64, count: i64| -> Result<ImmutableString, Box<EvalAltResult>> {
-                let mut guard = chunk_state.lock().expect("paper RLM shared state");
-                let start_index = start_index.max(0) as usize;
-                let count = count.max(0) as usize;
-                let mut rendered = String::new();
-                let mut loaded_bytes = 0_u64;
-                let selected = guard
-                    .corpus
-                    .items
-                    .iter()
-                    .skip(start_index)
-                    .take(count)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if selected.is_empty() {
-                    return Err(eval_error("requested context_chunk is empty"));
-                }
-                for item in selected {
-                    guard.touch_item(item.item_ref.as_str());
-                    rendered.push_str(format!("## {}\n{}\n\n", item.item_ref, item.text).as_str());
-                    loaded_bytes = loaded_bytes.saturating_add(item.text.len() as u64);
-                }
-                guard.note_loaded(loaded_bytes, 1)?;
-                Ok(rendered.into())
+                context_chunk_from_state(&chunk_state, start_index, count)
+            },
+        );
+        let item_chunk_state = shared_state.clone();
+        engine.register_fn(
+            "context_chunk",
+            move |item_ref: ImmutableString,
+                  start_char: i64,
+                  max_chars: i64|
+                  -> Result<ImmutableString, Box<EvalAltResult>> {
+                context_item_chunk_from_state(&item_chunk_state, item_ref, start_char, max_chars)
             },
         );
     }
@@ -775,41 +747,29 @@ fn build_engine(
         engine.register_fn(
             "llm_query",
             move |prompt: ImmutableString| -> Result<ImmutableString, Box<EvalAltResult>> {
-                let (profile, probe_home, model_name, touched_item_refs, iteration) = {
-                    let mut guard = llm_state.lock().expect("paper RLM shared state");
-                    guard.note_sub_lm_call()?;
-                    (
-                        guard.sub_lm_profile.clone(),
-                        guard.probe_home.clone(),
-                        guard.sub_lm_profile.model.clone(),
-                        guard.touched_item_refs.iter().cloned().collect::<Vec<_>>(),
-                        guard.current_iteration,
-                    )
-                };
-                let response = complete_plain_text_with_context(
-                    &profile,
-                    vec![
-                        PlainTextMessage::system(DEFAULT_SUB_LM_SYSTEM_PROMPT),
-                        PlainTextMessage::user(prompt.to_string()),
-                    ],
-                    OpenAiRequestContext {
-                        probe_home: probe_home.as_deref(),
-                        session_id: None,
-                    },
+                llm_query_from_state(&llm_state, prompt, None)
+            },
+        );
+        let llm_state_with_context = shared_state.clone();
+        engine.register_fn(
+            "llm_query",
+            move |prompt: ImmutableString,
+                  context: Array|
+                  -> Result<ImmutableString, Box<EvalAltResult>> {
+                llm_query_from_state(&llm_state_with_context, prompt, Some(context))
+            },
+        );
+        let llm_state_with_text_context = shared_state.clone();
+        engine.register_fn(
+            "llm_query",
+            move |prompt: ImmutableString,
+                  context: ImmutableString|
+                  -> Result<ImmutableString, Box<EvalAltResult>> {
+                llm_query_from_state(
+                    &llm_state_with_text_context,
+                    prompt,
+                    Some(vec![Dynamic::from(context)]),
                 )
-                .map_err(|error| eval_error(format!("sub-LM request failed: {error}")))?;
-                let assistant_text = response.assistant_text.unwrap_or_default();
-                let mut guard = llm_state.lock().expect("paper RLM shared state");
-                guard.subcall_receipts.push(PaperRlmSubcallReceipt {
-                    iteration,
-                    prompt_chars: prompt.chars().count(),
-                    prompt_preview: truncate_chars(prompt.as_str(), 240),
-                    response_chars: assistant_text.chars().count(),
-                    response_preview: truncate_chars(assistant_text.as_str(), 240),
-                    touched_item_refs,
-                    model_name,
-                });
-                Ok(assistant_text.into())
             },
         );
     }
@@ -836,6 +796,191 @@ fn build_engine(
     }
 
     engine
+}
+
+fn context_preview_from_state(
+    shared_state: &Arc<Mutex<SharedExecutionState>>,
+    max_chars: Option<i64>,
+) -> Result<ImmutableString, Box<EvalAltResult>> {
+    let mut guard = shared_state.lock().expect("paper RLM shared state");
+    let max_chars = max_chars.map_or_else(
+        || guard.assignment.budget.max_observation_bytes.min(4096) as usize,
+        |value| value.max(0) as usize,
+    );
+    let mut preview = String::new();
+    let mut loaded_bytes = 0_u64;
+    let items = guard.corpus.items.clone();
+    for item in items {
+        if preview.len() >= max_chars {
+            break;
+        }
+        guard.touch_item(item.item_ref.as_str());
+        let header = format!("## {}\n", item.item_ref);
+        preview.push_str(header.as_str());
+        let remaining = max_chars.saturating_sub(preview.len());
+        let snippet = truncate_chars(item.text.as_str(), remaining);
+        loaded_bytes = loaded_bytes.saturating_add(snippet.len() as u64);
+        preview.push_str(snippet.as_str());
+        preview.push('\n');
+    }
+    guard.note_loaded(loaded_bytes, 1)?;
+    Ok(preview.into())
+}
+
+fn context_search_from_state(
+    shared_state: &Arc<Mutex<SharedExecutionState>>,
+    query: ImmutableString,
+    limit: Option<i64>,
+) -> Result<Array, Box<EvalAltResult>> {
+    let mut guard = shared_state.lock().expect("paper RLM shared state");
+    let limit = limit.unwrap_or(8).max(0) as usize;
+    let query_lower = query.to_lowercase();
+    let mut matches = Vec::new();
+    let items = guard.corpus.items.clone();
+    for item in items {
+        if matches.len() >= limit {
+            break;
+        }
+        let item_lower = item.text.to_lowercase();
+        if let Some(index) = item_lower.find(query_lower.as_str()) {
+            guard.touch_item(item.item_ref.as_str());
+            let excerpt = excerpt_around(item.text.as_str(), index, query.len(), 160);
+            let mut map = Map::new();
+            map.insert("item_ref".into(), Dynamic::from(item.item_ref.clone()));
+            map.insert("item_kind".into(), Dynamic::from(item.item_kind.clone()));
+            map.insert("label".into(), Dynamic::from(item.label.clone()));
+            map.insert("excerpt".into(), Dynamic::from(excerpt));
+            matches.push(Dynamic::from_map(map));
+        }
+    }
+    guard.search_matches = matches.len();
+    Ok(matches)
+}
+
+fn context_chunk_from_state(
+    shared_state: &Arc<Mutex<SharedExecutionState>>,
+    start_index: i64,
+    count: i64,
+) -> Result<ImmutableString, Box<EvalAltResult>> {
+    let mut guard = shared_state.lock().expect("paper RLM shared state");
+    let start_index = start_index.max(0) as usize;
+    let count = count.max(0) as usize;
+    let mut rendered = String::new();
+    let mut loaded_bytes = 0_u64;
+    let selected = guard
+        .corpus
+        .items
+        .iter()
+        .skip(start_index)
+        .take(count)
+        .cloned()
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err(eval_error("requested context_chunk is empty"));
+    }
+    for item in selected {
+        guard.touch_item(item.item_ref.as_str());
+        rendered.push_str(format!("## {}\n{}\n\n", item.item_ref, item.text).as_str());
+        loaded_bytes = loaded_bytes.saturating_add(item.text.len() as u64);
+    }
+    guard.note_loaded(loaded_bytes, 1)?;
+    Ok(rendered.into())
+}
+
+fn context_item_chunk_from_state(
+    shared_state: &Arc<Mutex<SharedExecutionState>>,
+    item_ref: ImmutableString,
+    start_char: i64,
+    max_chars: i64,
+) -> Result<ImmutableString, Box<EvalAltResult>> {
+    let mut guard = shared_state.lock().expect("paper RLM shared state");
+    let start_char = start_char.max(0) as usize;
+    let max_chars = max_chars.max(0) as usize;
+    let item = guard
+        .corpus
+        .items
+        .iter()
+        .find(|candidate| candidate.item_ref == item_ref.as_str())
+        .cloned()
+        .ok_or_else(|| eval_error(format!("unknown corpus item `{item_ref}`")))?;
+    let text = item
+        .text
+        .chars()
+        .skip(start_char)
+        .take(max_chars)
+        .collect::<String>();
+    guard.touch_item(item.item_ref.as_str());
+    guard.note_loaded(text.len() as u64, 1)?;
+    Ok(text.into())
+}
+
+fn llm_query_from_state(
+    shared_state: &Arc<Mutex<SharedExecutionState>>,
+    prompt: ImmutableString,
+    context: Option<Array>,
+) -> Result<ImmutableString, Box<EvalAltResult>> {
+    let rendered_prompt = render_llm_prompt(prompt.as_str(), context.as_ref());
+    let (profile, probe_home, model_name, touched_item_refs, iteration) = {
+        let mut guard = shared_state.lock().expect("paper RLM shared state");
+        guard.note_sub_lm_call()?;
+        (
+            guard.sub_lm_profile.clone(),
+            guard.probe_home.clone(),
+            guard.sub_lm_profile.model.clone(),
+            guard.touched_item_refs.iter().cloned().collect::<Vec<_>>(),
+            guard.current_iteration,
+        )
+    };
+    let response = complete_plain_text_with_context(
+        &profile,
+        vec![
+            PlainTextMessage::system(DEFAULT_SUB_LM_SYSTEM_PROMPT),
+            PlainTextMessage::user(rendered_prompt.clone()),
+        ],
+        OpenAiRequestContext {
+            probe_home: probe_home.as_deref(),
+            session_id: None,
+        },
+    )
+    .map_err(|error| eval_error(format!("sub-LM request failed: {error}")))?;
+    let assistant_text = response.assistant_text.unwrap_or_default();
+    let mut guard = shared_state.lock().expect("paper RLM shared state");
+    guard.subcall_receipts.push(PaperRlmSubcallReceipt {
+        iteration,
+        prompt_chars: rendered_prompt.chars().count(),
+        prompt_preview: truncate_chars(rendered_prompt.as_str(), 240),
+        response_chars: assistant_text.chars().count(),
+        response_preview: truncate_chars(assistant_text.as_str(), 240),
+        touched_item_refs,
+        model_name,
+    });
+    Ok(assistant_text.into())
+}
+
+fn render_llm_prompt(prompt: &str, context: Option<&Array>) -> String {
+    let Some(context) = context else {
+        return prompt.to_string();
+    };
+    if context.is_empty() {
+        return prompt.to_string();
+    }
+
+    let mut rendered = String::from(prompt);
+    rendered.push_str("\n\nAdditional context:\n");
+    for (index, value) in context.iter().enumerate() {
+        rendered.push_str(format!("\n--- context {} ---\n", index + 1).as_str());
+        rendered.push_str(dynamic_context_text(value).as_str());
+        rendered.push('\n');
+    }
+    rendered
+}
+
+fn dynamic_context_text(value: &Dynamic) -> String {
+    value
+        .clone()
+        .try_cast::<ImmutableString>()
+        .map(|text| text.to_string())
+        .unwrap_or_else(|| value.to_string())
 }
 
 fn controller_system_prompt(repl_policy: &forge_policy::ReplPolicy) -> String {
@@ -905,11 +1050,14 @@ fn extract_rhai_code(response: &str) -> String {
     let mut lines = Vec::new();
     for line in trimmed.lines() {
         let block_header = line.trim();
-        if !in_block && (block_header == "```rhai" || block_header == "```repl") {
+        if !in_block
+            && block_header.starts_with("```")
+            && (block_header.contains("rhai") || block_header.contains("repl"))
+        {
             in_block = true;
             continue;
         }
-        if in_block && block_header == "```" {
+        if in_block && block_header.starts_with("```") {
             break;
         }
         if in_block {
@@ -1184,12 +1332,120 @@ mod tests {
 
     use super::{
         PaperRlmCorpus, PaperRlmCorpusItem, PaperRlmExecutionRequest, execute_paper_rlm_request,
+        extract_rhai_code,
     };
 
     struct PaperRlmTestRequest {
         request: PaperRlmExecutionRequest,
         _controller_server: probe_test_support::FakeOpenAiServer,
         _sub_lm_server: probe_test_support::FakeOpenAiServer,
+    }
+
+    #[test]
+    fn extract_rhai_code_accepts_malformed_codex_fence() {
+        let response = "let meta = context_metadata();\n\
+print(meta.to_string());\n\
+``````rhai\n\
+let hits = context_search(\"blocker\");\n\
+print(hits.to_string());\n\
+```{\"answer\":\"not code\"}";
+
+        assert_eq!(
+            extract_rhai_code(response),
+            "let hits = context_search(\"blocker\");\nprint(hits.to_string());"
+        );
+    }
+
+    #[test]
+    fn paper_rlm_runtime_supports_advertised_zero_arg_helpers() {
+        let corpus = sample_corpus();
+        let bundle = ExecutionPolicyBundle::issue_thread_paper_rlm_default();
+        let test_request = paper_rlm_request(
+            bundle,
+            corpus,
+            1,
+            0,
+            vec![
+                "```rhai\nlet preview = context_preview();\nlet hits = context_search(\"magic\");\nlet chunk = context_chunk(\"doc-2\", 0, 6);\nlet joined = [preview, chunk].join(\"\\n\");\nprint(joined);\nFINAL(hits[0][\"item_ref\"]);\n```",
+            ],
+            Vec::new(),
+            OutputSchema::RlmFinalTextV1,
+        );
+        let outcome = execute_paper_rlm_request(test_request.request).expect("paper rlm outcome");
+
+        assert_eq!(
+            outcome.runtime_result.status,
+            ExecutionStatus::Succeeded,
+            "{:?}",
+            outcome.failure_reason
+        );
+        assert_eq!(
+            outcome.final_output,
+            Some(Value::String(String::from("doc-2")))
+        );
+    }
+
+    #[test]
+    fn paper_rlm_runtime_supports_llm_query_with_context_array() {
+        let corpus = sample_corpus();
+        let bundle = ExecutionPolicyBundle::issue_thread_paper_rlm_default();
+        let test_request = paper_rlm_request(
+            bundle,
+            corpus,
+            1,
+            1,
+            vec![
+                "```rhai\nlet text = context_load(\"doc-2\");\nlet answer = llm_query(\"Use the provided context.\", [text]);\nFINAL_VAR(answer);\n```",
+            ],
+            vec!["context array worked"],
+            OutputSchema::RlmFinalTextV1,
+        );
+        let outcome = execute_paper_rlm_request(test_request.request).expect("paper rlm outcome");
+
+        assert_eq!(
+            outcome.runtime_result.status,
+            ExecutionStatus::Succeeded,
+            "{:?}",
+            outcome.failure_reason
+        );
+        assert_eq!(
+            outcome.final_output,
+            Some(Value::String(String::from("context array worked")))
+        );
+        assert!(
+            outcome.subcall_receipts[0]
+                .prompt_preview
+                .contains("Additional context")
+        );
+    }
+
+    #[test]
+    fn paper_rlm_runtime_supports_llm_query_with_text_context() {
+        let corpus = sample_corpus();
+        let bundle = ExecutionPolicyBundle::issue_thread_paper_rlm_default();
+        let test_request = paper_rlm_request(
+            bundle,
+            corpus,
+            1,
+            1,
+            vec![
+                "```rhai\nlet text = context_load(\"doc-2\");\nlet answer = llm_query(text, \"Answer from this context.\");\nFINAL_VAR(answer);\n```",
+            ],
+            vec!["text context worked"],
+            OutputSchema::RlmFinalTextV1,
+        );
+        let outcome = execute_paper_rlm_request(test_request.request).expect("paper rlm outcome");
+
+        assert_eq!(
+            outcome.runtime_result.status,
+            ExecutionStatus::Succeeded,
+            "{:?}",
+            outcome.failure_reason
+        );
+        assert_eq!(
+            outcome.final_output,
+            Some(Value::String(String::from("text context worked")))
+        );
     }
 
     #[test]
