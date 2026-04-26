@@ -35,8 +35,18 @@ fn forge_rlm_execute_plan_writes_grounded_artifacts() {
                 "budget": {
                     "max_iterations": 24,
                     "max_loaded_chunks": 8,
-                    "max_duration_seconds": 300
+                    "max_duration_seconds": 300,
+                    "max_sub_lm_calls": 0,
+                    "max_loaded_bytes": 2000000,
+                    "max_stdout_bytes": 16384,
+                    "max_observation_bytes": 65536
                 },
+                "model_roles": {
+                    "controller_profile_ref": "controller/default",
+                    "sub_lm_profile_ref": null,
+                    "allow_controller_fallback_for_sub_lm": false
+                },
+                "repl_policy": null,
                 "output_schema": "issue_thread_analysis_v1"
             },
             "workspace_ref": "workspace://probe/test",

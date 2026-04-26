@@ -126,6 +126,14 @@ Probe CLI startup now also autoloads `PROBE_OPENAI_API_KEY` from a workspace
 secret file named `.secrets/probe-openai.env` when the current working
 directory is inside that workspace tree.
 
+Hosted Forge workers may receive the same fallback key from their process
+environment instead of a workspace file. In that case the worker should also
+set `PROBE_OPENAI_API_KEY_SOURCE` to a non-secret locator such as
+`hosted_secret:secret-manager/probe-forge-worker-openai-api-key`. `probe codex
+status` prints the source locator but never the key value. The website
+application does not need to hold this key; it belongs only in the worker
+environment that is making model calls.
+
 ## Status And Logout
 
 Inspect the current auth state:
@@ -141,6 +149,7 @@ Status now prints:
 - per-account expiry and cached rate-limit summary
 - the selected execution route
 - whether `PROBE_OPENAI_API_KEY` is currently available as an optional fallback
+- the sanitized API-key source when the fallback key is present
 
 When auth is missing, Probe still prints both:
 

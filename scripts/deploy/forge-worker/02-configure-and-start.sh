@@ -125,7 +125,7 @@ fi
 if [[ ! -f "$PROBE_HOME/auth/forge-worker.json" && -z "${PROBE_FORGE_BOOTSTRAP_TOKEN:-}" ]]; then
   CAN_START=0
 fi
-if [[ "${PROBE_FORGE_PROFILE:-openai-codex-subscription}" == "openai-codex-subscription" ]] && [[ ! -f "$PROBE_HOME/auth/openai-codex.json" ]]; then
+if [[ "${PROBE_FORGE_PROFILE:-openai-codex-subscription}" == "openai-codex-subscription" ]] && [[ ! -f "$PROBE_HOME/auth/openai-codex.json" ]] && [[ -z "${PROBE_OPENAI_API_KEY:-}" ]]; then
   CAN_START=0
 fi
 
@@ -137,6 +137,7 @@ else
   printf 'service_installed_not_started=true\n'
   printf 'env_file=%s\n' "$ENV_FILE_PATH"
   printf 'codex_auth_present=%s\n' "$([[ -f "$PROBE_HOME/auth/openai-codex.json" ]] && echo true || echo false)"
+  printf 'api_key_fallback_present=%s\n' "$([[ -n "${PROBE_OPENAI_API_KEY:-}" ]] && echo true || echo false)"
   printf 'forge_session_present=%s\n' "$([[ -f "$PROBE_HOME/auth/forge-worker.json" ]] && echo true || echo false)"
 fi
 REMOTE

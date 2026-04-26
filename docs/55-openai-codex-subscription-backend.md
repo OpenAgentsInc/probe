@@ -73,6 +73,9 @@ In that fallback mode Probe keeps the same model and Responses body shape, but:
 - `ChatGPT-Account-Id` is omitted
 - the fallback can also be used when no viable saved subscription account is
   present
+- hosted workers may set `PROBE_OPENAI_API_KEY_SOURCE` to a non-secret source
+  label so `probe codex status` can prove the key came from worker-side secret
+  injection without printing the key
 
 Current hosted-body contract:
 
@@ -173,7 +176,12 @@ The built-in OpenAI-compatible Psionic-backed profiles still require that env
 var directly. Probe now also treats it as an optional fallback for the Codex
 subscription lane when the saved subscription accounts are not usable. The CLI
 autoloads that key from `.secrets/probe-openai.env` when Probe starts inside a
-workspace tree containing that file.
+workspace tree containing that file. Hosted Forge workers should instead inject
+the key into the worker process environment and keep the source marker limited
+to a redacted locator such as
+`hosted_secret:secret-manager/probe-forge-worker-openai-api-key`; the
+`openagents.com` Laravel environment should not hold model-provider keys for
+Probe execution.
 
 ## Tests
 

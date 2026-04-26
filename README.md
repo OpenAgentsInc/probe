@@ -64,6 +64,7 @@ Probe currently ships four backend profiles across three backend families:
   - reasoning level: `backend_default`
   - auth source: versioned multi-account state at `PROBE_HOME/auth/openai-codex.json`
   - optional fallback env: `PROBE_OPENAI_API_KEY`
+  - optional fallback source label: `PROBE_OPENAI_API_KEY_SOURCE`
   - workspace secret autoload: `.secrets/probe-openai.env` when Probe starts
     inside that workspace tree
 - `psionic-apple-fm-bridge`
@@ -81,7 +82,10 @@ headroom, prefers the account with the most remaining capacity, and can fall
 back to `PROBE_OPENAI_API_KEY` when the saved subscription accounts are
 missing, unusable, or rate-limited. If Probe starts inside a workspace tree
 that contains `.secrets/probe-openai.env`, it autoloads that key into the CLI
-process before the TUI, `exec`, `chat`, or `codex status` paths run.
+process before the TUI, `exec`, `chat`, or `codex status` paths run. Hosted
+Forge workers should receive the same key from their worker environment and set
+`PROBE_OPENAI_API_KEY_SOURCE` to a non-secret locator; `openagents.com` does
+not need the model-provider key.
 The mesh profile is attach-only as well. Probe discovers live routed inventory
 from `GET /psionic/management/status`, picks the effective model from that
 inventory, prints the mesh role or fallback posture in operator output, and
@@ -344,6 +348,15 @@ export PROBE_OPENAI_API_KEY=sk-...
 probe
 ```
 
+Hosted Forge workers should get `PROBE_OPENAI_API_KEY` from the worker-side
+cloud secret injector and may set:
+
+```bash
+PROBE_OPENAI_API_KEY_SOURCE=hosted_secret:secret-manager/probe-forge-worker-openai-api-key
+```
+
+That source string is metadata only. It must not contain the key.
+
 Operator surfaces now make that route visible:
 
 - `probe codex status` prints `api_key_source=...` and `selected_route=...`
@@ -351,6 +364,7 @@ Operator surfaces now make that route visible:
   the key-backed route
 - the backend overlay shows `selected_route`, `api_key_fallback`, and the key
   source summary
+- status and TUI surfaces must never print the `PROBE_OPENAI_API_KEY` value
 
 ## Forge Worker Auth
 
@@ -548,6 +562,8 @@ and keeps the auth split explicit:
 - Forge worker-session auth lives at `PROBE_HOME/auth/forge-worker.json`
 - `PROBE_OPENAI_API_KEY` is optional for the default Codex lane and is only
   needed when Probe should use the Responses API fallback path
+- hosted workers can use an injected `PROBE_OPENAI_API_KEY` instead of a saved
+  Codex auth file; Laravel/openagents.com should not hold that key
 
 After auth succeeds, use the ChatGPT-backed Codex profile directly:
 

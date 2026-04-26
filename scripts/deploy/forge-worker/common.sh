@@ -48,6 +48,8 @@ export PROBE_FORGE_SERVER_MODEL_ID="${PROBE_FORGE_SERVER_MODEL_ID:-}"
 export PROBE_FORGE_SERVER_MODEL_PATH="${PROBE_FORGE_SERVER_MODEL_PATH:-}"
 export PROBE_FORGE_HOSTNAME_OVERRIDE="${PROBE_FORGE_HOSTNAME_OVERRIDE:-}"
 export PROBE_FORGE_ATTACHMENT_METADATA_JSON="${PROBE_FORGE_ATTACHMENT_METADATA_JSON:-}"
+export PROBE_FORGE_OPENAI_API_KEY_SECRET_NAME="${PROBE_FORGE_OPENAI_API_KEY_SECRET_NAME:-probe-forge-worker-openai-api-key}"
+export PROBE_OPENAI_API_KEY_SOURCE="${PROBE_OPENAI_API_KEY_SOURCE:-hosted_secret:secret-manager/${PROBE_FORGE_OPENAI_API_KEY_SECRET_NAME}}"
 
 log() {
   printf '[probe-forge-worker] %s\n' "$*" >&2
@@ -134,7 +136,8 @@ write_worker_env_file() {
   {
     printf '# Probe Forge worker environment\n'
     printf '# Codex subscription auth lives at: %s/auth/openai-codex.json\n' "$PROBE_FORGE_PROBE_HOME"
-    printf '# Leave PROBE_OPENAI_API_KEY empty for the Codex subscription lane.\n'
+    printf '# Hosted fallback auth may be injected as PROBE_OPENAI_API_KEY by Secret Manager.\n'
+    printf '# PROBE_OPENAI_API_KEY_SOURCE is status metadata only; never put key material there.\n'
     printf '# Set PROBE_FORGE_BOOTSTRAP_TOKEN only for the initial attach or a later refresh.\n'
   } >>"$file"
   write_env_line "$file" "HOME" "$PROBE_FORGE_PROBE_HOME"
@@ -156,5 +159,5 @@ write_worker_env_file() {
   write_env_line "$file" "PROBE_FORGE_HOSTNAME_OVERRIDE" "$PROBE_FORGE_HOSTNAME_OVERRIDE"
   write_env_line "$file" "PROBE_FORGE_ATTACHMENT_METADATA_JSON" "$PROBE_FORGE_ATTACHMENT_METADATA_JSON"
   write_env_line "$file" "PROBE_OPENAI_API_KEY" "${PROBE_OPENAI_API_KEY:-}"
+  write_env_line "$file" "PROBE_OPENAI_API_KEY_SOURCE" "${PROBE_OPENAI_API_KEY_SOURCE:-}"
 }
-

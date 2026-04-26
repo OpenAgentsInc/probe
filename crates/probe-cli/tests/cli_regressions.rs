@@ -232,6 +232,7 @@ fn codex_status_autoloads_workspace_secret_and_prefers_api_key_route_without_aut
         .current_dir(&nested)
         .env("CODEX_HOME", codex_home.as_os_str())
         .env_remove("PROBE_OPENAI_API_KEY")
+        .env_remove("PROBE_OPENAI_API_KEY_SOURCE")
         .arg("codex")
         .arg("status")
         .arg("--probe-home")
@@ -243,7 +244,59 @@ fn codex_status_autoloads_workspace_secret_and_prefers_api_key_route_without_aut
         .stdout(predicate::str::contains(
             "selected_route=api_key_fallback:PROBE_OPENAI_API_KEY",
         ))
-        .stdout(predicate::str::contains("api_key_source=workspace_secret:"));
+        .stdout(predicate::str::contains("api_key_source=workspace_secret:"))
+        .stdout(predicate::str::contains("probe-secret-key").not());
+}
+
+#[test]
+fn codex_status_reports_hosted_api_key_source_without_leaking_key() {
+    let environment = ProbeTestEnvironment::new();
+    let codex_home = isolated_codex_home(&environment);
+
+    probe_cli_command()
+        .env("CODEX_HOME", codex_home.as_os_str())
+        .env("PROBE_OPENAI_API_KEY", "probe-secret-key")
+        .env(
+            "PROBE_OPENAI_API_KEY_SOURCE",
+            "hosted_secret:secret-manager/probe-forge-worker-openai-api-key",
+        )
+        .arg("codex")
+        .arg("status")
+        .arg("--probe-home")
+        .arg(environment.probe_home())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("authenticated=false"))
+        .stdout(predicate::str::contains("api_key_fallback_available=true"))
+        .stdout(predicate::str::contains(
+            "api_key_source=hosted_secret:secret-manager/probe-forge-worker-openai-api-key",
+        ))
+        .stdout(predicate::str::contains(
+            "selected_route=api_key_fallback:PROBE_OPENAI_API_KEY",
+        ))
+        .stdout(predicate::str::contains("probe-secret-key").not());
+}
+
+#[test]
+fn codex_status_rejects_secret_shaped_api_key_source_metadata() {
+    let environment = ProbeTestEnvironment::new();
+    let codex_home = isolated_codex_home(&environment);
+
+    probe_cli_command()
+        .env("CODEX_HOME", codex_home.as_os_str())
+        .env("PROBE_OPENAI_API_KEY", "probe-secret-key")
+        .env("PROBE_OPENAI_API_KEY_SOURCE", "bearer probe-secret-key")
+        .arg("codex")
+        .arg("status")
+        .arg("--probe-home")
+        .arg(environment.probe_home())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("api_key_fallback_available=true"))
+        .stdout(predicate::str::contains(
+            "api_key_source=env:PROBE_OPENAI_API_KEY",
+        ))
+        .stdout(predicate::str::contains("probe-secret-key").not());
 }
 
 #[test]
@@ -276,6 +329,7 @@ fn codex_status_imports_local_codex_auth() {
     probe_cli_command()
         .env("CODEX_HOME", codex_home.as_os_str())
         .env_remove("PROBE_OPENAI_API_KEY")
+        .env_remove("PROBE_OPENAI_API_KEY_SOURCE")
         .arg("codex")
         .arg("status")
         .arg("--probe-home")
@@ -339,6 +393,7 @@ fn codex_status_reports_selected_account_email_and_api_key_fallback_reason() {
 
     probe_cli_command()
         .env("PROBE_OPENAI_API_KEY", "probe-secret-key")
+        .env_remove("PROBE_OPENAI_API_KEY_SOURCE")
         .arg("codex")
         .arg("status")
         .arg("--probe-home")
@@ -352,11 +407,15 @@ fn codex_status_reports_selected_account_email_and_api_key_fallback_reason() {
             "selected_route=api_key_fallback:PROBE_OPENAI_API_KEY",
         ))
         .stdout(predicate::str::contains(
+            "api_key_source=env:PROBE_OPENAI_API_KEY",
+        ))
+        .stdout(predicate::str::contains(
             "selected_route_reason=selected subscription account chris@openagents.com is rate-limited",
         ))
         .stdout(predicate::str::contains(
             "account key=acct:acct-rate-limited label=none email=chris@openagents.com",
-        ));
+        ))
+        .stdout(predicate::str::contains("probe-secret-key").not());
 }
 
 #[test]

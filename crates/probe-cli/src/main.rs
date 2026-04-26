@@ -93,6 +93,7 @@ use serde_json::{Value, json};
 const OPENAI_API_KEY_ENV: &str = "PROBE_OPENAI_API_KEY";
 const OPENAI_API_KEY_SOURCE_ENV: &str = "PROBE_OPENAI_API_KEY_SOURCE";
 const WORKSPACE_OPENAI_SECRET_RELATIVE_PATH: &str = ".secrets/probe-openai.env";
+const OPENAI_API_KEY_SOURCE_MAX_LEN: usize = 180;
 
 #[derive(Parser, Debug)]
 #[command(name = "probe")]
@@ -908,9 +909,19 @@ fn prime_workspace_openai_api_key() -> Result<(), String> {
     }
 
     let Some(secret_path) = find_workspace_openai_secret() else {
+        // SAFETY: If no key is available, stale source metadata would make
+        // status output claim a fallback source that Probe cannot actually use.
+        unsafe {
+            std::env::remove_var(OPENAI_API_KEY_SOURCE_ENV);
+        }
         return Ok(());
     };
     let Some(api_key) = parse_secret_file_value(secret_path.as_path(), OPENAI_API_KEY_ENV)? else {
+        // SAFETY: A present workspace secret file without the expected key does
+        // not make the fallback available, so avoid stale source metadata.
+        unsafe {
+            std::env::remove_var(OPENAI_API_KEY_SOURCE_ENV);
+        }
         return Ok(());
     };
     // SAFETY: Probe sets these process-local env vars once during CLI startup.
@@ -929,7 +940,45 @@ fn openai_api_key_process_env_source() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .map(|_| format!("env:{OPENAI_API_KEY_ENV}"))
+        .map(|api_key| {
+            std::env::var(OPENAI_API_KEY_SOURCE_ENV)
+                .ok()
+                .and_then(|source| {
+                    sanitize_openai_api_key_source(source.as_str(), api_key.as_str())
+                })
+                .unwrap_or_else(|| format!("env:{OPENAI_API_KEY_ENV}"))
+        })
+}
+
+fn sanitize_openai_api_key_source(raw: &str, api_key: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let api_key = api_key.trim();
+    if api_key.len() >= 8 && trimmed.contains(api_key) {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("sk-") || lower.contains("bearer ") || lower.contains("authorization:") {
+        return None;
+    }
+
+    let mut sanitized = String::with_capacity(trimmed.len().min(OPENAI_API_KEY_SOURCE_MAX_LEN));
+    for ch in trimmed.chars() {
+        let safe = ch.is_ascii_alphanumeric() || matches!(ch, ':' | '/' | '.' | '_' | '-');
+        sanitized.push(if safe { ch } else { '_' });
+        if sanitized.len() >= OPENAI_API_KEY_SOURCE_MAX_LEN {
+            break;
+        }
+    }
+
+    let sanitized = sanitized.trim_matches('_').to_string();
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
 }
 
 fn find_workspace_openai_secret() -> Option<PathBuf> {
@@ -3767,10 +3816,15 @@ fn render_codex_account_identity(
 }
 
 fn current_openai_api_key_source() -> Option<String> {
-    std::env::var(OPENAI_API_KEY_SOURCE_ENV)
+    let api_key = std::env::var(OPENAI_API_KEY_ENV)
         .ok()
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty())?;
+    let source = std::env::var(OPENAI_API_KEY_SOURCE_ENV)
+        .ok()
+        .and_then(|value| sanitize_openai_api_key_source(value.as_str(), api_key.as_str()))
+        .unwrap_or_else(|| format!("env:{OPENAI_API_KEY_ENV}"));
+    Some(source)
 }
 
 fn try_open_browser(url: &str) -> bool {

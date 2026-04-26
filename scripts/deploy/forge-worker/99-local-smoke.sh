@@ -28,15 +28,6 @@ REQUEST_LOG="${TMP_DIR}/requests.log"
 PORT_FILE="${TMP_DIR}/port.txt"
 mkdir -p "${PROBE_HOME}/auth" "${PROBE_HOME}/server" "${WORKSPACE_ROOT}"
 
-cat >"${PROBE_HOME}/auth/openai-codex.json" <<'JSON'
-{
-  "refresh": "refresh-token",
-  "access": "access-token",
-  "expires": "2099-01-01T00:00:00Z",
-  "account_id": "acct-smoke"
-}
-JSON
-
 cat >"${TMP_DIR}/fake_forge.py" <<'PY'
 import http.server
 import json
@@ -146,6 +137,8 @@ export PROBE_FORGE_POLL_INTERVAL_MS="1"
 export PROBE_FORGE_EXIT_ON_IDLE="true"
 export PROBE_FORGE_MAX_ITERATIONS="1"
 export PROBE_FORGE_HOSTNAME_OVERRIDE="probe-smoke.local"
+export PROBE_OPENAI_API_KEY="probe-smoke-secret-key"
+export PROBE_OPENAI_API_KEY_SOURCE="hosted_secret:secret-manager/probe-forge-worker-openai-api-key"
 
 "${SCRIPT_DIR}/probe-forge-worker.sh" | tee "${TMP_DIR}/worker-output.log"
 
@@ -153,6 +146,7 @@ grep -q 'POST /worker/v1/attach' "${REQUEST_LOG}"
 grep -q 'POST /worker/v1/runs/claim-next' "${REQUEST_LOG}"
 grep -q 'loop_completed=true' "${TMP_DIR}/worker-output.log"
 grep -q 'exit_reason="idle"' "${TMP_DIR}/worker-output.log"
+! grep -q 'probe-smoke-secret-key' "${TMP_DIR}/worker-output.log"
 
 printf 'local_smoke_passed=true\n'
 printf 'request_log=%s\n' "${REQUEST_LOG}"

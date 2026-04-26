@@ -32,16 +32,24 @@ This lane supports two different auth concerns. Keep them separate.
 
 ### 1. Probe runtime auth to the Codex/OpenAI lane
 
-Preferred first path:
+Preferred first paths:
 
 - `openai-codex-subscription`
 - auth record stored at `PROBE_HOME/auth/openai-codex.json`
 - obtained with `probe codex login --method headless`
 
-This path does **not** require `PROBE_OPENAI_API_KEY`.
+or, for hosted workers that should not depend on a manually refreshed Codex
+subscription token:
 
-`PROBE_OPENAI_API_KEY` is now an optional fallback for the Codex lane as well,
-but a healthy worker with valid saved subscription auth still does not need it.
+- `openai-codex-subscription`
+- `PROBE_OPENAI_API_KEY` injected by the worker environment from the cloud
+  secret manager
+- `PROBE_OPENAI_API_KEY_SOURCE` set to a non-secret locator such as
+  `hosted_secret:secret-manager/probe-forge-worker-openai-api-key`
+
+`PROBE_OPENAI_API_KEY_SOURCE` is status metadata only. It must name the source
+of the secret, not the secret value. `probe codex status` prints that source so
+operators can see that a hosted secret is active without exposing key material.
 
 ### 2. Probe worker auth to Forge
 
@@ -91,7 +99,8 @@ state to do so:
 - `PROBE_FORGE_WORKER_ID`
 - either an existing `PROBE_HOME/auth/forge-worker.json` or a fresh
   `PROBE_FORGE_BOOTSTRAP_TOKEN`
-- for the Codex lane, `PROBE_HOME/auth/openai-codex.json`
+- for the Codex lane, either `PROBE_HOME/auth/openai-codex.json` or an injected
+  `PROBE_OPENAI_API_KEY`
 
 If those are not all present yet, it leaves the service installed but stopped
 and prints the remaining gap honestly.
@@ -128,9 +137,10 @@ worker status.
 
 Local retained validation for the lane.
 
-It starts a fake Forge server, seeds a fake Codex auth record, runs the
-launcher, verifies attach plus claim traffic, and confirms the worker loop
-exits cleanly on idle.
+It starts a fake Forge server, runs the launcher with a fake hosted
+`PROBE_OPENAI_API_KEY`, verifies attach plus claim traffic, confirms the worker
+loop exits cleanly on idle, and fails if the fake key appears in launcher
+output.
 
 ## Launcher contract
 
@@ -140,7 +150,8 @@ On startup it:
 
 1. verifies the `probe` binary exists
 2. ensures `PROBE_HOME`, auth directories, and the workspace root exist
-3. checks for Codex auth when `PROBE_FORGE_PROFILE=openai-codex-subscription`
+3. checks for Codex auth or an injected API-key fallback when
+   `PROBE_FORGE_PROFILE=openai-codex-subscription`
 4. checks whether a Forge worker session already exists
 5. if not, uses `PROBE_FORGE_BASE_URL`, `PROBE_FORGE_WORKER_ID`, and
    `PROBE_FORGE_BOOTSTRAP_TOKEN` to run `probe forge attach`
@@ -171,11 +182,19 @@ Important fields:
 
 Optional fields for non-Codex lanes:
 
-- `PROBE_OPENAI_API_KEY`
 - `PROBE_FORGE_SERVER_HOST`
 - `PROBE_FORGE_SERVER_PORT`
 - `PROBE_FORGE_SERVER_MODEL_ID`
 - `PROBE_FORGE_SERVER_MODEL_PATH`
+
+Optional hosted fallback fields for the default Codex lane:
+
+- `PROBE_OPENAI_API_KEY`
+- `PROBE_OPENAI_API_KEY_SOURCE`
+
+The generated env file is installed with mode `0600`. Deployment scripts and
+status surfaces must never print `PROBE_OPENAI_API_KEY`; they may print only
+the sanitized `PROBE_OPENAI_API_KEY_SOURCE` label.
 
 ## Expected operator flow
 
@@ -187,7 +206,8 @@ Optional fields for non-Codex lanes:
    - `PROBE_FORGE_WORKER_ID`
    - `PROBE_FORGE_BOOTSTRAP_TOKEN`
 3. Run `scripts/deploy/forge-worker/02-configure-and-start.sh`
-4. If Codex auth is not already present, run:
+4. If Codex auth is not already present, either inject `PROBE_OPENAI_API_KEY`
+   from the hosted worker secret or run:
    - `scripts/deploy/forge-worker/03-run-headless-codex-login.sh`
 5. Restart or refresh the worker if needed:
    - `scripts/deploy/forge-worker/06-restart-service.sh`

@@ -24,8 +24,8 @@ PROBE_FORGE_ATTACHMENT_METADATA_JSON="${PROBE_FORGE_ATTACHMENT_METADATA_JSON:-}"
 [[ -x "$PROBE_BINARY" ]] || die "missing probe binary: ${PROBE_BINARY}"
 mkdir -p "$PROBE_HOME/auth" "$PROBE_HOME/server" "$PROBE_FORGE_WORKSPACE_ROOT"
 
-if [[ "$PROBE_FORGE_PROFILE" == "openai-codex-subscription" ]] && [[ ! -f "$PROBE_HOME/auth/openai-codex.json" ]]; then
-  die "missing Codex auth at ${PROBE_HOME}/auth/openai-codex.json; run \`${PROBE_BINARY} codex login --method headless --probe-home ${PROBE_HOME}\`"
+if [[ "$PROBE_FORGE_PROFILE" == "openai-codex-subscription" ]] && [[ ! -f "$PROBE_HOME/auth/openai-codex.json" ]] && [[ -z "${PROBE_OPENAI_API_KEY:-}" ]]; then
+  die "missing Codex auth at ${PROBE_HOME}/auth/openai-codex.json and missing PROBE_OPENAI_API_KEY fallback; run \`${PROBE_BINARY} codex login --method headless --probe-home ${PROBE_HOME}\` or inject PROBE_OPENAI_API_KEY from the hosted worker secret"
 fi
 
 CONTEXT_LOG="$(mktemp -t probe-forge-context.XXXXXX)"

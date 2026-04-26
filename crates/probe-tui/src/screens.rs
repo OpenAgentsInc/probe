@@ -2760,9 +2760,15 @@ fn is_weekly_window(limit_window_seconds: u64) -> bool {
 }
 
 fn current_openai_api_key_source() -> Option<&'static str> {
+    std::env::var(OPENAI_API_KEY_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
     let source = std::env::var(OPENAI_API_KEY_SOURCE_ENV).ok()?;
     if source.starts_with("workspace_secret:") {
         Some("workspace secret")
+    } else if source.starts_with("hosted_secret:") {
+        Some("hosted secret")
     } else if source.starts_with("env:") {
         Some("env")
     } else {
