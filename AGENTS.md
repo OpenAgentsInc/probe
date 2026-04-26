@@ -85,5 +85,6 @@ This repo should not quietly absorb unrelated product-shell concerns.
 - `docs/84-forge-rlm-assignment-execution.md`
 - `docs/88-probe-worker-verification-pack.md`
 - `docs/89-probe-health-diagnosis-forge-worker-lane.md`
+- `docs/90-forge-bounded-child-probe-sessions.md`
 
 Add more canonical docs here as the repo grows.

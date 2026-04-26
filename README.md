@@ -40,6 +40,10 @@ Current shipped surface:
 - a Forge health-diagnosis worker lane inside `probe forge run-once|run-loop`
   that consumes Forge health snapshots/events/evidence refs and returns
   structured diagnosis artifacts without executing production recovery actions
+- `probe_core::forge_child_sessions` for Forge-policy-bounded child Probe
+  session spawn/read/synthesis, with read-only research defaults, patch-attempt
+  authorization gates, repository/budget limits, and no production recovery
+  authority by default
 - Forge-owned RLM assignment execution in `probe-core::forge_rlm` plus
   `probe forge rlm execute|proof-openagents-4368` for large-corpus issue-thread
   analysis with chunk manifests, trace artifacts, and grounded outputs

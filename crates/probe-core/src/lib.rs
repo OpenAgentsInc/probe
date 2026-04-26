@@ -1,5 +1,6 @@
 pub mod backend_profiles;
 pub mod dataset_export;
+pub mod forge_child_sessions;
 pub mod forge_health_diagnosis;
 pub mod forge_rlm;
 pub mod forge_run_worker;
