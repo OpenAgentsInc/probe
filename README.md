@@ -37,6 +37,9 @@ Current shipped surface:
   evidence report covering worker attach state, assignment-loop contracts,
   Codex route status, hosted environment redaction, sync gates, child-session
   status, and summary artifacts
+- a Forge health-diagnosis worker lane inside `probe forge run-once|run-loop`
+  that consumes Forge health snapshots/events/evidence refs and returns
+  structured diagnosis artifacts without executing production recovery actions
 - Forge-owned RLM assignment execution in `probe-core::forge_rlm` plus
   `probe forge rlm execute|proof-openagents-4368` for large-corpus issue-thread
   analysis with chunk manifests, trace artifacts, and grounded outputs

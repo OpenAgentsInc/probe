@@ -1,15 +1,27 @@
+use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use probe_protocol::backend::BackendProfile;
-use probe_protocol::session::{SessionHarnessProfile, SessionSummaryArtifact};
+use probe_protocol::session::{
+    SessionHarnessProfile, SessionMetadata, SessionSummaryArtifact, SessionTurn, TranscriptItemKind,
+};
 use serde_json::{Value, json};
 
+use crate::forge_health_diagnosis::{
+    PROBE_HEALTH_DIAGNOSIS_ARTIFACT_KIND, ProbeHealthDiagnosisReport,
+    build_health_diagnosis_prompt, build_health_diagnosis_report,
+    health_diagnosis_issue_comment_draft, is_health_diagnosis_assignment,
+};
 use crate::forge_worker::{ForgeAssignedRunRecord, ForgeWorkerAuthController, ForgeWorkerError};
+use crate::forge_worker_verification::{
+    ProbeWorkerCodexRouteStatus, ProbeWorkerVerificationRequest, run_probe_worker_verification_pack,
+};
 use crate::runtime::{
     PlainTextExecOutcome, PlainTextExecRequest, ProbeRuntime, RuntimeError, RuntimeEvent,
     RuntimeEventSink,
 };
+use crate::session_store::NewItem;
 use crate::session_summary_artifacts::refresh_session_summary_artifacts;
 use crate::tools::ToolLoopConfig;
 
@@ -107,6 +119,10 @@ impl ForgeAssignedRunExecutor {
                 "forge_run_id": assignment.run.id,
             })),
         )?;
+
+        if is_health_diagnosis_assignment(&assignment) {
+            return self.run_health_diagnosis_assignment(assignment, &request);
+        }
 
         let reporter_state = Arc::new(Mutex::new(ForgeEventReporterState::default()));
         let event_sink: Arc<dyn RuntimeEventSink> = Arc::new(ForgeEventReporter {
@@ -219,6 +235,137 @@ impl ForgeAssignedRunExecutor {
         )?;
 
         Ok(())
+    }
+
+    fn run_health_diagnosis_assignment(
+        &self,
+        assignment: ForgeAssignedRunRecord,
+        request: &ForgeAssignedRunExecutionRequest,
+    ) -> Result<ForgeAssignedRunExecutionOutcome, ForgeAssignedRunExecutionError> {
+        let cwd = execution_cwd(&assignment, &request.default_cwd);
+        let session = self
+            .runtime
+            .session_store()
+            .create_session(
+                format!("Forge Health: {}", assignment.work_order.title),
+                cwd,
+            )
+            .map_err(RuntimeError::from)?;
+        let runtime_session_id = session.id.as_str().to_string();
+        let prompt = build_health_diagnosis_prompt(&assignment);
+
+        self.forge.record_run_event(
+            assignment.run.id.as_str(),
+            "run.started",
+            Some(runtime_session_id.as_str()),
+            json!({
+                "phase": "health_diagnosis_started",
+                "artifact_kind": PROBE_HEALTH_DIAGNOSIS_ARTIFACT_KIND,
+                "recovery": recovery_summary(&assignment),
+            }),
+        )?;
+
+        let verification_pack = run_probe_worker_verification_pack(
+            ProbeWorkerVerificationRequest::new(ProbeWorkerCodexRouteStatus {
+                api_key_fallback_available: std::env::var(request.profile.api_key_env.as_str())
+                    .ok()
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false),
+                api_key_source: std::env::var(format!("{}_SOURCE", request.profile.api_key_env))
+                    .ok()
+                    .and_then(safe_env_source)
+                    .filter(|value| !value.trim().is_empty()),
+            }),
+        )
+        .map_err(|error| {
+            ForgeAssignedRunExecutionError::Reporting(format!(
+                "probe worker verification pack failed: {error}"
+            ))
+        })?;
+
+        let initial_report =
+            build_health_diagnosis_report(&assignment, Some(&verification_pack), Vec::new());
+        let initial_report_text =
+            serde_json::to_string_pretty(&initial_report).map_err(|error| {
+                ForgeAssignedRunExecutionError::Reporting(format!(
+                    "failed to serialize health diagnosis report: {error}"
+                ))
+            })?;
+        let turn = self
+            .runtime
+            .session_store()
+            .append_turn(
+                &session.id,
+                &[
+                    NewItem::new(TranscriptItemKind::UserMessage, prompt),
+                    NewItem::new(TranscriptItemKind::AssistantMessage, initial_report_text),
+                ],
+            )
+            .map_err(RuntimeError::from)?;
+        let transcript = self
+            .runtime
+            .session_store()
+            .read_transcript(&session.id)
+            .map_err(RuntimeError::from)?;
+        let summary_artifacts = refresh_session_summary_artifacts(
+            self.runtime.session_store(),
+            &session,
+            transcript.as_slice(),
+            None,
+            None,
+        )
+        .map_err(|error| {
+            ForgeAssignedRunExecutionError::Reporting(format!(
+                "failed to refresh Probe health diagnosis summary artifacts: {error}"
+            ))
+        })?;
+        let summary_artifact_refs = summary_artifacts
+            .iter()
+            .map(|artifact| artifact.artifact_ref().clone())
+            .collect::<Vec<_>>();
+        let report = build_health_diagnosis_report(
+            &assignment,
+            Some(&verification_pack),
+            summary_artifact_refs,
+        );
+        let assistant_text = serde_json::to_string_pretty(&report).map_err(|error| {
+            ForgeAssignedRunExecutionError::Reporting(format!(
+                "failed to serialize final health diagnosis report: {error}"
+            ))
+        })?;
+        let artifact_refs = write_health_diagnosis_artifacts(
+            &self.runtime,
+            &assignment,
+            &report,
+            &verification_pack,
+        )?;
+
+        let final_state = self.forge.record_run_event(
+            assignment.run.id.as_str(),
+            "run.ready_for_verification",
+            Some(runtime_session_id.as_str()),
+            health_diagnosis_ready_summary(
+                &assignment,
+                &session,
+                &turn,
+                &report,
+                &verification_pack,
+                &summary_artifacts,
+                artifact_refs,
+            ),
+        )?;
+        self.forge
+            .heartbeat("attached", None, Some(json!({"phase":"idle"})))?;
+
+        Ok(ForgeAssignedRunExecutionOutcome::Executed(
+            ForgeAssignedRunExecutionResult {
+                assignment,
+                probe_session_id: Some(runtime_session_id),
+                final_run_state: final_state.run_state,
+                assistant_text: Some(assistant_text),
+                error: None,
+            },
+        ))
     }
 }
 
@@ -452,6 +599,161 @@ fn ready_for_verification_summary(
     }))
 }
 
+fn health_diagnosis_ready_summary(
+    assignment: &ForgeAssignedRunRecord,
+    session: &SessionMetadata,
+    turn: &SessionTurn,
+    report: &ProbeHealthDiagnosisReport,
+    verification_pack: &crate::forge_worker_verification::ProbeWorkerVerificationReport,
+    summary_artifacts: &[SessionSummaryArtifact],
+    artifact_refs: Vec<Value>,
+) -> Value {
+    json!({
+        "assistant_text": health_diagnosis_issue_comment_draft(report),
+        "probe_health_diagnosis": report,
+        "probe_worker_verification_pack": verification_pack,
+        "probe_session": {
+            "session_id": session.id.as_str(),
+            "title": session.title.clone(),
+            "cwd": session.cwd.display().to_string(),
+            "transcript_path": session.transcript_path.display().to_string(),
+            "created_at_ms": session.created_at_ms,
+            "updated_at_ms": session.updated_at_ms,
+            "turn_id": turn.id.0,
+            "turn_index": turn.index,
+        },
+        "probe_artifacts": {
+            "transcript": {
+                "kind": "probe.transcript",
+                "path": session.transcript_path.display().to_string(),
+            },
+            "summary_artifacts": session_summary_artifact_refs(summary_artifacts),
+            "health_diagnosis_artifacts": artifact_refs,
+        },
+        "recovery": recovery_summary(assignment),
+        "recovery_policy": {
+            "direct_recovery_actions_executed": false,
+            "route": "forge_health_worker_policy_lease",
+        },
+    })
+}
+
+fn write_health_diagnosis_artifacts(
+    runtime: &ProbeRuntime,
+    assignment: &ForgeAssignedRunRecord,
+    report: &ProbeHealthDiagnosisReport,
+    verification_pack: &crate::forge_worker_verification::ProbeWorkerVerificationReport,
+) -> Result<Vec<Value>, ForgeAssignedRunExecutionError> {
+    let artifact_dir = runtime
+        .session_store()
+        .root()
+        .join("forge-health-diagnosis")
+        .join(safe_path_segment(assignment.run.id.as_str()));
+    fs::create_dir_all(artifact_dir.as_path()).map_err(|error| {
+        ForgeAssignedRunExecutionError::Reporting(format!(
+            "failed to create health diagnosis artifact dir: {error}"
+        ))
+    })?;
+
+    let report_path = artifact_dir.join("diagnosis-report.json");
+    let verification_pack_path = artifact_dir.join("probe-worker-verification-pack.json");
+    let comment_path = artifact_dir.join("issue-comment-draft.md");
+    fs::write(
+        report_path.as_path(),
+        serde_json::to_vec_pretty(report).map_err(|error| {
+            ForgeAssignedRunExecutionError::Reporting(format!(
+                "failed to render health diagnosis report: {error}"
+            ))
+        })?,
+    )
+    .map_err(|error| {
+        ForgeAssignedRunExecutionError::Reporting(format!(
+            "failed to write health diagnosis report: {error}"
+        ))
+    })?;
+    fs::write(
+        verification_pack_path.as_path(),
+        serde_json::to_vec_pretty(verification_pack).map_err(|error| {
+            ForgeAssignedRunExecutionError::Reporting(format!(
+                "failed to render Probe worker verification pack: {error}"
+            ))
+        })?,
+    )
+    .map_err(|error| {
+        ForgeAssignedRunExecutionError::Reporting(format!(
+            "failed to write Probe worker verification pack: {error}"
+        ))
+    })?;
+    fs::write(
+        comment_path.as_path(),
+        health_diagnosis_issue_comment_draft(report),
+    )
+    .map_err(|error| {
+        ForgeAssignedRunExecutionError::Reporting(format!(
+            "failed to write health diagnosis issue-comment draft: {error}"
+        ))
+    })?;
+
+    Ok(vec![
+        json!({
+            "kind": PROBE_HEALTH_DIAGNOSIS_ARTIFACT_KIND,
+            "path": report_path.display().to_string(),
+        }),
+        json!({
+            "kind": "probe.forge_worker.verification_pack_report",
+            "path": verification_pack_path.display().to_string(),
+        }),
+        json!({
+            "kind": "probe.forge_worker.health_diagnosis_issue_comment_draft",
+            "path": comment_path.display().to_string(),
+        }),
+    ])
+}
+
+fn safe_path_segment(value: &str) -> String {
+    let mut segment = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if segment.is_empty() {
+        segment.push_str("run");
+    }
+    segment
+}
+
+fn safe_env_source(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("sk-") || lower.contains("bearer ") || lower.contains("authorization:") {
+        return None;
+    }
+
+    let mut sanitized = String::with_capacity(trimmed.len().min(180));
+    for ch in trimmed.chars() {
+        let safe = ch.is_ascii_alphanumeric() || matches!(ch, ':' | '/' | '.' | '_' | '-');
+        sanitized.push(if safe { ch } else { '_' });
+        if sanitized.len() >= 180 {
+            break;
+        }
+    }
+
+    let sanitized = sanitized.trim_matches('_').to_string();
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
 fn session_summary_artifact_refs(summary_artifacts: &[SessionSummaryArtifact]) -> Vec<Value> {
     summary_artifacts
         .iter()
@@ -513,7 +815,7 @@ mod tests {
 
     use super::{
         ForgeAssignedRunExecutionOutcome, ForgeAssignedRunExecutionRequest,
-        ForgeAssignedRunExecutor,
+        ForgeAssignedRunExecutor, PROBE_HEALTH_DIAGNOSIS_ARTIFACT_KIND,
     };
     use crate::forge_worker::ForgeWorkerAuthController;
     use crate::runtime::ProbeRuntime;
@@ -873,6 +1175,318 @@ mod tests {
                 .expect("summary artifacts should be an array")
                 .iter()
                 .any(|artifact| artifact["kind"] == "retained_session_summary")
+        );
+    }
+
+    #[test]
+    fn forge_health_diagnosis_run_reports_structured_evidence_without_recovery_actions() {
+        let api_key_env = "PROBE_HEALTH_DIAGNOSIS_TEST_OPENAI_API_KEY";
+        let _api_key_guard = ScopedEnvVar::set(api_key_env, "probe-test-openai-key");
+        let _api_key_source_guard = ScopedEnvVar::set(
+            "PROBE_HEALTH_DIAGNOSIS_TEST_OPENAI_API_KEY_SOURCE",
+            "secret-manager/projects/openagents/probe-worker-openai",
+        );
+        let run_event_payloads = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let run_event_payloads_thread = Arc::clone(&run_event_payloads);
+        let forge = FakeOpenAiServer::from_handler(move |request: FakeHttpRequest| {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/worker/v1/attach") => FakeHttpResponse::json_ok(json!({
+                    "worker": {
+                        "id": "forge-worker-1",
+                        "org_id": "org-1",
+                        "project_id": "project-1",
+                        "runtime_kind": "probe",
+                        "environment_class": "hosted-gcp",
+                        "state": "attached"
+                    },
+                    "session_id": "forge-worker-session-1",
+                    "session_token": "session-token-1",
+                    "expires_at": "2026-04-26T18:00:00Z"
+                })),
+                ("GET", "/worker/v1/runs/current") => FakeHttpResponse::json_ok(json!({
+                    "request_id": "req-current",
+                    "assignment": null
+                })),
+                ("POST", "/worker/v1/runs/claim-next") => FakeHttpResponse::json_ok(json!({
+                    "request_id": "req-claim-health",
+                    "assignment": {
+                        "run": {
+                            "id": "forge-run-health-1",
+                            "work_order_id": "forge-work-health-1",
+                            "state": "assigned",
+                            "version": 1,
+                            "workspace_id": "forge-workspace-health-1",
+                            "controller_lease_id": "forge-lease-health-1",
+                            "assigned_worker_id": "forge-worker-1",
+                            "active_worker_session_id": "forge-worker-session-1",
+                            "runtime": {
+                                "kind": "probe",
+                                "session_id": null,
+                                "summary": {}
+                            },
+                            "started_at": null,
+                            "finished_at": null
+                        },
+                        "work_order": {
+                            "id": "forge-work-health-1",
+                            "org_id": "org-1",
+                            "project_id": "project-1",
+                            "title": "Nexus health diagnosis",
+                            "state": "leased",
+                            "version": 1,
+                            "repository_id": "OpenAgentsInc/openagents",
+                            "base_ref": "origin/main",
+                            "verification_policy": {
+                                "required": ["probe_worker_verification_pack", "structured_health_diagnosis"]
+                            },
+                            "requested_outputs": {
+                                "kind": "probe_health_diagnosis",
+                                "health_snapshot": {
+                                    "public_edge": {"status": 1033},
+                                    "nexus": {"healthz": "unreachable"}
+                                },
+                                "health_events": [
+                                    {"event_type": "cloudflare_1033", "summary": "public nexus edge failed"}
+                                ],
+                                "evidence_refs": [
+                                    {"kind": "nexus.health.snapshot", "path": "memory://snapshot"}
+                                ]
+                            }
+                        },
+                        "workspace": {
+                            "id": "forge-workspace-health-1",
+                            "state": "ready",
+                            "version": 1,
+                            "repository_id": "OpenAgentsInc/openagents",
+                            "base_ref": "origin/main",
+                            "worktree_ref": null,
+                            "environment_class": "hosted-gcp",
+                            "mounted_pack_ids": [],
+                            "secret_scope_ref": "secret-scope:health-agent",
+                            "retention_policy": "retain_until_delivery",
+                            "status_metadata": {}
+                        },
+                        "controller_lease": {
+                            "id": "forge-lease-health-1",
+                            "state": "active",
+                            "version": 1,
+                            "holder_actor_id": "controller-1",
+                            "holder_kind": "worker",
+                            "expires_at": null
+                        },
+                        "worker": {
+                            "id": "forge-worker-1",
+                            "display_name": "Forge worker",
+                            "runtime_kind": "probe",
+                            "environment_class": "hosted-gcp",
+                            "state": "busy",
+                            "last_seen_at": null
+                        },
+                        "active_recovery": {
+                            "id": "forge-run-recovery-health-1",
+                            "worker_id": "forge-worker-1",
+                            "worker_session_id": "forge-worker-session-1",
+                            "attempt_number": 1,
+                            "status": "active",
+                            "summary": {},
+                            "started_at": "2026-04-26T18:00:00Z",
+                            "ended_at": null,
+                            "updated_at": "2026-04-26T18:00:00Z"
+                        }
+                    }
+                })),
+                ("POST", "/worker/v1/heartbeat") => {
+                    let body: serde_json::Value =
+                        serde_json::from_str(request.body.as_str()).expect("heartbeat body");
+                    let state = body["state"].as_str().unwrap_or("attached");
+                    FakeHttpResponse::json_ok(json!({
+                        "request_id": "req-heartbeat",
+                        "worker_session": {
+                            "worker_id": "forge-worker-1",
+                            "org_id": "org-1",
+                            "project_id": "project-1",
+                            "runtime_kind": "probe",
+                            "environment_class": "hosted-gcp",
+                            "session_id": "forge-worker-session-1"
+                        },
+                        "worker": {
+                            "id": "forge-worker-1",
+                            "org_id": "org-1",
+                            "project_id": "project-1",
+                            "runtime_kind": "probe",
+                            "environment_class": "hosted-gcp",
+                            "state": state
+                        }
+                    }))
+                }
+                ("POST", path) if path.starts_with("/worker/v1/runs/forge-run-health-1/events") => {
+                    let body: serde_json::Value =
+                        serde_json::from_str(request.body.as_str()).expect("event body");
+                    run_event_payloads_thread
+                        .lock()
+                        .expect("run event payload lock")
+                        .push(body.clone());
+                    let event_type = body["event_type"].as_str().unwrap_or("run.progress");
+                    let ready = event_type == "run.ready_for_verification";
+                    FakeHttpResponse::json_ok(json!({
+                        "run": {
+                            "id": "forge-run-health-1",
+                            "work_order_id": "forge-work-health-1",
+                            "state": if ready { "verifying" } else { "running" },
+                            "version": 2,
+                            "workspace_id": "forge-workspace-health-1",
+                            "controller_lease_id": "forge-lease-health-1",
+                            "assigned_worker_id": "forge-worker-1",
+                            "active_worker_session_id": if ready { serde_json::Value::Null } else { json!("forge-worker-session-1") },
+                            "runtime": {
+                                "kind": "probe",
+                                "session_id": body["runtime_session_id"],
+                                "summary": {}
+                            },
+                            "started_at": "2026-04-26T18:00:01Z",
+                            "finished_at": if ready { json!("2026-04-26T18:00:02Z") } else { serde_json::Value::Null }
+                        },
+                        "work_order": {
+                            "id": "forge-work-health-1",
+                            "org_id": "org-1",
+                            "project_id": "project-1",
+                            "title": "Nexus health diagnosis",
+                            "state": if ready { "verification_pending" } else { "running" },
+                            "version": 2,
+                            "repository_id": "OpenAgentsInc/openagents",
+                            "base_ref": "origin/main",
+                            "verification_policy": {
+                                "required": ["probe_worker_verification_pack", "structured_health_diagnosis"]
+                            },
+                            "requested_outputs": {
+                                "kind": "probe_health_diagnosis"
+                            }
+                        },
+                        "workspace": {
+                            "id": "forge-workspace-health-1",
+                            "state": "ready",
+                            "version": 1,
+                            "repository_id": "OpenAgentsInc/openagents",
+                            "base_ref": "origin/main",
+                            "worktree_ref": null,
+                            "environment_class": "hosted-gcp",
+                            "mounted_pack_ids": [],
+                            "secret_scope_ref": "secret-scope:health-agent",
+                            "retention_policy": "retain_until_delivery",
+                            "status_metadata": {}
+                        },
+                        "controller_lease": null,
+                        "worker": {
+                            "id": "forge-worker-1",
+                            "display_name": "Forge worker",
+                            "runtime_kind": "probe",
+                            "environment_class": "hosted-gcp",
+                            "state": if ready { "attached" } else { "busy" },
+                            "last_seen_at": "2026-04-26T18:00:02Z"
+                        },
+                        "recent_events": [{ "event_type": event_type }],
+                        "recovery_history": [{
+                            "id": "forge-run-recovery-health-1",
+                            "worker_id": "forge-worker-1",
+                            "worker_session_id": "forge-worker-session-1",
+                            "attempt_number": 1,
+                            "status": if ready { "completed" } else { "active" },
+                            "summary": {},
+                            "started_at": "2026-04-26T18:00:00Z",
+                            "ended_at": if ready { json!("2026-04-26T18:00:02Z") } else { serde_json::Value::Null },
+                            "updated_at": "2026-04-26T18:00:02Z"
+                        }]
+                    }))
+                }
+                other => panic!("unexpected forge request {other:?}"),
+            }
+        });
+
+        let temp = tempdir().expect("temp dir");
+        let controller = ForgeWorkerAuthController::new(temp.path(), forge.base_url()).unwrap();
+        controller
+            .attach_worker("forge-worker-1", "bootstrap-token", None)
+            .unwrap();
+
+        let runtime = ProbeRuntime::new(temp.path());
+        let executor = ForgeAssignedRunExecutor::new(controller, runtime);
+        let profile = BackendProfile {
+            name: String::from("forge-health-test-profile"),
+            kind: BackendKind::OpenAiChatCompletions,
+            base_url: String::from("http://127.0.0.1:65535"),
+            model: String::from("qwen3.5-2b-q8_0-registry.gguf"),
+            reasoning_level: None,
+            service_tier: None,
+            api_key_env: String::from(api_key_env),
+            timeout_secs: 15,
+            attach_mode: ServerAttachMode::AttachToExisting,
+            prefix_cache_mode: PrefixCacheMode::BackendDefault,
+            control_plane: None,
+            psionic_mesh: None,
+        };
+
+        let outcome = executor
+            .run_once(ForgeAssignedRunExecutionRequest {
+                profile,
+                default_cwd: temp.path().to_path_buf(),
+                system_prompt: None,
+                harness_profile: None,
+                tool_loop: None,
+            })
+            .unwrap();
+
+        match outcome {
+            ForgeAssignedRunExecutionOutcome::Executed(result) => {
+                assert_eq!(result.final_run_state, "verifying");
+                assert!(result.error.is_none());
+                assert!(result.probe_session_id.is_some());
+                let assistant_text = result.assistant_text.expect("assistant text");
+                assert!(assistant_text.contains(PROBE_HEALTH_DIAGNOSIS_ARTIFACT_KIND));
+                assert!(assistant_text.contains("public_edge_unreachable"));
+                assert!(assistant_text.contains("forge_health_worker_policy_lease"));
+            }
+            other => panic!("unexpected outcome {other:?}"),
+        }
+
+        let event_payloads = run_event_payloads
+            .lock()
+            .expect("run event payload lock")
+            .clone();
+        assert!(
+            event_payloads
+                .iter()
+                .any(|payload| payload["event_type"] == "run.started")
+        );
+        let ready_for_verification = event_payloads
+            .iter()
+            .find(|payload| payload["event_type"] == "run.ready_for_verification")
+            .expect("ready_for_verification event should be recorded");
+        assert_eq!(
+            ready_for_verification["summary"]["probe_health_diagnosis"]["artifact_kind"],
+            json!(PROBE_HEALTH_DIAGNOSIS_ARTIFACT_KIND)
+        );
+        assert_eq!(
+            ready_for_verification["summary"]["probe_health_diagnosis"]["recommended_action"]["direct_recovery_actions_executed"],
+            json!(false)
+        );
+        assert_eq!(
+            ready_for_verification["summary"]["probe_health_diagnosis"]["verification"]["verification_pack_status"],
+            json!("passed")
+        );
+        assert_eq!(
+            ready_for_verification["summary"]["recovery_policy"]["route"],
+            json!("forge_health_worker_policy_lease")
+        );
+        assert_eq!(
+            ready_for_verification["summary"]["probe_artifacts"]["transcript"]["kind"],
+            json!("probe.transcript")
+        );
+        assert!(
+            ready_for_verification["summary"]["probe_artifacts"]["health_diagnosis_artifacts"]
+                .as_array()
+                .expect("health diagnosis artifacts should be an array")
+                .iter()
+                .any(|artifact| artifact["kind"] == PROBE_HEALTH_DIAGNOSIS_ARTIFACT_KIND)
         );
     }
 
