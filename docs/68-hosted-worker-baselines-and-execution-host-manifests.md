@@ -29,6 +29,21 @@ That state carries:
   - snapshot id
   - restore manifest id
   - source baseline id
+- optional prepared environment ref
+  - environment id
+  - repo slug
+  - image ref
+  - cache ref
+  - dependency cache key
+  - prepared timestamp
+  - warm commands
+- optional default-branch sync state
+  - sync status
+  - default branch
+  - requested ref
+  - synced ref
+  - timestamps
+  - status message
 - optional execution-host metadata
   - host kind
   - host id
@@ -52,6 +67,11 @@ normalization.
 Probe uses those files as provider-agnostic manifest hints. The typed session
 state is the public contract; the on-disk layout is only the first local
 implementation.
+
+Prepared baseline manifests may also include `prepared_environment` and `sync`
+objects. Probe copies those into `workspace_state` during session startup so
+Forge and other hosted consumers can see which prepared checkout/cache was used
+and whether the default branch was safe for writes.
 
 ## Fallback Semantics
 
@@ -94,3 +114,15 @@ This issue does not claim:
 
 The important change is that hosted consumers can now trust typed workspace and
 execution provenance instead of inferring it from logs or side channels.
+
+## Issue 127 Extension
+
+Issue `#127` extends this contract with a write-safety rule:
+
+- if `workspace_state.sync.status` is `complete`, normal tool policy applies
+- if sync is `unknown`, `syncing`, or `failed`, Probe allows read-only work but
+  refuses non-read-only tools
+
+This lets a hosted Probe worker begin repo research from a prepared environment
+while default-branch sync is still settling, without risking edits against a
+stale checkout.

@@ -42,12 +42,33 @@ HEAD_REF="$(sudo -u probe-hosted git -C "$OPENAGENTS_DIR" rev-parse --abbrev-ref
 if [[ "$HEAD_REF" == "HEAD" || -z "$HEAD_REF" ]]; then
   HEAD_REF="$(sudo -u probe-hosted git -C "$OPENAGENTS_DIR" rev-parse HEAD)"
 fi
+HEAD_COMMIT="$(sudo -u probe-hosted git -C "$OPENAGENTS_DIR" rev-parse HEAD)"
+PREPARED_AT_MS="$(date +%s000)"
 
 sudo tee "$PROBE_HOME/hosted/baselines/${BASELINE_ID}.json" >/dev/null <<JSON
 {
   "baseline_id": "${BASELINE_ID}",
   "repo_identity": "${REPO_URL}",
   "base_ref": "${HEAD_REF}",
+  "prepared_environment": {
+    "environment_id": "${BASELINE_ID}",
+    "repo_slug": "OpenAgentsInc/openagents",
+    "cache_ref": "${WORKSPACE_ROOT}",
+    "prepared_at_ms": ${PREPARED_AT_MS},
+    "warm_commands": [
+      "cargo fetch",
+      "cargo check --workspace"
+    ]
+  },
+  "sync": {
+    "status": "complete",
+    "default_branch": "main",
+    "requested_ref": "${REPO_REF}",
+    "synced_ref": "${HEAD_COMMIT}",
+    "started_at_ms": ${PREPARED_AT_MS},
+    "completed_at_ms": ${PREPARED_AT_MS},
+    "message": "managed hosted openagents checkout refreshed before baseline manifest publish"
+  },
   "stale": false
 }
 JSON
@@ -56,6 +77,7 @@ sudo chown probe-hosted:probe-hosted "$PROBE_HOME/hosted/baselines/${BASELINE_ID
 printf 'remote_workspace=%s\n' "$OPENAGENTS_DIR"
 printf 'baseline_manifest=%s\n' "$PROBE_HOME/hosted/baselines/${BASELINE_ID}.json"
 printf 'head_ref=%s\n' "$HEAD_REF"
+printf 'head_commit=%s\n' "$HEAD_COMMIT"
 REMOTE
 
 chmod +x "$TMP_REMOTE_SCRIPT"

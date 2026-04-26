@@ -70,6 +70,12 @@ pub struct ToolExecutionContext {
     cwd: PathBuf,
     oracle: Option<ToolOracleContext>,
     long_context: Option<ToolLongContextContext>,
+    write_gate: Option<ToolWriteGate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolWriteGate {
+    reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -185,6 +191,7 @@ impl ToolExecutionContext {
             cwd: cwd.into(),
             oracle: None,
             long_context: None,
+            write_gate: None,
         }
     }
 
@@ -224,6 +231,31 @@ impl ToolExecutionContext {
     #[must_use]
     pub fn long_context(&self) -> Option<&ToolLongContextContext> {
         self.long_context.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_write_gate(mut self, write_gate: ToolWriteGate) -> Self {
+        self.write_gate = Some(write_gate);
+        self
+    }
+
+    #[must_use]
+    pub fn write_gate(&self) -> Option<&ToolWriteGate> {
+        self.write_gate.as_ref()
+    }
+}
+
+impl ToolWriteGate {
+    #[must_use]
+    pub fn blocked(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        self.reason.as_str()
     }
 }
 
@@ -807,6 +839,16 @@ impl ToolExecutionSession {
             RegisteredToolRisk::Fixed(risk) => risk,
             RegisteredToolRisk::Shell => classify_shell_command(&arguments),
         };
+        if let Some(reason) = write_gate_refusal_reason(&self.context, risk_class) {
+            return refused_named_tool_call(
+                &self.context,
+                call_id,
+                name,
+                arguments,
+                risk_class,
+                Some(reason),
+            );
+        }
         let (policy_decision, approval_state, policy_reason) =
             evaluate_tool_policy(name.as_str(), risk_class, approval);
         let reason = denied_reason_override.or(policy_reason);
@@ -865,6 +907,24 @@ impl ToolExecutionSession {
             },
         }
     }
+}
+
+fn write_gate_refusal_reason(
+    context: &ToolExecutionContext,
+    risk_class: ToolRiskClass,
+) -> Option<String> {
+    if matches!(
+        risk_class,
+        ToolRiskClass::ReadOnly | ToolRiskClass::ShellReadOnly
+    ) {
+        return None;
+    }
+    context.write_gate().map(|gate| {
+        format!(
+            "workspace sync gate blocked non-read-only tool execution: {}",
+            gate.reason()
+        )
+    })
 }
 
 fn read_file(
@@ -2665,7 +2725,7 @@ mod tests {
     use super::{
         ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolExecutionContext,
         ToolLongContextConfig, ToolLongContextContext, ToolLoopConfig, ToolOracleConfig,
-        ToolOracleContext, ToolRegistry, code_search_without_ripgrep,
+        ToolOracleContext, ToolRegistry, ToolWriteGate, code_search_without_ripgrep,
         stored_tool_result_model_text, tool_result_model_text,
     };
 
@@ -3019,6 +3079,73 @@ mod tests {
         assert_eq!(
             results[0].tool_execution.policy_decision,
             ToolPolicyDecision::Refused
+        );
+        assert_eq!(
+            fs::read_to_string(path).expect("read file"),
+            "hello world\n"
+        );
+    }
+
+    #[test]
+    fn workspace_sync_gate_allows_read_only_tools_before_sync_completes() {
+        let tempdir = tempdir().expect("tempdir");
+        fs::write(tempdir.path().join("hello.txt"), "hello world\n").expect("write file");
+        let registry = ToolRegistry::coding_bootstrap(false, false);
+        let context = ToolExecutionContext::new(tempdir.path())
+            .with_write_gate(ToolWriteGate::blocked("main sync status is syncing"));
+        let results = registry.execute_batch(
+            &context,
+            &[ChatToolCall {
+                id: String::from("call_read"),
+                kind: String::from("function"),
+                function: ChatToolCallFunction {
+                    name: String::from("read_file"),
+                    arguments: String::from("{\"path\":\"hello.txt\"}"),
+                },
+            }],
+            &ToolApprovalConfig::allow_all(),
+        );
+
+        assert_eq!(
+            results[0].tool_execution.policy_decision,
+            ToolPolicyDecision::AutoAllow
+        );
+        assert_eq!(results[0].output["content"], "hello world");
+    }
+
+    #[test]
+    fn workspace_sync_gate_rejects_writes_even_when_write_approval_is_available() {
+        let tempdir = tempdir().expect("tempdir");
+        let path = tempdir.path().join("hello.txt");
+        fs::write(&path, "hello world\n").expect("write file");
+        let registry = ToolRegistry::coding_bootstrap(false, false);
+        let context = ToolExecutionContext::new(tempdir.path())
+            .with_write_gate(ToolWriteGate::blocked("main sync status is syncing"));
+        let results = registry.execute_batch(
+            &context,
+            &[ChatToolCall {
+                id: String::from("call_patch"),
+                kind: String::from("function"),
+                function: ChatToolCallFunction {
+                    name: String::from("apply_patch"),
+                    arguments: String::from(
+                        "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}",
+                    ),
+                },
+            }],
+            &ToolApprovalConfig::allow_all(),
+        );
+
+        assert_eq!(results[0].tool_execution.risk_class, ToolRiskClass::Write);
+        assert_eq!(
+            results[0].tool_execution.policy_decision,
+            ToolPolicyDecision::Refused
+        );
+        assert_eq!(
+            results[0].tool_execution.reason.as_deref(),
+            Some(
+                "workspace sync gate blocked non-read-only tool execution: main sync status is syncing"
+            )
         );
         assert_eq!(
             fs::read_to_string(path).expect("read file"),

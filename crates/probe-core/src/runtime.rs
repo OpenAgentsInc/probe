@@ -8,8 +8,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use probe_protocol::backend::{BackendKind, BackendProfile};
 use probe_protocol::session::{
     BackendTurnReceipt, CacheSignal, PendingToolApproval, SessionBackendTarget,
-    SessionHarnessProfile, SessionId, SessionMetadata, SessionTurn, ToolApprovalResolution,
-    ToolRiskClass, TranscriptEvent, TranscriptItem, TranscriptItemKind, TurnObservability,
+    SessionHarnessProfile, SessionId, SessionMetadata, SessionTurn, SessionWorkspaceSyncStatus,
+    ToolApprovalResolution, ToolRiskClass, TranscriptEvent, TranscriptItem, TranscriptItemKind,
+    TurnObservability,
 };
 use probe_provider_openai::{ChatCompletionChunk, ChatMessage, ChatToolCall};
 use psionic_apple_fm::{
@@ -32,7 +33,8 @@ use crate::provider::{
 use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionStoreError};
 use crate::tools::{
     ExecutedToolCall, ToolExecutionContext, ToolExecutionSession, ToolLongContextContext,
-    ToolLoopConfig, ToolOracleContext, stored_tool_result_model_text, tool_result_model_text,
+    ToolLoopConfig, ToolOracleContext, ToolWriteGate, stored_tool_result_model_text,
+    tool_result_model_text,
 };
 
 const DEFAULT_PROBE_HOME_DIR: &str = ".probe";
@@ -842,6 +844,27 @@ fn should_replay_tool_result(
         .is_none_or(|position| *position == (turn_index, item.sequence))
 }
 
+fn workspace_sync_write_gate(session: &SessionMetadata) -> Option<ToolWriteGate> {
+    let sync = session.workspace_state.as_ref()?.sync.as_ref()?;
+    if matches!(sync.status, SessionWorkspaceSyncStatus::Complete) {
+        return None;
+    }
+    let status = match sync.status {
+        SessionWorkspaceSyncStatus::Unknown => "unknown",
+        SessionWorkspaceSyncStatus::Syncing => "syncing",
+        SessionWorkspaceSyncStatus::Complete => "complete",
+        SessionWorkspaceSyncStatus::Failed => "failed",
+    };
+    let default_branch = sync.default_branch.as_deref().unwrap_or("default branch");
+    let detail = sync
+        .message
+        .as_deref()
+        .unwrap_or("default-branch sync has not completed");
+    Some(ToolWriteGate::blocked(format!(
+        "{default_branch} sync status is {status}; {detail}"
+    )))
+}
+
 impl ProbeRuntime {
     fn run_plain_text_turn(
         &self,
@@ -1643,6 +1666,9 @@ impl ProbeRuntime {
         let transcript = self.session_store.read_transcript(&session.id)?;
         let session_summary = build_decision_summary(session, transcript.as_slice());
         let mut execution_context = ToolExecutionContext::new(session.cwd.clone());
+        if let Some(write_gate) = workspace_sync_write_gate(session) {
+            execution_context = execution_context.with_write_gate(write_gate);
+        }
         if let Some(oracle) = tool_loop.oracle.as_ref() {
             execution_context = execution_context.with_oracle(ToolOracleContext::new(
                 oracle.profile.clone(),

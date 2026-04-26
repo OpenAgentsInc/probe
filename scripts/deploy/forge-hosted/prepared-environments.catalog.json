@@ -1,0 +1,55 @@
+{
+  "schema": "probe.hosted.prepared_environments.v1",
+  "environments": [
+    {
+      "environment_id": "openagents-main",
+      "repo_slug": "OpenAgentsInc/openagents",
+      "repo_url": "https://github.com/OpenAgentsInc/openagents.git",
+      "default_branch": "main",
+      "baseline_id": "forge-openagents-main",
+      "cache_ref": "probe-hosted/openagents-main",
+      "warm_commands": ["cargo fetch", "cargo check --workspace"],
+      "verification_commands": ["cargo test -p nexus-control health_agent -- --nocapture"]
+    },
+    {
+      "environment_id": "openagents-com-main",
+      "repo_slug": "OpenAgentsInc/openagents.com",
+      "repo_url": "https://github.com/OpenAgentsInc/openagents.com.git",
+      "default_branch": "main",
+      "baseline_id": "forge-openagents-com-main",
+      "cache_ref": "probe-hosted/openagents-com-main",
+      "warm_commands": ["bun install", "bun run build"],
+      "verification_commands": ["php artisan test", "bun run build"]
+    },
+    {
+      "environment_id": "forge-main",
+      "repo_slug": "OpenAgentsInc/forge",
+      "repo_url": "https://github.com/OpenAgentsInc/forge.git",
+      "default_branch": "main",
+      "baseline_id": "forge-forge-main",
+      "cache_ref": "probe-hosted/forge-main",
+      "warm_commands": ["cargo fetch", "cargo check --workspace"],
+      "verification_commands": ["cargo test --workspace"]
+    },
+    {
+      "environment_id": "probe-main",
+      "repo_slug": "OpenAgentsInc/probe",
+      "repo_url": "https://github.com/OpenAgentsInc/probe.git",
+      "default_branch": "main",
+      "baseline_id": "forge-probe-main",
+      "cache_ref": "probe-hosted/probe-main",
+      "warm_commands": ["cargo fetch", "./probe-dev check"],
+      "verification_commands": ["./probe-dev test"]
+    },
+    {
+      "environment_id": "workspace-main",
+      "repo_slug": "AtlantisPleb/workspace",
+      "repo_url": "https://github.com/AtlantisPleb/workspace.git",
+      "default_branch": "main",
+      "baseline_id": "forge-workspace-main",
+      "cache_ref": "probe-hosted/workspace-main",
+      "warm_commands": ["git status --short"],
+      "verification_commands": ["git status --short"]
+    }
+  ]
+}

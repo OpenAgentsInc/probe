@@ -58,10 +58,10 @@ use probe_protocol::session::{
     SessionMeshCoordinationMode, SessionMeshCoordinationStatus, SessionMeshCoordinationVisibility,
     SessionMeshPluginOffer, SessionMeshPluginTool, SessionMetadata, SessionMountKind,
     SessionMountRef, SessionParentLink, SessionParticipant, SessionPreparedBaselineRef,
-    SessionPreparedBaselineStatus, SessionRuntimeOwner, SessionRuntimeOwnerKind,
-    SessionSummaryArtifact, SessionSummaryArtifactRef, SessionWorkspaceBootMode,
-    SessionWorkspaceSnapshotRef, SessionWorkspaceState, TranscriptEvent, UsageMeasurement,
-    UsageTruth,
+    SessionPreparedBaselineStatus, SessionPreparedEnvironmentRef, SessionRuntimeOwner,
+    SessionRuntimeOwnerKind, SessionSummaryArtifact, SessionSummaryArtifactRef,
+    SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef, SessionWorkspaceState,
+    SessionWorkspaceSyncState, TranscriptEvent, UsageMeasurement, UsageTruth,
 };
 use probe_protocol::{PROBE_PROTOCOL_VERSION, PROBE_RUNTIME_NAME};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -400,6 +400,10 @@ struct HostedBaselineManifest {
     repo_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     base_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prepared_environment: Option<SessionPreparedEnvironmentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sync: Option<SessionWorkspaceSyncState>,
     #[serde(default)]
     stale: bool,
 }
@@ -4769,6 +4773,8 @@ fn resolve_workspace_state(
         boot_mode: SessionWorkspaceBootMode::Fresh,
         baseline: None,
         snapshot: None,
+        prepared_environment: None,
+        sync: None,
         execution_host: None,
         provenance_note: None,
     });
@@ -4777,10 +4783,16 @@ fn resolve_workspace_state(
         workspace_state.execution_host = Some(execution_host_for_owner(runtime_owner));
     }
 
-    workspace_state.baseline = workspace_state
-        .baseline
-        .take()
-        .map(|baseline| resolve_baseline_ref(probe_home, baseline, &mut notes));
+    if let Some(baseline) = workspace_state.baseline.take() {
+        let resolution = resolve_baseline_ref(probe_home, baseline, &mut notes);
+        if workspace_state.prepared_environment.is_none() {
+            workspace_state.prepared_environment = resolution.prepared_environment;
+        }
+        if workspace_state.sync.is_none() {
+            workspace_state.sync = resolution.sync;
+        }
+        workspace_state.baseline = Some(resolution.baseline);
+    }
     workspace_state.snapshot = workspace_state
         .snapshot
         .take()
@@ -4894,11 +4906,19 @@ fn execution_host_for_owner(runtime_owner: &SessionRuntimeOwner) -> SessionExecu
     }
 }
 
+struct HostedBaselineResolution {
+    baseline: SessionPreparedBaselineRef,
+    prepared_environment: Option<SessionPreparedEnvironmentRef>,
+    sync: Option<SessionWorkspaceSyncState>,
+}
+
 fn resolve_baseline_ref(
     probe_home: &Path,
     mut baseline: SessionPreparedBaselineRef,
     notes: &mut Vec<String>,
-) -> SessionPreparedBaselineRef {
+) -> HostedBaselineResolution {
+    let mut prepared_environment = None;
+    let mut sync = None;
     match read_manifest::<HostedBaselineManifest>(
         probe_home,
         HOSTED_BASELINES_DIR,
@@ -4907,6 +4927,8 @@ fn resolve_baseline_ref(
         Ok(Some(manifest)) => {
             baseline.repo_identity = baseline.repo_identity.or(manifest.repo_identity);
             baseline.base_ref = baseline.base_ref.or(manifest.base_ref);
+            prepared_environment = manifest.prepared_environment;
+            sync = manifest.sync;
             baseline.status = if manifest.stale {
                 SessionPreparedBaselineStatus::Stale
             } else {
@@ -4928,7 +4950,11 @@ fn resolve_baseline_ref(
             ));
         }
     }
-    baseline
+    HostedBaselineResolution {
+        baseline,
+        prepared_environment,
+        sync,
+    }
 }
 
 fn resolve_snapshot_ref(

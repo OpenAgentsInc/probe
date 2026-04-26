@@ -62,6 +62,8 @@ The new scripts live under `scripts/deploy/forge-hosted/`.
    - clones or refreshes a managed `openagents` checkout
    - writes the prepared-baseline manifest that Probe uses for honest startup
      projection
+   - includes prepared-environment metadata and completed sync metadata in that
+     manifest, including the resolved commit SHA
 4. `04-open-tunnel.sh`
    - opens a manual local IAP tunnel when the operator wants the old explicit
      tunnel path
@@ -123,6 +125,10 @@ Deployed footprint:
 - local IAP tunnel: `127.0.0.1:17777`
 - prepared baseline workspace:
   - `/var/lib/probe-hosted/hosted/workspaces/forge-openagents-main/openagents`
+- prepared baseline manifest:
+  - includes `prepared_environment` for `OpenAgentsInc/openagents`
+  - includes `sync.status = complete`
+  - includes the resolved `synced_ref` commit SHA
 
 The final successful hosted session was:
 
@@ -157,6 +163,11 @@ This deploy lane is still intentionally narrow:
 - internal IAP attach, not a public hosted endpoint
 - prepared baseline manifests are explicit files, not image registries or
   snapshot orchestration
+- the prepared-environment catalog is checked in, but this lane only prepares
+  the `OpenAgentsInc/openagents` worker checkout today
+- dependency and test-cache warming remains an explicit operator/image-builder
+  responsibility; the manifest records the warm commands expected for that
+  environment
 - cleanup and restart drills still depend on direct operator invocation
 
 That is acceptable for the current phase. The point is proving the real hosted

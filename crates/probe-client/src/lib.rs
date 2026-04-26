@@ -1694,8 +1694,9 @@ mod tests {
         SessionAttachTransport, SessionControllerAction, SessionExecutionHostKind,
         SessionHostedAuthKind, SessionHostedCheckoutKind, SessionHostedCleanupStatus,
         SessionHostedLifecycleEvent, SessionPreparedBaselineRef, SessionPreparedBaselineStatus,
-        SessionRuntimeOwnerKind, SessionWorkspaceBootMode, SessionWorkspaceSnapshotRef,
-        SessionWorkspaceState,
+        SessionPreparedEnvironmentRef, SessionRuntimeOwnerKind, SessionWorkspaceBootMode,
+        SessionWorkspaceSnapshotRef, SessionWorkspaceState, SessionWorkspaceSyncState,
+        SessionWorkspaceSyncStatus,
     };
     use probe_test_support::{FakeHttpResponse, FakeOpenAiServer, ProbeTestEnvironment};
 
@@ -1767,6 +1768,27 @@ mod tests {
   "baseline_id": "repo-main",
   "repo_identity": "github.com/OpenAgentsInc/probe",
   "base_ref": "main",
+  "prepared_environment": {
+    "environment_id": "probe-main-macos-arm64",
+    "repo_slug": "OpenAgentsInc/probe",
+    "image_ref": "gce-image/probe-main",
+    "cache_ref": "cloud-build-cache/probe-main",
+    "dependency_cache_key": "cargo-probe-main",
+    "prepared_at_ms": 1777200000000,
+    "warm_commands": [
+      "cargo fetch",
+      "./probe-dev check"
+    ]
+  },
+  "sync": {
+    "status": "complete",
+    "default_branch": "main",
+    "requested_ref": "origin/main",
+    "synced_ref": "abcdef123456",
+    "started_at_ms": 1777200000000,
+    "completed_at_ms": 1777200005000,
+    "message": "baseline synced before session start"
+  },
   "stale": false
 }"#,
         )
@@ -1813,6 +1835,8 @@ mod tests {
                         restore_manifest_id: None,
                         source_baseline_id: None,
                     }),
+                    prepared_environment: None,
+                    sync: None,
                     execution_host: None,
                     provenance_note: None,
                 }),
@@ -1845,6 +1869,33 @@ mod tests {
         );
         assert_eq!(baseline.base_ref.as_deref(), Some("main"));
         assert_eq!(baseline.status, SessionPreparedBaselineStatus::Ready);
+        assert_eq!(
+            workspace_state.prepared_environment,
+            Some(SessionPreparedEnvironmentRef {
+                environment_id: String::from("probe-main-macos-arm64"),
+                repo_slug: String::from("OpenAgentsInc/probe"),
+                image_ref: Some(String::from("gce-image/probe-main")),
+                cache_ref: Some(String::from("cloud-build-cache/probe-main")),
+                dependency_cache_key: Some(String::from("cargo-probe-main")),
+                prepared_at_ms: Some(1_777_200_000_000),
+                warm_commands: vec![
+                    String::from("cargo fetch"),
+                    String::from("./probe-dev check")
+                ],
+            })
+        );
+        assert_eq!(
+            workspace_state.sync,
+            Some(SessionWorkspaceSyncState {
+                status: SessionWorkspaceSyncStatus::Complete,
+                default_branch: Some(String::from("main")),
+                requested_ref: Some(String::from("origin/main")),
+                synced_ref: Some(String::from("abcdef123456")),
+                started_at_ms: Some(1_777_200_000_000),
+                completed_at_ms: Some(1_777_200_005_000),
+                message: Some(String::from("baseline synced before session start")),
+            })
+        );
         let execution_host = workspace_state
             .execution_host
             .expect("hosted session should expose execution-host provenance");
@@ -2823,6 +2874,8 @@ mod tests {
                         status: SessionPreparedBaselineStatus::Ready,
                     }),
                     snapshot: None,
+                    prepared_environment: None,
+                    sync: None,
                     execution_host: None,
                     provenance_note: None,
                 }),

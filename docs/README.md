@@ -293,3 +293,19 @@ This folder holds technical planning docs for the Probe runtime.
   - mac-first native artifact handling, npm tarball staging, publish order,
     and dist-tag rules so `latest` stays on the thin meta package instead of
     the platform payload
+- `84-forge-rlm-assignment-execution.md`
+  - Forge-assigned RLM execution flow, including worker-side assignment
+    intake, bounded execution, evidence publication, and completion receipts
+- `84-paper-rlm-runtime.md`
+  - retained Paper RLM runtime lane for text-backed paper analysis, local
+    execution boundaries, and evaluation artifacts
+- `85-issue-thread-strategy-routing.md`
+  - issue-thread strategy routing for deciding whether Probe should answer,
+    plan, implement, or escalate work from GitHub issue context
+- `86-paper-rlm-evals.md`
+  - Paper RLM evaluation lane and artifacts for checking whether paper
+    analysis outputs are useful and reproducible
+- `87-hosted-prepared-environments-and-sync-gates.md`
+  - prepared hosted repo environments, default-branch sync metadata, and the
+    runtime write gate that allows read-only research before sync while
+    blocking mutations until the checkout is safe

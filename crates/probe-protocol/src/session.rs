@@ -639,6 +639,48 @@ pub struct SessionWorkspaceSnapshotRef {
     pub source_baseline_id: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPreparedEnvironmentRef {
+    pub environment_id: String,
+    pub repo_slug: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_cache_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_at_ms: Option<TimestampMs>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warm_commands: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionWorkspaceSyncStatus {
+    Unknown,
+    Syncing,
+    Complete,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionWorkspaceSyncState {
+    pub status: SessionWorkspaceSyncStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synced_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<TimestampMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<TimestampMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionExecutionHostKind {
@@ -663,6 +705,10 @@ pub struct SessionWorkspaceState {
     pub baseline: Option<SessionPreparedBaselineRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<SessionWorkspaceSnapshotRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_environment: Option<SessionPreparedEnvironmentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SessionWorkspaceSyncState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_host: Option<SessionExecutionHost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
