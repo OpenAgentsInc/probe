@@ -151,6 +151,8 @@ The recommended local verification lane for this issue is:
 
 ```shell
 cargo test -p probe-core workspace_sync_gate -- --nocapture
+cargo test -p probe-core forge_worker_verification -- --nocapture
+cargo run -p probe-cli -- forge verification-pack --pretty
 cargo test -p probe-client client_can_connect_to_hosted_tcp_transport_and_inspect_runtime_owner -- --nocapture
 cargo check --workspace
 ```

@@ -3,6 +3,7 @@ pub mod dataset_export;
 pub mod forge_rlm;
 pub mod forge_run_worker;
 pub mod forge_worker;
+pub mod forge_worker_verification;
 pub mod harness;
 pub mod issue_thread_analysis;
 pub mod issue_thread_eval;

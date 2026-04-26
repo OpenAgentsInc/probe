@@ -37,6 +37,9 @@ use probe_core::forge_run_worker::{
     ForgeAssignedRunExecutionOutcome, ForgeAssignedRunExecutionRequest, ForgeAssignedRunExecutor,
 };
 use probe_core::forge_worker::{ForgeAssignedRunRecord, ForgeWorkerAuthController};
+use probe_core::forge_worker_verification::{
+    ProbeWorkerCodexRouteStatus, ProbeWorkerVerificationRequest, run_probe_worker_verification_pack,
+};
 use probe_core::harness::{
     HarnessCandidateManifest, builtin_harness_candidate_manifests, render_harness_profile,
     resolve_prompt_contract,
@@ -170,6 +173,8 @@ enum ForgeCommands {
     Detach(ForgeDetachArgs),
     RunOnce(ForgeRunOnceArgs),
     RunLoop(ForgeRunLoopArgs),
+    #[command(name = "verification-pack")]
+    VerificationPack(ForgeVerificationPackArgs),
     Rlm(ForgeRlmArgs),
 }
 
@@ -470,6 +475,14 @@ struct ForgeHeartbeatArgs {
 struct ForgeDetachArgs {
     #[arg(long)]
     probe_home: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct ForgeVerificationPackArgs {
+    #[arg(long)]
+    scratch_root: Option<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    pretty: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -1035,6 +1048,7 @@ fn run_forge(args: ForgeArgs) -> Result<(), String> {
         ForgeCommands::Detach(args) => run_forge_detach(args),
         ForgeCommands::RunOnce(args) => run_forge_run_once(args),
         ForgeCommands::RunLoop(args) => run_forge_run_loop(args),
+        ForgeCommands::VerificationPack(args) => run_forge_verification_pack(args),
         ForgeCommands::Rlm(args) => run_forge_rlm(args),
     }
 }
@@ -1188,6 +1202,31 @@ fn run_forge_detach(args: ForgeDetachArgs) -> Result<(), String> {
     let cleared = controller.clear().map_err(stringify_error)?;
     print_kv("path", path)?;
     print_kv("cleared", cleared)?;
+    Ok(())
+}
+
+fn run_forge_verification_pack(args: ForgeVerificationPackArgs) -> Result<(), String> {
+    let profile = openai_codex_subscription();
+    let api_key_fallback_available = std::env::var(profile.api_key_env.as_str())
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .is_some();
+    let mut request = ProbeWorkerVerificationRequest::new(ProbeWorkerCodexRouteStatus {
+        api_key_fallback_available,
+        api_key_source: current_openai_api_key_source(),
+    });
+    if let Some(scratch_root) = args.scratch_root {
+        request = request.with_scratch_root(scratch_root);
+    }
+
+    let report = run_probe_worker_verification_pack(request).map_err(stringify_error)?;
+    let rendered = if args.pretty {
+        serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?
+    } else {
+        serde_json::to_string(&report).map_err(|error| error.to_string())?
+    };
+    println!("{rendered}");
     Ok(())
 }
 

@@ -350,6 +350,41 @@ fn forge_worker_deploy_lane_local_smoke_script_passes() {
     assert!(stdout.contains("probe_home="), "stdout:\n{stdout}");
 }
 
+#[test]
+fn forge_verification_pack_emits_redacted_forge_evidence_report() {
+    let environment = ProbeTestEnvironment::new();
+    let fake_model_key = "probe-cli-verification-key-do-not-leak";
+
+    probe_cli_command()
+        .args([
+            "forge",
+            "verification-pack",
+            "--pretty",
+            "--scratch-root",
+            environment.workspace().to_str().expect("workspace utf-8"),
+        ])
+        .env("PROBE_OPENAI_API_KEY", fake_model_key)
+        .env(
+            "PROBE_OPENAI_API_KEY_SOURCE",
+            "secret-manager/projects/openagents/probe-worker-openai",
+        )
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"artifact_kind\": \"probe.forge_worker.verification_pack_report\"",
+        ))
+        .stdout(predicate::str::contains("\"status\": \"passed\""))
+        .stdout(predicate::str::contains("\"forge_evidence_safe\": true"))
+        .stdout(predicate::str::contains(
+            "\"api_key_fallback_available\": true",
+        ))
+        .stdout(predicate::str::contains(fake_model_key).not())
+        .stdout(
+            predicate::str::contains("probe-verification-worker-session-material-do-not-leak")
+                .not(),
+        );
+}
+
 fn models_response() -> Value {
     json!({
         "object": "list",

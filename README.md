@@ -33,6 +33,10 @@ Current shipped surface:
 - local acceptance/eval and module-optimization tooling
 - private Forge worker-attachment support in `probe-core::forge_worker` for
   persisted worker-session state, attach, heartbeat, and revocation handling
+- `probe forge verification-pack` for a redacted, Forge-safe hosted-worker
+  evidence report covering worker attach state, assignment-loop contracts,
+  Codex route status, hosted environment redaction, sync gates, child-session
+  status, and summary artifacts
 - Forge-owned RLM assignment execution in `probe-core::forge_rlm` plus
   `probe forge rlm execute|proof-openagents-4368` for large-corpus issue-thread
   analysis with chunk manifests, trace artifacts, and grounded outputs
