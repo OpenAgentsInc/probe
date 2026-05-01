@@ -1,10 +1,11 @@
+pub mod admin_chat;
 pub mod backend;
 pub mod runtime;
 pub mod session;
 
 use std::path::{Path, PathBuf};
 
-pub const PROBE_PROTOCOL_VERSION: u32 = 14;
+pub const PROBE_PROTOCOL_VERSION: u32 = 15;
 pub const PROBE_RUNTIME_NAME: &str = "probe";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +32,7 @@ pub fn default_local_daemon_socket_path(probe_home: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::ProtocolDescriptor;
+    use super::admin_chat::{AdminChatBridgeEvent, AdminChatBridgeRequest};
     use super::backend::{BackendKind, PrefixCacheMode, ServerAttachMode};
     use super::session::{SessionId, SessionState, TurnId};
 
@@ -38,7 +40,7 @@ mod tests {
     fn current_descriptor_is_stable() {
         let descriptor = ProtocolDescriptor::current();
         assert_eq!(descriptor.runtime_name, "probe");
-        assert_eq!(descriptor.version, 14);
+        assert_eq!(descriptor.version, 15);
     }
 
     #[test]
@@ -63,5 +65,24 @@ mod tests {
         assert!(matches!(apple_kind, BackendKind::AppleFmBridge));
         assert!(matches!(attach_mode, ServerAttachMode::AttachToExisting));
         assert!(matches!(cache_mode, PrefixCacheMode::BackendDefault));
+    }
+
+    #[test]
+    fn admin_chat_bridge_types_are_serializable() {
+        let request =
+            AdminChatBridgeRequest::fake("request-1", 123, "admin@example.com", "hello admin chat");
+        let encoded = serde_json::to_string(&request).expect("serialize request");
+        let decoded: AdminChatBridgeRequest =
+            serde_json::from_str(encoded.as_str()).expect("deserialize request");
+        assert_eq!(decoded.request_id, "request-1");
+        assert_eq!(decoded.tool_policy.mode, "admin_chat");
+
+        let event = AdminChatBridgeEvent::TextDelta {
+            run_id: String::from("run-1"),
+            id: String::from("assistant-run-1"),
+            delta: String::from("hello"),
+        };
+        let encoded = serde_json::to_string(&event).expect("serialize event");
+        assert!(encoded.contains("\"type\":\"text_delta\""));
     }
 }

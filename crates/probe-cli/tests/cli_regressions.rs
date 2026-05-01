@@ -100,6 +100,61 @@ fn tui_help_is_available() {
 }
 
 #[test]
+fn admin_chat_bridge_fake_command_emits_redacted_sse_contract() {
+    let environment = ProbeTestEnvironment::new();
+    let request_path = environment.temp_root().join("admin-chat-request.json");
+    fs::write(
+        request_path.as_path(),
+        serde_json::to_string_pretty(&json!({
+            "requestId": "request-web-1",
+            "workspace": "openagents.com",
+            "webUserId": 123,
+            "webUserEmail": "admin@example.com",
+            "conversationId": "conversation-1",
+            "runId": "run-web-1",
+            "prompt": "Summarize the bridge contract.",
+            "messages": [],
+            "provider": {
+                "key": "openai",
+                "mode": "service_api_key",
+                "accountRef": "provider-account-opaque-1",
+                "label": "service fallback"
+            },
+            "toolPolicy": {
+                "mode": "admin_chat",
+                "allowedTools": [],
+                "approvalRequired": true
+            },
+            "metadata": {
+                "api_key": "sk-should-not-leak",
+                "refresh_token": "refresh-should-not-leak"
+            }
+        }))
+        .expect("encode bridge request"),
+    )
+    .expect("write bridge request");
+
+    probe_cli_command()
+        .args([
+            "admin-chat-bridge",
+            "fake",
+            "--request",
+            request_path.to_str().expect("request path utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("data: {\"type\":\"run_started\""))
+        .stdout(predicate::str::contains(
+            "\"provider\":{\"key\":\"openai\",\"mode\":\"service_api_key\"",
+        ))
+        .stdout(predicate::str::contains("\"type\":\"text_delta\""))
+        .stdout(predicate::str::contains("\"type\":\"run_completed\""))
+        .stdout(predicate::str::contains("data: [DONE]"))
+        .stdout(predicate::str::contains("sk-should-not-leak").not())
+        .stdout(predicate::str::contains("refresh-should-not-leak").not());
+}
+
+#[test]
 fn version_flag_is_available() {
     probe_cli_command()
         .arg("--version")

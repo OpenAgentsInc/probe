@@ -19,6 +19,7 @@ use probe_client::{
     ProbeClient, ProbeClientConfig, ProbeClientError, ProbeClientTransportConfig,
     is_missing_local_daemon_error,
 };
+use probe_core::admin_chat_bridge::{fake_admin_chat_bridge_stream, render_admin_chat_sse};
 use probe_core::backend_profiles::{
     OPENAI_CODEX_SUBSCRIPTION_PROFILE, PSIONIC_APPLE_FM_BRIDGE_PROFILE,
     PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE, PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE,
@@ -74,6 +75,7 @@ use probe_optimizer::{
     optimize_decision_modules, optimize_harness_profiles, optimize_skill_packs,
     skill_pack_ledger_entries_from_bundle,
 };
+use probe_protocol::admin_chat::AdminChatBridgeRequest;
 use probe_protocol::backend::{BackendKind, BackendProfile, PsionicMeshAttachInfo};
 use probe_protocol::runtime::{
     DetachedSessionEventPayload, DetachedSessionEventRecord, DetachedSessionEventTruth,
@@ -112,6 +114,8 @@ struct Cli {
 enum Commands {
     Exec(ExecArgs),
     Chat(ChatArgs),
+    #[command(about = "Run the internal openagents.com admin chat bridge smoke path")]
+    AdminChatBridge(AdminChatBridgeArgs),
     Forge(ForgeArgs),
     #[command(about = "Inspect or publish Probe plugin offers above the mesh attach surface")]
     Mesh(MeshArgs),
@@ -698,6 +702,32 @@ struct ChatArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct AdminChatBridgeArgs {
+    #[command(subcommand)]
+    command: AdminChatBridgeCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum AdminChatBridgeCommands {
+    #[command(about = "Emit a fake openagents.com admin chat bridge SSE stream")]
+    Fake(AdminChatBridgeFakeArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct AdminChatBridgeFakeArgs {
+    #[arg(long)]
+    request: Option<PathBuf>,
+    #[arg(long)]
+    prompt: Option<String>,
+    #[arg(long, default_value = "request.fake")]
+    request_id: String,
+    #[arg(long, default_value_t = 0)]
+    web_user_id: u64,
+    #[arg(long, default_value = "admin@example.com")]
+    web_user_email: String,
+}
+
+#[derive(clap::Args, Debug)]
 struct AcceptArgs {
     #[arg(long, default_value = PSIONIC_QWEN35_2B_Q8_REGISTRY_PROFILE)]
     profile: String,
@@ -888,6 +918,7 @@ fn run() -> Result<(), String> {
     match cli.command.unwrap_or(Commands::Tui(TuiArgs::default())) {
         Commands::Exec(args) => run_exec(args),
         Commands::Chat(args) => run_chat(args),
+        Commands::AdminChatBridge(args) => run_admin_chat_bridge(args),
         Commands::Forge(args) => run_forge(args),
         Commands::Mesh(args) => run_mesh(args),
         Commands::Daemon(args) => run_daemon(args),
@@ -1620,6 +1651,42 @@ fn run_tui_smoke(config: TuiLaunchConfig, args: &TuiArgs) -> Result<(), String> 
 
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn run_admin_chat_bridge(args: AdminChatBridgeArgs) -> Result<(), String> {
+    match args.command {
+        AdminChatBridgeCommands::Fake(args) => run_admin_chat_bridge_fake(args),
+    }
+}
+
+fn run_admin_chat_bridge_fake(args: AdminChatBridgeFakeArgs) -> Result<(), String> {
+    let request = match args.request {
+        Some(path) => {
+            let contents = fs::read_to_string(path.as_path()).map_err(|error| {
+                format!(
+                    "failed to read admin chat bridge request at {}: {error}",
+                    path.display()
+                )
+            })?;
+            serde_json::from_str::<AdminChatBridgeRequest>(&contents).map_err(|error| {
+                format!("failed to parse admin chat bridge request JSON: {error}")
+            })?
+        }
+        None => AdminChatBridgeRequest::fake(
+            args.request_id,
+            args.web_user_id,
+            args.web_user_email,
+            args.prompt
+                .unwrap_or_else(|| String::from("Probe admin chat bridge smoke.")),
+        ),
+    };
+    let stream = fake_admin_chat_bridge_stream(&request);
+    let rendered = render_admin_chat_sse(&stream.events)
+        .map_err(|error| format!("failed to render admin chat bridge SSE: {error}"))?;
+
+    print!("{rendered}");
+
+    Ok(())
 }
 
 fn run_exec(args: ExecArgs) -> Result<(), String> {

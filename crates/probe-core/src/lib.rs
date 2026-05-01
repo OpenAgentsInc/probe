@@ -1,3 +1,4 @@
+pub mod admin_chat_bridge;
 pub mod backend_profiles;
 pub mod dataset_export;
 pub mod forge_child_sessions;
