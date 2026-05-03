@@ -1796,6 +1796,7 @@ dependencies = [
 name = "probe-core"
 version = "0.1.37"
 dependencies = [
+ "base64",
  "forge-eval",
  "forge-policy",
  "forge-rlm-core",

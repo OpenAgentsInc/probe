@@ -372,6 +372,9 @@ impl FilesystemSessionStore {
         session_id: &SessionId,
     ) -> Result<Vec<TranscriptEvent>, SessionStoreError> {
         let metadata = self.read_metadata(session_id)?;
+        let _json_lock = SESSION_STORE_JSON_LOCK
+            .lock()
+            .expect("session store json mutex should not be poisoned");
         let file = File::open(metadata.transcript_path)?;
         let reader = BufReader::new(file);
         let mut events = Vec::new();
@@ -543,9 +546,13 @@ impl FilesystemSessionStore {
         transcript_path: &Path,
         event: &TranscriptEvent,
     ) -> Result<(), SessionStoreError> {
+        let _json_lock = SESSION_STORE_JSON_LOCK
+            .lock()
+            .expect("session store json mutex should not be poisoned");
         let mut file = OpenOptions::new().append(true).open(transcript_path)?;
         serde_json::to_writer(&mut file, event)?;
         file.write_all(b"\n")?;
+        file.flush()?;
         Ok(())
     }
 

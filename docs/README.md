@@ -332,3 +332,8 @@ This folder holds technical planning docs for the Probe runtime.
     private GCE, local, and future Daytona worker advertisements, Laravel
     constraints, resource/tool/language/backend matching, safe metadata, and
     incompatibility reasons
+- `96-managed-cloud-run-job-runner.md`
+  - first Google Cloud Run Job managed-session runner, including signed Laravel
+    assignment tokens, Cloud Run execution identity, idempotent retries,
+    callbacks, evidence/artifact refs, required secrets, service account scope,
+    and image/job configuration

@@ -61,6 +61,11 @@ Current shipped surface:
   private GCE, local, and future Daytona worker advertisements, Laravel
   constraint matching, safe public metadata, resource/tool/language/backend
   capability checks, and actionable incompatibility reasons
+- `probe managed cloud-run-job run-once` plus
+  `probe_core::managed_cloud_run_job` for the first Google Cloud Run Job hosted
+  managed-session runner: signed Laravel assignment tokens, Cloud Run execution
+  identity, idempotent retries, Laravel callbacks, managed runtime terminal
+  events, and evidence/artifact refs
 - a Forge health-diagnosis worker lane inside `probe forge run-once|run-loop`
   that consumes Forge health snapshots/events/evidence refs and returns
   structured diagnosis artifacts without executing production recovery actions
@@ -142,6 +147,10 @@ The managed environment contract is documented in
 `docs/95-managed-environment-contract.md`. It is the provider-neutral worker
 capability and constraint layer Laravel should use before dispatching managed
 sessions to Pylon, Google Cloud, private GCE, local, or future Daytona hosts.
+The first Cloud Run Job runner is documented in
+`docs/96-managed-cloud-run-job-runner.md`. It is the bounded Google Cloud
+task-to-completion lane for managed agents, using signed Laravel assignments
+and Probe-owned runtime evidence.
 The mesh profile is attach-only as well. Probe discovers live routed inventory
 from `GET /psionic/management/status`, picks the effective model from that
 inventory, prints the mesh role or fallback posture in operator output, and

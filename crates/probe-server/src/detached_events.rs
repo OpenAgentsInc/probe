@@ -94,6 +94,10 @@ impl DetachedSessionEventHub {
         if !path.exists() {
             return Ok(Vec::new());
         }
+        let _append_lock = self
+            .append_lock
+            .lock()
+            .expect("detached session append mutex should not be poisoned");
         let file = File::open(path)?;
         if let Some(after_cursor) = after_cursor {
             let mut events = Vec::new();
@@ -129,6 +133,17 @@ impl DetachedSessionEventHub {
     }
 
     pub(crate) fn newest_cursor(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<u64>, DetachedEventError> {
+        let _append_lock = self
+            .append_lock
+            .lock()
+            .expect("detached session append mutex should not be poisoned");
+        self.newest_cursor_unlocked(session_id)
+    }
+
+    fn newest_cursor_unlocked(
         &self,
         session_id: &SessionId,
     ) -> Result<Option<u64>, DetachedEventError> {
@@ -176,7 +191,7 @@ impl DetachedSessionEventHub {
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let next = self
-                    .newest_cursor(session_id)?
+                    .newest_cursor_unlocked(session_id)?
                     .map(|cursor| cursor + 1)
                     .unwrap_or(0);
                 entry.insert(next + 1);

@@ -52,6 +52,11 @@ use probe_core::issue_thread_analysis::{
     GithubIssueThreadHandle, IssueThreadAnalysisRequest, IssueThreadCorpusSource,
     IssueThreadStrategyMode, execute_issue_thread_analysis, plan_issue_thread_analysis,
 };
+use probe_core::managed_cloud_run_job::{
+    ManagedCloudRunJobIdentity, ManagedCloudRunJobOutcome, ManagedCloudRunJobRunRequest,
+    ManagedCloudRunJobRunner,
+};
+use probe_core::managed_runtime::ManagedRuntimeController;
 use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, current_working_dir,
     default_probe_home,
@@ -60,6 +65,7 @@ use probe_core::server_control::{
     PsionicServerConfig, PsionicServerMode, ServerConfigOverrides, ServerOperatorSummary,
     ServerProcessGuard,
 };
+use probe_core::session_store::FilesystemSessionStore;
 use probe_core::tools::{
     ExecutedToolCall, ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLongContextConfig,
     ToolLoopConfig, ToolOracleConfig,
@@ -120,6 +126,7 @@ enum Commands {
     #[command(about = "Run the internal openagents.com admin chat bridge smoke path")]
     AdminChatBridge(AdminChatBridgeArgs),
     Forge(ForgeArgs),
+    Managed(ManagedArgs),
     #[command(about = "Inspect or publish Probe plugin offers above the mesh attach surface")]
     Mesh(MeshArgs),
     #[command(about = "Manage the local detached Probe daemon")]
@@ -167,6 +174,30 @@ struct ForgeArgs {
 struct MeshArgs {
     #[command(subcommand)]
     command: MeshCommands,
+}
+
+#[derive(clap::Args, Debug)]
+struct ManagedArgs {
+    #[command(subcommand)]
+    command: ManagedCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum ManagedCommands {
+    #[command(name = "cloud-run-job")]
+    CloudRunJob(ManagedCloudRunJobArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct ManagedCloudRunJobArgs {
+    #[command(subcommand)]
+    command: ManagedCloudRunJobCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum ManagedCloudRunJobCommands {
+    #[command(name = "run-once")]
+    RunOnce(ManagedCloudRunJobRunOnceArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -548,6 +579,48 @@ struct ForgeRunLoopArgs {
     max_iterations: Option<usize>,
     #[arg(long, default_value_t = false)]
     exit_on_idle: bool,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct ManagedCloudRunJobRunOnceArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[arg(long)]
+    assignment_token: Option<String>,
+    #[arg(long)]
+    assignment_token_file: Option<PathBuf>,
+    #[arg(long, default_value = "PROBE_MANAGED_ASSIGNMENT_TOKEN")]
+    assignment_token_env: String,
+    #[arg(long, default_value = "PROBE_MANAGED_ASSIGNMENT_SIGNING_SECRET")]
+    signing_secret_env: String,
+    #[arg(long)]
+    signing_secret_file: Option<PathBuf>,
+    #[arg(long, default_value = "PROBE_MANAGED_CALLBACK_BEARER_TOKEN")]
+    callback_bearer_env: String,
+    #[arg(long, default_value = OPENAI_CODEX_SUBSCRIPTION_PROFILE)]
+    profile: String,
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+    #[arg(long)]
+    artifact_dir: Option<PathBuf>,
+    #[arg(long)]
+    system: Option<String>,
+    #[arg(long)]
+    cloud_run_job: Option<String>,
+    #[arg(long)]
+    cloud_run_execution: Option<String>,
+    #[arg(long)]
+    cloud_run_task_index: Option<String>,
+    #[arg(long)]
+    cloud_run_task_attempt: Option<String>,
+    #[arg(long)]
+    logs_url: Option<String>,
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+    #[arg(long, default_value_t = false)]
+    pretty: bool,
+    #[command(flatten)]
+    server: ServerArgs,
 }
 
 #[derive(clap::Args, Debug)]
@@ -945,6 +1018,7 @@ fn run() -> Result<(), String> {
         Commands::Chat(args) => run_chat(args),
         Commands::AdminChatBridge(args) => run_admin_chat_bridge(args),
         Commands::Forge(args) => run_forge(args),
+        Commands::Managed(args) => run_managed(args),
         Commands::Mesh(args) => run_mesh(args),
         Commands::Daemon(args) => run_daemon(args),
         Commands::Ps(args) => run_ps(args),
@@ -1107,6 +1181,113 @@ fn run_forge(args: ForgeArgs) -> Result<(), String> {
         ForgeCommands::VerificationPack(args) => run_forge_verification_pack(args),
         ForgeCommands::Rlm(args) => run_forge_rlm(args),
     }
+}
+
+fn run_managed(args: ManagedArgs) -> Result<(), String> {
+    match args.command {
+        ManagedCommands::CloudRunJob(args) => match args.command {
+            ManagedCloudRunJobCommands::RunOnce(args) => run_managed_cloud_run_job_once(args),
+        },
+    }
+}
+
+fn run_managed_cloud_run_job_once(args: ManagedCloudRunJobRunOnceArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home.clone())?;
+    let assignment_token = resolve_required_secret_value(
+        args.assignment_token.as_deref(),
+        args.assignment_token_file.as_ref(),
+        args.assignment_token_env.as_str(),
+        "managed assignment token",
+    )?;
+    let signing_secret = resolve_required_secret_value(
+        None,
+        args.signing_secret_file.as_ref(),
+        args.signing_secret_env.as_str(),
+        "managed assignment signing secret",
+    )?;
+    let callback_bearer_token = std::env::var(args.callback_bearer_env.as_str())
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let mut profile = named_profile(args.profile.as_str())?;
+    let server_guard = prepare_server(probe_home.as_path(), &args.server, &profile)?;
+    apply_server_summary_to_profile(&mut profile, &server_guard.operator_summary());
+
+    let runtime = ProbeRuntime::new(probe_home.as_path());
+    let managed_runtime =
+        ManagedRuntimeController::new(FilesystemSessionStore::new(probe_home.as_path()));
+    let runner = ManagedCloudRunJobRunner::new(runtime, managed_runtime);
+    let artifact_dir = args
+        .artifact_dir
+        .or_else(|| {
+            std::env::var("PROBE_MANAGED_JOB_ARTIFACT_DIR")
+                .ok()
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| probe_home.join("managed/cloud-run-job/artifacts"));
+    let default_cwd = args
+        .cwd
+        .unwrap_or(current_working_dir().map_err(|error| error.to_string())?);
+
+    let outcome = runner
+        .run_once(ManagedCloudRunJobRunRequest {
+            assignment_token,
+            signing_secret,
+            callback_bearer_token,
+            profile,
+            default_cwd,
+            artifact_dir,
+            cloud_run: ManagedCloudRunJobIdentity {
+                job_name: args
+                    .cloud_run_job
+                    .or_else(|| std::env::var("CLOUD_RUN_JOB").ok()),
+                execution_name: args
+                    .cloud_run_execution
+                    .or_else(|| std::env::var("CLOUD_RUN_EXECUTION").ok()),
+                task_index: args
+                    .cloud_run_task_index
+                    .or_else(|| std::env::var("CLOUD_RUN_TASK_INDEX").ok()),
+                task_attempt: args
+                    .cloud_run_task_attempt
+                    .or_else(|| std::env::var("CLOUD_RUN_TASK_ATTEMPT").ok()),
+                logs_url: args
+                    .logs_url
+                    .or_else(|| std::env::var("PROBE_MANAGED_CLOUD_RUN_LOGS_URL").ok()),
+            },
+            system_prompt: args.system,
+            harness_profile: None,
+            tool_loop: None,
+            dry_run: args.dry_run,
+        })
+        .map_err(stringify_error)?;
+
+    match &outcome {
+        ManagedCloudRunJobOutcome::Completed(state) => {
+            print_kv("managed_cloud_run_job_status", "completed")?;
+            print_kv("probe_session_id", &state.probe_session_id)?;
+        }
+        ManagedCloudRunJobOutcome::Failed(state) => {
+            print_kv("managed_cloud_run_job_status", "failed")?;
+            print_kv("probe_session_id", &state.probe_session_id)?;
+        }
+        ManagedCloudRunJobOutcome::DuplicateSkipped(state) => {
+            print_kv("managed_cloud_run_job_status", "duplicate_skipped")?;
+            print_kv("probe_session_id", &state.probe_session_id)?;
+        }
+    }
+    if args.pretty {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(outcome.state()).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string(outcome.state()).map_err(|error| error.to_string())?
+        );
+    }
+    Ok(())
 }
 
 fn run_forge_rlm(args: ForgeRlmArgs) -> Result<(), String> {
@@ -2319,6 +2500,34 @@ fn resolve_probe_home_path(probe_home: Option<PathBuf>) -> Result<PathBuf, Strin
     probe_home
         .map(Ok)
         .unwrap_or_else(|| default_probe_home().map_err(|error| error.to_string()))
+}
+
+fn resolve_required_secret_value(
+    explicit: Option<&str>,
+    file: Option<&PathBuf>,
+    env_key: &str,
+    label: &str,
+) -> Result<String, String> {
+    if let Some(value) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(value.to_string());
+    }
+    if let Some(path) = file {
+        let value = fs::read_to_string(path)
+            .map_err(|error| format!("failed to read {label} file {}: {error}", path.display()))?;
+        let value = value.trim();
+        if !value.is_empty() {
+            return Ok(value.to_string());
+        }
+    }
+    if let Ok(value) = std::env::var(env_key) {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Ok(value);
+        }
+    }
+    Err(format!(
+        "missing {label}; set {env_key} or pass its file/argument"
+    ))
 }
 
 fn resolve_forge_exec_request(
@@ -4779,10 +4988,11 @@ mod tests {
     };
 
     use super::{
-        BackendKind, Cli, Commands, HostedConnectArgs, ProbeClientTransportConfig,
-        PsionicServerConfig, ServerArgs, ToolApprovalConfig, TuiArgs, build_tui_runtime_config,
-        operator_client_config, render_detached_summary_line, render_turn_backend_receipt,
-        render_turn_observability, resolve_server_config, resolve_tui_profile,
+        BackendKind, Cli, Commands, HostedConnectArgs, ManagedCloudRunJobCommands, ManagedCommands,
+        ProbeClientTransportConfig, PsionicServerConfig, ServerArgs, ToolApprovalConfig, TuiArgs,
+        build_tui_runtime_config, operator_client_config, render_detached_summary_line,
+        render_turn_backend_receipt, render_turn_observability, resolve_server_config,
+        resolve_tui_profile,
     };
 
     #[test]
@@ -4956,6 +5166,34 @@ mod tests {
         match cli.command {
             Some(Commands::Tui(args)) => assert_eq!(args, TuiArgs::default()),
             other => panic!("expected tui command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn managed_cloud_run_job_command_parses() {
+        let cli = Cli::try_parse_from([
+            "probe",
+            "managed",
+            "cloud-run-job",
+            "run-once",
+            "--assignment-token",
+            "token",
+            "--signing-secret-env",
+            "SECRET_ENV",
+            "--dry-run",
+        ])
+        .expect("managed cloud run job command should parse");
+        match cli.command {
+            Some(Commands::Managed(args)) => match args.command {
+                ManagedCommands::CloudRunJob(args) => match args.command {
+                    ManagedCloudRunJobCommands::RunOnce(args) => {
+                        assert_eq!(args.assignment_token.as_deref(), Some("token"));
+                        assert_eq!(args.signing_secret_env, "SECRET_ENV");
+                        assert!(args.dry_run);
+                    }
+                },
+            },
+            other => panic!("expected managed cloud run job command, got {other:?}"),
         }
     }
 
