@@ -19,21 +19,21 @@ use probe_core::tools::{ExecutedToolCall, ProbeToolChoice, ToolDeniedAction, Too
 use probe_protocol::runtime::{
     AttachSessionParticipantRequest, AttachSessionParticipantResponse, CancelQueuedTurnRequest,
     CancelQueuedTurnResponse, ClientMessage, DetachedSessionEventRecord, DetachedSessionSummary,
-    EventEnvelope, InitializeRequest, InspectDetachedSessionResponse,
-    InspectSessionMeshCoordinationRequest, InspectSessionMeshCoordinationResponse,
-    InspectSessionMeshPluginOffersRequest, InspectSessionMeshPluginOffersResponse,
-    InspectSessionTurnsResponse, InterruptTurnResponse, ListDetachedSessionsResponse,
-    ListSessionsResponse, PostSessionMeshCoordinationRequest, PostSessionMeshCoordinationResponse,
-    PublishSessionMeshPluginOfferRequest, PublishSessionMeshPluginOfferResponse, QueueTurnResponse,
-    ReadDetachedSessionLogRequest, ReadDetachedSessionLogResponse, RequestEnvelope,
-    ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope, RuntimeProgressEvent,
-    RuntimeProtocolError, RuntimeRequest, RuntimeResponse, RuntimeToolCallDelta, RuntimeUsage,
-    ServerEvent, ServerMessage, SessionLookupRequest, SessionSnapshot, SpawnChildSessionRequest,
-    SpawnChildSessionResponse, StartSessionRequest, ToolApprovalRecipe, ToolCallResult, ToolChoice,
-    ToolDeniedAction as ProtocolDeniedAction, ToolLongContextRecipe, ToolLoopRecipe,
-    ToolOracleRecipe, ToolSetKind, TurnAuthor, TurnCompleted, TurnPaused, TurnRequest,
-    TurnResponse, UpdateSessionControllerRequest, UpdateSessionControllerResponse,
-    WatchDetachedSessionRequest, WatchDetachedSessionResponse,
+    EventEnvelope, InitializeRequest, InspectChildSessionRequest, InspectChildSessionResponse,
+    InspectDetachedSessionResponse, InspectSessionMeshCoordinationRequest,
+    InspectSessionMeshCoordinationResponse, InspectSessionMeshPluginOffersRequest,
+    InspectSessionMeshPluginOffersResponse, InspectSessionTurnsResponse, InterruptTurnResponse,
+    ListDetachedSessionsResponse, ListSessionsResponse, PostSessionMeshCoordinationRequest,
+    PostSessionMeshCoordinationResponse, PublishSessionMeshPluginOfferRequest,
+    PublishSessionMeshPluginOfferResponse, QueueTurnResponse, ReadDetachedSessionLogRequest,
+    ReadDetachedSessionLogResponse, RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody,
+    ResponseEnvelope, RuntimeProgressEvent, RuntimeProtocolError, RuntimeRequest, RuntimeResponse,
+    RuntimeToolCallDelta, RuntimeUsage, ServerEvent, ServerMessage, SessionLookupRequest,
+    SessionSnapshot, SpawnChildSessionRequest, SpawnChildSessionResponse, StartSessionRequest,
+    ToolApprovalRecipe, ToolCallResult, ToolChoice, ToolDeniedAction as ProtocolDeniedAction,
+    ToolLongContextRecipe, ToolLoopRecipe, ToolOracleRecipe, ToolSetKind, TurnAuthor,
+    TurnCompleted, TurnPaused, TurnRequest, TurnResponse, UpdateSessionControllerRequest,
+    UpdateSessionControllerResponse, WatchDetachedSessionRequest, WatchDetachedSessionResponse,
     unbounded_tool_loop_round_trips_sentinel,
 };
 use probe_protocol::session::{
@@ -866,6 +866,18 @@ impl ProbeClient {
             RuntimeResponse::SpawnChildSession(response) => Ok(response),
             other => Err(ProbeClientError::UnexpectedServerMessage(format!(
                 "expected spawn_child_session response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub fn inspect_child_session(
+        &mut self,
+        request: InspectChildSessionRequest,
+    ) -> Result<InspectChildSessionResponse, ProbeClientError> {
+        match self.send_request(RuntimeRequest::InspectChildSession(request), None)? {
+            RuntimeResponse::InspectChildSession(response) => Ok(response),
+            other => Err(ProbeClientError::UnexpectedServerMessage(format!(
+                "expected inspect_child_session response, got {other:?}"
             ))),
         }
     }

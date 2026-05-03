@@ -97,6 +97,11 @@ pub const fn unbounded_tool_loop_round_trips_sentinel() -> usize {
     1_000_000_000
 }
 
+#[must_use]
+pub const fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitializeRequest {
     pub client_name: String,
@@ -185,6 +190,23 @@ pub struct SpawnChildSessionResponse {
     pub parent_session_id: SessionId,
     pub child: SessionChildSummary,
     pub session: SessionSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectChildSessionRequest {
+    pub parent_session_id: SessionId,
+    pub child_session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectChildSessionResponse {
+    pub parent_session_id: SessionId,
+    pub child: SessionChildSummary,
+    pub session: SessionSnapshot,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detached_events: Vec<DetachedSessionEventRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -533,6 +555,10 @@ pub struct InterruptTurnResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<String>,
     pub message: String,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub child_sessions_cancelled: usize,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub child_turns_cancelled: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -813,6 +839,7 @@ pub enum RuntimeRequest {
     StartSession(StartSessionRequest),
     ResumeSession(SessionLookupRequest),
     SpawnChildSession(SpawnChildSessionRequest),
+    InspectChildSession(InspectChildSessionRequest),
     ListSessions,
     ListDetachedSessions,
     ReadDetachedSessionLog(ReadDetachedSessionLogRequest),
@@ -844,6 +871,7 @@ pub enum RuntimeResponse {
     StartSession(SessionSnapshot),
     ResumeSession(SessionSnapshot),
     SpawnChildSession(SpawnChildSessionResponse),
+    InspectChildSession(InspectChildSessionResponse),
     ListSessions(ListSessionsResponse),
     ListDetachedSessions(ListDetachedSessionsResponse),
     ReadDetachedSessionLog(ReadDetachedSessionLogResponse),

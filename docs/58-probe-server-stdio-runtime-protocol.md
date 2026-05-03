@@ -220,6 +220,13 @@ is created or its detached status changes, and those child summaries now carry
 runtime-owned initiator, purpose, and terminal closure fields instead of
 forcing hosts to infer delegated ownership from transcript prose.
 
+`inspect_child_session` is the parent-scoped drilldown path. It verifies the
+child belongs to the requested parent, then returns the child summary, child
+session snapshot, and recent detached child events when available. Parent
+interrupts also propagate to linked child work that is queued or paused for
+approval, rejecting pending child approvals and marking those child turns
+cancelled.
+
 Detached daemon transports now also emit `workspace_state_updated` when Probe
 can resolve git-owned branch and delivery posture for the session workspace.
 That keeps branch name, upstream tracking, divergence, and compare posture on

@@ -351,3 +351,7 @@ This folder holds technical planning docs for the Probe runtime.
   - managed-session tool registry manifests, default allow/ask/deny policy,
     scoped overrides, durable approval pause/resume, API-safe redacted pending
     approvals, and redacted tool input/output summaries for Laravel history
+- `100-managed-child-sessions.md`
+  - one-level managed child-session delegation, parent-scoped child drilldown,
+    child summaries and traces for API/UI, and parent-interrupt propagation to
+    queued or approval-paused child work

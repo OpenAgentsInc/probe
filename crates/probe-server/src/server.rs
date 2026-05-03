@@ -35,11 +35,12 @@ use probe_protocol::runtime::{
     CancelQueuedTurnResponse, ClientMessage, DetachedSessionEventPayload,
     DetachedSessionEventTruth, DetachedSessionRecoveryState, DetachedSessionStatus,
     DetachedSessionSummary, EventDeliveryGuarantee, EventEnvelope, InitializeResponse,
-    InspectDetachedSessionResponse, InspectSessionMeshCoordinationRequest,
-    InspectSessionMeshCoordinationResponse, InspectSessionMeshPluginOffersRequest,
-    InspectSessionMeshPluginOffersResponse, InspectSessionTurnsResponse, InterruptTurnResponse,
-    ListDetachedSessionsResponse, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListSessionsResponse, PostSessionMeshCoordinationRequest, PostSessionMeshCoordinationResponse,
+    InspectChildSessionRequest, InspectChildSessionResponse, InspectDetachedSessionResponse,
+    InspectSessionMeshCoordinationRequest, InspectSessionMeshCoordinationResponse,
+    InspectSessionMeshPluginOffersRequest, InspectSessionMeshPluginOffersResponse,
+    InspectSessionTurnsResponse, InterruptTurnResponse, ListDetachedSessionsResponse,
+    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListSessionsResponse,
+    PostSessionMeshCoordinationRequest, PostSessionMeshCoordinationResponse,
     PublishSessionMeshPluginOfferRequest, PublishSessionMeshPluginOfferResponse, QueueTurnResponse,
     QueuedTurnStatus, ReadDetachedSessionLogRequest, ReadDetachedSessionLogResponse,
     RequestEnvelope, ResolvePendingApprovalResponse, ResponseBody, ResponseEnvelope,
@@ -527,6 +528,12 @@ struct BackgroundTurnWorkItem {
 struct InterruptOutcome {
     response: InterruptTurnResponse,
     should_start_next: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ChildWorkCancellationSummary {
+    child_sessions_cancelled: usize,
+    child_turns_cancelled: usize,
 }
 
 impl ProbeServerCore {
@@ -1490,6 +1497,8 @@ impl TurnControlPlane {
                         interrupted: false,
                         reason_code: Some(String::from("not_running")),
                         message: String::from("session is not currently running a turn"),
+                        child_sessions_cancelled: 0,
+                        child_turns_cancelled: 0,
                     },
                     should_start_next: false,
                 });
@@ -1504,6 +1513,8 @@ impl TurnControlPlane {
                     interrupted: false,
                     reason_code: Some(String::from("not_running")),
                     message: String::from("session is not currently running a turn"),
+                    child_sessions_cancelled: 0,
+                    child_turns_cancelled: 0,
                 },
                 should_start_next: false,
             });
@@ -1519,6 +1530,8 @@ impl TurnControlPlane {
                     message: String::from(
                         "probe-server still cannot cooperatively interrupt an in-flight runtime turn",
                     ),
+                    child_sessions_cancelled: 0,
+                    child_turns_cancelled: 0,
                 },
                 should_start_next: false,
             });
@@ -1533,6 +1546,8 @@ impl TurnControlPlane {
                     message: String::from(
                         "the active turn is not paused on approval, so there is nothing honest to interrupt yet",
                     ),
+                    child_sessions_cancelled: 0,
+                    child_turns_cancelled: 0,
                 },
                 should_start_next: false,
             });
@@ -1579,8 +1594,113 @@ impl TurnControlPlane {
                 message: String::from(
                     "cancelled the approval-paused turn, rejected its pending approvals, and preserved the interruption in the transcript",
                 ),
+                child_sessions_cancelled: 0,
+                child_turns_cancelled: 0,
             },
             should_start_next,
+        })
+    }
+
+    fn cancel_child_work_for_parent(
+        &self,
+        parent_session_id: &SessionId,
+    ) -> Result<ChildWorkCancellationSummary, RuntimeProtocolError> {
+        let parent = self
+            .runtime
+            .session_store()
+            .read_metadata(parent_session_id)
+            .map_err(session_store_error_to_protocol)?;
+        let mut summary = ChildWorkCancellationSummary::default();
+        for link in parent.child_links {
+            let child_summary = self.cancel_session_work_because_parent_interrupted(
+                &link.session_id,
+                parent_session_id,
+            )?;
+            if child_summary.child_turns_cancelled > 0 {
+                summary.child_sessions_cancelled += 1;
+                summary.child_turns_cancelled += child_summary.child_turns_cancelled;
+            }
+        }
+        Ok(summary)
+    }
+
+    fn cancel_session_work_because_parent_interrupted(
+        &self,
+        child_session_id: &SessionId,
+        parent_session_id: &SessionId,
+    ) -> Result<ChildWorkCancellationSummary, RuntimeProtocolError> {
+        let mut coordination = self
+            .coordination
+            .lock()
+            .expect("probe-server coordination mutex should not be poisoned");
+        let mut state = self.load_state_locked(child_session_id.as_str(), &mut coordination)?;
+        let mut cancelled_turns = 0usize;
+        let mut rejected_approvals = 0usize;
+        let cancellation_reason = format!(
+            "cancelled because parent session {} was interrupted",
+            parent_session_id.as_str()
+        );
+        let pending_approvals = self
+            .runtime
+            .pending_tool_approvals(child_session_id)
+            .map_err(runtime_error_to_protocol)?;
+
+        for turn in &mut state.turns {
+            match turn.record.status {
+                QueuedTurnStatus::Queued => {
+                    turn.record.status = QueuedTurnStatus::Cancelled;
+                    turn.record.finished_at_ms = Some(now_ms());
+                    turn.record.cancellation_reason = Some(cancellation_reason.clone());
+                    turn.record.awaiting_approval = false;
+                    turn.record.execution_timeout_at_ms = None;
+                    cancelled_turns += 1;
+                }
+                QueuedTurnStatus::Running if turn.record.awaiting_approval => {
+                    turn.record.status = QueuedTurnStatus::Cancelled;
+                    turn.record.finished_at_ms = Some(now_ms());
+                    turn.record.cancellation_reason = Some(cancellation_reason.clone());
+                    turn.record.awaiting_approval = false;
+                    turn.record.execution_timeout_at_ms = None;
+                    rejected_approvals = pending_approvals.len();
+                    cancelled_turns += 1;
+                }
+                _ => {}
+            }
+        }
+
+        if cancelled_turns == 0 {
+            return Ok(ChildWorkCancellationSummary::default());
+        }
+
+        for approval in &pending_approvals {
+            self.runtime
+                .session_store()
+                .resolve_pending_tool_approval(
+                    child_session_id,
+                    approval.tool_call_id.as_str(),
+                    probe_protocol::session::ToolApprovalResolution::Rejected,
+                )
+                .map_err(session_store_error_to_protocol)?;
+        }
+        self.runtime
+            .session_store()
+            .append_turn(
+                child_session_id,
+                &[NewItem::new(
+                    probe_protocol::session::TranscriptItemKind::Note,
+                    child_work_cancelled_note(
+                        parent_session_id,
+                        cancelled_turns,
+                        rejected_approvals,
+                    ),
+                )],
+            )
+            .map_err(session_store_error_to_protocol)?;
+        coordination.remove(child_session_id.as_str());
+        self.save_state_and_sync(child_session_id, &state)?;
+        Ok(ChildWorkCancellationSummary {
+            child_sessions_cancelled: usize::from(cancelled_turns > 0),
+            child_turns_cancelled: cancelled_turns,
         })
     }
 
@@ -2008,6 +2128,18 @@ impl ProbeServerConnection {
                 }
                 Ok(RequestHandlingOutcome::Continue)
             }
+            RuntimeRequest::InspectChildSession(request) => {
+                match self.inspect_child_session(request) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::InspectChildSession(response),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
             RuntimeRequest::ListSessions => {
                 match self.core.runtime.session_store().list_sessions() {
                     Ok(sessions) => self.writer.send_response_ok(
@@ -2389,6 +2521,35 @@ impl ProbeServerConnection {
         })
     }
 
+    fn inspect_child_session(
+        &self,
+        request: InspectChildSessionRequest,
+    ) -> Result<InspectChildSessionResponse, RuntimeProtocolError> {
+        ensure_child_linked_to_parent(
+            &self.core.runtime,
+            &request.parent_session_id,
+            &request.child_session_id,
+        )?;
+        let session = self.session_snapshot(&request.child_session_id)?;
+        let child = session_child_summary_from_runtime(&self.core, &request.child_session_id)?;
+        let detached_events = match self.core.detached_event_hub.as_ref() {
+            Some(event_hub) => event_hub
+                .read(
+                    &request.child_session_id,
+                    None,
+                    request.event_limit.unwrap_or(100).min(500),
+                )
+                .map_err(detached_event_error_to_protocol)?,
+            None => Vec::new(),
+        };
+        Ok(InspectChildSessionResponse {
+            parent_session_id: request.parent_session_id,
+            child,
+            session,
+            detached_events,
+        })
+    }
+
     fn session_snapshot(
         &self,
         session_id: &SessionId,
@@ -2534,10 +2695,26 @@ impl ProbeServerConnection {
             self.core
                 .ensure_detached_session_registered_by_id(&request.session_id)?;
         }
-        let outcome = self
+        let mut outcome = self
             .core
             .turn_control
             .interrupt_turn(request.session_id.clone())?;
+        if outcome.response.interrupted {
+            let child_summary = self
+                .core
+                .turn_control
+                .cancel_child_work_for_parent(&request.session_id)?;
+            if child_summary.child_turns_cancelled > 0 {
+                outcome.response.child_sessions_cancelled = child_summary.child_sessions_cancelled;
+                outcome.response.child_turns_cancelled = child_summary.child_turns_cancelled;
+                outcome.response.message = format!(
+                    "{}; cancelled {} child turn(s) across {} child session(s)",
+                    outcome.response.message,
+                    child_summary.child_turns_cancelled,
+                    child_summary.child_sessions_cancelled
+                );
+            }
+        }
         if outcome.should_start_next {
             spawn_next_queued_turn_if_ready(
                 Arc::clone(&self.core.turn_control),
@@ -3023,6 +3200,17 @@ fn interrupted_turn_note(turn: &StoredTurnControlRecord, pending_approvals: usiz
         render_turn_author(&turn.record.author),
         pending_approvals,
         render_prompt_excerpt(turn.record.prompt.as_str()),
+    )
+}
+
+fn child_work_cancelled_note(
+    parent_session_id: &SessionId,
+    cancelled_turns: usize,
+    rejected_approvals: usize,
+) -> String {
+    format!(
+        "probe-server cancelled {cancelled_turns} child turn(s) because parent session {} was interrupted; rejected {rejected_approvals} pending child approval(s)",
+        parent_session_id.as_str(),
     )
 }
 
@@ -4187,6 +4375,32 @@ fn redacted_pending_tool_approvals(approvals: &[PendingToolApproval]) -> Vec<Pen
         .iter()
         .map(PendingToolApproval::redacted_for_api)
         .collect()
+}
+
+fn ensure_child_linked_to_parent(
+    runtime: &ProbeRuntime,
+    parent_session_id: &SessionId,
+    child_session_id: &SessionId,
+) -> Result<(), RuntimeProtocolError> {
+    let parent = runtime
+        .session_store()
+        .read_metadata(parent_session_id)
+        .map_err(session_store_error_to_protocol)?;
+    if parent
+        .child_links
+        .iter()
+        .any(|link| &link.session_id == child_session_id)
+    {
+        return Ok(());
+    }
+    Err(protocol_error(
+        "child_session_not_linked",
+        format!(
+            "child session {} is not linked to parent session {}",
+            child_session_id.as_str(),
+            parent_session_id.as_str()
+        ),
+    ))
 }
 
 fn session_branch_state(cwd: &Path) -> Option<SessionBranchState> {

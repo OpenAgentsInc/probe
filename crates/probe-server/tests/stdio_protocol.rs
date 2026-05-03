@@ -18,13 +18,13 @@ use probe_protocol::managed_runtime::{
     ManagedSessionStartRequest, PROBE_MANAGED_RUNTIME_SCHEMA_VERSION,
 };
 use probe_protocol::runtime::{
-    ClientMessage, InspectSessionMeshCoordinationRequest, InspectSessionMeshPluginOffersRequest,
-    InspectSessionTurnsResponse, PostSessionMeshCoordinationRequest,
-    PublishSessionMeshPluginOfferRequest, QueueTurnResponse, QueuedTurnStatus, RequestEnvelope,
-    ResponseBody, RuntimeProgressEvent, RuntimeRequest, RuntimeResponse, ServerEvent,
-    ServerMessage, SessionLookupRequest, SpawnChildSessionRequest, StartSessionRequest,
-    ToolApprovalRecipe, ToolChoice, ToolDeniedAction, ToolLoopRecipe, ToolSetKind, TransportKind,
-    TurnAuthor, TurnRequest,
+    ClientMessage, InspectChildSessionRequest, InspectSessionMeshCoordinationRequest,
+    InspectSessionMeshPluginOffersRequest, InspectSessionTurnsResponse,
+    PostSessionMeshCoordinationRequest, PublishSessionMeshPluginOfferRequest, QueueTurnResponse,
+    QueuedTurnStatus, RequestEnvelope, ResponseBody, RuntimeProgressEvent, RuntimeRequest,
+    RuntimeResponse, ServerEvent, ServerMessage, SessionLookupRequest, SpawnChildSessionRequest,
+    StartSessionRequest, ToolApprovalRecipe, ToolChoice, ToolDeniedAction, ToolLoopRecipe,
+    ToolSetKind, TransportKind, TurnAuthor, TurnRequest,
 };
 use probe_protocol::session::{
     SessionDeliveryStatus, SessionId, SessionMeshCoordinationKind, SessionMeshCoordinationMode,
@@ -765,6 +765,30 @@ fn spawn_child_session_persists_parent_linkage_and_returns_child_status() {
         Some("Fix the delegated branch")
     );
 
+    let inspect_child = harness.request(
+        "req-inspect-child",
+        RuntimeRequest::InspectChildSession(InspectChildSessionRequest {
+            parent_session_id: parent_session_id.clone(),
+            child_session_id: response.child.session_id.clone(),
+            event_limit: Some(10),
+        }),
+    );
+    let RuntimeResponse::InspectChildSession(child_drilldown) = expect_ok_response(inspect_child)
+    else {
+        panic!("expected inspect child response");
+    };
+    assert_eq!(child_drilldown.parent_session_id, parent_session_id);
+    assert_eq!(child_drilldown.child.session_id, response.child.session_id);
+    assert_eq!(
+        child_drilldown
+            .session
+            .session
+            .parent_link
+            .as_ref()
+            .map(|link| link.session_id.clone()),
+        Some(child_drilldown.parent_session_id)
+    );
+
     harness.shutdown();
 }
 
@@ -1476,6 +1500,125 @@ fn interrupting_approval_paused_turn_cancels_it_and_drains_the_queue() {
 }
 
 #[test]
+fn interrupting_parent_cancels_approval_paused_child_work() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let fake_backend = always_approval_pause_backend(Duration::from_millis(50));
+    let profile = test_profile(fake_backend.base_url());
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+    let parent_session_id = start_test_session(&mut harness, &environment, &profile);
+
+    let spawn_child = harness.request(
+        "req-spawn-cancellable-child",
+        RuntimeRequest::SpawnChildSession(SpawnChildSessionRequest {
+            parent_session_id: parent_session_id.clone(),
+            profile: profile.clone(),
+            title: Some(String::from("delegated child")),
+            cwd: None,
+            system_prompt: Some(String::from("Work in the same repo.")),
+            harness_profile: None,
+            parent_turn_id: Some(String::from("turn-parent")),
+            parent_turn_index: Some(0),
+            author: Some(operator_author()),
+            purpose: Some(String::from("delegated patch check")),
+        }),
+    );
+    let RuntimeResponse::SpawnChildSession(child_response) = expect_ok_response(spawn_child) else {
+        panic!("expected spawn child response");
+    };
+    let child_session_id = child_response.child.session_id.clone();
+
+    harness.send_request(
+        "req-parent-pauses",
+        RuntimeRequest::ContinueTurn(TurnRequest {
+            session_id: parent_session_id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("patch hello.txt in parent"),
+            author: Some(operator_author()),
+            tool_loop: Some(approval_pause_tool_loop()),
+        }),
+    );
+    harness.send_request(
+        "req-child-pauses",
+        RuntimeRequest::ContinueTurn(TurnRequest {
+            session_id: child_session_id.clone(),
+            profile: profile.clone(),
+            prompt: String::from("patch hello.txt in child"),
+            author: Some(operator_author()),
+            tool_loop: Some(approval_pause_tool_loop()),
+        }),
+    );
+    let RuntimeResponse::ContinueTurn(probe_protocol::runtime::TurnResponse::Paused(_)) =
+        expect_ok_response(harness.read_until_response("req-parent-pauses").1)
+    else {
+        panic!("expected paused parent turn response");
+    };
+    let RuntimeResponse::ContinueTurn(probe_protocol::runtime::TurnResponse::Paused(_)) =
+        expect_ok_response(harness.read_until_response("req-child-pauses").1)
+    else {
+        panic!("expected paused child turn response");
+    };
+
+    let interrupt = harness.request(
+        "req-interrupt-parent-with-child",
+        RuntimeRequest::InterruptTurn(probe_protocol::runtime::InterruptTurnRequest {
+            session_id: parent_session_id.clone(),
+            author: Some(operator_author()),
+        }),
+    );
+    let RuntimeResponse::InterruptTurn(interrupt) = expect_ok_response(interrupt) else {
+        panic!("expected interrupt response");
+    };
+    assert!(interrupt.interrupted);
+    assert_eq!(interrupt.child_sessions_cancelled, 1);
+    assert_eq!(interrupt.child_turns_cancelled, 1);
+
+    let child_turns = wait_for_turns(
+        &mut harness,
+        &child_session_id,
+        "req-poll-child-cancelled",
+        |turns| {
+            turns.active_turn.is_none()
+                && turns.recent_turns.iter().any(|turn| {
+                    turn.status == QueuedTurnStatus::Cancelled && !turn.awaiting_approval
+                })
+        },
+    );
+    assert!(child_turns.queued_turns.is_empty());
+
+    let pending = harness.request(
+        "req-child-pending-after-parent-interrupt",
+        RuntimeRequest::ListPendingApprovals(
+            probe_protocol::runtime::ListPendingApprovalsRequest {
+                session_id: Some(child_session_id.clone()),
+            },
+        ),
+    );
+    let RuntimeResponse::ListPendingApprovals(response) = expect_ok_response(pending) else {
+        panic!("expected child pending approvals response");
+    };
+    assert!(response.approvals.is_empty());
+
+    let parent = harness.request(
+        "req-inspect-parent-after-child-cancel",
+        RuntimeRequest::InspectSession(SessionLookupRequest {
+            session_id: parent_session_id.clone(),
+        }),
+    );
+    let RuntimeResponse::InspectSession(parent_snapshot) = expect_ok_response(parent) else {
+        panic!("expected parent inspect response");
+    };
+    assert_eq!(
+        parent_snapshot.child_sessions[0].status,
+        probe_protocol::session::SessionChildStatus::Cancelled
+    );
+
+    harness.shutdown();
+    let requests = fake_backend.finish();
+    assert_eq!(requests.len(), 2);
+}
+
+#[test]
 fn queued_turns_can_be_cancelled_before_execution() {
     let environment = ProbeTestEnvironment::new();
     environment.seed_coding_workspace();
@@ -1878,6 +2021,35 @@ fn approval_pause_then_interrupt_backend(delay: Duration) -> FakeOpenAiServer {
         };
         *counter += 1;
         response
+    })
+}
+
+fn always_approval_pause_backend(delay: Duration) -> FakeOpenAiServer {
+    let counter = Arc::new(Mutex::new(0usize));
+    FakeOpenAiServer::from_handler(move |_request| {
+        thread::sleep(delay);
+        let mut counter = counter.lock().expect("backend counter");
+        let call_index = *counter + 1;
+        *counter += 1;
+        FakeHttpResponse::json_ok(serde_json::json!({
+            "id": format!("chatcmpl_always_pause_{call_index}"),
+            "model": TEST_MODEL,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": format!("call_patch_{call_index}"),
+                        "type": "function",
+                        "function": {
+                            "name": "apply_patch",
+                            "arguments": "{\"path\":\"hello.txt\",\"old_text\":\"world\",\"new_text\":\"probe\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }))
     })
 }
 

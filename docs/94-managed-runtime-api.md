@@ -108,8 +108,12 @@ provider credentials. It can also carry the worker's current
 `probe.managed_environment.v1` advertisement so Laravel can refresh scheduling
 eligibility before dispatching more work.
 
-`record_child_session` is the future multi-agent hook: parent and child Probe
-session ids are explicit and correlated without requiring transcript prose.
+`record_child_session` is the managed-runtime event hook for multi-agent work:
+parent and child Probe session ids are explicit and correlated without requiring
+transcript prose. The stdio runtime API also exposes `spawn_child_session` and
+`inspect_child_session` for one-level delegation, parent-scoped child
+drilldown, child summaries, and detailed child traces. Parent interruption now
+cancels linked child work that is queued or paused for approval.
 
 ## Event Log
 
