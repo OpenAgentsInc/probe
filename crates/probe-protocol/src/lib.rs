@@ -1,5 +1,6 @@
 pub mod admin_chat;
 pub mod backend;
+pub mod managed_environment;
 pub mod managed_runtime;
 pub mod runtime;
 pub mod scheduled_bridge;
@@ -8,7 +9,7 @@ pub mod website_events;
 
 use std::path::{Path, PathBuf};
 
-pub const PROBE_PROTOCOL_VERSION: u32 = 19;
+pub const PROBE_PROTOCOL_VERSION: u32 = 20;
 pub const PROBE_RUNTIME_NAME: &str = "probe";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,13 +46,13 @@ mod tests {
         PROBE_WEBSITE_EVENT_SCHEMA_VERSION, ProbeWebsiteEvent, ProbeWebsiteEventActor,
         ProbeWebsiteEventCorrelation, ProbeWebsiteEventSource, ProbeWebsiteEventType,
     };
-    use serde_json::Map;
+    use serde_json::{Map, json};
 
     #[test]
     fn current_descriptor_is_stable() {
         let descriptor = ProtocolDescriptor::current();
         assert_eq!(descriptor.runtime_name, "probe");
-        assert_eq!(descriptor.version, 19);
+        assert_eq!(descriptor.version, 20);
     }
 
     #[test]
@@ -277,6 +278,99 @@ mod tests {
         assert_eq!(
             decoded.artifact_refs[0].resource_ref,
             "probe://sessions/sess-managed-1/transcript"
+        );
+    }
+
+    #[test]
+    fn managed_environment_contract_serializes_provider_neutral_shape() {
+        let mut metadata = Map::new();
+        metadata.insert(
+            String::from("containerImage"),
+            json!("us-docker.pkg.dev/openagents/probe/worker:latest"),
+        );
+        metadata.insert(
+            String::from("secretManagerSecret"),
+            json!("projects/openagents/secrets/probe-worker-token"),
+        );
+        metadata.insert(
+            String::from("nested"),
+            json!({
+                "region": "us-central1",
+                "apiToken": "must-not-serialize"
+            }),
+        );
+
+        let mut gcp = super::managed_environment::ManagedEnvironmentCapabilities::gcp_cloud_run_job(
+            "worker-gcp-1",
+            "gcp-coding-standard",
+        );
+        gcp.public_metadata = super::managed_environment::public_metadata_from_map(metadata);
+        gcp.backend_profiles = vec![String::from("openai-codex-subscription")];
+        gcp.languages = vec![
+            super::managed_environment::ManagedEnvironmentLanguageCapability {
+                language: String::from("rust"),
+                versions: vec![String::from("1.86")],
+                default_version: Some(String::from("1.86")),
+            },
+        ];
+
+        let advertisement = super::managed_environment::ManagedEnvironmentWorkerAdvertisement::new(
+            "worker-gcp-1",
+            1_777_777_777_000,
+            gcp,
+        );
+        let encoded = serde_json::to_string(&advertisement).expect("serialize advertisement");
+        let decoded: super::managed_environment::ManagedEnvironmentWorkerAdvertisement =
+            serde_json::from_str(encoded.as_str()).expect("deserialize advertisement");
+
+        assert!(
+            encoded.contains(super::managed_environment::PROBE_MANAGED_ENVIRONMENT_SCHEMA_VERSION)
+        );
+        assert!(encoded.contains("\"provider\":\"google_cloud\""));
+        assert!(!encoded.contains("probe-worker-token"));
+        assert!(!encoded.contains("must-not-serialize"));
+        assert!(
+            !decoded
+                .capabilities
+                .public_metadata
+                .entries()
+                .contains_key("secretManagerSecret")
+        );
+        assert_eq!(
+            decoded.capabilities.provider,
+            super::managed_environment::ManagedEnvironmentProviderKind::GoogleCloud
+        );
+
+        let pylon = super::managed_environment::ManagedEnvironmentCapabilities::pylon_hosted(
+            "pylon-worker-1",
+            "pylon-coding",
+        );
+        let daytona = super::managed_environment::ManagedEnvironmentCapabilities::daytona_workspace(
+            "daytona-worker-1",
+            "daytona-coding",
+        );
+        assert_eq!(
+            pylon.host_class,
+            super::managed_environment::ManagedEnvironmentHostClass::PylonDevice
+        );
+        assert_eq!(
+            daytona.host_class,
+            super::managed_environment::ManagedEnvironmentHostClass::DaytonaWorkspace
+        );
+
+        let constraints = super::managed_environment::ManagedEnvironmentConstraints {
+            allowed_providers: vec![
+                super::managed_environment::ManagedEnvironmentProviderKind::GoogleCloud,
+                super::managed_environment::ManagedEnvironmentProviderKind::Pylon,
+            ],
+            required_backend_profiles: vec![String::from("openai-codex-subscription")],
+            ..super::managed_environment::ManagedEnvironmentConstraints::empty()
+        };
+        let constraints_json =
+            serde_json::to_value(&constraints).expect("serialize environment constraints");
+        assert_eq!(
+            constraints_json["schemaVersion"],
+            super::managed_environment::PROBE_MANAGED_ENVIRONMENT_SCHEMA_VERSION
         );
     }
 }

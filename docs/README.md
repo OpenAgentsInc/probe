@@ -327,3 +327,8 @@ This folder holds technical planning docs for the Probe runtime.
     including durable start/resume/replay/control operations, append-only
     managed runtime events, restart reconstruction, heartbeats, approvals,
     transcript refs, artifact refs, and child-session hooks
+- `95-managed-environment-contract.md`
+  - provider-neutral managed environment contract for Pylon, Google Cloud,
+    private GCE, local, and future Daytona worker advertisements, Laravel
+    constraints, resource/tool/language/backend matching, safe metadata, and
+    incompatibility reasons

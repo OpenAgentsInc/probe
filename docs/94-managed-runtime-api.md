@@ -86,8 +86,9 @@ transport contract as first-party Probe clients.
 - `record_child_session`
 
 `start_session` creates a durable Probe session with profile, cwd,
-system-prompt, harness, workspace-state, mounted-ref, and optional initial
-prompt metadata. It returns the Probe session id, transcript ref, current
+system-prompt, harness, workspace-state, mounted-ref, optional initial prompt
+metadata, and optional `ManagedEnvironmentConstraints` from the Laravel
+environment record. It returns the Probe session id, transcript ref, current
 status, and the first replayable events.
 
 `resume_session` reconstructs current status from the persisted event log and
@@ -103,7 +104,9 @@ APIs remain available for direct turn-control mechanics.
 execution continuation still belong to the normal Probe approval runtime.
 
 `heartbeat` projects worker/session status back to Laravel without exposing
-provider credentials.
+provider credentials. It can also carry the worker's current
+`probe.managed_environment.v1` advertisement so Laravel can refresh scheduling
+eligibility before dispatching more work.
 
 `record_child_session` is the future multi-agent hook: parent and child Probe
 session ids are explicit and correlated without requiring transcript prose.

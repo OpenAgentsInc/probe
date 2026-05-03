@@ -1,7 +1,9 @@
 use std::fs::{self, File};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use probe_core::runtime::ProbeRuntime;
 use probe_core::session_store::SessionStoreError;
@@ -16,6 +18,7 @@ use serde::{Deserialize, Serialize};
 const TURN_CONTROL_FILE: &str = "turn-control.json";
 const TURN_CONTROL_SCHEMA_VERSION: u32 = 1;
 static TURN_CONTROL_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+static TURN_CONTROL_JSON_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StoredTurnControlRecord {
@@ -66,8 +69,7 @@ impl SessionTurnControlState {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let file = File::open(path)?;
-        Ok(serde_json::from_reader(file)?)
+        read_json_file(path.as_path())
     }
 
     pub(crate) fn save(
@@ -344,6 +346,9 @@ fn write_json_pretty_atomic<T: Serialize>(
     path: &std::path::Path,
     value: &T,
 ) -> Result<(), SessionStoreError> {
+    let _json_lock = TURN_CONTROL_JSON_LOCK
+        .lock()
+        .expect("turn control json mutex should not be poisoned");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -364,6 +369,32 @@ fn write_json_pretty_atomic<T: Serialize>(
     }
     fs::rename(temp_path, path)?;
     Ok(())
+}
+
+fn read_json_file<T: for<'de> Deserialize<'de>>(
+    path: &std::path::Path,
+) -> Result<T, SessionStoreError> {
+    let mut last_eof = None;
+    for attempt in 0..5 {
+        let result = {
+            let _json_lock = TURN_CONTROL_JSON_LOCK
+                .lock()
+                .expect("turn control json mutex should not be poisoned");
+            let file = File::open(path)?;
+            serde_json::from_reader(file)
+        };
+        match result {
+            Ok(value) => return Ok(value),
+            Err(error) if error.is_eof() && attempt < 4 => {
+                last_eof = Some(error);
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(SessionStoreError::Json(error)),
+        }
+    }
+    Err(SessionStoreError::Json(last_eof.expect(
+        "eof retry loop should retain the last parse error",
+    )))
 }
 
 fn decorate_queue_position(

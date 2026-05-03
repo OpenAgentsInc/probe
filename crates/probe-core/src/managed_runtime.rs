@@ -114,6 +114,7 @@ impl ManagedRuntimeController {
             workspace_state,
             mounted_refs,
             initial_prompt,
+            environment_constraints,
             ..
         } = request;
 
@@ -159,6 +160,7 @@ impl ManagedRuntimeController {
                 cwd: session.cwd.clone(),
                 backend_profile: profile.name.clone(),
                 model: profile.model.clone(),
+                environment_constraints: environment_constraints.clone(),
             },
         })?);
         events.push(self.append_event(ManagedRuntimeEventDraft {
@@ -178,6 +180,7 @@ impl ManagedRuntimeController {
                 cwd: session.cwd.clone(),
                 backend_profile: profile.name,
                 model: profile.model,
+                environment_constraints,
             },
         })?);
         if let Some(prompt) = initial_prompt {
@@ -905,6 +908,7 @@ mod tests {
             mounted_refs: Vec::new(),
             initial_prompt: prompt.map(String::from),
             tool_loop: None,
+            environment_constraints: None,
             metadata: serde_json::Map::new(),
         }
     }

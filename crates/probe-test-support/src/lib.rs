@@ -117,6 +117,9 @@ impl FakeOpenAiServer {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let request = read_request(&mut stream);
+                        if request.trim().is_empty() {
+                            continue;
+                        }
                         requests_thread
                             .lock()
                             .expect("fake server request lock")
@@ -214,6 +217,9 @@ impl FakeAppleFmServer {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let request = read_request(&mut stream);
+                        if request.trim().is_empty() {
+                            continue;
+                        }
                         requests_thread
                             .lock()
                             .expect("fake server request lock")

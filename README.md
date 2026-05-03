@@ -56,6 +56,11 @@ Current shipped surface:
   reconstruction after worker restart, heartbeats, approvals, transcript refs,
   artifact refs, and child-session hooks without making Codex the product
   contract
+- `probe_protocol::managed_environment` plus `probe_core::managed_environment`
+  for the provider-neutral managed environment contract: Pylon, Google Cloud,
+  private GCE, local, and future Daytona worker advertisements, Laravel
+  constraint matching, safe public metadata, resource/tool/language/backend
+  capability checks, and actionable incompatibility reasons
 - a Forge health-diagnosis worker lane inside `probe forge run-once|run-loop`
   that consumes Forge health snapshots/events/evidence refs and returns
   structured diagnosis artifacts without executing production recovery actions
@@ -133,6 +138,10 @@ optional Probe-selected backend behind that boundary.
 The managed runtime API is documented in `docs/94-managed-runtime-api.md`. It
 is the direct Laravel-to-Probe control surface for managed-agent sessions:
 Laravel owns product persistence and Probe owns runtime session/event truth.
+The managed environment contract is documented in
+`docs/95-managed-environment-contract.md`. It is the provider-neutral worker
+capability and constraint layer Laravel should use before dispatching managed
+sessions to Pylon, Google Cloud, private GCE, local, or future Daytona hosts.
 The mesh profile is attach-only as well. Probe discovers live routed inventory
 from `GET /psionic/management/status`, picks the effective model from that
 inventory, prints the mesh role or fallback posture in operator output, and

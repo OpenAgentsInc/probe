@@ -70,6 +70,14 @@ fn stdio_protocol_can_initialize_start_resume_and_run_a_turn() {
     assert_eq!(response.capabilities.transport, TransportKind::StdioJsonl);
     assert!(response.capabilities.supports_queued_turns);
     assert!(response.capabilities.supports_mesh_coordination_adjunct);
+    assert!(response.capabilities.supports_managed_environment_contract);
+    assert!(
+        response
+            .capabilities
+            .managed_environment
+            .as_ref()
+            .is_some_and(|environment| environment.worker_id.starts_with("probe-server-"))
+    );
 
     let start_session = harness.request(
         "req-start-session",
@@ -195,6 +203,7 @@ fn stdio_protocol_exposes_managed_runtime_start_replay_resume_and_cancel() {
                 mounted_refs: Vec::new(),
                 initial_prompt: Some(String::from("inspect current state")),
                 tool_loop: None,
+                environment_constraints: None,
                 metadata: serde_json::Map::new(),
             }),
         }),

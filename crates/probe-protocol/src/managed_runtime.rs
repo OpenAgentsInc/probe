@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::backend::BackendProfile;
+use crate::managed_environment::{
+    ManagedEnvironmentConstraints, ManagedEnvironmentWorkerAdvertisement,
+};
 use crate::runtime::{ToolLoopRecipe, TurnAuthor};
 use crate::session::{
     PendingToolApproval, SessionHarnessProfile, SessionId, SessionMountRef, SessionWorkspaceState,
@@ -251,6 +254,8 @@ pub enum ManagedRuntimeEventPayload {
         cwd: PathBuf,
         backend_profile: String,
         model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment_constraints: Option<ManagedEnvironmentConstraints>,
     },
     TurnLifecycle {
         probe_turn_id: String,
@@ -383,6 +388,8 @@ pub struct ManagedSessionStartRequest {
     pub initial_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_loop: Option<ToolLoopRecipe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_constraints: Option<ManagedEnvironmentConstraints>,
     #[serde(default)]
     pub metadata: Map<String, Value>,
 }
@@ -513,6 +520,8 @@ pub struct ManagedRuntimeHeartbeatRequest {
     pub request_id: String,
     pub worker_id: String,
     pub heartbeat_at_ms: TimestampMs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<ManagedEnvironmentWorkerAdvertisement>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<ManagedRuntimeSessionStatusProjection>,
     #[serde(default)]

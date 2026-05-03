@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::backend::BackendProfile;
+use crate::managed_environment::ManagedEnvironmentWorkerAdvertisement;
 use crate::managed_runtime::{ManagedRuntimeRequestEnvelope, ManagedRuntimeResponseEnvelope};
 use crate::session::{
     PendingToolApproval, SessionBranchState, SessionChildSummary, SessionControllerAction,
@@ -121,6 +122,10 @@ pub struct RuntimeCapabilities {
     pub supports_mesh_coordination_adjunct: bool,
     #[serde(default)]
     pub supports_managed_runtime_api: bool,
+    #[serde(default)]
+    pub supports_managed_environment_contract: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_environment: Option<ManagedEnvironmentWorkerAdvertisement>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1008,6 +1013,8 @@ mod tests {
             supports_detached_watch_subscriptions: false,
             supports_mesh_coordination_adjunct: true,
             supports_managed_runtime_api: true,
+            supports_managed_environment_contract: true,
+            managed_environment: None,
         };
 
         let response_json = serde_json::to_value(&response).expect("response should encode");

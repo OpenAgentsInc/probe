@@ -24,6 +24,9 @@ use probe_core::tools::{
     ToolLongContextConfig, ToolLoopConfig, ToolOracleConfig, ToolRegistry,
 };
 use probe_protocol::default_local_daemon_socket_path;
+use probe_protocol::managed_environment::{
+    ManagedEnvironmentCapabilities, ManagedEnvironmentWorkerAdvertisement,
+};
 use probe_protocol::managed_runtime::{
     ManagedRuntimeRequest, ManagedRuntimeResponse, ManagedRuntimeResponseEnvelope,
 };
@@ -1952,6 +1955,17 @@ impl ProbeServerConnection {
                                     .is_some(),
                                 supports_mesh_coordination_adjunct: true,
                                 supports_managed_runtime_api: true,
+                                supports_managed_environment_contract: true,
+                                managed_environment: Some(
+                                    ManagedEnvironmentWorkerAdvertisement::new(
+                                        format!("probe-server-{}", std::process::id()),
+                                        now_ms(),
+                                        ManagedEnvironmentCapabilities::local_development(format!(
+                                            "probe-server-{}",
+                                            std::process::id()
+                                        )),
+                                    ),
+                                ),
                             },
                         }),
                     )?;

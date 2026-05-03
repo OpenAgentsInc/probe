@@ -2,8 +2,10 @@ use std::fmt::{Display, Formatter};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use probe_protocol::session::{
     BackendTurnReceipt, ItemId, PendingToolApproval, SessionBackendTarget, SessionChildLink,
@@ -16,6 +18,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SESSION_STORE_JSON_LOCK: Mutex<()> = Mutex::new(());
 
 const INDEX_FILE: &str = "index.json";
 const SESSIONS_DIR: &str = "sessions";
@@ -334,8 +337,7 @@ impl FilesystemSessionStore {
         if !path.exists() {
             return Err(SessionStoreError::NotFound(session_id.as_str().to_string()));
         }
-        let file = File::open(path)?;
-        Ok(serde_json::from_reader(file)?)
+        read_json_file(path.as_path())
     }
 
     pub fn replace_metadata(
@@ -391,8 +393,7 @@ impl FilesystemSessionStore {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let file = File::open(path)?;
-        Ok(serde_json::from_reader(file)?)
+        read_json_file(path.as_path())
     }
 
     pub fn read_pending_tool_approvals(
@@ -505,8 +506,7 @@ impl FilesystemSessionStore {
         if !path.exists() {
             return Ok(None);
         }
-        let file = File::open(path)?;
-        Ok(Some(serde_json::from_reader(file)?))
+        Ok(Some(read_json_file(path.as_path())?))
     }
 
     pub(crate) fn remove_session_artifact(
@@ -551,8 +551,7 @@ impl FilesystemSessionStore {
 
     fn read_index(&self) -> Result<SessionIndex, SessionStoreError> {
         self.ensure_layout()?;
-        let file = File::open(self.index_path())?;
-        Ok(serde_json::from_reader(file)?)
+        read_json_file(self.index_path().as_path())
     }
 
     fn upsert_index(&self, metadata: SessionMetadata) -> Result<(), SessionStoreError> {
@@ -575,6 +574,9 @@ fn write_json_pretty_atomic<T: Serialize + ?Sized>(
     path: &Path,
     value: &T,
 ) -> Result<(), SessionStoreError> {
+    let _json_lock = SESSION_STORE_JSON_LOCK
+        .lock()
+        .expect("session store json mutex should not be poisoned");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -586,6 +588,30 @@ fn write_json_pretty_atomic<T: Serialize + ?Sized>(
     }
     fs::rename(temp_path, path)?;
     Ok(())
+}
+
+fn read_json_file<T: DeserializeOwned>(path: &Path) -> Result<T, SessionStoreError> {
+    let mut last_eof = None;
+    for attempt in 0..5 {
+        let result = {
+            let _json_lock = SESSION_STORE_JSON_LOCK
+                .lock()
+                .expect("session store json mutex should not be poisoned");
+            let file = File::open(path)?;
+            serde_json::from_reader(file)
+        };
+        match result {
+            Ok(value) => return Ok(value),
+            Err(error) if error.is_eof() && attempt < 4 => {
+                last_eof = Some(error);
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(SessionStoreError::Json(error)),
+        }
+    }
+    Err(SessionStoreError::Json(last_eof.expect(
+        "eof retry loop should retain the last parse error",
+    )))
 }
 
 fn temp_json_path(path: &Path) -> PathBuf {
