@@ -1135,6 +1135,7 @@ fn approval_pause_tool_loop() -> ToolLoopConfig {
         allow_network_shell: false,
         allow_destructive_shell: false,
         denied_action: ToolDeniedAction::Pause,
+        overrides: Vec::new(),
     };
     tool_loop
 }

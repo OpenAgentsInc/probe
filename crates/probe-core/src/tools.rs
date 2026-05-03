@@ -8,13 +8,14 @@ use std::time::Duration;
 
 use probe_protocol::backend::BackendProfile;
 use probe_protocol::session::{
-    ToolApprovalResolution, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision,
-    ToolRiskClass,
+    ToolApprovalResolution, ToolApprovalState, ToolExecutionRecord, ToolPermissionDecision,
+    ToolPermissionOverride, ToolPolicyDecision, ToolRiskClass,
 };
 use probe_provider_openai::{
     ChatNamedToolChoice, ChatNamedToolChoiceFunction, ChatToolCall, ChatToolChoice,
     ChatToolDefinition, ChatToolDefinitionEnvelope,
 };
+use serde::{Deserialize, Serialize};
 use wait_timeout::ChildExt;
 
 use crate::long_context::{
@@ -29,6 +30,8 @@ const CODE_SEARCH_DEFAULT_MAX_MATCHES: usize = 50;
 const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 5;
 const SHELL_MAX_OUTPUT_CHARS: usize = 4_000;
 const TOOL_MODEL_TEXT_MAX_CHARS: usize = 3_000;
+const TOOL_SUMMARY_MAX_CHARS: usize = 512;
+const TOOL_SUMMARY_MAX_ARRAY_ITEMS: usize = 12;
 const LONG_CONTEXT_DEFAULT_MAX_LINES_PER_FILE: u64 = 160;
 const LONG_CONTEXT_DEFAULT_MAX_EVIDENCE_FILES: usize = 6;
 
@@ -118,6 +121,57 @@ pub struct ToolApprovalConfig {
     pub allow_network_shell: bool,
     pub allow_destructive_shell: bool,
     pub denied_action: ToolDeniedAction,
+    pub overrides: Vec<ToolPermissionOverride>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolRegistryManifest {
+    pub registry_name: String,
+    pub tools: Vec<ToolManifestEntry>,
+    pub policy: ToolPermissionPolicyManifest,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolManifestEntry {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub input_schema: serde_json::Value,
+    pub result_schema: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_risk_class: Option<ToolRiskClass>,
+    pub possible_risk_classes: Vec<ToolRiskClass>,
+    pub timeout_policy: ToolTimeoutPolicy,
+    pub execution_owner: String,
+    pub redaction: ToolRedactionBehavior,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolTimeoutPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_chars: Option<usize>,
+    pub operator_configurable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRedactionBehavior {
+    pub input_summary: String,
+    pub output_summary: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolPermissionPolicyManifest {
+    pub default_decisions: Vec<ToolRiskPermission>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<ToolPermissionOverride>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRiskPermission {
+    pub risk_class: ToolRiskClass,
+    pub decision: ToolPermissionDecision,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -267,6 +321,7 @@ impl ToolApprovalConfig {
             allow_network_shell: false,
             allow_destructive_shell: false,
             denied_action: ToolDeniedAction::Refuse,
+            overrides: Vec::new(),
         }
     }
 
@@ -277,6 +332,31 @@ impl ToolApprovalConfig {
             allow_network_shell: true,
             allow_destructive_shell: true,
             denied_action: ToolDeniedAction::Refuse,
+            overrides: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_override(mut self, override_rule: ToolPermissionOverride) -> Self {
+        self.overrides.push(override_rule);
+        self
+    }
+
+    #[must_use]
+    pub fn default_decision_for_risk(&self, risk_class: ToolRiskClass) -> ToolPermissionDecision {
+        match risk_class {
+            ToolRiskClass::ReadOnly | ToolRiskClass::ShellReadOnly => ToolPermissionDecision::Allow,
+            ToolRiskClass::Write if self.allow_write_tools => ToolPermissionDecision::Allow,
+            ToolRiskClass::Network if self.allow_network_shell => ToolPermissionDecision::Allow,
+            ToolRiskClass::Destructive if self.allow_destructive_shell => {
+                ToolPermissionDecision::Allow
+            }
+            ToolRiskClass::Write | ToolRiskClass::Network | ToolRiskClass::Destructive => {
+                match self.denied_action {
+                    ToolDeniedAction::Refuse => ToolPermissionDecision::Deny,
+                    ToolDeniedAction::Pause => ToolPermissionDecision::Ask,
+                }
+            }
         }
     }
 }
@@ -621,6 +701,28 @@ impl ToolRegistry {
     }
 
     #[must_use]
+    pub fn managed_tool_manifest(&self, approval: &ToolApprovalConfig) -> ToolRegistryManifest {
+        ToolRegistryManifest {
+            registry_name: self.name.clone(),
+            tools: self
+                .tools
+                .values()
+                .map(|tool| tool_manifest_entry(tool))
+                .collect(),
+            policy: ToolPermissionPolicyManifest {
+                default_decisions: all_tool_risk_classes()
+                    .into_iter()
+                    .map(|risk_class| ToolRiskPermission {
+                        risk_class,
+                        decision: approval.default_decision_for_risk(risk_class),
+                    })
+                    .collect(),
+                overrides: approval.overrides.clone(),
+            },
+        }
+    }
+
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
@@ -659,6 +761,103 @@ impl ToolRegistry {
             .iter()
             .map(|tool_call| session.execute_openai_tool_call_with_observer(tool_call, observer))
             .collect()
+    }
+}
+
+fn tool_manifest_entry(tool: &RegisteredTool) -> ToolManifestEntry {
+    let (declared_risk_class, possible_risk_classes) = match tool.risk {
+        RegisteredToolRisk::Fixed(risk_class) => (Some(risk_class), vec![risk_class]),
+        RegisteredToolRisk::Shell => (None, shell_possible_risk_classes()),
+    };
+    ToolManifestEntry {
+        name: tool.definition.name.clone(),
+        description: tool.definition.description.clone(),
+        input_schema: tool
+            .definition
+            .parameters
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({ "type": "object" })),
+        result_schema: tool_result_schema(tool.definition.name.as_str()),
+        declared_risk_class,
+        possible_risk_classes,
+        timeout_policy: timeout_policy_for_tool(tool.definition.name.as_str()),
+        execution_owner: String::from("probe_runtime"),
+        redaction: redaction_behavior_for_tool(tool.definition.name.as_str()),
+    }
+}
+
+fn all_tool_risk_classes() -> Vec<ToolRiskClass> {
+    vec![
+        ToolRiskClass::ReadOnly,
+        ToolRiskClass::ShellReadOnly,
+        ToolRiskClass::Write,
+        ToolRiskClass::Network,
+        ToolRiskClass::Destructive,
+    ]
+}
+
+fn shell_possible_risk_classes() -> Vec<ToolRiskClass> {
+    vec![
+        ToolRiskClass::ShellReadOnly,
+        ToolRiskClass::Write,
+        ToolRiskClass::Network,
+        ToolRiskClass::Destructive,
+    ]
+}
+
+fn timeout_policy_for_tool(tool_name: &str) -> ToolTimeoutPolicy {
+    if tool_name == "shell" {
+        return ToolTimeoutPolicy {
+            default_secs: Some(SHELL_DEFAULT_TIMEOUT_SECS),
+            max_output_chars: Some(SHELL_MAX_OUTPUT_CHARS),
+            operator_configurable: true,
+        };
+    }
+    ToolTimeoutPolicy {
+        default_secs: None,
+        max_output_chars: Some(TOOL_MODEL_TEXT_MAX_CHARS),
+        operator_configurable: false,
+    }
+}
+
+fn redaction_behavior_for_tool(tool_name: &str) -> ToolRedactionBehavior {
+    match tool_name {
+        "apply_patch" => ToolRedactionBehavior {
+            input_summary: String::from(
+                "path and replacement sizes only; patch text is not exposed in managed summaries",
+            ),
+            output_summary: String::from("path, created flag, replacement mode, and bytes written"),
+        },
+        "shell" => ToolRedactionBehavior {
+            input_summary: String::from(
+                "command preview with secret assignments and tokens redacted",
+            ),
+            output_summary: String::from(
+                "exit, timeout, truncation flags, and bounded redacted stdout/stderr previews",
+            ),
+        },
+        "read_file" => ToolRedactionBehavior {
+            input_summary: String::from("path and line bounds with secret-looking values redacted"),
+            output_summary: String::from(
+                "path, line bounds, truncation, and bounded redacted content preview",
+            ),
+        },
+        "code_search" => ToolRedactionBehavior {
+            input_summary: String::from("search options with secret-looking values redacted"),
+            output_summary: String::from(
+                "match counts, matched paths, status, and truncation state",
+            ),
+        },
+        "consult_oracle" | "analyze_repository" => ToolRedactionBehavior {
+            input_summary: String::from("task metadata and bounded redacted question preview"),
+            output_summary: String::from("bounded redacted answer or analysis preview plus counts"),
+        },
+        _ => ToolRedactionBehavior {
+            input_summary: String::from("bounded JSON summary with secret-looking values redacted"),
+            output_summary: String::from(
+                "bounded JSON summary with secret-looking values redacted",
+            ),
+        },
     }
 }
 
@@ -1806,6 +2005,8 @@ fn classify_shell_command(arguments: &serde_json::Value) -> ToolRiskClass {
             "git clone ",
             "git fetch ",
             "git pull ",
+            "git push ",
+            "gh ",
             "cargo install ",
             "pip install ",
             "uv pip install ",
@@ -1836,7 +2037,17 @@ fn classify_shell_command(arguments: &serde_json::Value) -> ToolRiskClass {
             "python3 -c",
             "tee ",
             "truncate ",
+            "chmod ",
+            "chown ",
+            "git add ",
             "git apply ",
+            "git checkout ",
+            "git commit ",
+            "git merge ",
+            "git rebase ",
+            "git restore ",
+            "git stash ",
+            "git switch ",
         ],
     ) {
         return ToolRiskClass::Write;
@@ -1854,6 +2065,16 @@ fn evaluate_tool_policy(
     risk_class: ToolRiskClass,
     approval: &ToolApprovalConfig,
 ) -> (ToolPolicyDecision, ToolApprovalState, Option<String>) {
+    if let Some(override_rule) = matching_permission_override(tool_name, risk_class, approval) {
+        return evaluate_permission_decision(
+            tool_name,
+            risk_class,
+            override_rule.decision,
+            override_rule.reason.as_deref(),
+            true,
+        );
+    }
+
     match risk_class {
         ToolRiskClass::ReadOnly | ToolRiskClass::ShellReadOnly => (
             ToolPolicyDecision::AutoAllow,
@@ -1882,6 +2103,101 @@ fn evaluate_tool_policy(
         ToolRiskClass::Write => denied_by_policy(approval, tool_name, "write"),
         ToolRiskClass::Network => denied_by_policy(approval, tool_name, "network"),
         ToolRiskClass::Destructive => denied_by_policy(approval, tool_name, "destructive"),
+    }
+}
+
+fn matching_permission_override<'a>(
+    tool_name: &str,
+    risk_class: ToolRiskClass,
+    approval: &'a ToolApprovalConfig,
+) -> Option<&'a ToolPermissionOverride> {
+    approval
+        .overrides
+        .iter()
+        .enumerate()
+        .filter(|(_, override_rule)| {
+            override_rule
+                .tool_name
+                .as_deref()
+                .map_or(true, |configured_tool| configured_tool == tool_name)
+                && override_rule
+                    .risk_class
+                    .map_or(true, |configured_risk| configured_risk == risk_class)
+        })
+        .max_by_key(|(index, override_rule)| {
+            let specificity = usize::from(override_rule.tool_name.is_some())
+                + usize::from(override_rule.risk_class.is_some());
+            (specificity, *index)
+        })
+        .map(|(_, override_rule)| override_rule)
+}
+
+fn evaluate_permission_decision(
+    tool_name: &str,
+    risk_class: ToolRiskClass,
+    decision: ToolPermissionDecision,
+    reason: Option<&str>,
+    scoped_override: bool,
+) -> (ToolPolicyDecision, ToolApprovalState, Option<String>) {
+    let reason = reason
+        .map(String::from)
+        .or_else(|| default_permission_reason(tool_name, risk_class, decision, scoped_override));
+    match decision {
+        ToolPermissionDecision::Allow => {
+            if matches!(
+                risk_class,
+                ToolRiskClass::ReadOnly | ToolRiskClass::ShellReadOnly
+            ) {
+                (
+                    ToolPolicyDecision::AutoAllow,
+                    ToolApprovalState::NotRequired,
+                    reason,
+                )
+            } else {
+                (
+                    ToolPolicyDecision::Approved,
+                    ToolApprovalState::Approved,
+                    reason,
+                )
+            }
+        }
+        ToolPermissionDecision::Ask => (
+            ToolPolicyDecision::Paused,
+            ToolApprovalState::Pending,
+            reason,
+        ),
+        ToolPermissionDecision::Deny => (
+            ToolPolicyDecision::Refused,
+            ToolApprovalState::Refused,
+            reason,
+        ),
+    }
+}
+
+fn default_permission_reason(
+    tool_name: &str,
+    risk_class: ToolRiskClass,
+    decision: ToolPermissionDecision,
+    scoped_override: bool,
+) -> Option<String> {
+    let scope = if scoped_override {
+        "scoped policy override"
+    } else {
+        "default policy"
+    };
+    match decision {
+        ToolPermissionDecision::Allow => Some(format!(
+            "tool `{tool_name}` allowed by {scope} for {} access",
+            render_risk_class(risk_class)
+        )),
+        ToolPermissionDecision::Ask => Some(format!(
+            "tool `{tool_name}` requires {} approval by {scope}",
+            render_risk_class(risk_class)
+        )),
+        ToolPermissionDecision::Deny => Some(format!(
+            "tool `{tool_name}` denied by {scope} for {} access",
+            render_risk_class(risk_class)
+        )),
     }
 }
 
@@ -1937,6 +2253,280 @@ fn denied_tool_invocation(
         bytes_returned: None,
         files_touched,
     }
+}
+
+#[must_use]
+pub fn tool_input_summary(tool_name: &str, arguments: &serde_json::Value) -> serde_json::Value {
+    match tool_name {
+        "apply_patch" => serde_json::json!({
+            "path": redacted_json_string_field(arguments, "path"),
+            "old_text_chars": arguments.get("old_text").and_then(serde_json::Value::as_str).map(str::len),
+            "new_text_chars": arguments.get("new_text").and_then(serde_json::Value::as_str).map(str::len),
+            "replace_all": arguments.get("replace_all").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            "create_if_missing": arguments.get("create_if_missing").and_then(serde_json::Value::as_bool).unwrap_or(false)
+        }),
+        "shell" => serde_json::json!({
+            "command": arguments
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_and_truncate_text),
+            "timeout_secs": arguments.get("timeout_secs").and_then(serde_json::Value::as_u64)
+        }),
+        "consult_oracle" => serde_json::json!({
+            "task_kind": redacted_json_string_field(arguments, "task_kind"),
+            "question_preview": arguments
+                .get("question")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_and_truncate_text),
+            "question_chars": arguments.get("question").and_then(serde_json::Value::as_str).map(str::len)
+        }),
+        "analyze_repository" => serde_json::json!({
+            "task_kind": redacted_json_string_field(arguments, "task_kind"),
+            "question_preview": arguments
+                .get("question")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_and_truncate_text),
+            "question_chars": arguments.get("question").and_then(serde_json::Value::as_str).map(str::len),
+            "evidence_paths": redact_json_value(arguments.get("evidence_paths").unwrap_or(&serde_json::Value::Null))
+        }),
+        _ => redact_json_value(arguments),
+    }
+}
+
+#[must_use]
+pub fn tool_output_summary(tool_name: &str, output: &serde_json::Value) -> serde_json::Value {
+    if output.get("error").is_some() {
+        return serde_json::json!({
+            "error": output
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_and_truncate_text),
+            "reason": output
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_and_truncate_text),
+            "risk_class": output.get("risk_class").cloned().unwrap_or(serde_json::Value::Null),
+            "approval_required": output
+                .get("approval_required")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        });
+    }
+
+    match tool_name {
+        "read_file" => serde_json::json!({
+            "path": redacted_json_string_field(output, "path"),
+            "start_line": output.get("start_line").and_then(serde_json::Value::as_u64),
+            "end_line": output.get("end_line").and_then(serde_json::Value::as_u64),
+            "total_lines": output.get("total_lines").and_then(serde_json::Value::as_u64),
+            "truncated": output.get("truncated").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            "content_preview": output
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_and_truncate_text)
+        }),
+        "list_files" => {
+            let entries = output
+                .get("entries")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            serde_json::json!({
+                "path": redacted_json_string_field(output, "path"),
+                "entry_count": entries.len(),
+                "entries_preview": redact_json_value(&serde_json::Value::Array(
+                    entries.into_iter().take(TOOL_SUMMARY_MAX_ARRAY_ITEMS).collect()
+                )),
+                "truncated": output.get("truncated").and_then(serde_json::Value::as_bool).unwrap_or(false)
+            })
+        }
+        "code_search" => {
+            let matches = output
+                .get("matches")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let paths = matches
+                .iter()
+                .filter_map(|entry| entry.get("path").and_then(serde_json::Value::as_str))
+                .take(TOOL_SUMMARY_MAX_ARRAY_ITEMS)
+                .map(|path| serde_json::Value::String(redact_and_truncate_text(path)))
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "path": redacted_json_string_field(output, "path"),
+                "match_count": matches.len(),
+                "matched_paths_preview": paths,
+                "status_code": output.get("status_code").and_then(serde_json::Value::as_i64),
+                "truncated": output.get("truncated").and_then(serde_json::Value::as_bool).unwrap_or(false)
+            })
+        }
+        "shell" => serde_json::json!({
+            "command": output
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_and_truncate_text),
+            "timed_out": output.get("timed_out").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            "exit_code": output.get("exit_code").and_then(serde_json::Value::as_i64),
+            "stdout_preview": output
+                .get("stdout")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_and_truncate_text),
+            "stderr_preview": output
+                .get("stderr")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_and_truncate_text),
+            "stdout_truncated": output.get("stdout_truncated").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            "stderr_truncated": output.get("stderr_truncated").and_then(serde_json::Value::as_bool).unwrap_or(false)
+        }),
+        "apply_patch" => serde_json::json!({
+            "path": redacted_json_string_field(output, "path"),
+            "created": output.get("created").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            "replace_all": output.get("replace_all").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            "bytes_written": output.get("bytes_written").and_then(serde_json::Value::as_u64)
+        }),
+        "consult_oracle" => serde_json::json!({
+            "task_kind": redacted_json_string_field(output, "task_kind"),
+            "oracle_profile": redacted_json_string_field(output, "oracle_profile"),
+            "oracle_model": redacted_json_string_field(output, "oracle_model"),
+            "answer_preview": output
+                .get("oracle_answer")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_and_truncate_text),
+            "calls_used_after": output.get("calls_used_after").and_then(serde_json::Value::as_u64),
+            "max_calls": output.get("max_calls").and_then(serde_json::Value::as_u64)
+        }),
+        "analyze_repository" => serde_json::json!({
+            "task_kind": redacted_json_string_field(output, "task_kind"),
+            "analysis_profile": redacted_json_string_field(output, "analysis_profile"),
+            "analysis_model": redacted_json_string_field(output, "analysis_model"),
+            "analysis_preview": output
+                .get("analysis")
+                .and_then(serde_json::Value::as_str)
+                .map(redact_and_truncate_text),
+            "evidence_count": output
+                .get("evidence")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0),
+            "calls_used_after": output.get("calls_used_after").and_then(serde_json::Value::as_u64),
+            "max_calls": output.get("max_calls").and_then(serde_json::Value::as_u64)
+        }),
+        _ => redact_json_value(output),
+    }
+}
+
+fn redacted_json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(redact_and_truncate_text)
+}
+
+fn redact_json_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    if is_sensitive_key(key) {
+                        (
+                            key.clone(),
+                            serde_json::Value::String(String::from("[redacted]")),
+                        )
+                    } else {
+                        (key.clone(), redact_json_value(value))
+                    }
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .take(TOOL_SUMMARY_MAX_ARRAY_ITEMS)
+                .map(redact_json_value)
+                .collect(),
+        ),
+        serde_json::Value::String(text) => {
+            serde_json::Value::String(redact_and_truncate_text(text))
+        }
+        other => other.clone(),
+    }
+}
+
+fn redact_and_truncate_text(text: &str) -> String {
+    let redacted = redact_sensitive_text(text);
+    let total = redacted.chars().count();
+    if total <= TOOL_SUMMARY_MAX_CHARS {
+        return redacted;
+    }
+    let mut preview = redacted
+        .chars()
+        .take(TOOL_SUMMARY_MAX_CHARS)
+        .collect::<String>();
+    preview.push_str("...");
+    preview
+}
+
+fn redact_sensitive_text(text: &str) -> String {
+    text.split_whitespace()
+        .map(|token| {
+            if should_redact_token(token) {
+                String::from("[redacted]")
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("/Users/", "[redacted-path]/")
+        .replace("/private/var/", "[redacted-path]/")
+}
+
+fn should_redact_token(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    token.starts_with("sk-")
+        || lower.starts_with("bearer ")
+        || lower.starts_with("authorization:")
+        || lower.contains("refresh_token")
+        || lower.contains("access_token")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+        || token
+            .split_once('=')
+            .map_or(false, |(key, _)| is_sensitive_key(key))
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if normalized.contains("apikey")
+        || normalized.contains("secret")
+        || normalized.contains("password")
+        || normalized.contains("authorization")
+        || normalized.contains("credential")
+        || normalized.contains("token")
+    {
+        return true;
+    }
+    matches!(
+        normalized.as_str(),
+        "password"
+            | "passwd"
+            | "secret"
+            | "token"
+            | "apikey"
+            | "authorization"
+            | "credential"
+            | "credentials"
+            | "privatekey"
+            | "refreshtoken"
+            | "accesstoken"
+            | "clientsecret"
+            | "signingsecret"
+            | "nonce"
+    )
 }
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
@@ -2083,10 +2673,12 @@ fn is_safe_git_read_only(command: &str) -> bool {
     }
     let mut parts = command.split_whitespace();
     let _ = parts.next();
-    matches!(
-        parts.next().unwrap_or_default(),
-        "status" | "diff" | "show" | "log" | "branch" | "rev-parse" | "grep"
-    )
+    let subcommand = parts.next().unwrap_or_default();
+    match subcommand {
+        "status" | "diff" | "show" | "log" | "rev-parse" | "grep" => true,
+        "branch" => parts.all(|part| part.starts_with('-')),
+        _ => false,
+    }
 }
 
 fn render_risk_class(risk_class: ToolRiskClass) -> &'static str {
@@ -2096,6 +2688,97 @@ fn render_risk_class(risk_class: ToolRiskClass) -> &'static str {
         ToolRiskClass::Write => "write",
         ToolRiskClass::Network => "network",
         ToolRiskClass::Destructive => "destructive",
+    }
+}
+
+fn tool_result_schema(tool_name: &str) -> serde_json::Value {
+    match tool_name {
+        "read_file" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "start_line": { "type": "integer" },
+                "end_line": { "type": "integer" },
+                "total_lines": { "type": "integer" },
+                "truncated": { "type": "boolean" },
+                "content": { "type": "string" }
+            },
+            "required": ["path", "start_line", "end_line", "total_lines", "truncated", "content"]
+        }),
+        "list_files" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "max_depth": { "type": "integer" },
+                "truncated": { "type": "boolean" },
+                "entries": { "type": "array" }
+            },
+            "required": ["path", "max_depth", "truncated", "entries"]
+        }),
+        "code_search" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "pattern": { "type": "string" },
+                "matches": { "type": "array" },
+                "truncated": { "type": "boolean" },
+                "status_code": { "type": "integer" }
+            },
+            "required": ["path", "pattern", "matches", "truncated", "status_code"]
+        }),
+        "shell" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": { "type": "string" },
+                "timeout_secs": { "type": "integer" },
+                "timed_out": { "type": "boolean" },
+                "exit_code": { "type": ["integer", "null"] },
+                "stdout": { "type": "string" },
+                "stderr": { "type": "string" },
+                "stdout_truncated": { "type": "boolean" },
+                "stderr_truncated": { "type": "boolean" }
+            },
+            "required": ["command", "timeout_secs", "timed_out", "stdout", "stderr"]
+        }),
+        "apply_patch" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "created": { "type": "boolean" },
+                "replace_all": { "type": "boolean" },
+                "bytes_written": { "type": "integer" }
+            },
+            "required": ["path", "created", "replace_all", "bytes_written"]
+        }),
+        "consult_oracle" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task_kind": { "type": "string" },
+                "question": { "type": "string" },
+                "oracle_profile": { "type": "string" },
+                "oracle_model": { "type": "string" },
+                "oracle_answer": { "type": "string" },
+                "calls_used_after": { "type": "integer" },
+                "max_calls": { "type": "integer" }
+            }
+        }),
+        "analyze_repository" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task_kind": { "type": "string" },
+                "question": { "type": "string" },
+                "analysis_profile": { "type": "string" },
+                "analysis_model": { "type": "string" },
+                "analysis": { "type": "string" },
+                "calls_used_after": { "type": "integer" },
+                "max_calls": { "type": "integer" },
+                "evidence": { "type": "array" }
+            }
+        }),
+        _ => serde_json::json!({
+            "type": "object",
+            "additionalProperties": true
+        }),
     }
 }
 
@@ -2841,6 +3524,7 @@ mod tests {
                 allow_network_shell: false,
                 allow_destructive_shell: false,
                 denied_action: ToolDeniedAction::Refuse,
+                overrides: Vec::new(),
             },
         );
 
@@ -3173,6 +3857,7 @@ mod tests {
                 allow_network_shell: false,
                 allow_destructive_shell: false,
                 denied_action: ToolDeniedAction::Pause,
+                overrides: Vec::new(),
             },
         );
 

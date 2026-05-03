@@ -84,6 +84,11 @@ fn approval_overlay_snapshot_is_stable() {
                 "old_text": "world",
                 "new_text": "probe"
             }),
+            arguments_summary: json!({
+                "path": "hello.txt",
+                "old_text_chars": 5,
+                "new_text_chars": 5
+            }),
             risk_class: ToolRiskClass::Write,
             reason: Some(String::from("tool `apply_patch` requires write approval")),
             tool_call_turn_index: 1,

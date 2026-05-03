@@ -156,6 +156,11 @@ Instead it ships a serializable `ToolLoopRecipe` that carries:
 That keeps the protocol stable even though runtime-local registries and
 execution handlers are not serializable.
 
+The approval policy includes coarse booleans plus scoped
+`ToolPermissionOverride` entries. Clients can programmatically express default
+allow/ask/deny behavior and per-tool or per-risk overrides without local access
+to the Rust registry internals.
+
 ## Session Snapshots
 
 `resume_session` and `inspect_session` return a `SessionSnapshot` with:

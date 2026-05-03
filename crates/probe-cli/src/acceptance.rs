@@ -1455,6 +1455,7 @@ fn coding_tool_loop(
         allow_network_shell,
         allow_destructive_shell,
         denied_action,
+        overrides: Vec::new(),
     };
     tool_loop
 }

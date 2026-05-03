@@ -4704,6 +4704,7 @@ fn resolve_tool_loop(
         } else {
             ToolDeniedAction::Refuse
         },
+        overrides: Vec::new(),
     };
     let has_non_default_tool_flags = tool_choice != "auto"
         || parallel_tool_calls

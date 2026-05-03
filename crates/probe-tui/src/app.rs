@@ -2709,6 +2709,7 @@ mod tests {
             allow_network_shell: false,
             allow_destructive_shell: false,
             denied_action: probe_core::tools::ToolDeniedAction::Pause,
+            overrides: Vec::new(),
         };
         config.tool_loop = Some(tool_loop);
         let mut app = AppShell::new_for_tests_with_chat_config(config);

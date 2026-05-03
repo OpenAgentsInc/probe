@@ -34,7 +34,7 @@ use crate::session_store::{FilesystemSessionStore, NewItem, NewSession, SessionS
 use crate::tools::{
     ExecutedToolCall, ToolExecutionContext, ToolExecutionSession, ToolLongContextContext,
     ToolLoopConfig, ToolOracleContext, ToolWriteGate, stored_tool_result_model_text,
-    tool_result_model_text,
+    tool_input_summary, tool_result_model_text,
 };
 
 const DEFAULT_PROBE_HOME_DIR: &str = ".probe";
@@ -1581,6 +1581,7 @@ impl ProbeRuntime {
                 tool_call_id: tool.call_id.clone(),
                 tool_name: tool.name.clone(),
                 arguments: tool.arguments.clone(),
+                arguments_summary: tool_input_summary(tool.name.as_str(), &tool.arguments),
                 risk_class: tool.tool_execution.risk_class,
                 reason: tool.tool_execution.reason.clone(),
                 tool_call_turn_index,
@@ -3323,6 +3324,7 @@ mod tests {
             allow_network_shell: false,
             allow_destructive_shell: false,
             denied_action: ToolDeniedAction::Pause,
+            overrides: Vec::new(),
         };
 
         let error = runtime
@@ -4267,6 +4269,7 @@ mod tests {
             allow_network_shell: false,
             allow_destructive_shell: false,
             denied_action: ToolDeniedAction::Pause,
+            overrides: Vec::new(),
         };
 
         let error = runtime
@@ -4356,6 +4359,7 @@ mod tests {
             allow_network_shell: false,
             allow_destructive_shell: false,
             denied_action: ToolDeniedAction::Pause,
+            overrides: Vec::new(),
         };
 
         let error = runtime
@@ -4466,6 +4470,7 @@ mod tests {
             allow_network_shell: false,
             allow_destructive_shell: false,
             denied_action: ToolDeniedAction::Pause,
+            overrides: Vec::new(),
         };
 
         let error = runtime
@@ -4557,6 +4562,7 @@ mod tests {
             allow_network_shell: false,
             allow_destructive_shell: false,
             denied_action: ToolDeniedAction::Pause,
+            overrides: Vec::new(),
         };
         let collector = Arc::new(TestRuntimeEventCollector::default());
 

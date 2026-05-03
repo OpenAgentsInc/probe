@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::runtime::RuntimeEvent;
-use crate::tools::ExecutedToolCall;
+use crate::tools::{ExecutedToolCall, tool_input_summary, tool_output_summary};
 
 const DEFAULT_PREVIEW_CHARS: usize = 240;
 
@@ -195,6 +195,10 @@ pub fn runtime_event_to_website_event(
             payload.insert(
                 String::from("argumentsHash"),
                 json!(stable_json_digest(arguments)),
+            );
+            payload.insert(
+                String::from("argumentsSummary"),
+                tool_input_summary(tool_name, arguments),
             );
             (
                 ProbeWebsiteEventType::ToolCallStarted,
@@ -411,8 +415,16 @@ fn tool_payload(round_trip: usize, tool: &ExecutedToolCall, status: &str) -> Map
         json!(stable_json_digest(&tool.arguments)),
     );
     payload.insert(
+        String::from("argumentsSummary"),
+        tool_input_summary(tool.name.as_str(), &tool.arguments),
+    );
+    payload.insert(
         String::from("outputHash"),
         json!(stable_json_digest(&tool.output)),
+    );
+    payload.insert(
+        String::from("outputSummary"),
+        tool_output_summary(tool.name.as_str(), &tool.output),
     );
     payload.insert(
         String::from("filesTouchedCount"),

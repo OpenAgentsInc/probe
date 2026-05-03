@@ -2266,9 +2266,14 @@ impl ApprovalOverlay {
                     .unwrap_or("pending operator decision")
             )),
             Line::from(""),
-            Line::from("arguments"),
+            Line::from("arguments_summary"),
         ];
-        for line in compact_json_lines(&self.approval.arguments, 5) {
+        let display_arguments = if self.approval.arguments_summary.is_null() {
+            &self.approval.arguments
+        } else {
+            &self.approval.arguments_summary
+        };
+        for line in compact_json_lines(display_arguments, 5) {
             lines.push(Line::from(format!("  {line}")));
         }
         lines.extend([

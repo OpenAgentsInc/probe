@@ -1378,6 +1378,7 @@ fn tool_loop_recipe_from_config(
                 ToolDeniedAction::Refuse => ProtocolDeniedAction::Refuse,
                 ToolDeniedAction::Pause => ProtocolDeniedAction::Pause,
             },
+            overrides: config.approval.overrides.clone(),
         },
         oracle: config.oracle.as_ref().map(|oracle| ToolOracleRecipe {
             profile: oracle.profile.clone(),
@@ -3123,6 +3124,7 @@ PY
             allow_network_shell: false,
             allow_destructive_shell: false,
             denied_action: probe_core::tools::ToolDeniedAction::Pause,
+            overrides: Vec::new(),
         };
         tool_loop
     }

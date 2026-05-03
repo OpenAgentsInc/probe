@@ -54,7 +54,15 @@ pause with:
 
 - `--pause-for-approval`
 
-That gives Probe four explicit policy outcomes:
+Managed sessions can further narrow or widen the default policy with scoped
+`ToolPermissionOverride` records. Each override can match a tool name, a risk
+class, or both, and then choose one of:
+
+- `allow`
+- `ask`
+- `deny`
+
+That gives Probe four explicit execution outcomes:
 
 - `auto_allow`
 - `approved`
@@ -97,12 +105,13 @@ When the model emits tool calls, Probe now does the following in order:
 This means a paused approval request is no longer implicit CLI behavior. It is
 persisted runtime state.
 
-Issue `#45` builds the next layer above that pause contract:
+The durable approval broker now includes:
 
 - persisted pending-approval records per session and tool call
 - explicit approve or reject resolution
 - runtime-backed resume after the decision
 - TUI approval overlay wiring against that real runtime state
+- API-safe pending approval views with redacted argument summaries
 
 ## Why This Matters
 
@@ -119,3 +128,7 @@ They need to know:
 
 Probe now has the durable truth needed for a real interactive approval broker,
 not just a persisted pause receipt.
+
+For managed agents, see `99-managed-tool-permission-policy.md` for the
+serializable registry manifest, API override contract, and redacted summary
+rules used by Laravel-facing event persistence.

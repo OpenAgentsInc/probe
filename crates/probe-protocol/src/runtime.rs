@@ -13,8 +13,8 @@ use crate::session::{
     SessionMeshCoordinationStatus, SessionMeshCoordinationVisibility, SessionMeshPluginOffer,
     SessionMetadata, SessionMountRef, SessionParticipant, SessionRuntimeOwner,
     SessionSummaryArtifact, SessionSummaryArtifactRef, SessionTurn, SessionWorkspaceState,
-    TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass, TranscriptEvent,
-    UsageMeasurement,
+    TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolPermissionOverride,
+    ToolRiskClass, TranscriptEvent, UsageMeasurement,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +60,8 @@ pub struct ToolApprovalRecipe {
     pub allow_network_shell: bool,
     pub allow_destructive_shell: bool,
     pub denied_action: ToolDeniedAction,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<ToolPermissionOverride>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -967,6 +969,7 @@ mod tests {
                 allow_network_shell: false,
                 allow_destructive_shell: false,
                 denied_action: ToolDeniedAction::Pause,
+                overrides: Vec::new(),
             },
             oracle: None,
             long_context: None,

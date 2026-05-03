@@ -347,3 +347,7 @@ This folder holds technical planning docs for the Probe runtime.
     contract, including snapshot capability advertisement, signed assignments,
     sandbox allocation, bootstrap execution, normalized provider errors,
     Laravel boundary rules, callbacks, and evidence artifacts
+- `99-managed-tool-permission-policy.md`
+  - managed-session tool registry manifests, default allow/ask/deny policy,
+    scoped overrides, durable approval pause/resume, API-safe redacted pending
+    approvals, and redacted tool input/output summaries for Laravel history

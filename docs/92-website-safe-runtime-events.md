@@ -93,8 +93,15 @@ Website-safe events must not include:
 
 The core mapper emits previews plus stable hashes for prompts, assistant text,
 errors, tool arguments, and tool output. Tool events expose tool name, call id,
-risk class, policy decision, approval state, and counts rather than raw
-arguments or outputs.
+risk class, policy decision, approval state, counts, and redacted
+`argumentsSummary` / `outputSummary` objects rather than raw arguments or raw
+outputs.
+
+Pending approvals returned by `probe-server` are also API-safe: their
+`arguments` field is replaced with the redacted summary before the approval is
+sent over stdio, detached-session watch events, or session snapshots. The local
+Probe session store still keeps raw arguments so approval resume can execute
+the exact originally requested call.
 
 ## Core Mapper
 

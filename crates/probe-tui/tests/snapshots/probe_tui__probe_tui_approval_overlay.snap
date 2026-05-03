@@ -14,10 +14,10 @@ expression: snapshot
            │ paused_turn: 2                                         │
            │ reason: tool `apply_patch` requires write approval     │
            │                                                        │
-           │ arguments                                              │
+           │ arguments_summary                                      │
            │   {                                                    │
-           │     "new_text": "probe",                               │
-           │     "old_text": "world",                               │
+           │     "new_text_chars": 5,                               │
+           │     "old_text_chars": 5,                               │
            │     "path": "hello.txt"                                │
            │   }                                                    │
            │                                                        │

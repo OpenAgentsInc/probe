@@ -1282,6 +1282,16 @@ fn queue_turns_report_state_and_resume_after_approval_resolution() {
         panic!("expected paused turn response");
     };
     assert!(!paused.pending_approvals.is_empty());
+    assert!(
+        paused.pending_approvals[0]
+            .arguments
+            .get("old_text")
+            .is_none()
+    );
+    assert_eq!(
+        paused.pending_approvals[0].arguments_summary["old_text_chars"],
+        5
+    );
     assert!(events.iter().any(|event| matches!(
         event,
         ServerEvent::RuntimeProgress {
@@ -1751,6 +1761,7 @@ fn approval_pause_tool_loop() -> ToolLoopRecipe {
             allow_network_shell: false,
             allow_destructive_shell: false,
             denied_action: ToolDeniedAction::Pause,
+            overrides: Vec::new(),
         },
         oracle: None,
         long_context: None,

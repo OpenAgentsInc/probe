@@ -157,7 +157,7 @@ The payload enum covers the runtime facts Laravel needs to persist:
 - tool calls
 - tool results
 - custom tool results
-- approvals
+- approvals, including redacted pending-approval argument summaries
 - transcript refs
 - artifact refs
 - structured errors
@@ -166,11 +166,12 @@ The payload enum covers the runtime facts Laravel needs to persist:
 - child sessions
 - status notes
 
-Events can include raw-ish runtime payloads because this is an internal managed
-runtime contract. Laravel must still apply its own retention and redaction
-rules before exposing event bodies to an admin UI or external API clients.
-Provider keys, bearer tokens, refresh tokens, and local secret material must not
-be sent through this contract.
+Tool call, tool result, and approval events should use Probe's redacted
+`argumentsSummary` and `outputSummary` fields for Laravel UI/history. Raw local
+tool arguments stay in Probe's session store for approval resume and should not
+be treated as the managed API display contract. Provider keys, bearer tokens,
+refresh tokens, and local secret material must not be sent through this
+contract.
 
 ## Restart Semantics
 

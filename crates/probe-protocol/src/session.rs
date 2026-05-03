@@ -153,6 +153,25 @@ pub enum ToolRiskClass {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ToolPermissionDecision {
+    Allow,
+    Ask,
+    Deny,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolPermissionOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_class: Option<ToolRiskClass>,
+    pub decision: ToolPermissionDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolPolicyDecision {
     AutoAllow,
     Approved,
@@ -203,6 +222,8 @@ pub struct PendingToolApproval {
     pub tool_call_id: String,
     pub tool_name: String,
     pub arguments: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub arguments_summary: Value,
     pub risk_class: ToolRiskClass,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -219,6 +240,17 @@ impl PendingToolApproval {
     #[must_use]
     pub fn is_pending(&self) -> bool {
         self.resolution.is_none()
+    }
+
+    #[must_use]
+    pub fn redacted_for_api(&self) -> Self {
+        let mut approval = self.clone();
+        approval.arguments = if self.arguments_summary.is_null() {
+            Value::Null
+        } else {
+            self.arguments_summary.clone()
+        };
+        approval
     }
 }
 

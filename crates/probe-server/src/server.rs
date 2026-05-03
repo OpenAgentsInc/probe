@@ -54,10 +54,10 @@ use probe_protocol::runtime::{
     unbounded_tool_loop_round_trips_sentinel,
 };
 use probe_protocol::session::{
-    SessionAttachTransport, SessionBackendTarget, SessionBranchState, SessionChildClosureSummary,
-    SessionChildLink, SessionChildStatus, SessionChildSummary, SessionControllerAction,
-    SessionControllerLease, SessionDeliveryArtifact, SessionDeliveryState, SessionDeliveryStatus,
-    SessionExecutionHost, SessionExecutionHostKind, SessionHostedAuthKind,
+    PendingToolApproval, SessionAttachTransport, SessionBackendTarget, SessionBranchState,
+    SessionChildClosureSummary, SessionChildLink, SessionChildStatus, SessionChildSummary,
+    SessionControllerAction, SessionControllerLease, SessionDeliveryArtifact, SessionDeliveryState,
+    SessionDeliveryStatus, SessionExecutionHost, SessionExecutionHostKind, SessionHostedAuthKind,
     SessionHostedAuthReceipt, SessionHostedCheckoutKind, SessionHostedCheckoutReceipt,
     SessionHostedCleanupReceipt, SessionHostedCleanupStatus, SessionHostedCostReceipt,
     SessionHostedLifecycleEvent, SessionHostedReceipts, SessionHostedWorkerReceipt, SessionId,
@@ -2407,11 +2407,12 @@ impl ProbeServerConnection {
         request: ListPendingApprovalsRequest,
     ) -> Result<Vec<probe_protocol::session::PendingToolApproval>, RuntimeProtocolError> {
         if let Some(session_id) = request.session_id {
-            return self
+            let approvals = self
                 .core
                 .runtime
                 .pending_tool_approvals(&session_id)
-                .map_err(runtime_error_to_protocol);
+                .map_err(runtime_error_to_protocol)?;
+            return Ok(redacted_pending_tool_approvals(&approvals));
         }
 
         let mut approvals = Vec::new();
@@ -2431,7 +2432,7 @@ impl ProbeServerConnection {
             );
         }
         approvals.sort_by(|left, right| right.requested_at_ms.cmp(&left.requested_at_ms));
-        Ok(approvals)
+        Ok(redacted_pending_tool_approvals(&approvals))
     }
 
     fn managed_runtime(
@@ -3237,6 +3238,7 @@ fn run_turn_request(
             let pending_approvals = runtime
                 .pending_tool_approvals(&session_id)
                 .map_err(runtime_error_to_protocol)?;
+            let pending_approvals_for_api = redacted_pending_tool_approvals(&pending_approvals);
             if let Some(request_id) = request_id {
                 writer
                     .send_event(
@@ -3244,7 +3246,7 @@ fn run_turn_request(
                         ServerEvent::PendingApprovalsUpdated {
                             delivery: EventDeliveryGuarantee::Lossless,
                             session_id: session_id.clone(),
-                            approvals: pending_approvals.clone(),
+                            approvals: pending_approvals_for_api.clone(),
                         },
                     )
                     .map_err(|error| protocol_error("event_write_failed", error.to_string()))?;
@@ -3255,7 +3257,7 @@ fn run_turn_request(
                         &session_id,
                         DetachedSessionEventTruth::Authoritative,
                         DetachedSessionEventPayload::PendingApprovalsUpdated {
-                            approvals: pending_approvals.clone(),
+                            approvals: pending_approvals_for_api.clone(),
                         },
                         now_ms(),
                     )
@@ -3271,7 +3273,7 @@ fn run_turn_request(
                     call_id,
                     tool_name,
                     reason,
-                    pending_approvals,
+                    pending_approvals: pending_approvals_for_api,
                 }),
                 mode,
             )
@@ -3346,6 +3348,7 @@ fn run_pending_approval_resolution(
             session,
             pending_approvals,
         } => {
+            let pending_approvals_for_api = redacted_pending_tool_approvals(&pending_approvals);
             if let Some(request_id) = request_id {
                 writer
                     .send_event(
@@ -3353,7 +3356,7 @@ fn run_pending_approval_resolution(
                         ServerEvent::PendingApprovalsUpdated {
                             delivery: EventDeliveryGuarantee::Lossless,
                             session_id: session.id.clone(),
-                            approvals: pending_approvals.clone(),
+                            approvals: pending_approvals_for_api.clone(),
                         },
                     )
                     .map_err(|error| protocol_error("event_write_failed", error.to_string()))?;
@@ -3364,7 +3367,7 @@ fn run_pending_approval_resolution(
                         &session.id,
                         DetachedSessionEventTruth::Authoritative,
                         DetachedSessionEventPayload::PendingApprovalsUpdated {
-                            approvals: pending_approvals.clone(),
+                            approvals: pending_approvals_for_api.clone(),
                         },
                         now_ms(),
                     )
@@ -3373,7 +3376,7 @@ fn run_pending_approval_resolution(
             Ok(RuntimeResponse::ResolvePendingApproval(
                 ResolvePendingApprovalResponse::StillPending {
                     session,
-                    pending_approvals,
+                    pending_approvals: pending_approvals_for_api,
                 },
             ))
         }
@@ -3445,6 +3448,7 @@ fn session_snapshot_from_core(
         .runtime
         .pending_tool_approvals(session_id)
         .map_err(runtime_error_to_protocol)?;
+    let pending_approvals = redacted_pending_tool_approvals(&pending_approvals);
     let branch_state = session_branch_state(session.cwd.as_path());
     let delivery_state = branch_state
         .as_ref()
@@ -4176,6 +4180,13 @@ fn finalize_managed_hosted_cleanup(
     }
 
     Ok(metadata)
+}
+
+fn redacted_pending_tool_approvals(approvals: &[PendingToolApproval]) -> Vec<PendingToolApproval> {
+    approvals
+        .iter()
+        .map(PendingToolApproval::redacted_for_api)
+        .collect()
 }
 
 fn session_branch_state(cwd: &Path) -> Option<SessionBranchState> {
@@ -5565,6 +5576,7 @@ fn approval_from_recipe(recipe: ToolApprovalRecipe) -> ToolApprovalConfig {
             ToolDeniedAction::Refuse => CoreDeniedAction::Refuse,
             ToolDeniedAction::Pause => CoreDeniedAction::Pause,
         },
+        overrides: recipe.overrides,
     }
 }
 
@@ -5946,6 +5958,7 @@ mod tests {
                 allow_network_shell: false,
                 allow_destructive_shell: false,
                 denied_action: ToolDeniedAction::Pause,
+                overrides: Vec::new(),
             },
             oracle: None,
             long_context: None,
@@ -5962,6 +5975,7 @@ mod tests {
             allow_network_shell: false,
             allow_destructive_shell: false,
             denied_action: ToolDeniedAction::Pause,
+            overrides: Vec::new(),
         });
         assert!(approval.allow_write_tools);
         assert!(matches!(
@@ -6011,6 +6025,7 @@ mod tests {
                 allow_network_shell: false,
                 allow_destructive_shell: false,
                 denied_action: ToolDeniedAction::Refuse,
+                overrides: Vec::new(),
             },
             oracle: Some(super::ToolOracleRecipe {
                 profile,
