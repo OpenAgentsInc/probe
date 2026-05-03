@@ -46,6 +46,10 @@ Current shipped surface:
   stable website-safe runtime event contract used by Laravel/Pylon adapters to
   persist runs, approvals, child sessions, and artifact refs without parsing
   Probe internals
+- `probe_protocol::scheduled_bridge` for the Probe-first scheduled-agent
+  bridge contract, including signed website/Pylon requests, runner responses,
+  approval/control ids, fixture-backed event streams, error codes, idempotency,
+  and Codex-as-a-Probe-backend examples
 - a Forge health-diagnosis worker lane inside `probe forge run-once|run-loop`
   that consumes Forge health snapshots/events/evidence refs and returns
   structured diagnosis artifacts without executing production recovery actions
@@ -116,6 +120,10 @@ The website-safe event export contract is documented in
 `docs/92-website-safe-runtime-events.md` and should be the bridge surface for
 Laravel persistence, approvals, child sessions, transcript refs, summary
 artifacts, and verification-pack refs.
+The scheduled-agent bridge contract is documented in
+`docs/93-scheduled-agent-bridge-contract.md`. It is the contract
+`openagents.com` should target for recurring autonomous work; Codex remains an
+optional Probe-selected backend behind that boundary.
 The mesh profile is attach-only as well. Probe discovers live routed inventory
 from `GET /psionic/management/status`, picks the effective model from that
 inventory, prints the mesh role or fallback posture in operator output, and

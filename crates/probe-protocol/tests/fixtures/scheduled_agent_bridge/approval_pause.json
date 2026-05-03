@@ -1,0 +1,234 @@
+{
+  "name": "scheduled-agent-approval-pause",
+  "scenario": "approval_pause",
+  "signedRequest": {
+    "auth": {
+      "keyId": "openagents.com",
+      "issuedAtMs": 1777778876000,
+      "expiresAtMs": 1777778936000,
+      "nonce": "nonce-approval-200",
+      "signature": "sha256=fixture-signature-approval"
+    },
+    "request": {
+      "schemaVersion": "probe.scheduled_agent_bridge.v1",
+      "requestId": "req-sched-approval-200",
+      "workspace": "openagents.com",
+      "actor": {
+        "webUserId": 42,
+        "email": "admin@example.com",
+        "role": "admin"
+      },
+      "conversation": {
+        "conversationId": "conv-admin-200",
+        "threadRef": "openagents-chat-thread-200"
+      },
+      "run": {
+        "runId": "run-web-200",
+        "scheduledRunId": "sched-run-200"
+      },
+      "schedule": {
+        "scheduleId": "schedule-resolve-admin-issues",
+        "name": "Resolve admin-created issues",
+        "regularity": {
+          "kind": "interval",
+          "everySeconds": 3600,
+          "timezone": "UTC"
+        }
+      },
+      "wake": {
+        "wakeId": "wake-200",
+        "dueAtMs": 1777778877000,
+        "attempt": 1
+      },
+      "orchestrationJob": {
+        "orchestrationJobId": "orch-200",
+        "queue": "scheduled-agents",
+        "attempt": 1
+      },
+      "goal": {
+        "masterGoal": "Resolve any open issues created by the admin.",
+        "phaseGoal": "Apply a small patch if tests identify a safe fix."
+      },
+      "context": {
+        "workspaceRef": "openagents://workspace/main",
+        "repository": "OpenAgentsInc/openagents.com",
+        "issueRefs": [
+          "https://github.com/OpenAgentsInc/openagents.com/issues/118"
+        ],
+        "memoryRefs": [
+          "probe://memory/schedules/schedule-resolve-admin-issues"
+        ],
+        "instructions": [
+          "Pause for admin approval before shell mutations."
+        ]
+      },
+      "backend": {
+        "key": "probe-codex",
+        "family": "codex",
+        "profile": "openai-codex-subscription",
+        "model": "gpt-5.4",
+        "mode": "probe_backend",
+        "accountRef": "probe://auth/openai-codex/default",
+        "label": "Codex through Probe"
+      },
+      "toolPolicy": {
+        "mode": "scheduled_agent",
+        "allowedTools": [
+          "read",
+          "patch",
+          "shell"
+        ],
+        "approvalRequired": true,
+        "approvalMode": "admin_control_api"
+      },
+      "idempotencyKey": "sched-run-200:start",
+      "metadata": {}
+    }
+  },
+  "acceptedResponse": {
+    "schemaVersion": "probe.scheduled_agent_bridge.v1",
+    "requestId": "req-sched-approval-200",
+    "runId": "run-web-200",
+    "scheduledRunId": "sched-run-200",
+    "probeSessionId": "sess-approval-200",
+    "probeTurnId": "turn-approval-200",
+    "status": "approval_required",
+    "backend": {
+      "key": "probe-codex",
+      "family": "codex",
+      "profile": "openai-codex-subscription",
+      "model": "gpt-5.4",
+      "mode": "probe_backend",
+      "accountRef": "probe://auth/openai-codex/default",
+      "label": "Codex through Probe"
+    },
+    "transcriptRef": "probe://sessions/sess-approval-200/transcript",
+    "correlation": {
+      "requestId": "req-sched-approval-200",
+      "workspace": "openagents.com",
+      "conversationId": "conv-admin-200",
+      "runId": "run-web-200",
+      "scheduleId": "schedule-resolve-admin-issues",
+      "wakeId": "wake-200",
+      "scheduledRunId": "sched-run-200",
+      "orchestrationJobId": "orch-200"
+    },
+    "diagnostics": {
+      "redaction": "website_safe",
+      "runtime": "probe"
+    }
+  },
+  "approval": {
+    "approvalId": "approval-200",
+    "status": "pending",
+    "actionRef": "probe://sessions/sess-approval-200/approvals/approval-200",
+    "riskClass": "write",
+    "toolName": "shell",
+    "callId": "call-shell-200",
+    "summary": "Run the focused test command before applying the patch.",
+    "requestedAtMs": 1777778879000,
+    "payloadSummary": {
+      "argumentsHash": "sha256-200",
+      "argumentsPreview": "php artisan test --compact tests/Feature/ExampleTest.php"
+    }
+  },
+  "eventBatch": {
+    "schemaVersion": "probe.website_event.v1",
+    "events": [
+      {
+        "schemaVersion": "probe.website_event.v1",
+        "sequence": 1,
+        "occurredAtMs": 1777778877000,
+        "eventType": "run_started",
+        "actor": {
+          "kind": "probe",
+          "id": "sess-approval-200"
+        },
+        "source": {
+          "kind": "runtime",
+          "id": "turn-approval-200"
+        },
+        "correlation": {
+          "requestId": "req-sched-approval-200",
+          "workspace": "openagents.com",
+          "conversationId": "conv-admin-200",
+          "runId": "run-web-200",
+          "scheduleId": "schedule-resolve-admin-issues",
+          "wakeId": "wake-200",
+          "scheduledRunId": "sched-run-200",
+          "probeSessionId": "sess-approval-200",
+          "probeTurnId": "turn-approval-200"
+        },
+        "payload": {
+          "backendProfile": "openai-codex-subscription",
+          "goalHash": "sha256-201",
+          "goalPreview": "Resolve any open issues created by the admin."
+        }
+      },
+      {
+        "schemaVersion": "probe.website_event.v1",
+        "sequence": 2,
+        "occurredAtMs": 1777778878000,
+        "eventType": "tool_call_started",
+        "actor": {
+          "kind": "probe",
+          "id": "sess-approval-200"
+        },
+        "source": {
+          "kind": "runtime",
+          "id": "turn-approval-200"
+        },
+        "correlation": {
+          "requestId": "req-sched-approval-200",
+          "workspace": "openagents.com",
+          "conversationId": "conv-admin-200",
+          "runId": "run-web-200",
+          "scheduleId": "schedule-resolve-admin-issues",
+          "wakeId": "wake-200",
+          "scheduledRunId": "sched-run-200",
+          "probeSessionId": "sess-approval-200",
+          "probeTurnId": "turn-approval-200"
+        },
+        "payload": {
+          "callId": "call-shell-200",
+          "toolName": "shell",
+          "riskClass": "write"
+        }
+      },
+      {
+        "schemaVersion": "probe.website_event.v1",
+        "sequence": 3,
+        "occurredAtMs": 1777778879000,
+        "eventType": "approval_requested",
+        "actor": {
+          "kind": "probe",
+          "id": "sess-approval-200"
+        },
+        "source": {
+          "kind": "runtime",
+          "id": "turn-approval-200"
+        },
+        "correlation": {
+          "requestId": "req-sched-approval-200",
+          "workspace": "openagents.com",
+          "conversationId": "conv-admin-200",
+          "runId": "run-web-200",
+          "scheduleId": "schedule-resolve-admin-issues",
+          "wakeId": "wake-200",
+          "scheduledRunId": "sched-run-200",
+          "probeSessionId": "sess-approval-200",
+          "probeTurnId": "turn-approval-200"
+        },
+        "payload": {
+          "approvalId": "approval-200",
+          "actionRef": "probe://sessions/sess-approval-200/approvals/approval-200",
+          "callId": "call-shell-200",
+          "toolName": "shell",
+          "riskClass": "write",
+          "summary": "Run the focused test command before applying the patch.",
+          "argumentsHash": "sha256-200"
+        }
+      }
+    ]
+  }
+}

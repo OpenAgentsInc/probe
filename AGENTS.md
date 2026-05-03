@@ -86,5 +86,8 @@ This repo should not quietly absorb unrelated product-shell concerns.
 - `docs/88-probe-worker-verification-pack.md`
 - `docs/89-probe-health-diagnosis-forge-worker-lane.md`
 - `docs/90-forge-bounded-child-probe-sessions.md`
+- `docs/91-openagents-com-admin-chat-bridge.md`
+- `docs/92-website-safe-runtime-events.md`
+- `docs/93-scheduled-agent-bridge-contract.md`
 
 Add more canonical docs here as the repo grows.

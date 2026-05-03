@@ -309,3 +309,16 @@ This folder holds technical planning docs for the Probe runtime.
   - prepared hosted repo environments, default-branch sync metadata, and the
     runtime write gate that allows read-only research before sync while
     blocking mutations until the checkout is safe
+- `91-openagents-com-admin-chat-bridge.md`
+  - signed internal `openagents.com` admin-chat bridge contract, including
+    HMAC auth, safe provider selection, accepted session/turn metadata, and
+    redacted bridge events
+- `92-website-safe-runtime-events.md`
+  - stable website-facing runtime event schema for Laravel/Pylon persistence,
+    approvals, child sessions, cancellation, transcript refs, and artifact refs
+    without parsing Probe internals
+- `93-scheduled-agent-bridge-contract.md`
+  - Probe-first scheduled-agent bridge contract for recurring website/Pylon
+    work, with signed requests, response/error schemas, approval ids,
+    idempotency rules, redaction posture, and JSON fixtures future Laravel
+    adapter tests can mirror

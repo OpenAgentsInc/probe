@@ -1,12 +1,13 @@
 pub mod admin_chat;
 pub mod backend;
 pub mod runtime;
+pub mod scheduled_bridge;
 pub mod session;
 pub mod website_events;
 
 use std::path::{Path, PathBuf};
 
-pub const PROBE_PROTOCOL_VERSION: u32 = 17;
+pub const PROBE_PROTOCOL_VERSION: u32 = 18;
 pub const PROBE_RUNTIME_NAME: &str = "probe";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +36,9 @@ mod tests {
     use super::ProtocolDescriptor;
     use super::admin_chat::{AdminChatBridgeEvent, AdminChatBridgeRequest};
     use super::backend::{BackendKind, PrefixCacheMode, ServerAttachMode};
+    use super::scheduled_bridge::{
+        PROBE_SCHEDULED_AGENT_BRIDGE_SCHEMA_VERSION, ScheduledAgentBridgeRequest,
+    };
     use super::session::{SessionId, SessionState, TurnId};
     use super::website_events::{
         PROBE_WEBSITE_EVENT_SCHEMA_VERSION, ProbeWebsiteEvent, ProbeWebsiteEventActor,
@@ -46,7 +50,7 @@ mod tests {
     fn current_descriptor_is_stable() {
         let descriptor = ProtocolDescriptor::current();
         assert_eq!(descriptor.runtime_name, "probe");
-        assert_eq!(descriptor.version, 17);
+        assert_eq!(descriptor.version, 18);
     }
 
     #[test]
@@ -124,5 +128,86 @@ mod tests {
         assert!(encoded.contains("\"eventType\":\"approval_requested\""));
         assert!(encoded.contains("\"sequence\":7"));
         assert!(encoded.contains("\"probeSessionId\":\"sess-1\""));
+    }
+
+    #[test]
+    fn scheduled_agent_bridge_request_shape_is_stable() {
+        let request = ScheduledAgentBridgeRequest {
+            schema_version: String::from(PROBE_SCHEDULED_AGENT_BRIDGE_SCHEMA_VERSION),
+            request_id: String::from("request-1"),
+            workspace: String::from("openagents.com"),
+            actor: super::scheduled_bridge::ScheduledAgentBridgeActor {
+                web_user_id: 123,
+                email: String::from("admin@example.com"),
+                role: String::from("admin"),
+            },
+            conversation: super::scheduled_bridge::ScheduledAgentBridgeConversationRef {
+                conversation_id: String::from("conversation-1"),
+                thread_ref: Some(String::from("thread-1")),
+            },
+            run: super::scheduled_bridge::ScheduledAgentBridgeRunRef {
+                run_id: String::from("run-1"),
+                scheduled_run_id: String::from("scheduled-run-1"),
+            },
+            schedule: super::scheduled_bridge::ScheduledAgentBridgeScheduleRef {
+                schedule_id: String::from("schedule-1"),
+                name: String::from("Evolve pylon training"),
+                regularity: super::scheduled_bridge::ScheduledAgentBridgeRegularity {
+                    kind: String::from("interval"),
+                    every_seconds: Some(7_200),
+                    cron: None,
+                    timezone: Some(String::from("UTC")),
+                },
+            },
+            wake: super::scheduled_bridge::ScheduledAgentBridgeWakeRef {
+                wake_id: String::from("wake-1"),
+                due_at_ms: 1_777_777_777_000,
+                attempt: 1,
+            },
+            orchestration_job: super::scheduled_bridge::ScheduledAgentBridgeOrchestrationJobRef {
+                orchestration_job_id: String::from("job-1"),
+                queue: String::from("scheduled-agents"),
+                attempt: 1,
+            },
+            goal: super::scheduled_bridge::ScheduledAgentBridgeGoal {
+                master_goal: String::from("Evolve pylon training code."),
+                phase_goal: Some(String::from(
+                    "Inspect current failures and queue the next patch.",
+                )),
+            },
+            context: super::scheduled_bridge::ScheduledAgentBridgeContext::default(),
+            backend: super::scheduled_bridge::ScheduledAgentBridgeBackendSelection {
+                key: String::from("probe-codex"),
+                family: String::from("codex"),
+                profile: String::from("openai-codex-subscription"),
+                model: String::from("gpt-5.4"),
+                mode: String::from("probe_backend"),
+                account_ref: Some(String::from("probe://auth/openai-codex/default")),
+                label: Some(String::from("Codex through Probe")),
+            },
+            tool_policy: super::scheduled_bridge::ScheduledAgentBridgeToolPolicy {
+                mode: String::from("scheduled_agent"),
+                allowed_tools: vec![String::from("read"), String::from("patch")],
+                approval_required: true,
+                approval_mode: Some(String::from("admin_control_api")),
+            },
+            idempotency_key: String::from("scheduled-run-1:start"),
+            metadata: Map::new(),
+        };
+
+        let encoded = serde_json::to_string(&request).expect("serialize scheduled request");
+        let decoded: ScheduledAgentBridgeRequest =
+            serde_json::from_str(encoded.as_str()).expect("deserialize scheduled request");
+
+        assert_eq!(
+            decoded.schema_version,
+            PROBE_SCHEDULED_AGENT_BRIDGE_SCHEMA_VERSION
+        );
+        assert_eq!(decoded.backend.family, "codex");
+        assert_eq!(decoded.schedule.regularity.every_seconds, Some(7_200));
+        assert_eq!(
+            decoded.goal.phase_goal.as_deref(),
+            Some("Inspect current failures and queue the next patch.")
+        );
     }
 }

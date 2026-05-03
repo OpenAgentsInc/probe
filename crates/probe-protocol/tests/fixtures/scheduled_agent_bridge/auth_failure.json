@@ -1,0 +1,92 @@
+{
+  "name": "scheduled-agent-auth-failure",
+  "scenario": "auth_failure",
+  "signedRequest": {
+    "auth": {
+      "keyId": "openagents.com",
+      "issuedAtMs": 1777783276000,
+      "expiresAtMs": 1777783336000,
+      "nonce": "nonce-auth-600",
+      "signature": "sha256=bad-fixture-signature"
+    },
+    "request": {
+      "schemaVersion": "probe.scheduled_agent_bridge.v1",
+      "requestId": "req-sched-auth-600",
+      "workspace": "openagents.com",
+      "actor": {
+        "webUserId": 42,
+        "email": "admin@example.com",
+        "role": "admin"
+      },
+      "conversation": {
+        "conversationId": "conv-admin-600",
+        "threadRef": "openagents-chat-thread-600"
+      },
+      "run": {
+        "runId": "run-web-600",
+        "scheduledRunId": "sched-run-600"
+      },
+      "schedule": {
+        "scheduleId": "schedule-auth-smoke",
+        "name": "Auth smoke",
+        "regularity": {
+          "kind": "interval",
+          "everySeconds": 7200,
+          "timezone": "UTC"
+        }
+      },
+      "wake": {
+        "wakeId": "wake-600",
+        "dueAtMs": 1777783277000,
+        "attempt": 1
+      },
+      "orchestrationJob": {
+        "orchestrationJobId": "orch-600",
+        "queue": "scheduled-agents",
+        "attempt": 1
+      },
+      "goal": {
+        "masterGoal": "Verify scheduled-agent bridge authentication.",
+        "phaseGoal": "Reject invalid signatures without creating runtime state."
+      },
+      "context": {
+        "workspaceRef": "openagents://workspace/main",
+        "instructions": [
+          "Authentication failure must not create events, turns, or sessions."
+        ]
+      },
+      "backend": {
+        "key": "probe-local",
+        "family": "probe",
+        "profile": "coding-bootstrap",
+        "model": "runtime-default",
+        "mode": "probe_backend",
+        "label": "Probe local runtime"
+      },
+      "toolPolicy": {
+        "mode": "scheduled_agent",
+        "allowedTools": [
+          "read"
+        ],
+        "approvalRequired": true,
+        "approvalMode": "admin_control_api"
+      },
+      "idempotencyKey": "sched-run-600:start",
+      "metadata": {}
+    }
+  },
+  "errorResponse": {
+    "schemaVersion": "probe.scheduled_agent_bridge.v1",
+    "requestId": "req-sched-auth-600",
+    "error": {
+      "code": "auth.invalid_signature",
+      "message": "Probe rejected the scheduled-agent bridge signature.",
+      "category": "auth",
+      "retryable": false,
+      "diagnostics": {
+        "keyId": "openagents.com",
+        "redaction": "website_safe"
+      }
+    }
+  }
+}

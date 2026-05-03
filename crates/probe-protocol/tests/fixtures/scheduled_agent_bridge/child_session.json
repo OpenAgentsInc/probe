@@ -1,0 +1,223 @@
+{
+  "name": "scheduled-agent-child-session",
+  "scenario": "child_session",
+  "signedRequest": {
+    "auth": {
+      "keyId": "openagents.com",
+      "issuedAtMs": 1777779976000,
+      "expiresAtMs": 1777780036000,
+      "nonce": "nonce-child-300",
+      "signature": "sha256=fixture-signature-child"
+    },
+    "request": {
+      "schemaVersion": "probe.scheduled_agent_bridge.v1",
+      "requestId": "req-sched-child-300",
+      "workspace": "openagents.com",
+      "actor": {
+        "webUserId": 42,
+        "email": "admin@example.com",
+        "role": "admin"
+      },
+      "conversation": {
+        "conversationId": "conv-admin-300",
+        "threadRef": "openagents-chat-thread-300"
+      },
+      "run": {
+        "runId": "run-web-300",
+        "scheduledRunId": "sched-run-300"
+      },
+      "schedule": {
+        "scheduleId": "schedule-distribute-pylon-work",
+        "name": "Distribute work to pylons",
+        "regularity": {
+          "kind": "interval",
+          "everySeconds": 7200,
+          "timezone": "UTC"
+        }
+      },
+      "wake": {
+        "wakeId": "wake-300",
+        "dueAtMs": 1777779977000,
+        "attempt": 1
+      },
+      "orchestrationJob": {
+        "orchestrationJobId": "orch-300",
+        "queue": "scheduled-agents",
+        "attempt": 1
+      },
+      "goal": {
+        "masterGoal": "Distribute work to pylons.",
+        "phaseGoal": "Spawn bounded child sessions for independent issue analysis."
+      },
+      "context": {
+        "workspaceRef": "openagents://workspace/main",
+        "repository": "OpenAgentsInc/openagents.com",
+        "issueRefs": [
+          "https://github.com/OpenAgentsInc/openagents.com/issues/119",
+          "https://github.com/OpenAgentsInc/openagents.com/issues/120"
+        ],
+        "instructions": [
+          "Child sessions are bounded and report artifacts to the parent."
+        ]
+      },
+      "backend": {
+        "key": "probe-local",
+        "family": "probe",
+        "profile": "coding-bootstrap",
+        "model": "runtime-default",
+        "mode": "probe_backend",
+        "label": "Probe local runtime"
+      },
+      "toolPolicy": {
+        "mode": "scheduled_agent",
+        "allowedTools": [
+          "read",
+          "spawn_child_session"
+        ],
+        "approvalRequired": true,
+        "approvalMode": "admin_control_api"
+      },
+      "idempotencyKey": "sched-run-300:start",
+      "metadata": {}
+    }
+  },
+  "acceptedResponse": {
+    "schemaVersion": "probe.scheduled_agent_bridge.v1",
+    "requestId": "req-sched-child-300",
+    "runId": "run-web-300",
+    "scheduledRunId": "sched-run-300",
+    "probeSessionId": "sess-child-parent-300",
+    "probeTurnId": "turn-child-parent-300",
+    "status": "completed",
+    "backend": {
+      "key": "probe-local",
+      "family": "probe",
+      "profile": "coding-bootstrap",
+      "model": "runtime-default",
+      "mode": "probe_backend",
+      "label": "Probe local runtime"
+    },
+    "transcriptRef": "probe://sessions/sess-child-parent-300/transcript",
+    "correlation": {
+      "requestId": "req-sched-child-300",
+      "workspace": "openagents.com",
+      "conversationId": "conv-admin-300",
+      "runId": "run-web-300",
+      "scheduleId": "schedule-distribute-pylon-work",
+      "wakeId": "wake-300",
+      "scheduledRunId": "sched-run-300",
+      "orchestrationJobId": "orch-300"
+    },
+    "diagnostics": {
+      "redaction": "website_safe",
+      "runtime": "probe"
+    }
+  },
+  "eventBatch": {
+    "schemaVersion": "probe.website_event.v1",
+    "events": [
+      {
+        "schemaVersion": "probe.website_event.v1",
+        "sequence": 1,
+        "occurredAtMs": 1777779977000,
+        "eventType": "run_started",
+        "actor": {
+          "kind": "probe",
+          "id": "sess-child-parent-300"
+        },
+        "source": {
+          "kind": "runtime",
+          "id": "turn-child-parent-300"
+        },
+        "correlation": {
+          "requestId": "req-sched-child-300",
+          "workspace": "openagents.com",
+          "conversationId": "conv-admin-300",
+          "runId": "run-web-300",
+          "scheduleId": "schedule-distribute-pylon-work",
+          "wakeId": "wake-300",
+          "scheduledRunId": "sched-run-300",
+          "probeSessionId": "sess-child-parent-300",
+          "probeTurnId": "turn-child-parent-300"
+        },
+        "payload": {
+          "goalHash": "sha256-300",
+          "goalPreview": "Distribute work to pylons."
+        }
+      },
+      {
+        "schemaVersion": "probe.website_event.v1",
+        "sequence": 2,
+        "occurredAtMs": 1777779978000,
+        "eventType": "child_session_started",
+        "actor": {
+          "kind": "probe",
+          "id": "sess-child-parent-300"
+        },
+        "source": {
+          "kind": "runtime",
+          "id": "turn-child-parent-300"
+        },
+        "correlation": {
+          "requestId": "req-sched-child-300",
+          "workspace": "openagents.com",
+          "conversationId": "conv-admin-300",
+          "runId": "run-web-300",
+          "scheduleId": "schedule-distribute-pylon-work",
+          "wakeId": "wake-300",
+          "scheduledRunId": "sched-run-300",
+          "probeSessionId": "sess-child-parent-300",
+          "probeTurnId": "turn-child-parent-300",
+          "parentProbeSessionId": "sess-child-parent-300",
+          "childProbeSessionId": "sess-child-worker-301"
+        },
+        "payload": {
+          "childProbeSessionId": "sess-child-worker-301",
+          "status": "running",
+          "summary": "Analyze issue 119 with read-only authority."
+        }
+      },
+      {
+        "schemaVersion": "probe.website_event.v1",
+        "sequence": 3,
+        "occurredAtMs": 1777779981000,
+        "eventType": "child_session_updated",
+        "actor": {
+          "kind": "probe",
+          "id": "sess-child-parent-300"
+        },
+        "source": {
+          "kind": "runtime",
+          "id": "turn-child-parent-300"
+        },
+        "correlation": {
+          "requestId": "req-sched-child-300",
+          "workspace": "openagents.com",
+          "conversationId": "conv-admin-300",
+          "runId": "run-web-300",
+          "scheduleId": "schedule-distribute-pylon-work",
+          "wakeId": "wake-300",
+          "scheduledRunId": "sched-run-300",
+          "probeSessionId": "sess-child-parent-300",
+          "probeTurnId": "turn-child-parent-300",
+          "parentProbeSessionId": "sess-child-parent-300",
+          "childProbeSessionId": "sess-child-worker-301"
+        },
+        "artifactRefs": [
+          {
+            "kind": "transcript",
+            "resourceRef": "probe://sessions/sess-child-worker-301/transcript",
+            "stableDigest": "sha256-0000000000000000000000000000000000000000000000000000000000000301",
+            "label": "Child session transcript",
+            "updatedAtMs": 1777779981000
+          }
+        ],
+        "payload": {
+          "childProbeSessionId": "sess-child-worker-301",
+          "status": "completed",
+          "artifactCount": 1
+        }
+      }
+    ]
+  }
+}
