@@ -71,6 +71,12 @@ Current shipped surface:
   Cloud Run Worker Pool runners: worker identity, heartbeats, lease claims,
   graceful drain, terminal assignment reports, deployment revision metadata,
   and evidence/artifact refs without public inbound access to the container
+- `probe managed daytona advertise|run-once` plus
+  `probe_core::managed_daytona` for supplemental Daytona workspaces behind the
+  managed environment contract: snapshot capability advertisement, sandbox
+  allocation, bootstrap command execution, normalized provider errors,
+  callbacks, managed runtime terminal events, and evidence/artifact refs while
+  keeping GCP as the default hosted path
 - a Forge health-diagnosis worker lane inside `probe forge run-once|run-loop`
   that consumes Forge health snapshots/events/evidence refs and returns
   structured diagnosis artifacts without executing production recovery actions

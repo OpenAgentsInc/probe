@@ -60,6 +60,10 @@ use probe_core::managed_cloud_run_worker_pool::{
     ManagedCloudRunWorkerPoolIdentity, ManagedCloudRunWorkerPoolRunRequest,
     ManagedCloudRunWorkerPoolRunner, ManagedCloudRunWorkerPoolShutdown,
 };
+use probe_core::managed_daytona::{
+    ManagedDaytonaConfig, ManagedDaytonaOutcome, ManagedDaytonaRunRequest, ManagedDaytonaRunner,
+    ManagedDaytonaSnapshotTemplate,
+};
 use probe_core::managed_runtime::ManagedRuntimeController;
 use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, current_working_dir,
@@ -195,6 +199,7 @@ enum ManagedCommands {
     CloudRunJob(ManagedCloudRunJobArgs),
     #[command(name = "cloud-run-worker-pool")]
     CloudRunWorkerPool(ManagedCloudRunWorkerPoolArgs),
+    Daytona(ManagedDaytonaArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -219,6 +224,19 @@ struct ManagedCloudRunWorkerPoolArgs {
 enum ManagedCloudRunWorkerPoolCommands {
     #[command(name = "run")]
     Run(ManagedCloudRunWorkerPoolRunArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct ManagedDaytonaArgs {
+    #[command(subcommand)]
+    command: ManagedDaytonaCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum ManagedDaytonaCommands {
+    Advertise(ManagedDaytonaAdvertiseArgs),
+    #[command(name = "run-once")]
+    RunOnce(ManagedDaytonaRunOnceArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -694,6 +712,92 @@ struct ManagedCloudRunWorkerPoolRunArgs {
     pretty: bool,
     #[command(flatten)]
     server: ServerArgs,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct ManagedDaytonaAdvertiseArgs {
+    #[arg(long)]
+    worker_id: String,
+    #[arg(long, default_value = "daytona-coding")]
+    environment_class: String,
+    #[arg(long)]
+    managed_environment_id: String,
+    #[arg(long)]
+    snapshot: String,
+    #[arg(long)]
+    target: Option<String>,
+    #[arg(long)]
+    cpu_millicores: Option<u32>,
+    #[arg(long)]
+    memory_mib: Option<u64>,
+    #[arg(long)]
+    disk_mib: Option<u64>,
+    #[arg(long)]
+    gpu_count: Option<u32>,
+    #[arg(long = "backend-profile")]
+    backend_profiles: Vec<String>,
+    #[arg(long = "label")]
+    labels: Vec<String>,
+    #[arg(long, default_value_t = false)]
+    pretty: bool,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct ManagedDaytonaRunOnceArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[arg(long)]
+    assignment_token: Option<String>,
+    #[arg(long)]
+    assignment_token_file: Option<PathBuf>,
+    #[arg(long, default_value = "PROBE_MANAGED_DAYTONA_ASSIGNMENT_TOKEN")]
+    assignment_token_env: String,
+    #[arg(long)]
+    signing_secret_file: Option<PathBuf>,
+    #[arg(long, default_value = "PROBE_MANAGED_ASSIGNMENT_SIGNING_SECRET")]
+    signing_secret_env: String,
+    #[arg(long)]
+    callback_bearer_token: Option<String>,
+    #[arg(long)]
+    callback_bearer_token_file: Option<PathBuf>,
+    #[arg(long, default_value = "PROBE_MANAGED_CALLBACK_BEARER_TOKEN")]
+    callback_bearer_token_env: String,
+    #[arg(long)]
+    daytona_base_url: Option<String>,
+    #[arg(long, default_value = "DAYTONA_BASE_URL")]
+    daytona_base_url_env: String,
+    #[arg(long)]
+    daytona_toolbox_base_url: Option<String>,
+    #[arg(long, default_value = "DAYTONA_TOOLBOX_BASE_URL")]
+    daytona_toolbox_base_url_env: String,
+    #[arg(long)]
+    daytona_api_key: Option<String>,
+    #[arg(long)]
+    daytona_api_key_file: Option<PathBuf>,
+    #[arg(long, default_value = "DAYTONA_API_KEY")]
+    daytona_api_key_env: String,
+    #[arg(long)]
+    daytona_organization_id: Option<String>,
+    #[arg(long, default_value = "DAYTONA_ORGANIZATION_ID")]
+    daytona_organization_id_env: String,
+    #[arg(long)]
+    default_snapshot: Option<String>,
+    #[arg(long, default_value = "DAYTONA_SNAPSHOT")]
+    default_snapshot_env: String,
+    #[arg(long)]
+    default_target: Option<String>,
+    #[arg(long, default_value = "DAYTONA_TARGET")]
+    default_target_env: String,
+    #[arg(long)]
+    artifact_dir: Option<PathBuf>,
+    #[arg(long, default_value_t = 120_000)]
+    wait_timeout_ms: u64,
+    #[arg(long, default_value_t = false)]
+    delete_sandbox_on_finish: bool,
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+    #[arg(long, default_value_t = false)]
+    pretty: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1264,6 +1368,10 @@ fn run_managed(args: ManagedArgs) -> Result<(), String> {
         ManagedCommands::CloudRunWorkerPool(args) => match args.command {
             ManagedCloudRunWorkerPoolCommands::Run(args) => run_managed_cloud_run_worker_pool(args),
         },
+        ManagedCommands::Daytona(args) => match args.command {
+            ManagedDaytonaCommands::Advertise(args) => run_managed_daytona_advertise(args),
+            ManagedDaytonaCommands::RunOnce(args) => run_managed_daytona_run_once(args),
+        },
     }
 }
 
@@ -1477,6 +1585,146 @@ fn run_managed_cloud_run_worker_pool(args: ManagedCloudRunWorkerPoolRunArgs) -> 
         println!(
             "{}",
             serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    }
+    Ok(())
+}
+
+fn run_managed_daytona_advertise(args: ManagedDaytonaAdvertiseArgs) -> Result<(), String> {
+    let capabilities = ManagedDaytonaSnapshotTemplate {
+        worker_id: args.worker_id,
+        managed_environment_id: args.managed_environment_id,
+        environment_class: args.environment_class,
+        snapshot: args.snapshot,
+        target: args.target,
+        resource_limits: ManagedEnvironmentResourceLimits {
+            cpu_millicores: args.cpu_millicores,
+            memory_mib: args.memory_mib,
+            disk_mib: args.disk_mib,
+            gpu_count: args.gpu_count,
+        },
+        backend_profiles: args.backend_profiles,
+        labels: args.labels,
+        public_metadata: Default::default(),
+    }
+    .capabilities();
+
+    if args.pretty {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&capabilities).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string(&capabilities).map_err(|error| error.to_string())?
+        );
+    }
+    Ok(())
+}
+
+fn run_managed_daytona_run_once(args: ManagedDaytonaRunOnceArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home.clone())?;
+    let assignment_token = resolve_required_secret_value(
+        args.assignment_token.as_deref(),
+        args.assignment_token_file.as_ref(),
+        args.assignment_token_env.as_str(),
+        "managed Daytona assignment token",
+    )?;
+    let signing_secret = resolve_required_secret_value(
+        None,
+        args.signing_secret_file.as_ref(),
+        args.signing_secret_env.as_str(),
+        "managed assignment signing secret",
+    )?;
+    let callback_bearer_token = optional_secret_value(
+        args.callback_bearer_token.as_deref(),
+        args.callback_bearer_token_file.as_ref(),
+        args.callback_bearer_token_env.as_str(),
+        "managed callback bearer token",
+    )?;
+    let daytona_api_key = resolve_required_secret_value(
+        args.daytona_api_key.as_deref(),
+        args.daytona_api_key_file.as_ref(),
+        args.daytona_api_key_env.as_str(),
+        "Daytona API key",
+    )?;
+    let config = ManagedDaytonaConfig {
+        base_url: args
+            .daytona_base_url
+            .or_else(|| std::env::var(args.daytona_base_url_env.as_str()).ok())
+            .unwrap_or_else(|| String::from("https://app.daytona.io/api")),
+        toolbox_base_url: args
+            .daytona_toolbox_base_url
+            .or_else(|| std::env::var(args.daytona_toolbox_base_url_env.as_str()).ok())
+            .unwrap_or_else(|| String::from("https://proxy.app.daytona.io/toolbox")),
+        api_key: daytona_api_key,
+        organization_id: args
+            .daytona_organization_id
+            .or_else(|| std::env::var(args.daytona_organization_id_env.as_str()).ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        request_timeout_secs: 30,
+    };
+    let artifact_dir = args
+        .artifact_dir
+        .unwrap_or_else(|| probe_home.join("managed/daytona/artifacts"));
+    let default_snapshot = args
+        .default_snapshot
+        .or_else(|| std::env::var(args.default_snapshot_env.as_str()).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let default_target = args
+        .default_target
+        .or_else(|| std::env::var(args.default_target_env.as_str()).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let runner = ManagedDaytonaRunner::new(ManagedRuntimeController::new(
+        FilesystemSessionStore::new(probe_home.as_path()),
+    ));
+    let outcome = runner
+        .run_once(ManagedDaytonaRunRequest {
+            assignment_token,
+            signing_secret,
+            callback_bearer_token,
+            artifact_dir,
+            config,
+            default_snapshot,
+            default_target,
+            wait_timeout_ms: args.wait_timeout_ms,
+            delete_sandbox_on_finish: args.delete_sandbox_on_finish,
+            dry_run: args.dry_run,
+        })
+        .map_err(stringify_error)?;
+
+    match &outcome {
+        ManagedDaytonaOutcome::Completed(state) => {
+            print_kv("managed_daytona_status", "completed")?;
+            if let Some(allocation) = state.allocation.as_ref() {
+                print_kv("daytona_sandbox_id", allocation.sandbox_id.as_str())?;
+            }
+        }
+        ManagedDaytonaOutcome::Failed(state) => {
+            print_kv("managed_daytona_status", "failed")?;
+            if let Some(error) = state.error.as_ref() {
+                print_kv("error", error.as_str())?;
+            }
+        }
+        ManagedDaytonaOutcome::DuplicateSkipped(state) => {
+            print_kv("managed_daytona_status", "duplicate_skipped")?;
+            print_kv("assignment_id", state.assignment_id.as_str())?;
+        }
+    }
+    if args.pretty {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(outcome.state()).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string(outcome.state()).map_err(|error| error.to_string())?
         );
     }
     Ok(())
@@ -2720,6 +2968,18 @@ fn resolve_required_secret_value(
     Err(format!(
         "missing {label}; set {env_key} or pass its file/argument"
     ))
+}
+
+fn optional_secret_value(
+    explicit: Option<&str>,
+    file: Option<&PathBuf>,
+    env_key: &str,
+    label: &str,
+) -> Result<Option<String>, String> {
+    if explicit.is_some() || file.is_some() || std::env::var(env_key).is_ok() {
+        return resolve_required_secret_value(explicit, file, env_key, label).map(Some);
+    }
+    Ok(None)
 }
 
 fn resolve_forge_exec_request(
@@ -5181,10 +5441,11 @@ mod tests {
 
     use super::{
         BackendKind, Cli, Commands, HostedConnectArgs, ManagedCloudRunJobCommands,
-        ManagedCloudRunWorkerPoolCommands, ManagedCommands, ProbeClientTransportConfig,
-        PsionicServerConfig, ServerArgs, ToolApprovalConfig, TuiArgs, build_tui_runtime_config,
-        operator_client_config, render_detached_summary_line, render_turn_backend_receipt,
-        render_turn_observability, resolve_server_config, resolve_tui_profile,
+        ManagedCloudRunWorkerPoolCommands, ManagedCommands, ManagedDaytonaCommands,
+        ProbeClientTransportConfig, PsionicServerConfig, ServerArgs, ToolApprovalConfig, TuiArgs,
+        build_tui_runtime_config, operator_client_config, render_detached_summary_line,
+        render_turn_backend_receipt, render_turn_observability, resolve_server_config,
+        resolve_tui_profile,
     };
 
     #[test]
@@ -5427,6 +5688,93 @@ mod tests {
                 other => panic!("expected cloud run worker pool command, got {other:?}"),
             },
             other => panic!("expected managed cloud run worker pool command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn managed_daytona_advertise_command_parses() {
+        let cli = Cli::try_parse_from([
+            "probe",
+            "managed",
+            "daytona",
+            "advertise",
+            "--worker-id",
+            "daytona-worker-1",
+            "--managed-environment-id",
+            "environment-1",
+            "--snapshot",
+            "probe-managed-agent",
+            "--target",
+            "us",
+            "--backend-profile",
+            "openai-codex-subscription",
+            "--label",
+            "supplemental",
+            "--pretty",
+        ])
+        .expect("managed daytona advertise command should parse");
+        match cli.command {
+            Some(Commands::Managed(args)) => match args.command {
+                ManagedCommands::Daytona(args) => match args.command {
+                    ManagedDaytonaCommands::Advertise(args) => {
+                        assert_eq!(args.worker_id, "daytona-worker-1");
+                        assert_eq!(args.managed_environment_id, "environment-1");
+                        assert_eq!(args.snapshot, "probe-managed-agent");
+                        assert_eq!(args.target.as_deref(), Some("us"));
+                        assert_eq!(
+                            args.backend_profiles,
+                            vec![String::from("openai-codex-subscription")]
+                        );
+                        assert_eq!(args.labels, vec![String::from("supplemental")]);
+                        assert!(args.pretty);
+                    }
+                    other => panic!("expected daytona advertise command, got {other:?}"),
+                },
+                other => panic!("expected managed daytona command, got {other:?}"),
+            },
+            other => panic!("expected managed daytona command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn managed_daytona_run_once_command_parses() {
+        let cli = Cli::try_parse_from([
+            "probe",
+            "managed",
+            "daytona",
+            "run-once",
+            "--assignment-token",
+            "token",
+            "--signing-secret-env",
+            "SECRET_ENV",
+            "--daytona-api-key-env",
+            "DAYTONA_TOKEN",
+            "--default-snapshot",
+            "probe-managed-agent",
+            "--wait-timeout-ms",
+            "1",
+            "--dry-run",
+        ])
+        .expect("managed daytona run-once command should parse");
+        match cli.command {
+            Some(Commands::Managed(args)) => match args.command {
+                ManagedCommands::Daytona(args) => match args.command {
+                    ManagedDaytonaCommands::RunOnce(args) => {
+                        assert_eq!(args.assignment_token.as_deref(), Some("token"));
+                        assert_eq!(args.signing_secret_env, "SECRET_ENV");
+                        assert_eq!(args.daytona_api_key_env, "DAYTONA_TOKEN");
+                        assert_eq!(
+                            args.default_snapshot.as_deref(),
+                            Some("probe-managed-agent")
+                        );
+                        assert_eq!(args.wait_timeout_ms, 1);
+                        assert!(args.dry_run);
+                    }
+                    other => panic!("expected daytona run-once command, got {other:?}"),
+                },
+                other => panic!("expected managed daytona command, got {other:?}"),
+            },
+            other => panic!("expected managed daytona command, got {other:?}"),
         }
     }
 

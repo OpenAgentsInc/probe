@@ -342,3 +342,8 @@ This folder holds technical planning docs for the Probe runtime.
     worker identity, heartbeats, claim/lease polling, graceful drain,
     assignment terminal events, deployment revision metadata, required
     environment variables, service account scope, and rollback behavior
+- `98-managed-daytona-provider.md`
+  - supplemental Daytona provider adapter behind the managed environment
+    contract, including snapshot capability advertisement, signed assignments,
+    sandbox allocation, bootstrap execution, normalized provider errors,
+    Laravel boundary rules, callbacks, and evidence artifacts
