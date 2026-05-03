@@ -12,6 +12,7 @@ pub mod issue_thread_analysis;
 pub mod issue_thread_eval;
 pub mod long_context;
 pub mod managed_cloud_run_job;
+pub mod managed_cloud_run_worker_pool;
 pub mod managed_environment;
 pub mod managed_runtime;
 pub mod paper_rlm;

@@ -66,6 +66,11 @@ Current shipped surface:
   managed-session runner: signed Laravel assignment tokens, Cloud Run execution
   identity, idempotent retries, Laravel callbacks, managed runtime terminal
   events, and evidence/artifact refs
+- `probe managed cloud-run-worker-pool run` plus
+  `probe_core::managed_cloud_run_worker_pool` for continuous pull-based Google
+  Cloud Run Worker Pool runners: worker identity, heartbeats, lease claims,
+  graceful drain, terminal assignment reports, deployment revision metadata,
+  and evidence/artifact refs without public inbound access to the container
 - a Forge health-diagnosis worker lane inside `probe forge run-once|run-loop`
   that consumes Forge health snapshots/events/evidence refs and returns
   structured diagnosis artifacts without executing production recovery actions

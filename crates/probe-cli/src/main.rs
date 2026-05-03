@@ -56,6 +56,10 @@ use probe_core::managed_cloud_run_job::{
     ManagedCloudRunJobIdentity, ManagedCloudRunJobOutcome, ManagedCloudRunJobRunRequest,
     ManagedCloudRunJobRunner,
 };
+use probe_core::managed_cloud_run_worker_pool::{
+    ManagedCloudRunWorkerPoolIdentity, ManagedCloudRunWorkerPoolRunRequest,
+    ManagedCloudRunWorkerPoolRunner, ManagedCloudRunWorkerPoolShutdown,
+};
 use probe_core::managed_runtime::ManagedRuntimeController;
 use probe_core::runtime::{
     PlainTextExecRequest, PlainTextResumeRequest, ProbeRuntime, current_working_dir,
@@ -86,6 +90,9 @@ use probe_optimizer::{
 };
 use probe_protocol::admin_chat::{AdminChatBridgeRequest, AdminChatBridgeSignedRequest};
 use probe_protocol::backend::{BackendKind, BackendProfile, PsionicMeshAttachInfo};
+use probe_protocol::managed_environment::{
+    ManagedEnvironmentCapabilities, ManagedEnvironmentResourceLimits,
+};
 use probe_protocol::runtime::{
     DetachedSessionEventPayload, DetachedSessionEventRecord, DetachedSessionEventTruth,
     DetachedSessionRecoveryState, DetachedSessionStatus, InspectDetachedSessionResponse,
@@ -186,6 +193,8 @@ struct ManagedArgs {
 enum ManagedCommands {
     #[command(name = "cloud-run-job")]
     CloudRunJob(ManagedCloudRunJobArgs),
+    #[command(name = "cloud-run-worker-pool")]
+    CloudRunWorkerPool(ManagedCloudRunWorkerPoolArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -198,6 +207,18 @@ struct ManagedCloudRunJobArgs {
 enum ManagedCloudRunJobCommands {
     #[command(name = "run-once")]
     RunOnce(ManagedCloudRunJobRunOnceArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct ManagedCloudRunWorkerPoolArgs {
+    #[command(subcommand)]
+    command: ManagedCloudRunWorkerPoolCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum ManagedCloudRunWorkerPoolCommands {
+    #[command(name = "run")]
+    Run(ManagedCloudRunWorkerPoolRunArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -615,6 +636,58 @@ struct ManagedCloudRunJobRunOnceArgs {
     cloud_run_task_attempt: Option<String>,
     #[arg(long)]
     logs_url: Option<String>,
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+    #[arg(long, default_value_t = false)]
+    pretty: bool,
+    #[command(flatten)]
+    server: ServerArgs,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct ManagedCloudRunWorkerPoolRunArgs {
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[arg(long)]
+    controller_base_url: Option<String>,
+    #[arg(long, default_value = "PROBE_MANAGED_CONTROLLER_BASE_URL")]
+    controller_base_url_env: String,
+    #[arg(long)]
+    bearer_token: Option<String>,
+    #[arg(long)]
+    bearer_token_file: Option<PathBuf>,
+    #[arg(long, default_value = "PROBE_MANAGED_WORKER_BEARER_TOKEN")]
+    bearer_token_env: String,
+    #[arg(long)]
+    worker_id: Option<String>,
+    #[arg(long)]
+    environment_class: Option<String>,
+    #[arg(long)]
+    image_ref: Option<String>,
+    #[arg(long)]
+    cpu_millicores: Option<u32>,
+    #[arg(long)]
+    memory_mib: Option<u64>,
+    #[arg(long)]
+    disk_mib: Option<u64>,
+    #[arg(long)]
+    region: Option<String>,
+    #[arg(long, default_value = OPENAI_CODEX_SUBSCRIPTION_PROFILE)]
+    profile: String,
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+    #[arg(long)]
+    artifact_dir: Option<PathBuf>,
+    #[arg(long)]
+    system: Option<String>,
+    #[arg(long, default_value_t = 1_000)]
+    poll_interval_ms: u64,
+    #[arg(long)]
+    max_iterations: Option<usize>,
+    #[arg(long, default_value_t = false)]
+    exit_on_idle: bool,
+    #[arg(long)]
+    shutdown_file: Option<PathBuf>,
     #[arg(long, default_value_t = false)]
     dry_run: bool,
     #[arg(long, default_value_t = false)]
@@ -1188,6 +1261,9 @@ fn run_managed(args: ManagedArgs) -> Result<(), String> {
         ManagedCommands::CloudRunJob(args) => match args.command {
             ManagedCloudRunJobCommands::RunOnce(args) => run_managed_cloud_run_job_once(args),
         },
+        ManagedCommands::CloudRunWorkerPool(args) => match args.command {
+            ManagedCloudRunWorkerPoolCommands::Run(args) => run_managed_cloud_run_worker_pool(args),
+        },
     }
 }
 
@@ -1285,6 +1361,122 @@ fn run_managed_cloud_run_job_once(args: ManagedCloudRunJobRunOnceArgs) -> Result
         println!(
             "{}",
             serde_json::to_string(outcome.state()).map_err(|error| error.to_string())?
+        );
+    }
+    Ok(())
+}
+
+fn run_managed_cloud_run_worker_pool(args: ManagedCloudRunWorkerPoolRunArgs) -> Result<(), String> {
+    let probe_home = resolve_probe_home_path(args.probe_home.clone())?;
+    let controller_base_url = args
+        .controller_base_url
+        .or_else(|| std::env::var(args.controller_base_url_env.as_str()).ok())
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "managed worker controller base URL is required via --controller-base-url or {}",
+                args.controller_base_url_env
+            )
+        })?;
+    let bearer_token = resolve_required_secret_value(
+        args.bearer_token.as_deref(),
+        args.bearer_token_file.as_ref(),
+        args.bearer_token_env.as_str(),
+        "managed worker bearer token",
+    )?;
+
+    let mut profile = named_profile(args.profile.as_str())?;
+    let server_guard = prepare_server(probe_home.as_path(), &args.server, &profile)?;
+    apply_server_summary_to_profile(&mut profile, &server_guard.operator_summary());
+
+    let runtime = ProbeRuntime::new(probe_home.as_path());
+    let managed_runtime =
+        ManagedRuntimeController::new(FilesystemSessionStore::new(probe_home.as_path()));
+    let runner =
+        ManagedCloudRunWorkerPoolRunner::new(runtime, managed_runtime).map_err(stringify_error)?;
+    let artifact_dir = args
+        .artifact_dir
+        .or_else(|| {
+            std::env::var("PROBE_MANAGED_WORKER_ARTIFACT_DIR")
+                .ok()
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| probe_home.join("managed/cloud-run-worker-pool/artifacts"));
+    let default_cwd = args
+        .cwd
+        .unwrap_or(current_working_dir().map_err(|error| error.to_string())?);
+    let mut identity = ManagedCloudRunWorkerPoolIdentity::from_env(args.worker_id);
+    if args.region.is_some() {
+        identity.region = args.region;
+    }
+
+    let environment_class = args
+        .environment_class
+        .or_else(|| std::env::var("PROBE_MANAGED_ENVIRONMENT_CLASS").ok())
+        .unwrap_or_else(|| String::from("gcp-coding-standard"));
+    let mut capabilities = ManagedEnvironmentCapabilities::gcp_cloud_run_worker_pool(
+        identity.worker_id.clone(),
+        environment_class,
+    );
+    capabilities.provider_region = identity.region.clone();
+    capabilities.backend_profiles.push(profile.name.clone());
+    capabilities.resource_limits = ManagedEnvironmentResourceLimits {
+        cpu_millicores: args.cpu_millicores,
+        memory_mib: args.memory_mib,
+        disk_mib: args.disk_mib,
+        gpu_count: None,
+    };
+    if let Some(image_ref) = args.image_ref {
+        capabilities.image_ref = Some(probe_protocol::managed_environment::ManagedEnvironmentRuntimeRef {
+            kind: probe_protocol::managed_environment::ManagedEnvironmentRuntimeRefKind::ContainerImage,
+            resource_ref: image_ref,
+            stable_digest: None,
+            label: Some(String::from("Probe managed Cloud Run Worker Pool image")),
+        });
+    }
+
+    let shutdown = args
+        .shutdown_file
+        .map(ManagedCloudRunWorkerPoolShutdown::file)
+        .unwrap_or_else(ManagedCloudRunWorkerPoolShutdown::none);
+    let report = runner
+        .run_loop(ManagedCloudRunWorkerPoolRunRequest {
+            controller_base_url,
+            bearer_token,
+            profile,
+            default_cwd,
+            artifact_dir,
+            identity,
+            capabilities,
+            system_prompt: args.system,
+            harness_profile: None,
+            tool_loop: None,
+            poll_interval_ms: args.poll_interval_ms,
+            max_iterations: args.max_iterations,
+            exit_on_idle: args.exit_on_idle,
+            dry_run: args.dry_run,
+            shutdown,
+        })
+        .map_err(stringify_error)?;
+
+    print_kv(
+        "managed_cloud_run_worker_pool_state",
+        format!("{:?}", report.state),
+    )?;
+    print_kv("worker_id", report.worker_id.as_str())?;
+    print_kv("claimed_assignments", report.claimed_assignments)?;
+    print_kv("completed_assignments", report.completed_assignments)?;
+    print_kv("failed_assignments", report.failed_assignments)?;
+    if args.pretty {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
         );
     }
     Ok(())
@@ -4988,11 +5180,11 @@ mod tests {
     };
 
     use super::{
-        BackendKind, Cli, Commands, HostedConnectArgs, ManagedCloudRunJobCommands, ManagedCommands,
-        ProbeClientTransportConfig, PsionicServerConfig, ServerArgs, ToolApprovalConfig, TuiArgs,
-        build_tui_runtime_config, operator_client_config, render_detached_summary_line,
-        render_turn_backend_receipt, render_turn_observability, resolve_server_config,
-        resolve_tui_profile,
+        BackendKind, Cli, Commands, HostedConnectArgs, ManagedCloudRunJobCommands,
+        ManagedCloudRunWorkerPoolCommands, ManagedCommands, ProbeClientTransportConfig,
+        PsionicServerConfig, ServerArgs, ToolApprovalConfig, TuiArgs, build_tui_runtime_config,
+        operator_client_config, render_detached_summary_line, render_turn_backend_receipt,
+        render_turn_observability, resolve_server_config, resolve_tui_profile,
     };
 
     #[test]
@@ -5192,8 +5384,49 @@ mod tests {
                         assert!(args.dry_run);
                     }
                 },
+                other => panic!("expected cloud run job command, got {other:?}"),
             },
             other => panic!("expected managed cloud run job command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn managed_cloud_run_worker_pool_command_parses() {
+        let cli = Cli::try_parse_from([
+            "probe",
+            "managed",
+            "cloud-run-worker-pool",
+            "run",
+            "--controller-base-url",
+            "https://openagents.test",
+            "--bearer-token-env",
+            "WORKER_TOKEN",
+            "--worker-id",
+            "worker-1",
+            "--max-iterations",
+            "1",
+            "--exit-on-idle",
+            "--dry-run",
+        ])
+        .expect("managed cloud run worker pool command should parse");
+        match cli.command {
+            Some(Commands::Managed(args)) => match args.command {
+                ManagedCommands::CloudRunWorkerPool(args) => match args.command {
+                    ManagedCloudRunWorkerPoolCommands::Run(args) => {
+                        assert_eq!(
+                            args.controller_base_url.as_deref(),
+                            Some("https://openagents.test")
+                        );
+                        assert_eq!(args.bearer_token_env, "WORKER_TOKEN");
+                        assert_eq!(args.worker_id.as_deref(), Some("worker-1"));
+                        assert_eq!(args.max_iterations, Some(1));
+                        assert!(args.exit_on_idle);
+                        assert!(args.dry_run);
+                    }
+                },
+                other => panic!("expected cloud run worker pool command, got {other:?}"),
+            },
+            other => panic!("expected managed cloud run worker pool command, got {other:?}"),
         }
     }
 

@@ -337,3 +337,8 @@ This folder holds technical planning docs for the Probe runtime.
     assignment tokens, Cloud Run execution identity, idempotent retries,
     callbacks, evidence/artifact refs, required secrets, service account scope,
     and image/job configuration
+- `97-managed-cloud-run-worker-pool.md`
+  - continuous pull-based Google Cloud Run Worker Pool runner, including
+    worker identity, heartbeats, claim/lease polling, graceful drain,
+    assignment terminal events, deployment revision metadata, required
+    environment variables, service account scope, and rollback behavior
