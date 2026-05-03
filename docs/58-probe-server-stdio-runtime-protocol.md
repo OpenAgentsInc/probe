@@ -58,6 +58,7 @@ The shared protocol currently ships these typed operations:
 - `cancel_queued_turn`
 - `list_pending_approvals`
 - `resolve_pending_approval`
+- `managed_runtime`
 - `shutdown`
 
 Session creation is explicit. A client can create a durable session first, then
@@ -188,6 +189,23 @@ Queued-turn lifecycle state intentionally lives beside that snapshot instead of
 inside it. `SessionSnapshot` remains the transcript plus delegated-child,
 transcript, and approval view, while `inspect_session_turns` is the typed queue
 and control view.
+
+## Managed Runtime API
+
+`managed_runtime` wraps the Laravel-facing managed-agent operations documented
+in `94-managed-runtime-api.md`. The nested request and response carry their own
+`op` field, so the outer server protocol stays:
+
+```json
+{"op":"managed_runtime","request":{"op":"start_session"}}
+```
+
+The managed runtime API creates durable Probe sessions, appends
+`probe.managed_runtime.v1` events under the session directory, replays those
+events by stable sequence number, and reconstructs status after a server or
+worker restart. It is the direct product-control surface for Laravel managed
+agents and avoids using browser chat or SSE bridge fixtures as the runtime
+contract.
 
 `spawn_child_session` is now part of the same contract. It lets a client create
 a child session with an explicit parent link, conservative same-repo guardrails,

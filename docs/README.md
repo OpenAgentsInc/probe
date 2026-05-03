@@ -322,3 +322,8 @@ This folder holds technical planning docs for the Probe runtime.
     work, with signed requests, response/error schemas, approval ids,
     idempotency rules, redaction posture, and JSON fixtures future Laravel
     adapter tests can mirror
+- `94-managed-runtime-api.md`
+  - Laravel-owned managed-agent runtime API over Probe's JSONL transport,
+    including durable start/resume/replay/control operations, append-only
+    managed runtime events, restart reconstruction, heartbeats, approvals,
+    transcript refs, artifact refs, and child-session hooks

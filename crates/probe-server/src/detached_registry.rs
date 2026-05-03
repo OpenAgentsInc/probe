@@ -1,6 +1,8 @@
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use probe_protocol::runtime::{
     DetachedSessionRecoveryState, DetachedSessionStatus, DetachedSessionSummary,
@@ -10,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 const DETACHED_REGISTRY_FILE: &str = "detached-sessions.json";
 const DETACHED_REGISTRY_SCHEMA_VERSION: u32 = 1;
+static REGISTRY_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub(crate) enum DetachedRegistryError {
@@ -43,18 +46,24 @@ impl From<serde_json::Error> for DetachedRegistryError {
 #[derive(Clone)]
 pub(crate) struct DetachedSessionRegistry {
     path: PathBuf,
+    state_lock: Arc<Mutex<()>>,
 }
 
 impl DetachedSessionRegistry {
     pub(crate) fn new(probe_home: &Path) -> Self {
         Self {
             path: probe_home.join("daemon").join(DETACHED_REGISTRY_FILE),
+            state_lock: Arc::new(Mutex::new(())),
         }
     }
 
     pub(crate) fn tracked_session_ids(&self) -> Result<Vec<SessionId>, DetachedRegistryError> {
+        let _state_lock = self
+            .state_lock
+            .lock()
+            .expect("detached registry mutex should not be poisoned");
         Ok(self
-            .read_state()?
+            .read_state_unlocked()?
             .sessions
             .into_iter()
             .map(|summary| summary.session_id)
@@ -62,7 +71,11 @@ impl DetachedSessionRegistry {
     }
 
     pub(crate) fn list(&self) -> Result<Vec<DetachedSessionSummary>, DetachedRegistryError> {
-        let mut sessions = self.read_state()?.sessions;
+        let _state_lock = self
+            .state_lock
+            .lock()
+            .expect("detached registry mutex should not be poisoned");
+        let mut sessions = self.read_state_unlocked()?.sessions;
         sessions.sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
         Ok(sessions)
     }
@@ -71,21 +84,29 @@ impl DetachedSessionRegistry {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<DetachedSessionSummary>, DetachedRegistryError> {
+        let _state_lock = self
+            .state_lock
+            .lock()
+            .expect("detached registry mutex should not be poisoned");
         Ok(self
-            .read_state()?
+            .read_state_unlocked()?
             .sessions
             .into_iter()
             .find(|summary| summary.session_id == *session_id))
     }
 
     pub(crate) fn remove(&self, session_id: &SessionId) -> Result<(), DetachedRegistryError> {
-        let mut state = self.read_state()?;
+        let _state_lock = self
+            .state_lock
+            .lock()
+            .expect("detached registry mutex should not be poisoned");
+        let mut state = self.read_state_unlocked()?;
         let previous_len = state.sessions.len();
         state
             .sessions
             .retain(|summary| summary.session_id != *session_id);
         if state.sessions.len() != previous_len {
-            self.write_state(&state)?;
+            self.write_state_unlocked(&state)?;
         }
         Ok(())
     }
@@ -94,20 +115,13 @@ impl DetachedSessionRegistry {
         &self,
         summary: DetachedSessionSummary,
     ) -> Result<(), DetachedRegistryError> {
-        let mut state = self.read_state()?;
-        if let Some(existing) = state
-            .sessions
-            .iter_mut()
-            .find(|existing| existing.session_id == summary.session_id)
-        {
-            *existing = summary;
-        } else {
-            state.sessions.push(summary);
-        }
-        state
-            .sessions
-            .sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
-        self.write_state(&state)
+        let _state_lock = self
+            .state_lock
+            .lock()
+            .expect("detached registry mutex should not be poisoned");
+        let mut state = self.read_state_unlocked()?;
+        upsert_summary(&mut state, summary);
+        self.write_state_unlocked(&state)
     }
 
     pub(crate) fn register_session(
@@ -115,7 +129,16 @@ impl DetachedSessionRegistry {
         metadata: &SessionMetadata,
         now_ms: TimestampMs,
     ) -> Result<DetachedSessionSummary, DetachedRegistryError> {
-        let existing = self.read(&metadata.id)?;
+        let _state_lock = self
+            .state_lock
+            .lock()
+            .expect("detached registry mutex should not be poisoned");
+        let mut state = self.read_state_unlocked()?;
+        let existing = state
+            .sessions
+            .iter()
+            .find(|summary| summary.session_id == metadata.id)
+            .cloned();
         let summary = DetachedSessionSummary {
             session_id: metadata.id.clone(),
             title: metadata.title.clone(),
@@ -164,11 +187,12 @@ impl DetachedSessionRegistry {
                 .as_ref()
                 .and_then(|value| value.recovery_note.clone()),
         };
-        self.upsert(summary.clone())?;
+        upsert_summary(&mut state, summary.clone());
+        self.write_state_unlocked(&state)?;
         Ok(summary)
     }
 
-    fn read_state(&self) -> Result<DetachedRegistryState, DetachedRegistryError> {
+    fn read_state_unlocked(&self) -> Result<DetachedRegistryState, DetachedRegistryError> {
         if !self.path.exists() {
             return Ok(DetachedRegistryState::default());
         }
@@ -176,18 +200,22 @@ impl DetachedSessionRegistry {
         Ok(serde_json::from_reader(file)?)
     }
 
-    fn write_state(&self, state: &DetachedRegistryState) -> Result<(), DetachedRegistryError> {
+    fn write_state_unlocked(
+        &self,
+        state: &DetachedRegistryState,
+    ) -> Result<(), DetachedRegistryError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
         let temp_path = self.path.with_file_name(format!(
-            "{}.tmp-{}-{}",
+            "{}.tmp-{}-{}-{}",
             self.path
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or("detached-sessions.json"),
             std::process::id(),
             now_ms(),
+            REGISTRY_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
         ));
         {
             let mut file = File::create(&temp_path)?;
@@ -197,6 +225,21 @@ impl DetachedSessionRegistry {
         fs::rename(temp_path, &self.path)?;
         Ok(())
     }
+}
+
+fn upsert_summary(state: &mut DetachedRegistryState, summary: DetachedSessionSummary) {
+    if let Some(existing) = state
+        .sessions
+        .iter_mut()
+        .find(|existing| existing.session_id == summary.session_id)
+    {
+        *existing = summary;
+    } else {
+        state.sessions.push(summary);
+    }
+    state
+        .sessions
+        .sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

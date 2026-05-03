@@ -2197,7 +2197,23 @@ mod tests {
 
     #[test]
     fn composer_submission_records_a_visible_shell_event() {
-        let mut app = AppShell::new_for_tests();
+        let environment = ProbeTestEnvironment::new();
+        let server = FakeOpenAiServer::from_json_responses(vec![json!({
+            "id": "chatcmpl_probe_tui_shell_event",
+            "model": "qwen3.5-2b-q8_0-registry.gguf",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Done."
+                },
+                "finish_reason": "stop"
+            }]
+        })]);
+        let mut app = AppShell::new_for_tests_with_chat_config(runtime_test_config(
+            &environment,
+            server.base_url(),
+        ));
 
         app.dispatch(UiEvent::ComposerInsert('h'));
         app.dispatch(UiEvent::ComposerInsert('i'));

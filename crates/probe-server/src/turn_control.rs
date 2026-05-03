@@ -1,5 +1,6 @@
 use std::fs::{self, File};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use probe_core::runtime::ProbeRuntime;
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 const TURN_CONTROL_FILE: &str = "turn-control.json";
 const TURN_CONTROL_SCHEMA_VERSION: u32 = 1;
+static TURN_CONTROL_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StoredTurnControlRecord {
@@ -350,9 +352,10 @@ fn write_json_pretty_atomic<T: Serialize>(
         .and_then(|value| value.to_str())
         .unwrap_or("turn-control.json");
     let temp_path = path.with_file_name(format!(
-        "{file_name}.tmp-{}-{}",
+        "{file_name}.tmp-{}-{}-{}",
         std::process::id(),
-        now_ms()
+        now_ms(),
+        TURN_CONTROL_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
     ));
     {
         let mut file = File::create(&temp_path)?;

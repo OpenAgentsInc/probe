@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::backend::BackendProfile;
+use crate::managed_runtime::{ManagedRuntimeRequestEnvelope, ManagedRuntimeResponseEnvelope};
 use crate::session::{
     PendingToolApproval, SessionBranchState, SessionChildSummary, SessionControllerAction,
     SessionControllerLease, SessionDeliveryState, SessionHarnessProfile, SessionHostedReceipts,
@@ -118,6 +119,8 @@ pub struct RuntimeCapabilities {
     pub supports_detached_watch_subscriptions: bool,
     #[serde(default)]
     pub supports_mesh_coordination_adjunct: bool,
+    #[serde(default)]
+    pub supports_managed_runtime_api: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -823,6 +826,7 @@ pub enum RuntimeRequest {
     CancelQueuedTurn(CancelQueuedTurnRequest),
     ListPendingApprovals(ListPendingApprovalsRequest),
     ResolvePendingApproval(ResolvePendingApprovalRequest),
+    ManagedRuntime(ManagedRuntimeRequestEnvelope),
     Shutdown,
 }
 
@@ -853,6 +857,7 @@ pub enum RuntimeResponse {
     CancelQueuedTurn(CancelQueuedTurnResponse),
     ListPendingApprovals(ListPendingApprovalsResponse),
     ResolvePendingApproval(ResolvePendingApprovalResponse),
+    ManagedRuntime(ManagedRuntimeResponseEnvelope),
     Shutdown(ShutdownResponse),
 }
 
@@ -1002,6 +1007,7 @@ mod tests {
             supports_detached_session_registry: false,
             supports_detached_watch_subscriptions: false,
             supports_mesh_coordination_adjunct: true,
+            supports_managed_runtime_api: true,
         };
 
         let response_json = serde_json::to_value(&response).expect("response should encode");

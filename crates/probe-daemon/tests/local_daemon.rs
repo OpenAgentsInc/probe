@@ -683,8 +683,8 @@ fn detached_watchdog_times_out_stalled_turn_and_cancels_follow_up_queue() {
         environment.probe_home(),
         DetachedTurnWatchdogPolicy {
             poll_interval_ms: 20,
-            stall_timeout_ms: 80,
-            execution_timeout_ms: 600,
+            stall_timeout_ms: 250,
+            execution_timeout_ms: 1_000,
         },
     );
     let mut client = daemon_client(environment.probe_home());
@@ -779,8 +779,8 @@ fn approval_paused_detached_turns_are_exempt_from_watchdog_timeout() {
         environment.probe_home(),
         DetachedTurnWatchdogPolicy {
             poll_interval_ms: 20,
-            stall_timeout_ms: 200,
-            execution_timeout_ms: 200,
+            stall_timeout_ms: 1_000,
+            execution_timeout_ms: 1_000,
         },
     );
     let mut client = daemon_client(environment.probe_home());
@@ -811,7 +811,7 @@ fn approval_paused_detached_turns_are_exempt_from_watchdog_timeout() {
         &session_id,
         DetachedSessionStatus::ApprovalPaused,
     );
-    thread::sleep(Duration::from_millis(350));
+    thread::sleep(Duration::from_millis(1_200));
 
     let mut inspect_client = daemon_client(environment.probe_home());
     let inspected = inspect_client
@@ -955,7 +955,17 @@ impl Drop for DaemonProcess {
 }
 
 fn daemon_client(probe_home: &Path) -> ProbeClient {
-    try_daemon_client(probe_home).expect("daemon client should connect")
+    let mut last_error = None;
+    for _ in 0..40 {
+        match try_daemon_client(probe_home) {
+            Ok(client) => return client,
+            Err(error) => {
+                last_error = Some(error);
+                thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+    panic!("daemon client should connect: {last_error:?}");
 }
 
 fn try_daemon_client(probe_home: &Path) -> Result<ProbeClient, probe_client::ProbeClientError> {

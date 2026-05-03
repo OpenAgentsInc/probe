@@ -11,6 +11,12 @@ use probe_protocol::backend::{
     BackendControlPlaneKind, BackendKind, BackendProfile, PrefixCacheMode, PsionicMeshAttachInfo,
     PsionicMeshTargetableModel, ServerAttachMode,
 };
+use probe_protocol::managed_runtime::{
+    ManagedRuntimeActor, ManagedRuntimeCorrelation, ManagedRuntimeRequest,
+    ManagedRuntimeRequestEnvelope, ManagedRuntimeResponse, ManagedRuntimeSessionStatus,
+    ManagedSessionControlRequest, ManagedSessionReplayRequest, ManagedSessionResumeRequest,
+    ManagedSessionStartRequest, PROBE_MANAGED_RUNTIME_SCHEMA_VERSION,
+};
 use probe_protocol::runtime::{
     ClientMessage, InspectSessionMeshCoordinationRequest, InspectSessionMeshPluginOffersRequest,
     InspectSessionTurnsResponse, PostSessionMeshCoordinationRequest,
@@ -163,6 +169,151 @@ fn stdio_protocol_can_initialize_start_resume_and_run_a_turn() {
     let requests = fake_backend.finish();
     assert_eq!(requests.len(), 1);
     assert!(requests[0].contains("hello"));
+}
+
+#[test]
+fn stdio_protocol_exposes_managed_runtime_start_replay_resume_and_cancel() {
+    let environment = ProbeTestEnvironment::new();
+    environment.seed_coding_workspace();
+    let mut harness = ProbeServerHarness::spawn(environment.probe_home());
+
+    let start = harness.request(
+        "req-managed-start",
+        RuntimeRequest::ManagedRuntime(ManagedRuntimeRequestEnvelope {
+            request: ManagedRuntimeRequest::StartSession(ManagedSessionStartRequest {
+                schema_version: String::from(PROBE_MANAGED_RUNTIME_SCHEMA_VERSION),
+                request_id: String::from("managed-start-1"),
+                idempotency_key: String::from("managed-session-1:start"),
+                actor: managed_actor(),
+                correlation: managed_correlation(),
+                title: Some(String::from("managed runtime e2e")),
+                cwd: environment.workspace().to_path_buf(),
+                profile: test_profile("http://127.0.0.1:1/v1"),
+                system_prompt: Some(String::from("You are Probe.")),
+                harness_profile: None,
+                workspace_state: None,
+                mounted_refs: Vec::new(),
+                initial_prompt: Some(String::from("inspect current state")),
+                tool_loop: None,
+                metadata: serde_json::Map::new(),
+            }),
+        }),
+    );
+    let RuntimeResponse::ManagedRuntime(envelope) = expect_ok_response(start) else {
+        panic!("expected managed start response");
+    };
+    let ManagedRuntimeResponse::StartSession(started) = envelope.response else {
+        panic!("expected managed start response");
+    };
+    assert_eq!(started.status, ManagedRuntimeSessionStatus::Running);
+    assert_eq!(started.events.len(), 3);
+    assert_eq!(started.events[0].sequence, 1);
+    assert_eq!(started.events[2].sequence, 3);
+    let session_ref = started.session_ref.clone();
+
+    let replay = harness.request(
+        "req-managed-replay",
+        RuntimeRequest::ManagedRuntime(ManagedRuntimeRequestEnvelope {
+            request: ManagedRuntimeRequest::ReplayEvents(ManagedSessionReplayRequest {
+                schema_version: String::from(PROBE_MANAGED_RUNTIME_SCHEMA_VERSION),
+                request_id: String::from("managed-replay-1"),
+                session_ref: session_ref.clone(),
+                after_sequence: 1,
+                limit: None,
+            }),
+        }),
+    );
+    let RuntimeResponse::ManagedRuntime(envelope) = expect_ok_response(replay) else {
+        panic!("expected managed replay response");
+    };
+    let ManagedRuntimeResponse::ReplayEvents(replayed) = envelope.response else {
+        panic!("expected managed replay response");
+    };
+    assert_eq!(replayed.events.len(), 2);
+    assert_eq!(replayed.newest_sequence, Some(3));
+
+    let resume = harness.request(
+        "req-managed-resume",
+        RuntimeRequest::ManagedRuntime(ManagedRuntimeRequestEnvelope {
+            request: ManagedRuntimeRequest::ResumeSession(ManagedSessionResumeRequest {
+                schema_version: String::from(PROBE_MANAGED_RUNTIME_SCHEMA_VERSION),
+                request_id: String::from("managed-resume-1"),
+                actor: managed_actor(),
+                session_ref: session_ref.clone(),
+                correlation: managed_correlation(),
+                after_sequence: 2,
+                include_snapshot: true,
+            }),
+        }),
+    );
+    let RuntimeResponse::ManagedRuntime(envelope) = expect_ok_response(resume) else {
+        panic!("expected managed resume response");
+    };
+    let ManagedRuntimeResponse::ResumeSession(resumed) = envelope.response else {
+        panic!("expected managed resume response");
+    };
+    assert_eq!(
+        resumed.projection.status,
+        ManagedRuntimeSessionStatus::Running
+    );
+    assert_eq!(resumed.replayed_events.len(), 1);
+    assert!(resumed.snapshot_ref.is_some());
+
+    let cancel = harness.request(
+        "req-managed-cancel",
+        RuntimeRequest::ManagedRuntime(ManagedRuntimeRequestEnvelope {
+            request: ManagedRuntimeRequest::CancelSession(ManagedSessionControlRequest {
+                schema_version: String::from(PROBE_MANAGED_RUNTIME_SCHEMA_VERSION),
+                request_id: String::from("managed-cancel-1"),
+                idempotency_key: String::from("managed-session-1:cancel"),
+                actor: managed_actor(),
+                session_ref: session_ref.clone(),
+                correlation: managed_correlation(),
+                reason: Some(String::from("admin cancelled")),
+                cancel_queued_turns: true,
+            }),
+        }),
+    );
+    let RuntimeResponse::ManagedRuntime(envelope) = expect_ok_response(cancel) else {
+        panic!("expected managed cancel response");
+    };
+    let ManagedRuntimeResponse::CancelSession(cancelled) = envelope.response else {
+        panic!("expected managed cancel response");
+    };
+    assert_eq!(
+        cancelled.projection.status,
+        ManagedRuntimeSessionStatus::Cancelled
+    );
+
+    harness.shutdown();
+
+    let mut restarted = ProbeServerHarness::spawn(environment.probe_home());
+    let resume_after_restart = restarted.request(
+        "req-managed-resume-restart",
+        RuntimeRequest::ManagedRuntime(ManagedRuntimeRequestEnvelope {
+            request: ManagedRuntimeRequest::ResumeSession(ManagedSessionResumeRequest {
+                schema_version: String::from(PROBE_MANAGED_RUNTIME_SCHEMA_VERSION),
+                request_id: String::from("managed-resume-restart-1"),
+                actor: managed_actor(),
+                session_ref,
+                correlation: managed_correlation(),
+                after_sequence: 3,
+                include_snapshot: false,
+            }),
+        }),
+    );
+    let RuntimeResponse::ManagedRuntime(envelope) = expect_ok_response(resume_after_restart) else {
+        panic!("expected managed resume after restart response");
+    };
+    let ManagedRuntimeResponse::ResumeSession(resumed) = envelope.response else {
+        panic!("expected managed resume after restart response");
+    };
+    assert_eq!(
+        resumed.projection.status,
+        ManagedRuntimeSessionStatus::Cancelled
+    );
+    assert_eq!(resumed.replayed_events.len(), 1);
+    restarted.shutdown();
 }
 
 #[test]
@@ -1724,6 +1875,24 @@ fn test_profile(base_url: &str) -> BackendProfile {
         prefix_cache_mode: PrefixCacheMode::BackendDefault,
         control_plane: None,
         psionic_mesh: None,
+    }
+}
+
+fn managed_actor() -> ManagedRuntimeActor {
+    ManagedRuntimeActor {
+        kind: String::from("laravel_admin"),
+        id: Some(String::from("user-1")),
+        label: Some(String::from("Admin")),
+    }
+}
+
+fn managed_correlation() -> ManagedRuntimeCorrelation {
+    ManagedRuntimeCorrelation {
+        request_id: Some(String::from("managed-request-1")),
+        workspace: Some(String::from("openagents.com")),
+        managed_agent_id: Some(String::from("agent-1")),
+        managed_session_id: Some(String::from("managed-session-1")),
+        ..ManagedRuntimeCorrelation::default()
     }
 }
 

@@ -50,6 +50,12 @@ Current shipped surface:
   bridge contract, including signed website/Pylon requests, runner responses,
   approval/control ids, fixture-backed event streams, error codes, idempotency,
   and Codex-as-a-Probe-backend examples
+- `probe_protocol::managed_runtime` plus `probe_core::managed_runtime` for the
+  Laravel-owned managed-agent runtime API: JSONL start/resume/replay/control
+  operations, append-only `probe.managed_runtime.v1` events, durable status
+  reconstruction after worker restart, heartbeats, approvals, transcript refs,
+  artifact refs, and child-session hooks without making Codex the product
+  contract
 - a Forge health-diagnosis worker lane inside `probe forge run-once|run-loop`
   that consumes Forge health snapshots/events/evidence refs and returns
   structured diagnosis artifacts without executing production recovery actions
@@ -124,6 +130,9 @@ The scheduled-agent bridge contract is documented in
 `docs/93-scheduled-agent-bridge-contract.md`. It is the contract
 `openagents.com` should target for recurring autonomous work; Codex remains an
 optional Probe-selected backend behind that boundary.
+The managed runtime API is documented in `docs/94-managed-runtime-api.md`. It
+is the direct Laravel-to-Probe control surface for managed-agent sessions:
+Laravel owns product persistence and Probe owns runtime session/event truth.
 The mesh profile is attach-only as well. Probe discovers live routed inventory
 from `GET /psionic/management/status`, picks the effective model from that
 inventory, prints the mesh role or fallback posture in operator output, and

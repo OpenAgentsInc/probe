@@ -1,5 +1,6 @@
 pub mod admin_chat;
 pub mod backend;
+pub mod managed_runtime;
 pub mod runtime;
 pub mod scheduled_bridge;
 pub mod session;
@@ -7,7 +8,7 @@ pub mod website_events;
 
 use std::path::{Path, PathBuf};
 
-pub const PROBE_PROTOCOL_VERSION: u32 = 18;
+pub const PROBE_PROTOCOL_VERSION: u32 = 19;
 pub const PROBE_RUNTIME_NAME: &str = "probe";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,7 +51,7 @@ mod tests {
     fn current_descriptor_is_stable() {
         let descriptor = ProtocolDescriptor::current();
         assert_eq!(descriptor.runtime_name, "probe");
-        assert_eq!(descriptor.version, 18);
+        assert_eq!(descriptor.version, 19);
     }
 
     #[test]
@@ -208,6 +209,74 @@ mod tests {
         assert_eq!(
             decoded.goal.phase_goal.as_deref(),
             Some("Inspect current failures and queue the next patch.")
+        );
+    }
+
+    #[test]
+    fn managed_runtime_event_contract_serializes_stable_shape() {
+        let event = super::managed_runtime::ManagedRuntimeEvent::new(
+            1,
+            1_777_777_777_000,
+            super::managed_runtime::ManagedRuntimeEventType::ApprovalRequested,
+            super::managed_runtime::ManagedRuntimeSessionStatus::ApprovalPaused,
+            super::managed_runtime::ManagedRuntimeActor {
+                kind: String::from("probe"),
+                id: Some(String::from("worker-1")),
+                label: None,
+            },
+            super::managed_runtime::ManagedRuntimeSource {
+                kind: String::from("tool"),
+                id: Some(String::from("call-1")),
+                label: Some(String::from("shell")),
+            },
+            super::managed_runtime::ManagedSessionRef {
+                probe_session_id: SessionId::new("sess-managed-1"),
+                managed_session_id: Some(String::from("managed-session-1")),
+                parent_probe_session_id: None,
+                child_probe_session_id: None,
+            },
+            super::managed_runtime::ManagedRuntimeCorrelation {
+                request_id: Some(String::from("request-1")),
+                managed_agent_id: Some(String::from("agent-1")),
+                managed_session_id: Some(String::from("managed-session-1")),
+                ..super::managed_runtime::ManagedRuntimeCorrelation::default()
+            },
+            super::managed_runtime::ManagedRuntimeEventPayload::Approval {
+                approval: super::managed_runtime::ManagedRuntimeApproval {
+                    approval_id: String::from("approval-1"),
+                    call_id: String::from("call-1"),
+                    tool_name: String::from("shell"),
+                    status: String::from("pending"),
+                    risk_class: Some(super::session::ToolRiskClass::Write),
+                    resolution: None,
+                    reason: Some(String::from("write tool requires admin approval")),
+                    pending_tool_approval: None,
+                },
+            },
+        )
+        .with_artifact_refs(vec![
+            super::managed_runtime::managed_runtime_transcript_ref(&SessionId::new(
+                "sess-managed-1",
+            )),
+        ]);
+
+        let encoded = serde_json::to_string(&event).expect("serialize managed event");
+        let decoded: super::managed_runtime::ManagedRuntimeEvent =
+            serde_json::from_str(encoded.as_str()).expect("deserialize managed event");
+
+        assert_eq!(
+            decoded.schema_version,
+            super::managed_runtime::PROBE_MANAGED_RUNTIME_SCHEMA_VERSION
+        );
+        assert_eq!(decoded.sequence, 1);
+        assert_eq!(
+            decoded.event_type,
+            super::managed_runtime::ManagedRuntimeEventType::ApprovalRequested
+        );
+        assert_eq!(decoded.session.probe_session_id.as_str(), "sess-managed-1");
+        assert_eq!(
+            decoded.artifact_refs[0].resource_ref,
+            "probe://sessions/sess-managed-1/transcript"
         );
     }
 }

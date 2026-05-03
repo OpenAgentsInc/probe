@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use probe_core::managed_runtime::{ManagedRuntimeController, ManagedRuntimeError};
 use probe_core::runtime::{
     PlainTextResumeRequest, ProbeRuntime, ResolvePendingToolApprovalOutcome,
     ResolvePendingToolApprovalRequest, RuntimeError, RuntimeEvent, RuntimeEventSink,
@@ -23,6 +24,9 @@ use probe_core::tools::{
     ToolLongContextConfig, ToolLoopConfig, ToolOracleConfig, ToolRegistry,
 };
 use probe_protocol::default_local_daemon_socket_path;
+use probe_protocol::managed_runtime::{
+    ManagedRuntimeRequest, ManagedRuntimeResponse, ManagedRuntimeResponseEnvelope,
+};
 use probe_protocol::runtime::{
     AttachSessionParticipantRequest, AttachSessionParticipantResponse, CancelQueuedTurnRequest,
     CancelQueuedTurnResponse, ClientMessage, DetachedSessionEventPayload,
@@ -1947,6 +1951,7 @@ impl ProbeServerConnection {
                                     .detached_event_hub
                                     .is_some(),
                                 supports_mesh_coordination_adjunct: true,
+                                supports_managed_runtime_api: true,
                             },
                         }),
                     )?;
@@ -2200,6 +2205,20 @@ impl ProbeServerConnection {
                 self.spawn_resolve_pending_approval(request_id, request)?;
                 Ok(RequestHandlingOutcome::Continue)
             }
+            RuntimeRequest::ManagedRuntime(envelope) => {
+                match self.managed_runtime(envelope.request) {
+                    Ok(response) => self.writer.send_response_ok(
+                        request_id.as_str(),
+                        RuntimeResponse::ManagedRuntime(ManagedRuntimeResponseEnvelope {
+                            response,
+                        }),
+                    )?,
+                    Err(error) => self
+                        .writer
+                        .send_response_error(request_id.as_str(), error)?,
+                }
+                Ok(RequestHandlingOutcome::Continue)
+            }
             RuntimeRequest::Shutdown => {
                 let active_turns = self.active_turn_count();
                 let accepted = active_turns == 0;
@@ -2399,6 +2418,52 @@ impl ProbeServerConnection {
         }
         approvals.sort_by(|left, right| right.requested_at_ms.cmp(&left.requested_at_ms));
         Ok(approvals)
+    }
+
+    fn managed_runtime(
+        &self,
+        request: ManagedRuntimeRequest,
+    ) -> Result<ManagedRuntimeResponse, RuntimeProtocolError> {
+        let controller = ManagedRuntimeController::new(self.core.runtime.session_store().clone());
+        match request {
+            ManagedRuntimeRequest::StartSession(request) => {
+                let response = controller
+                    .start_session(request)
+                    .map_err(managed_runtime_error_to_protocol)?;
+                self.core.ensure_detached_session_registered_by_id(
+                    &response.session_ref.probe_session_id,
+                )?;
+                Ok(ManagedRuntimeResponse::StartSession(response))
+            }
+            ManagedRuntimeRequest::ResumeSession(request) => controller
+                .resume_session(request)
+                .map(ManagedRuntimeResponse::ResumeSession)
+                .map_err(managed_runtime_error_to_protocol),
+            ManagedRuntimeRequest::InterruptSession(request) => controller
+                .interrupt_session(request)
+                .map(ManagedRuntimeResponse::InterruptSession)
+                .map_err(managed_runtime_error_to_protocol),
+            ManagedRuntimeRequest::CancelSession(request) => controller
+                .cancel_session(request)
+                .map(ManagedRuntimeResponse::CancelSession)
+                .map_err(managed_runtime_error_to_protocol),
+            ManagedRuntimeRequest::ResolveApproval(request) => controller
+                .resolve_approval(request)
+                .map(ManagedRuntimeResponse::ResolveApproval)
+                .map_err(managed_runtime_error_to_protocol),
+            ManagedRuntimeRequest::ReplayEvents(request) => controller
+                .replay_events(request)
+                .map(ManagedRuntimeResponse::ReplayEvents)
+                .map_err(managed_runtime_error_to_protocol),
+            ManagedRuntimeRequest::Heartbeat(request) => controller
+                .heartbeat(request)
+                .map(ManagedRuntimeResponse::Heartbeat)
+                .map_err(managed_runtime_error_to_protocol),
+            ManagedRuntimeRequest::RecordChildSession(request) => controller
+                .record_child_session(request)
+                .map(ManagedRuntimeResponse::RecordChildSession)
+                .map_err(managed_runtime_error_to_protocol),
+        }
     }
 
     fn inspect_session_turns(
@@ -5754,6 +5819,18 @@ fn session_store_error_to_protocol(error: SessionStoreError) -> RuntimeProtocolE
         SessionStoreError::Conflict(_) => protocol_error("session_conflict", error.to_string()),
         SessionStoreError::Io(_) | SessionStoreError::Json(_) => {
             protocol_error("session_store_error", error.to_string())
+        }
+    }
+}
+
+fn managed_runtime_error_to_protocol(error: ManagedRuntimeError) -> RuntimeProtocolError {
+    match error {
+        ManagedRuntimeError::SessionStore(error) => session_store_error_to_protocol(error),
+        ManagedRuntimeError::InvalidSchemaVersion { .. } => {
+            protocol_error("managed_runtime_invalid_schema", error.to_string())
+        }
+        ManagedRuntimeError::Io(_) | ManagedRuntimeError::Json(_) => {
+            protocol_error("managed_runtime_store_error", error.to_string())
         }
     }
 }
