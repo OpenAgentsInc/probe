@@ -42,6 +42,10 @@ Current shipped surface:
   stream, while the signed path verifies HMAC auth, rejects replayed nonces,
   creates a real Probe session/turn, and returns safe run/session correlation
   metadata for Laravel/Pylon adapters
+- `probe_protocol::website_events` plus `probe_core::website_events` for the
+  stable website-safe runtime event contract used by Laravel/Pylon adapters to
+  persist runs, approvals, child sessions, and artifact refs without parsing
+  Probe internals
 - a Forge health-diagnosis worker lane inside `probe forge run-once|run-loop`
   that consumes Forge health snapshots/events/evidence refs and returns
   structured diagnosis artifacts without executing production recovery actions
@@ -108,6 +112,10 @@ credential-free contract test surface, while the signed bridge path is the
 first non-fake internal transport for accepting website/Pylon work into Probe
 session persistence. Subscription and API-key execution should stay behind
 Probe-owned routing or a narrow internal broker.
+The website-safe event export contract is documented in
+`docs/92-website-safe-runtime-events.md` and should be the bridge surface for
+Laravel persistence, approvals, child sessions, transcript refs, summary
+artifacts, and verification-pack refs.
 The mesh profile is attach-only as well. Probe discovers live routed inventory
 from `GET /psionic/management/status`, picks the effective model from that
 inventory, prints the mesh role or fallback posture in operator output, and

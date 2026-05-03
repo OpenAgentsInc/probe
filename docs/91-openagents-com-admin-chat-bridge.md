@@ -154,7 +154,9 @@ diagnostics and JSON response include:
 - request, conversation, run, and optional schedule/wake correlation ids
 
 Provider streaming, approval mapping, and child-session event expansion are the
-next bridge layer and should build on this signed session/turn contract.
+next bridge layer and should build on this signed session/turn contract plus
+the website-safe event schema in
+`docs/92-website-safe-runtime-events.md`.
 
 ## Provider Modes
 

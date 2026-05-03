@@ -18,6 +18,7 @@ pub mod server_control;
 pub mod session_store;
 pub mod session_summary_artifacts;
 pub mod tools;
+pub mod website_events;
 
 use probe_protocol::ProtocolDescriptor;
 

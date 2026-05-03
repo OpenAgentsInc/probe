@@ -2,10 +2,11 @@ pub mod admin_chat;
 pub mod backend;
 pub mod runtime;
 pub mod session;
+pub mod website_events;
 
 use std::path::{Path, PathBuf};
 
-pub const PROBE_PROTOCOL_VERSION: u32 = 16;
+pub const PROBE_PROTOCOL_VERSION: u32 = 17;
 pub const PROBE_RUNTIME_NAME: &str = "probe";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,12 +36,17 @@ mod tests {
     use super::admin_chat::{AdminChatBridgeEvent, AdminChatBridgeRequest};
     use super::backend::{BackendKind, PrefixCacheMode, ServerAttachMode};
     use super::session::{SessionId, SessionState, TurnId};
+    use super::website_events::{
+        PROBE_WEBSITE_EVENT_SCHEMA_VERSION, ProbeWebsiteEvent, ProbeWebsiteEventActor,
+        ProbeWebsiteEventCorrelation, ProbeWebsiteEventSource, ProbeWebsiteEventType,
+    };
+    use serde_json::Map;
 
     #[test]
     fn current_descriptor_is_stable() {
         let descriptor = ProtocolDescriptor::current();
         assert_eq!(descriptor.runtime_name, "probe");
-        assert_eq!(descriptor.version, 16);
+        assert_eq!(descriptor.version, 17);
     }
 
     #[test]
@@ -84,5 +90,39 @@ mod tests {
         };
         let encoded = serde_json::to_string(&event).expect("serialize event");
         assert!(encoded.contains("\"type\":\"text_delta\""));
+    }
+
+    #[test]
+    fn website_event_contract_serializes_stable_shape() {
+        let event = ProbeWebsiteEvent::new(
+            7,
+            1_777_777_777_000,
+            ProbeWebsiteEventType::ApprovalRequested,
+            ProbeWebsiteEventActor {
+                kind: String::from("probe"),
+                id: Some(String::from("sess-1")),
+                label: None,
+            },
+            ProbeWebsiteEventSource {
+                kind: String::from("runtime"),
+                id: Some(String::from("turn-0")),
+                label: None,
+            },
+            ProbeWebsiteEventCorrelation {
+                request_id: Some(String::from("request-1")),
+                run_id: Some(String::from("run-1")),
+                probe_session_id: Some(String::from("sess-1")),
+                probe_turn_id: Some(String::from("turn-0")),
+                ..ProbeWebsiteEventCorrelation::default()
+            },
+            Map::new(),
+        );
+
+        let encoded = serde_json::to_string(&event).expect("serialize website event");
+
+        assert!(encoded.contains(PROBE_WEBSITE_EVENT_SCHEMA_VERSION));
+        assert!(encoded.contains("\"eventType\":\"approval_requested\""));
+        assert!(encoded.contains("\"sequence\":7"));
+        assert!(encoded.contains("\"probeSessionId\":\"sess-1\""));
     }
 }
