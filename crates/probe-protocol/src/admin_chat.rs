@@ -21,6 +21,23 @@ pub struct AdminChatBridgeRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AdminChatBridgeSignedRequest {
+    pub auth: AdminChatBridgeAuth,
+    pub request: AdminChatBridgeRequest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminChatBridgeAuth {
+    pub key_id: String,
+    pub issued_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub nonce: String,
+    pub signature: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AdminChatBridgeMessage {
     pub role: String,
     pub content: String,
@@ -77,11 +94,41 @@ pub struct AdminChatUsageSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct AdminChatRedactedDiagnostics {
     pub probe_session_id: String,
+    #[serde(default)]
+    pub probe_turn_id: Option<String>,
     pub transcript_ref: String,
     #[serde(default)]
     pub request_id: Option<String>,
     #[serde(default)]
     pub response_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminChatBridgeCorrelationMetadata {
+    pub request_id: String,
+    pub workspace: String,
+    pub web_user_id: u64,
+    pub conversation_id: String,
+    pub run_id: String,
+    #[serde(default)]
+    pub schedule_id: Option<String>,
+    #[serde(default)]
+    pub wake_id: Option<String>,
+    #[serde(default)]
+    pub scheduled_run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminChatBridgeAcceptedResponse {
+    pub request_id: String,
+    pub run_id: String,
+    pub probe_session_id: String,
+    pub probe_turn_id: String,
+    pub provider: AdminChatProviderMetadata,
+    pub transcript_ref: String,
+    pub correlation: AdminChatBridgeCorrelationMetadata,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

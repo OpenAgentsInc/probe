@@ -5,8 +5,10 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use insta::{assert_json_snapshot, assert_snapshot};
 use predicates::prelude::*;
+use probe_core::admin_chat_bridge::sign_admin_chat_bridge_request;
 use probe_core::server_control::{PsionicServerConfig, PsionicServerMode};
 use probe_openai_auth::{OpenAiCodexAuthRecord, OpenAiCodexAuthStore};
+use probe_protocol::admin_chat::AdminChatBridgeRequest;
 use probe_protocol::backend::BackendKind;
 use probe_test_support::{
     FakeOpenAiServer, ProbeTestEnvironment, configure_snapshot_root,
@@ -152,6 +154,118 @@ fn admin_chat_bridge_fake_command_emits_redacted_sse_contract() {
         .stdout(predicate::str::contains("data: [DONE]"))
         .stdout(predicate::str::contains("sk-should-not-leak").not())
         .stdout(predicate::str::contains("refresh-should-not-leak").not());
+}
+
+#[test]
+fn admin_chat_bridge_signed_command_accepts_valid_request() {
+    let environment = ProbeTestEnvironment::new();
+    let request_path = environment
+        .temp_root()
+        .join("signed-admin-chat-request.json");
+    let mut request = AdminChatBridgeRequest::fake(
+        "request-web-signed-1",
+        123,
+        "admin@example.com",
+        "Get acquainted with scheduled-agent state.",
+    );
+    request.conversation_id = String::from("conversation-signed-1");
+    request.run_id = String::from("run-signed-1");
+    request.provider.mode = String::from("service_api_key");
+    request.metadata.insert(
+        String::from("backendProfile"),
+        json!("openai-codex-subscription"),
+    );
+    request
+        .metadata
+        .insert(String::from("api_key"), json!("sk-should-not-leak"));
+    let signed = sign_admin_chat_bridge_request(
+        request,
+        "openagents.com",
+        "0123456789abcdef0123456789abcdef",
+        1_000,
+        4_100_000_000_000,
+        "nonce-cli-1",
+    )
+    .expect("sign bridge request");
+    fs::write(
+        request_path.as_path(),
+        serde_json::to_string_pretty(&signed).expect("encode signed request"),
+    )
+    .expect("write signed request");
+
+    probe_cli_command()
+        .env(
+            "PROBE_ADMIN_CHAT_BRIDGE_SECRET",
+            "0123456789abcdef0123456789abcdef",
+        )
+        .args([
+            "admin-chat-bridge",
+            "signed",
+            "--request",
+            request_path.to_str().expect("request path utf-8"),
+            "--probe-home",
+            environment.probe_home().to_str().expect("probe home utf-8"),
+            "--cwd",
+            environment.temp_root().to_str().expect("cwd utf-8"),
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"probeSessionId\""))
+        .stdout(predicate::str::contains("\"probeTurnId\": \"turn-0\""))
+        .stdout(predicate::str::contains(
+            "\"backendProfile\": \"openai-codex-subscription\"",
+        ))
+        .stdout(predicate::str::contains("\"status\": \"accepted\""))
+        .stdout(predicate::str::contains("sk-should-not-leak").not());
+}
+
+#[test]
+fn admin_chat_bridge_signed_command_rejects_bad_signature() {
+    let environment = ProbeTestEnvironment::new();
+    let request_path = environment
+        .temp_root()
+        .join("signed-admin-chat-request-bad.json");
+    let mut signed = sign_admin_chat_bridge_request(
+        AdminChatBridgeRequest::fake(
+            "request-web-signed-2",
+            123,
+            "admin@example.com",
+            "Get acquainted with scheduled-agent state.",
+        ),
+        "openagents.com",
+        "0123456789abcdef0123456789abcdef",
+        1_000,
+        4_100_000_000_000,
+        "nonce-cli-2",
+    )
+    .expect("sign bridge request");
+    signed.request.prompt = String::from("tampered prompt");
+    fs::write(
+        request_path.as_path(),
+        serde_json::to_string_pretty(&signed).expect("encode signed request"),
+    )
+    .expect("write signed request");
+
+    probe_cli_command()
+        .env(
+            "PROBE_ADMIN_CHAT_BRIDGE_SECRET",
+            "0123456789abcdef0123456789abcdef",
+        )
+        .args([
+            "admin-chat-bridge",
+            "signed",
+            "--request",
+            request_path.to_str().expect("request path utf-8"),
+            "--probe-home",
+            environment.probe_home().to_str().expect("probe home utf-8"),
+            "--cwd",
+            environment.temp_root().to_str().expect("cwd utf-8"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("signature verification failed"));
 }
 
 #[test]

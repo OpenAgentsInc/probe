@@ -32,6 +32,7 @@ forge-rlm-core = { git = "https://github.com/OpenAgentsInc/forge.git", rev = "62
 forge-runtime-protocol = { git = "https://github.com/OpenAgentsInc/forge.git", rev = "624937a080c2e24362bbb0b4caa28c4000977bcf", package = "forge-runtime-protocol" }
 forge-signatures = { git = "https://github.com/OpenAgentsInc/forge.git", rev = "624937a080c2e24362bbb0b4caa28c4000977bcf", package = "forge-signatures" }
 hex = "0.4"
+hmac = "0.12"
 insta = { version = "1.43", features = ["json"] }
 predicates = "3.1"
 pulldown-cmark = "0.10"

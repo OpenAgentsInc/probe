@@ -13,13 +13,16 @@ use acceptance::{
     default_self_test_report_path, run_acceptance_comparison, run_acceptance_harness,
     run_acceptance_matrix, run_self_test_harness,
 };
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use probe_client::{
     HostedGcpIapTransportConfig, INTERNAL_DAEMON_SUBCOMMAND, INTERNAL_SERVER_SUBCOMMAND,
     ProbeClient, ProbeClientConfig, ProbeClientError, ProbeClientTransportConfig,
     is_missing_local_daemon_error,
 };
-use probe_core::admin_chat_bridge::{fake_admin_chat_bridge_stream, render_admin_chat_sse};
+use probe_core::admin_chat_bridge::{
+    SignedAdminChatBridgeOptions, fake_admin_chat_bridge_stream, render_admin_chat_sse,
+    run_signed_admin_chat_bridge,
+};
 use probe_core::backend_profiles::{
     OPENAI_CODEX_SUBSCRIPTION_PROFILE, PSIONIC_APPLE_FM_BRIDGE_PROFILE,
     PSIONIC_QWEN35_2B_Q8_LONG_CONTEXT_PROFILE, PSIONIC_QWEN35_2B_Q8_ORACLE_PROFILE,
@@ -75,7 +78,7 @@ use probe_optimizer::{
     optimize_decision_modules, optimize_harness_profiles, optimize_skill_packs,
     skill_pack_ledger_entries_from_bundle,
 };
-use probe_protocol::admin_chat::AdminChatBridgeRequest;
+use probe_protocol::admin_chat::{AdminChatBridgeRequest, AdminChatBridgeSignedRequest};
 use probe_protocol::backend::{BackendKind, BackendProfile, PsionicMeshAttachInfo};
 use probe_protocol::runtime::{
     DetachedSessionEventPayload, DetachedSessionEventRecord, DetachedSessionEventTruth,
@@ -711,6 +714,8 @@ struct AdminChatBridgeArgs {
 enum AdminChatBridgeCommands {
     #[command(about = "Emit a fake openagents.com admin chat bridge SSE stream")]
     Fake(AdminChatBridgeFakeArgs),
+    #[command(about = "Accept a signed openagents.com admin chat bridge request")]
+    Signed(AdminChatBridgeSignedArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -725,6 +730,26 @@ struct AdminChatBridgeFakeArgs {
     web_user_id: u64,
     #[arg(long, default_value = "admin@example.com")]
     web_user_email: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct AdminChatBridgeSignedArgs {
+    #[arg(long)]
+    request: PathBuf,
+    #[arg(long)]
+    probe_home: Option<PathBuf>,
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+    #[arg(long, default_value = "PROBE_ADMIN_CHAT_BRIDGE_SECRET")]
+    secret_env: String,
+    #[arg(long, value_enum, default_value_t = AdminChatBridgeOutputFormat::Sse)]
+    format: AdminChatBridgeOutputFormat,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AdminChatBridgeOutputFormat {
+    Sse,
+    Json,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1656,6 +1681,7 @@ fn run_tui_smoke(config: TuiLaunchConfig, args: &TuiArgs) -> Result<(), String> 
 fn run_admin_chat_bridge(args: AdminChatBridgeArgs) -> Result<(), String> {
     match args.command {
         AdminChatBridgeCommands::Fake(args) => run_admin_chat_bridge_fake(args),
+        AdminChatBridgeCommands::Signed(args) => run_admin_chat_bridge_signed(args),
     }
 }
 
@@ -1685,6 +1711,52 @@ fn run_admin_chat_bridge_fake(args: AdminChatBridgeFakeArgs) -> Result<(), Strin
         .map_err(|error| format!("failed to render admin chat bridge SSE: {error}"))?;
 
     print!("{rendered}");
+
+    Ok(())
+}
+
+fn run_admin_chat_bridge_signed(args: AdminChatBridgeSignedArgs) -> Result<(), String> {
+    let contents = fs::read_to_string(args.request.as_path()).map_err(|error| {
+        format!(
+            "failed to read signed admin chat bridge request at {}: {error}",
+            args.request.display()
+        )
+    })?;
+    let signed =
+        serde_json::from_str::<AdminChatBridgeSignedRequest>(&contents).map_err(|error| {
+            format!("failed to parse signed admin chat bridge request JSON: {error}")
+        })?;
+    let secret = std::env::var(args.secret_env.as_str()).map_err(|_| {
+        format!(
+            "missing admin chat bridge shared secret env {}",
+            args.secret_env
+        )
+    })?;
+    let probe_home = args
+        .probe_home
+        .unwrap_or(default_probe_home().map_err(|error| error.to_string())?);
+    let cwd = args
+        .cwd
+        .unwrap_or(current_working_dir().map_err(|error| error.to_string())?);
+    let options = SignedAdminChatBridgeOptions::new(probe_home, cwd, secret);
+    let outcome = run_signed_admin_chat_bridge(&signed, &options)
+        .map_err(|error| format!("admin chat bridge signed request rejected: {error}"))?;
+
+    match args.format {
+        AdminChatBridgeOutputFormat::Sse => {
+            let rendered = render_admin_chat_sse(&outcome.stream.events)
+                .map_err(|error| format!("failed to render admin chat bridge SSE: {error}"))?;
+            print!("{rendered}");
+        }
+        AdminChatBridgeOutputFormat::Json => {
+            let rendered = serde_json::to_string_pretty(&json!({
+                "accepted": outcome.accepted,
+                "events": outcome.stream.events,
+            }))
+            .map_err(|error| format!("failed to render admin chat bridge JSON: {error}"))?;
+            println!("{rendered}");
+        }
+    }
 
     Ok(())
 }

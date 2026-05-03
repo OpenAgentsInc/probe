@@ -11,6 +11,7 @@ forge-rlm-core.workspace = true
 forge-runtime-protocol.workspace = true
 forge-signatures.workspace = true
 hex.workspace = true
+hmac.workspace = true
 probe-protocol.workspace = true
 probe-provider-apple-fm.workspace = true
 probe-provider-openai.workspace = true

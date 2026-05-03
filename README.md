@@ -37,9 +37,11 @@ Current shipped surface:
   evidence report covering worker attach state, assignment-loop contracts,
   Codex route status, hosted environment redaction, sync gates, child-session
   status, and summary artifacts
-- `probe admin-chat-bridge fake` for the first internal `openagents.com`
-  admin-chat bridge contract smoke path, emitting a redacted fake SSE stream
-  that Laravel can map onto website runs and run events
+- `probe admin-chat-bridge fake|signed` for the internal `openagents.com`
+  admin-chat bridge contract: the fake path emits a redacted fixture SSE
+  stream, while the signed path verifies HMAC auth, rejects replayed nonces,
+  creates a real Probe session/turn, and returns safe run/session correlation
+  metadata for Laravel/Pylon adapters
 - a Forge health-diagnosis worker lane inside `probe forge run-once|run-loop`
   that consumes Forge health snapshots/events/evidence refs and returns
   structured diagnosis artifacts without executing production recovery actions
@@ -102,8 +104,10 @@ Forge workers should receive the same key from their worker environment and set
 not need the model-provider key.
 The `openagents.com` admin-chat bridge contract is documented in
 `docs/91-openagents-com-admin-chat-bridge.md`; the fake bridge path is the
-credential-free contract test surface, while subscription and API-key execution
-should stay behind Probe-owned routing or a narrow internal broker.
+credential-free contract test surface, while the signed bridge path is the
+first non-fake internal transport for accepting website/Pylon work into Probe
+session persistence. Subscription and API-key execution should stay behind
+Probe-owned routing or a narrow internal broker.
 The mesh profile is attach-only as well. Probe discovers live routed inventory
 from `GET /psionic/management/status`, picks the effective model from that
 inventory, prints the mesh role or fallback posture in operator output, and

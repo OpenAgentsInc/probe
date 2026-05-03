@@ -48,6 +48,67 @@ The canonical Rust type is
 }
 ```
 
+The non-fake internal transport wraps that request in
+`probe_protocol::admin_chat::AdminChatBridgeSignedRequest`:
+
+```json
+{
+  "auth": {
+    "keyId": "openagents.com",
+    "issuedAtMs": 1777777777000,
+    "expiresAtMs": 1777777837000,
+    "nonce": "uuid-or-random-128-bit-value",
+    "signature": "sha256=hex-hmac-sha256"
+  },
+  "request": {
+    "requestId": "uuid",
+    "workspace": "openagents.com",
+    "webUserId": 123,
+    "webUserEmail": "admin@example.com",
+    "conversationId": "conversation-id",
+    "runId": "run-id",
+    "prompt": "user text",
+    "messages": [],
+    "provider": {
+      "key": "openai",
+      "mode": "service_api_key",
+      "accountRef": "opaque-provider-account-ref",
+      "label": "service fallback"
+    },
+    "toolPolicy": {
+      "mode": "admin_chat",
+      "allowedTools": [],
+      "approvalRequired": true
+    },
+    "metadata": {
+      "backendProfile": "openai-codex-subscription",
+      "scheduleId": "optional-schedule-id",
+      "wakeId": "optional-wake-id",
+      "scheduledRunId": "optional-scheduled-run-id"
+    }
+  }
+}
+```
+
+The signature payload is stable text:
+
+```text
+probe-admin-chat-bridge-v1
+<keyId>
+<issuedAtMs>
+<expiresAtMs>
+<nonce>
+<canonical request JSON>
+```
+
+Probe verifies `signature` as HMAC-SHA256 with the shared secret from
+`PROBE_ADMIN_CHAT_BRIDGE_SECRET` or a caller-selected secret env var. The secret
+must be at least 32 bytes. Probe rejects expired requests, requests issued too
+far in the future, invalid signatures, empty required fields, `fake` provider
+mode on the signed path, unknown backend profiles, and replayed nonces. Accepted
+nonces are persisted under `PROBE_HOME/admin-chat-bridge/nonces.json` until
+their expiry time.
+
 The initial admin-chat policy is default-deny: no filesystem, shell, network,
 or repository tools are enabled unless Laravel sends an explicit policy and a
 later bridge implementation maps that policy into Probe's approval model.
@@ -80,6 +141,20 @@ Laravel can map these directly onto website persistence:
   run events when tools are later enabled
 - `usage_limits_snapshot` -> usage/limit metadata
 - `run_completed` / `run_failed` -> terminal website run state
+
+The signed non-fake path currently accepts the request into a real Probe session
+and appends the first Probe turn with the web prompt plus a bridge-acceptance
+note. Its `run_completed` status is `accepted`, not model-completed. The event
+diagnostics and JSON response include:
+
+- `probeSessionId`
+- `probeTurnId`
+- selected backend family/profile/model
+- transcript ref
+- request, conversation, run, and optional schedule/wake correlation ids
+
+Provider streaming, approval mapping, and child-session event expansion are the
+next bridge layer and should build on this signed session/turn contract.
 
 ## Provider Modes
 
@@ -126,9 +201,36 @@ cargo run -p probe-cli -- admin-chat-bridge fake \
 The fake path deliberately does not echo request metadata, so secret-shaped
 metadata in the request cannot appear in the stream.
 
+## Signed Local Transport
+
+Accept a signed non-fake request and emit SSE:
+
+```bash
+PROBE_ADMIN_CHAT_BRIDGE_SECRET='32-byte-minimum-shared-secret-value' \
+  cargo run -p probe-cli -- admin-chat-bridge signed \
+    --request /path/to/signed-admin-chat-request.json \
+    --probe-home ~/.probe \
+    --cwd /path/to/workspace
+```
+
+For adapter tests, emit a single JSON document containing the accepted response
+and event array:
+
+```bash
+PROBE_ADMIN_CHAT_BRIDGE_SECRET='32-byte-minimum-shared-secret-value' \
+  cargo run -p probe-cli -- admin-chat-bridge signed \
+    --request /path/to/signed-admin-chat-request.json \
+    --format json
+```
+
+Use `--secret-env OPENAGENTS_PROBE_BRIDGE_SECRET` if Laravel or Pylon injects
+the shared secret under a different non-secret env-var name. Do not pass the raw
+secret as a command-line argument and do not log it.
+
 ## Next Implementation Step
 
-The next non-fake bridge should be a signed internal transport owned by Probe's
-server/daemon layer. It should expose this same protocol over a private local
-socket, Tailnet-only HTTP, or Forge-managed worker attachment, then map provider
-mode to the existing Probe backend profiles and Codex subscription routing.
+The next bridge layer should execute or attach the accepted session through the
+Probe runtime, stream runtime deltas, expose approval ids, and surface
+child-session/artifact refs over the same signed transport. A later server or
+daemon endpoint can reuse this envelope over a private local socket,
+Tailnet-only HTTP, or Forge-managed worker attachment.
