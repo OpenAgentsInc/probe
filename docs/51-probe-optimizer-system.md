@@ -7,6 +7,11 @@ It explains the subsystem that turns retained Probe runtime artifacts into
 bounded optimize-anything jobs, promotion decisions, and operator-managed
 adoption state.
 
+This document is canonical for Probe only. Blueprint owns the analogous
+program substrate for Autopilot business behavior: Program Types, Program
+Signatures, Module Versions, Program Runs, Optimizer Runs, RLM execution
+strategy, eval gates, promotion records, evidence, and receipts.
+
 Related narrower docs:
 
 - `docs/10-acceptance-harness.md`
@@ -46,6 +51,12 @@ Psionic owns the reusable optimization substrate:
 - frontier state
 - evaluation cache
 - run receipts
+
+Blueprint owns the business-facing catalog and promotion path when optimized
+behavior affects Autopilot CRM, CEO, Voice, Memory, legal, source-system, or
+approval workflows. Probe optimizer artifacts can be evidence or candidate
+inputs for Blueprint, but they are not sufficient to change Autopilot behavior
+without a Blueprint Module Version and release gate.
 
 The current landing point is offline and bounded. Probe optimizes narrow
 surfaces above the runtime rather than trying to "learn" the runtime itself.

@@ -88,6 +88,14 @@ Current shipped surface:
   `probe forge rlm execute|proof-openagents-4368` for large-corpus issue-thread
   analysis with chunk manifests, trace artifacts, and grounded outputs
 
+Blueprint boundary for Autopilot: Probe may execute coding-agent work and
+Forge-owned RLM assignments, but it does not own Autopilot business behavior
+authority. For Autopilot CRM, CEO, Voice, Memory, and legal workflows,
+Blueprint owns Program Types, Module Versions, Program Runs, Optimizer Runs,
+RLM execution-strategy policy, eval gates, Action Submissions, evidence, and
+receipts. Probe should emit runtime traces and artifacts that can be referenced
+from Blueprint, not create a parallel business program catalog.
+
 ## Backends
 
 Probe currently ships four backend profiles across three backend families:

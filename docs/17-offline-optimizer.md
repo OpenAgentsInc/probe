@@ -12,6 +12,12 @@ This is the first honest GEPA-style landing zone in the repo:
 - baseline-versus-candidate
 - promotion-gated
 
+Scope boundary: this optimizer lane tunes Probe-owned coding-runtime surfaces.
+It is not the promotion authority for Autopilot business behavior. Blueprint
+owns Program Types, Module Versions, Program Runs, Optimizer Runs, RLM
+execution-strategy policy, eval gates, and promotion records for CRM, CEO,
+Voice, Memory, legal, source-system, and approval workflows.
+
 ## Current CLI Paths
 
 Module candidates over decision datasets:
@@ -134,6 +140,10 @@ The optimizer lane does not optimize:
 Those remain runtime concerns.
 
 The optimizer lane only compares bounded surfaces above the runtime.
+
+If a candidate is intended to affect Autopilot business behavior, it must be
+registered as or wrapped by a Blueprint Module Version and promoted through
+Blueprint release gates before any product surface treats it as live behavior.
 
 ## Why This Matters
 

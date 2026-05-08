@@ -8,6 +8,12 @@ Probe now has a narrow Rust-native decision-module layer in
 The point is to add DSPy-style structure above the runtime without rebuilding
 Probe around a second orchestration system.
 
+For Autopilot business workflows, this layer is not the canonical program
+authority. Blueprint owns Program Types, Program Signatures, Module Versions,
+Program Runs, Optimizer Runs, RLM execution-strategy policy, evals, promotion
+gates, evidence, and receipts. Probe decision modules remain coding-runtime
+helpers and can provide traces or artifacts that Blueprint references.
+
 ## Boundary
 
 The decision-module crate is explicitly subordinate to:
@@ -151,3 +157,7 @@ into pseudo-DSPy artifacts.
 The runtime stays the authority.
 
 The decision modules sit above it and become the tunable comparison surface.
+
+When Probe is used underneath Autopilot, this tunable surface must compile to
+or be wrapped by Blueprint Program contracts before it influences CRM, CEO,
+Voice, Memory, legal, source-system, or approval behavior.

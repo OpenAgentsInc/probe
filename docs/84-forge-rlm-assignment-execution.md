@@ -3,6 +3,10 @@
 Probe executes Forge-owned RLM work. It does not own the canonical policy or
 promotion model.
 
+For Autopilot business workflows, Blueprint owns the canonical RLM execution
+strategy and Program Run records. This document covers Forge issue-thread RLM
+assignments only.
+
 ## Boundary
 
 - Forge owns:
@@ -10,6 +14,13 @@ promotion model.
   - policy bundle refs
   - runtime-assignment truth
   - issue-thread evaluation rules and scoring
+- Blueprint owns, for Autopilot business work:
+  - Program Types
+  - Module Versions
+  - Program Runs
+  - Optimizer Runs
+  - RLM execution-strategy policy
+  - release gates, evidence, and receipts
 - Probe owns:
   - execution of the assigned work
   - corpus materialization
