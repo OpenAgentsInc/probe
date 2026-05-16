@@ -56,6 +56,11 @@ Current shipped surface:
   reconstruction after worker restart, heartbeats, approvals, transcript refs,
   artifact refs, and child-session hooks without making Codex the product
   contract
+- `docs/101-openagents-coder-runtime-adapter.md` for the OpenAgents Coder
+  compatibility note: hosted Probe remains one Coder runtime adapter behind
+  Autopilot-owned jobs, events, approvals, evidence, and receipts, while raw
+  Probe sessions, auth material, local paths, and unbounded outputs stay
+  runtime-local
 - `probe_protocol::managed_environment` plus `probe_core::managed_environment`
   for the provider-neutral managed environment contract: Pylon, Google Cloud,
   private GCE, local, and future Daytona worker advertisements, Laravel
@@ -162,6 +167,10 @@ optional Probe-selected backend behind that boundary.
 The managed runtime API is documented in `docs/94-managed-runtime-api.md`. It
 is the direct Laravel-to-Probe control surface for managed-agent sessions:
 Laravel owns product persistence and Probe owns runtime session/event truth.
+The OpenAgents Coder compatibility note is documented in
+`docs/101-openagents-coder-runtime-adapter.md`. It explains how Autopilot can
+map hosted Probe managed-runtime requests and website-safe events into
+`coder.event.v1` without receiving raw Probe internals.
 The managed environment contract is documented in
 `docs/95-managed-environment-contract.md`. It is the provider-neutral worker
 capability and constraint layer Laravel should use before dispatching managed

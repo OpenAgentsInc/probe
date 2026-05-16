@@ -355,3 +355,8 @@ This folder holds technical planning docs for the Probe runtime.
   - one-level managed child-session delegation, parent-scoped child drilldown,
     child summaries and traces for API/UI, and parent-interrupt propagation to
     queued or approval-paused child work
+- `101-openagents-coder-runtime-adapter.md`
+  - OpenAgents Coder compatibility note for hosted Probe as one Autopilot Coder
+    runtime adapter, including managed-runtime operations, website-safe event
+    mapping, auth boundaries, hosted worker identity, child-session constraints,
+    and the fixture-backed minimal smoke path
