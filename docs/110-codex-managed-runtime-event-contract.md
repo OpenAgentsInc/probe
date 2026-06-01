@@ -211,4 +211,7 @@ The protocol tests include:
 - reported model usage, explicit unavailable usage, and resource usage receipt
   digest joins;
 - signature package evidence with source signature ids and fixture refs;
+- failure-learning payloads that can carry
+  `probe.signature_failure_learning.v1` findings and candidate Blueprint/Probe
+  signature revision proposals for retained failures;
 - local-only retention that stores metadata instead of content.

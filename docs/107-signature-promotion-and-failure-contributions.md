@@ -10,6 +10,7 @@ Related:
 - `docs/105-signature-selector.md`
 - `docs/106-codex-signature-attachment.md`
 - `../crates/probe-core/src/signature_promotion.rs`
+- `../crates/probe-core/src/signature_learning.rs`
 - `../crates/probe-core/src/dataset_export.rs`
 
 ## Purpose
@@ -90,3 +91,47 @@ Probe emits the review-card payload, but Autopilot/Vortex remains the product
 review and acceptance surface. Vortex should project these proposal records into
 signature contribution review cards and record the human approval, fixture run,
 and retained-run replay refs back into the promotion evidence.
+
+## Retained Trace Classifier
+
+Probe also has a direct retained-trace classifier contract:
+
+```text
+probe.signature_failure_learning.v1
+```
+
+The classifier accepts a retained benchmark or workroom failure trace with:
+
+- run/task refs;
+- dataset/version/task id;
+- selected Blueprint/Probe signatures;
+- event types and failure codes;
+- transcript/verifier excerpts;
+- artifact refs and digests;
+- retention mode, training-use rights, and redaction status.
+
+It emits a typed `FailureFinding` with one of the current failure kinds:
+
+- `auth_failed`
+- `quota_or_rate_limited`
+- `package_not_loaded`
+- `signature_mismatch`
+- `service_not_persistent`
+- `hidden_verifier_contract`
+- `verifier_stalled`
+- `domain_knowledge_missing`
+- `artifact_missing`
+- `policy_blocked`
+- `usage_unavailable`
+- `unknown_failure`
+
+For retained, training-allowed, clean/redacted traces, Probe can then emit a
+`CandidateSignatureRevisionProposal`. The proposal includes source evidence,
+fixture refs, expected task families, required and forbidden tools, provenance,
+and a rerun plan. It stays a candidate proposal. It does not promote itself and
+does not grant runtime authority.
+
+Local-only, training-denied, not-scanned, and redaction-blocked traces still get
+typed findings, but shared signature proposals are blocked. That preserves the
+owner's data-rights choice and keeps future marketplace compensation tied to
+explicitly shareable evidence.
