@@ -8,6 +8,7 @@ Related:
 
 - `docs/103-signature-context-contract.md`
 - `docs/104-seed-signature-packs.md`
+- `docs/108-adaptive-signature-budget-and-rendering.md`
 - `../crates/probe-core/src/signature_registry.rs`
 
 ## Purpose
@@ -42,6 +43,7 @@ The MVP selector combines:
 - deterministic local cosine scoring over normalized task/signature documents;
 - a minimum score threshold;
 - a max-signature cap;
+- adaptive budget modes;
 - runner-up preservation for later adaptive-budget learning.
 
 No external embedding service is required for the unit-test path. The API can
@@ -55,6 +57,9 @@ The selector returns a `SessionSignatureContext` with:
 - selected signature entries;
 - `SignatureSelectionDecision`;
 - selected and runner-up scores;
+- selected budget and budget mode;
+- rejected high-score signatures excluded by cap or budget;
+- rendered task-local context;
 - task-envelope digest;
 - selector mode: `hybrid` or `no_match`;
 - fallback reason for no-match cases.
@@ -69,6 +74,8 @@ produce an explicit no-match decision.
 - The selector does not make public benchmark claims.
 - The selector must preserve runner-up scores when the cap excludes plausible
   candidates.
+- Full-injection is blocked by default and is available only as an explicit
+  controlled-evaluation baseline.
 
 ## Validation
 
@@ -79,4 +86,8 @@ The scenario tests cover:
 - legal deliverable tasks select `legal.deliverable_file_workflow` and
   `legal.output_path_contract`;
 - greetings and ChatGPT-account/login prompts select no signatures;
-- candidate-heavy envelopes respect the cap and preserve runner-ups.
+- candidate-heavy envelopes respect the cap and preserve runner-ups;
+- no-signature, fixed-top-k, capped-selector, and full-injection baselines are
+  available in the retained fixture ablation report;
+- co-selected signatures render `Use for`, `Do not use for`, `Required
+  evidence`, and `Neighbor boundaries` clauses.

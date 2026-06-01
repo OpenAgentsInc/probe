@@ -2555,6 +2555,8 @@ mod tests {
             decision_id: String::from("sigsel-runtime-test"),
             selector_mode: SignatureSelectorMode::Hybrid,
             task_envelope_digest: Some(String::from("sha256:runtime")),
+            selected_signature_budget: Some(1),
+            budget_mode: Some(String::from("adaptive_threshold")),
             selected_signatures: vec![SignatureSelectionScore {
                 signature,
                 rank: 1,
@@ -2562,6 +2564,10 @@ mod tests {
                 reason_code: Some(String::from("structured_match")),
             }],
             runner_up_signatures: Vec::new(),
+            rejected_high_score_signatures: Vec::new(),
+            rendered_context: Some(String::from(
+                "- coding.service_readiness@candidate state=candidate\n  Use for: service readiness\n  Do not use for: unrelated tasks\n  Required evidence: port_probe\n  Neighbor boundaries: single selected signature",
+            )),
             recommended_harness_profile: Some(String::from("coding_bootstrap_codex@v1")),
             recommended_tool_set: Some(String::from("coding_bootstrap")),
             recommended_tool_choice: Some(String::from("auto")),

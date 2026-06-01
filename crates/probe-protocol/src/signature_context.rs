@@ -124,10 +124,18 @@ pub struct SignatureSelectionDecision {
     pub selector_mode: SignatureSelectorMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_envelope_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_signature_budget: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_signatures: Vec<SignatureSelectionScore>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner_up_signatures: Vec<SignatureSelectionScore>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected_high_score_signatures: Vec<SignatureSelectionScore>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_context: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_harness_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -222,6 +230,10 @@ pub struct WebsiteSafeSignatureSelection {
     pub selector_mode: SignatureSelectorMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_envelope_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_signature_budget: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_signatures: Vec<WebsiteSafeSignatureScore>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -244,6 +256,8 @@ impl From<&SignatureSelectionDecision> for WebsiteSafeSignatureSelection {
             decision_id: decision.decision_id.clone(),
             selector_mode: decision.selector_mode,
             task_envelope_digest: decision.task_envelope_digest.clone(),
+            selected_signature_budget: decision.selected_signature_budget,
+            budget_mode: decision.budget_mode.clone(),
             selected_signatures: decision
                 .selected_signatures
                 .iter()
@@ -336,6 +350,8 @@ mod tests {
             decision_id: String::from("decision-1"),
             selector_mode: SignatureSelectorMode::Hybrid,
             task_envelope_digest: Some(String::from("sha256:task-envelope")),
+            selected_signature_budget: Some(1),
+            budget_mode: Some(String::from("adaptive_threshold")),
             selected_signatures: vec![SignatureSelectionScore {
                 signature,
                 rank: 1,
@@ -343,6 +359,10 @@ mod tests {
                 reason_code: Some(String::from("matched_failure_fingerprint")),
             }],
             runner_up_signatures: Vec::new(),
+            rejected_high_score_signatures: Vec::new(),
+            rendered_context: Some(String::from(
+                "Use for: service readiness. Required evidence: service_logs.",
+            )),
             recommended_harness_profile: Some(String::from("coding_bootstrap_codex@v1")),
             recommended_tool_set: Some(String::from("coding_bootstrap")),
             recommended_tool_choice: Some(String::from("auto")),
@@ -413,6 +433,8 @@ mod tests {
             decision_id: String::from("decision-1"),
             selector_mode: SignatureSelectorMode::SemanticEmbedding,
             task_envelope_digest: Some(String::from("sha256:redacted-task-envelope")),
+            selected_signature_budget: Some(1),
+            budget_mode: Some(String::from("adaptive_threshold")),
             selected_signatures: vec![SignatureSelectionScore {
                 signature,
                 rank: 1,
@@ -420,6 +442,8 @@ mod tests {
                 reason_code: Some(String::from("semantic_match")),
             }],
             runner_up_signatures: Vec::new(),
+            rejected_high_score_signatures: Vec::new(),
+            rendered_context: Some(private_task_text.to_string()),
             recommended_harness_profile: None,
             recommended_tool_set: None,
             recommended_tool_choice: None,

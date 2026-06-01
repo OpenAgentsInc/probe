@@ -2041,6 +2041,8 @@ mod tests {
             decision_id: String::from("sigsel-dataset-test"),
             selector_mode: SignatureSelectorMode::Hybrid,
             task_envelope_digest: Some(String::from("sha256:dataset")),
+            selected_signature_budget: Some(1),
+            budget_mode: Some(String::from("adaptive_threshold")),
             selected_signatures: vec![SignatureSelectionScore {
                 signature,
                 rank: 1,
@@ -2060,6 +2062,10 @@ mod tests {
                 score_bps: 4_800,
                 reason_code: Some(String::from("semantic_runner_up")),
             }],
+            rejected_high_score_signatures: Vec::new(),
+            rendered_context: Some(String::from(
+                "Use for: service readiness. Required evidence: service-readiness.json.",
+            )),
             recommended_harness_profile: Some(String::from("coding_bootstrap_codex@v1")),
             recommended_tool_set: Some(String::from("coding_bootstrap")),
             recommended_tool_choice: Some(String::from("auto")),

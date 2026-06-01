@@ -51,8 +51,11 @@ Vortex records product Program Runs and acceptance
 - decision id
 - selector mode
 - task-envelope digest
+- selected budget and budget mode
 - selected signatures
 - runner-up signatures
+- rejected high-score signatures
+- rendered context for internal session trace
 - recommended harness/tool hints
 - forbidden tools
 - fallback reason code
@@ -71,9 +74,11 @@ redacted shape:
 - rank and score
 - reason codes
 - task-envelope digest
+- selected budget and budget mode
 
-It does not project raw task envelopes, rendered descriptions, prompts, file
-paths, private repo content, shell logs, or customer data.
+It does not project raw task envelopes, rendered descriptions, rendered
+signature context, prompts, file paths, private repo content, shell logs, or
+customer data.
 
 ## Runtime Events
 

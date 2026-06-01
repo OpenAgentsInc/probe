@@ -2,11 +2,11 @@ use std::path::Path;
 
 use probe_protocol::backend::BackendKind;
 use probe_protocol::session::SessionHarnessProfile;
-use probe_protocol::signature_context::{
-    SessionSignatureContext, SignatureAdoptionState, SignaturePackEntry, SignatureSelectorMode,
-};
+use probe_protocol::signature_context::{SessionSignatureContext, SignatureSelectorMode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::signature_registry::render_signature_set_context;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedHarnessProfile {
@@ -191,10 +191,27 @@ pub fn render_signature_harness_addendum(
             ));
         }
     }
+    if let Some(decision) = signature_context.selection_decision.as_ref() {
+        if let Some(budget_mode) = decision.budget_mode.as_ref() {
+            lines.push(format!("- budget_mode: {}", compact(budget_mode, 80)));
+        }
+        if let Some(budget) = decision.selected_signature_budget {
+            lines.push(format!("- selected_signature_budget: {budget}"));
+        }
+    }
     lines.push(String::from("- authority: signatures are context and evidence hints only; Probe tool policy and approvals still control all tool use."));
     lines.push(String::from("- selected_signatures:"));
-    for entry in &signature_context.signature_pack.entries {
-        lines.push(format_signature_entry(entry));
+    if let Some(rendered_context) = signature_context
+        .selection_decision
+        .as_ref()
+        .and_then(|decision| decision.rendered_context.as_ref())
+        .filter(|value| !value.trim().is_empty())
+    {
+        lines.push(rendered_context.clone());
+    } else if let Some(rendered_context) =
+        render_signature_set_context(&signature_context.signature_pack.entries)
+    {
+        lines.push(rendered_context);
     }
     Some(lines.join("\n"))
 }
@@ -249,39 +266,6 @@ fn append_operator_addendum(base: Option<String>, operator_system: Option<&str>)
         (Some(base), None) => Some(base),
         (None, Some(operator_system)) => Some(operator_system.to_string()),
         (None, None) => None,
-    }
-}
-
-fn format_signature_entry(entry: &SignaturePackEntry) -> String {
-    let evidence = entry
-        .required_evidence
-        .iter()
-        .map(|evidence| evidence.kind.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
-    let closeout = entry.closeout_artifacts.join(",");
-    let scope = entry
-        .rendered_description
-        .as_ref()
-        .map(|value| compact(value, 220))
-        .unwrap_or_else(|| compact(&entry.task_classes.join(","), 160));
-    format!(
-        "  - {}@{} state={} scope=\"{}\" evidence=[{}] closeout=[{}]",
-        entry.signature.id,
-        entry.signature.version,
-        adoption_state_label(entry.signature.adoption_state),
-        scope,
-        compact(&evidence, 220),
-        compact(&closeout, 220)
-    )
-}
-
-fn adoption_state_label(state: SignatureAdoptionState) -> &'static str {
-    match state {
-        SignatureAdoptionState::Candidate => "candidate",
-        SignatureAdoptionState::Shadow => "shadow",
-        SignatureAdoptionState::Promoted => "promoted",
-        SignatureAdoptionState::Deprecated => "deprecated",
     }
 }
 
@@ -510,6 +494,9 @@ mod tests {
         assert!(prompt.contains("Probe Signature Addendum"));
         assert!(prompt.contains("coding.service_readiness@candidate"));
         assert!(prompt.contains("recommended_tool_choice: auto"));
+        assert!(prompt.contains("budget_mode: adaptive_threshold"));
+        assert!(prompt.contains("Use for:"));
+        assert!(prompt.contains("Neighbor boundaries:"));
         assert!(prompt.contains("Probe tool policy and approvals still control all tool use"));
         assert!(!prompt.contains("apply_patch is required"));
     }
@@ -631,6 +618,8 @@ mod tests {
             decision_id: String::from("sigsel-test"),
             selector_mode: SignatureSelectorMode::Hybrid,
             task_envelope_digest: Some(String::from("sha256:test")),
+            selected_signature_budget: Some(1),
+            budget_mode: Some(String::from("adaptive_threshold")),
             selected_signatures: vec![SignatureSelectionScore {
                 signature,
                 rank: 1,
@@ -638,6 +627,10 @@ mod tests {
                 reason_code: Some(String::from("structured_match")),
             }],
             runner_up_signatures: Vec::new(),
+            rejected_high_score_signatures: Vec::new(),
+            rendered_context: Some(String::from(
+                "- coding.service_readiness@candidate state=candidate\n  Use for: service readiness\n  Do not use for: unrelated tasks\n  Required evidence: port_probe\n  Neighbor boundaries: single selected signature",
+            )),
             recommended_harness_profile: Some(String::from("coding_bootstrap_codex@v1")),
             recommended_tool_set: Some(String::from("coding_bootstrap")),
             recommended_tool_choice: Some(String::from("auto")),

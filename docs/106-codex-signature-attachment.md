@@ -10,6 +10,7 @@ Related:
 - `docs/104-seed-signature-packs.md`
 - `docs/105-signature-selector.md`
 - `docs/107-signature-promotion-and-failure-contributions.md`
+- `docs/108-adaptive-signature-budget-and-rendering.md`
 - `../crates/probe-core/src/harness.rs`
 - `../crates/probe-core/src/runtime.rs`
 - `../crates/probe-core/src/dataset_export.rs`
@@ -51,6 +52,11 @@ When present, Probe:
 The addendum is advisory context. It can tell the model what failure-derived
 workflow to use, what evidence to produce, and which tools are recommended or
 forbidden by the selected signature.
+
+The addendum is now set-aware: selected signatures render task-local `Use for`,
+`Do not use for`, `Required evidence`, and `Neighbor boundaries` clauses. This
+keeps co-selected signatures from blurring into one another without changing
+the canonical signature bodies.
 
 It does not:
 

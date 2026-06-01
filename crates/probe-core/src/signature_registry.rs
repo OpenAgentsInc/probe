@@ -9,6 +9,11 @@ use probe_protocol::signature_context::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::dataset_export::{
+    SignatureCaseResultStatus, SignatureOutcomeLabel, SignatureSelectionCaseRecord,
+    SignatureVerifierOutcome,
+};
+
 const SEED_SIGNATURE_REGISTRY_JSON: &str =
     include_str!("../signature_registry/seed-signatures.json");
 const PROBE_SEED_SIGNATURE_REGISTRY_ID: &str = "probe.seed_failure_signatures.v1";
@@ -74,6 +79,10 @@ pub struct SignatureSelectorConfig {
     pub max_signature_count: usize,
     pub min_score_bps: u16,
     pub max_runner_up_count: usize,
+    pub budget_mode: SignatureBudgetMode,
+    pub fixed_signature_count: Option<usize>,
+    pub allow_full_injection: bool,
+    pub adaptive_neighbor_gap_bps: u16,
 }
 
 impl Default for SignatureSelectorConfig {
@@ -82,8 +91,85 @@ impl Default for SignatureSelectorConfig {
             max_signature_count: 4,
             min_score_bps: 1_800,
             max_runner_up_count: 8,
+            budget_mode: SignatureBudgetMode::AdaptiveThreshold,
+            fixed_signature_count: None,
+            allow_full_injection: false,
+            adaptive_neighbor_gap_bps: 1_250,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureBudgetMode {
+    AdaptiveThreshold,
+    NoSignature,
+    FixedTopK,
+    CappedSelector,
+    FullInjection,
+}
+
+impl SignatureBudgetMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AdaptiveThreshold => "adaptive_threshold",
+            Self::NoSignature => "no_signature",
+            Self::FixedTopK => "fixed_top_k",
+            Self::CappedSelector => "capped_selector",
+            Self::FullInjection => "full_injection",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureAblationReport {
+    pub schema_version: u16,
+    pub report_id: String,
+    pub task_envelope_digest: String,
+    pub baselines: Vec<SignatureAblationBaselineReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureAblationBaselineReport {
+    pub baseline: String,
+    pub selected_signature_budget: usize,
+    pub selected_signature_ids: Vec<String>,
+    pub rejected_high_score_signature_ids: Vec<String>,
+    pub fallback_reason_code: Option<String>,
+    pub blocked_by_default: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureUtilityLabel {
+    pub signature_id: String,
+    pub score_bps: u16,
+    pub passed: bool,
+    pub verifier_outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_microusd: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u32>,
+    pub tool_failure_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_type: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureThresholdCalibrationReport {
+    pub schema_version: u16,
+    pub report_id: String,
+    pub label_count: usize,
+    pub recommended_min_score_bps: u16,
+    pub utility_at_threshold: i64,
+    pub thresholds_evaluated: Vec<SignatureThresholdCandidate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureThresholdCandidate {
+    pub min_score_bps: u16,
+    pub accepted_count: usize,
+    pub utility: i64,
 }
 
 impl SeedSignatureRegistry {
@@ -190,6 +276,157 @@ pub fn select_seed_signatures_for_task(
     registry.select_for_task(envelope, config)
 }
 
+pub fn build_signature_ablation_report(
+    registry: &SeedSignatureRegistry,
+    envelope: &TaskEnvelope,
+    config: &SignatureSelectorConfig,
+) -> Result<SignatureAblationReport, SignatureRegistryError> {
+    let task_envelope_digest = digest_task_envelope(envelope)?;
+    let baselines = [
+        (
+            "no_signature",
+            SignatureSelectorConfig {
+                budget_mode: SignatureBudgetMode::NoSignature,
+                ..config.clone()
+            },
+            false,
+        ),
+        (
+            "fixed_top_k",
+            SignatureSelectorConfig {
+                budget_mode: SignatureBudgetMode::FixedTopK,
+                fixed_signature_count: Some(1),
+                ..config.clone()
+            },
+            false,
+        ),
+        (
+            "capped_selector",
+            SignatureSelectorConfig {
+                budget_mode: SignatureBudgetMode::CappedSelector,
+                ..config.clone()
+            },
+            false,
+        ),
+        (
+            "full_injection",
+            SignatureSelectorConfig {
+                budget_mode: SignatureBudgetMode::FullInjection,
+                allow_full_injection: true,
+                ..config.clone()
+            },
+            true,
+        ),
+    ];
+    let mut reports = Vec::new();
+    for (baseline, baseline_config, blocked_by_default) in baselines {
+        let context = select_signatures_from_registry(registry, envelope, &baseline_config)?;
+        let decision = context
+            .selection_decision
+            .as_ref()
+            .expect("selector must attach decision");
+        reports.push(SignatureAblationBaselineReport {
+            baseline: baseline.to_string(),
+            selected_signature_budget: decision.selected_signature_budget.unwrap_or(0),
+            selected_signature_ids: decision
+                .selected_signatures
+                .iter()
+                .map(|score| score.signature.id.clone())
+                .collect(),
+            rejected_high_score_signature_ids: decision
+                .rejected_high_score_signatures
+                .iter()
+                .map(|score| score.signature.id.clone())
+                .collect(),
+            fallback_reason_code: decision.fallback_reason_code.clone(),
+            blocked_by_default,
+        });
+    }
+
+    Ok(SignatureAblationReport {
+        schema_version: 1,
+        report_id: String::from("probe.signature_ablation_report.v1"),
+        task_envelope_digest,
+        baselines: reports,
+    })
+}
+
+#[must_use]
+pub fn utility_labels_from_signature_cases(
+    cases: &[SignatureSelectionCaseRecord],
+) -> Vec<SignatureUtilityLabel> {
+    cases
+        .iter()
+        .filter_map(|case| {
+            let score_bps = case.signature.score_bps?;
+            let tool_failure_count =
+                case.tool_policy.refused_tool_calls + case.tool_policy.paused_tool_calls;
+            Some(SignatureUtilityLabel {
+                signature_id: case.signature.signature_id.clone(),
+                score_bps: score_bps.min(10_000) as u16,
+                passed: signature_case_passed(case),
+                verifier_outcome: verifier_outcome_label(case.result.verifier_outcome).to_string(),
+                cost_microusd: None,
+                message_count: Some(case.transcript_refs.len() as u32),
+                tool_failure_count: tool_failure_count as u32,
+                failure_type: case.result.failure_type.clone(),
+            })
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn calibrate_signature_threshold(
+    labels: &[SignatureUtilityLabel],
+) -> SignatureThresholdCalibrationReport {
+    let mut candidates = vec![0, 1_000, 1_800, 2_500, 3_500, 5_000, 7_500, 9_000];
+    candidates.extend(labels.iter().map(|label| label.score_bps));
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let mut evaluated = candidates
+        .into_iter()
+        .map(|threshold| {
+            let accepted = labels
+                .iter()
+                .filter(|label| label.score_bps >= threshold)
+                .collect::<Vec<_>>();
+            let utility = accepted
+                .iter()
+                .map(|label| signature_label_utility(label))
+                .sum();
+            SignatureThresholdCandidate {
+                min_score_bps: threshold,
+                accepted_count: accepted.len(),
+                utility,
+            }
+        })
+        .collect::<Vec<_>>();
+    evaluated.sort_by(|left, right| {
+        right
+            .utility
+            .cmp(&left.utility)
+            .then_with(|| left.min_score_bps.cmp(&right.min_score_bps))
+    });
+    let best = evaluated
+        .first()
+        .cloned()
+        .unwrap_or(SignatureThresholdCandidate {
+            min_score_bps: SignatureSelectorConfig::default().min_score_bps,
+            accepted_count: 0,
+            utility: 0,
+        });
+
+    SignatureThresholdCalibrationReport {
+        schema_version: 1,
+        report_id: String::from("probe.signature_threshold_calibration.v1"),
+        label_count: labels.len(),
+        recommended_min_score_bps: best.min_score_bps,
+        utility_at_threshold: best.utility,
+        thresholds_evaluated: evaluated,
+    }
+}
+
 pub fn validate_seed_signature_registry(
     registry: &SeedSignatureRegistry,
 ) -> Result<(), SignatureRegistryError> {
@@ -230,13 +467,24 @@ pub fn select_signatures_from_registry(
             "max_signature_count must be at least 1",
         )));
     }
+    if config.budget_mode == SignatureBudgetMode::FullInjection && !config.allow_full_injection {
+        return Err(SignatureRegistryError::InvalidSelectorConfig(String::from(
+            "full-injection baseline is blocked unless allow_full_injection=true",
+        )));
+    }
+    if config.budget_mode == SignatureBudgetMode::FixedTopK
+        && config.fixed_signature_count.unwrap_or(0) == 0
+    {
+        return Err(SignatureRegistryError::InvalidSelectorConfig(String::from(
+            "fixed_top_k mode requires fixed_signature_count > 0",
+        )));
+    }
 
     let task_envelope_digest = digest_task_envelope(envelope)?;
     let mut scored: Vec<_> = registry
         .entries
         .iter()
         .map(|entry| score_signature_entry(envelope, entry))
-        .filter(|score| score.score_bps > 0)
         .collect();
     scored.sort_by(|left, right| {
         right
@@ -248,11 +496,14 @@ pub fn select_signatures_from_registry(
     let mut selected_scores = Vec::new();
     let mut selected_entries = Vec::new();
     let mut runner_up_scores = Vec::new();
+    let selected_ids = selected_signature_ids(scored.as_slice(), config);
+    let selected_id_set = selected_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut rejected_high_score_signatures = Vec::new();
 
-    for score in scored {
-        if score.score_bps >= config.min_score_bps
-            && selected_scores.len() < config.max_signature_count
-        {
+    for score in scored.into_iter().filter(|score| {
+        config.budget_mode == SignatureBudgetMode::FullInjection || score.score_bps > 0
+    }) {
+        if selected_id_set.contains(score.signature.id.as_str()) {
             selected_entries.push(
                 registry
                     .entry_by_id(score.signature.id.as_str())
@@ -262,16 +513,25 @@ pub fn select_signatures_from_registry(
                     .clone(),
             );
             selected_scores.push(score);
-        } else if runner_up_scores.len() < config.max_runner_up_count {
-            runner_up_scores.push(score);
+        } else {
+            if score.score_bps >= config.min_score_bps {
+                rejected_high_score_signatures.push(score.clone());
+            }
+            if runner_up_scores.len() < config.max_runner_up_count {
+                runner_up_scores.push(score);
+            }
         }
     }
 
     rerank_scores(&mut selected_scores);
     rerank_scores(&mut runner_up_scores);
+    rerank_scores(&mut rejected_high_score_signatures);
 
     let fallback_reason_code = if selected_scores.is_empty() {
-        Some(String::from("no_signature_above_threshold"))
+        Some(match config.budget_mode {
+            SignatureBudgetMode::NoSignature => String::from("no_signature_budget_selected"),
+            _ => String::from("no_signature_above_threshold"),
+        })
     } else {
         None
     };
@@ -281,13 +541,18 @@ pub fn select_signatures_from_registry(
         SignatureSelectorMode::Hybrid
     };
     let forbidden_tools = aggregate_forbidden_tools(&selected_entries);
+    let rendered_context = render_signature_set_context(&selected_entries);
     let decision = SignatureSelectionDecision {
         schema_version: String::from(PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION),
         decision_id: format!("sigsel-{}", &task_envelope_digest[7..19]),
         selector_mode,
         task_envelope_digest: Some(task_envelope_digest),
+        selected_signature_budget: Some(selected_entries.len()),
+        budget_mode: Some(config.budget_mode.as_str().to_string()),
         selected_signatures: selected_scores,
         runner_up_signatures: runner_up_scores,
+        rejected_high_score_signatures,
+        rendered_context,
         recommended_harness_profile: if selected_entries.is_empty() {
             None
         } else {
@@ -316,6 +581,97 @@ pub fn select_signatures_from_registry(
         entries: selected_entries,
     })
     .with_selection_decision(decision))
+}
+
+fn selected_signature_ids(
+    scored: &[SignatureSelectionScore],
+    config: &SignatureSelectorConfig,
+) -> Vec<String> {
+    match config.budget_mode {
+        SignatureBudgetMode::NoSignature => Vec::new(),
+        SignatureBudgetMode::FullInjection => scored
+            .iter()
+            .map(|score| score.signature.id.clone())
+            .collect(),
+        SignatureBudgetMode::FixedTopK => scored
+            .iter()
+            .filter(|score| score.score_bps > 0)
+            .take(
+                config
+                    .fixed_signature_count
+                    .unwrap_or(config.max_signature_count)
+                    .min(config.max_signature_count),
+            )
+            .map(|score| score.signature.id.clone())
+            .collect(),
+        SignatureBudgetMode::CappedSelector => scored
+            .iter()
+            .filter(|score| score.score_bps >= config.min_score_bps)
+            .take(config.max_signature_count)
+            .map(|score| score.signature.id.clone())
+            .collect(),
+        SignatureBudgetMode::AdaptiveThreshold => adaptive_signature_ids(scored, config),
+    }
+}
+
+fn signature_case_passed(case: &SignatureSelectionCaseRecord) -> bool {
+    case.outcome_label == SignatureOutcomeLabel::Helped
+        || case.result.status == SignatureCaseResultStatus::Completed
+            && matches!(
+                case.result.verifier_outcome,
+                SignatureVerifierOutcome::Passed | SignatureVerifierOutcome::NotObserved
+            )
+            && case.result.failure_type.is_none()
+}
+
+fn verifier_outcome_label(outcome: SignatureVerifierOutcome) -> &'static str {
+    match outcome {
+        SignatureVerifierOutcome::NotObserved => "not_observed",
+        SignatureVerifierOutcome::Passed => "passed",
+        SignatureVerifierOutcome::Failed => "failed",
+        SignatureVerifierOutcome::Error => "error",
+        SignatureVerifierOutcome::Timeout => "timeout",
+    }
+}
+
+fn signature_label_utility(label: &SignatureUtilityLabel) -> i64 {
+    let base = if label.passed { 1_000 } else { -1_200 };
+    let verifier_bonus = match label.verifier_outcome.as_str() {
+        "passed" => 300,
+        "failed" => -400,
+        "error" | "timeout" => -650,
+        _ => 0,
+    };
+    let tool_penalty = i64::from(label.tool_failure_count) * 125;
+    let message_penalty = i64::from(label.message_count.unwrap_or(0).saturating_sub(12)) * 10;
+    let cost_penalty = label
+        .cost_microusd
+        .map(|cost| (cost / 100_000) as i64)
+        .unwrap_or(0);
+    let failure_penalty = if label.failure_type.is_some() { 200 } else { 0 };
+    base + verifier_bonus - tool_penalty - message_penalty - cost_penalty - failure_penalty
+}
+
+fn adaptive_signature_ids(
+    scored: &[SignatureSelectionScore],
+    config: &SignatureSelectorConfig,
+) -> Vec<String> {
+    let Some(top_score) = scored
+        .iter()
+        .find(|score| score.score_bps >= config.min_score_bps)
+        .map(|score| score.score_bps)
+    else {
+        return Vec::new();
+    };
+    let adaptive_floor = top_score
+        .saturating_sub(config.adaptive_neighbor_gap_bps)
+        .max(config.min_score_bps);
+    scored
+        .iter()
+        .filter(|score| score.score_bps >= adaptive_floor)
+        .take(config.max_signature_count)
+        .map(|score| score.signature.id.clone())
+        .collect()
 }
 
 fn score_signature_entry(
@@ -412,10 +768,148 @@ fn aggregate_forbidden_tools(entries: &[SignaturePackEntry]) -> Vec<String> {
     values.into_iter().collect()
 }
 
+#[must_use]
+pub fn render_signature_set_context(entries: &[SignaturePackEntry]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for entry in entries {
+        let task_classes = join_non_empty(&entry.task_classes);
+        let benchmark_families = join_non_empty(&entry.benchmark_families);
+        let use_for = entry
+            .rendered_description
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| non_empty_str(task_classes.as_str()))
+            .or_else(|| non_empty_str(benchmark_families.as_str()))
+            .unwrap_or("matching retained failure tasks");
+        lines.push(format!(
+            "- {}@{} state={}",
+            entry.signature.id,
+            entry.signature.version,
+            adoption_state_label(entry.signature.adoption_state)
+        ));
+        let do_not_use_for = if entry.forbidden_tools.is_empty() {
+            String::from(
+                "authority expansion, unrelated tasks, or tasks better matched by another selected signature",
+            )
+        } else {
+            format!(
+                "tool authority expansion or forbidden tool classes [{}]",
+                entry.forbidden_tools.join(",")
+            )
+        };
+        lines.push(format!("  Use for: {}", compact(use_for, 260)));
+        lines.push(format!(
+            "  Do not use for: {}",
+            compact(do_not_use_for.as_str(), 260)
+        ));
+        lines.push(format!(
+            "  Required evidence: {}",
+            compact(&required_evidence_clause(entry), 260)
+        ));
+        lines.push(format!(
+            "  Neighbor boundaries: {}",
+            compact(&neighbor_boundary_clause(entry, entries), 320)
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
 fn rerank_scores(scores: &mut [SignatureSelectionScore]) {
     for (index, score) in scores.iter_mut().enumerate() {
         score.rank = index + 1;
     }
+}
+
+fn required_evidence_clause(entry: &SignaturePackEntry) -> String {
+    let mut evidence = entry
+        .required_evidence
+        .iter()
+        .map(|evidence| evidence.kind.clone())
+        .collect::<Vec<_>>();
+    evidence.extend(entry.closeout_artifacts.iter().cloned());
+    if evidence.is_empty() {
+        String::from("record the task evidence, verifier result, and closeout artifact refs")
+    } else {
+        evidence.join(", ")
+    }
+}
+
+fn neighbor_boundary_clause(entry: &SignaturePackEntry, entries: &[SignaturePackEntry]) -> String {
+    let others = entries
+        .iter()
+        .filter(|other| other.signature.id != entry.signature.id)
+        .map(|other| {
+            format!(
+                "{} handles {}; keep this signature scoped to {}",
+                other.signature.id,
+                short_scope(other),
+                short_scope(entry)
+            )
+        })
+        .collect::<Vec<_>>();
+    if others.is_empty() {
+        return String::from(
+            "single selected signature; do not generalize beyond its use-for clause",
+        );
+    }
+    others.join("; ")
+}
+
+fn short_scope(entry: &SignaturePackEntry) -> String {
+    let failure_fingerprints = join_non_empty(&entry.failure_fingerprints);
+    let task_classes = join_non_empty(&entry.task_classes);
+    non_empty_str(failure_fingerprints.as_str())
+        .or_else(|| non_empty_str(task_classes.as_str()))
+        .or_else(|| {
+            entry
+                .rendered_description
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or("its declared task class")
+        .to_string()
+}
+
+fn non_empty_str(value: &str) -> Option<&str> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn join_non_empty(values: &[String]) -> String {
+    values
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn adoption_state_label(state: SignatureAdoptionState) -> &'static str {
+    match state {
+        SignatureAdoptionState::Candidate => "candidate",
+        SignatureAdoptionState::Shadow => "shadow",
+        SignatureAdoptionState::Promoted => "promoted",
+        SignatureAdoptionState::Deprecated => "deprecated",
+    }
+}
+
+fn compact(value: &str, max_chars: usize) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let mut truncated = normalized
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    truncated.push_str("...");
+    truncated
 }
 
 fn digest_task_envelope(envelope: &TaskEnvelope) -> Result<String, SignatureRegistryError> {
@@ -611,6 +1105,10 @@ fn invalid<T>(id: &str, reason: impl Into<String>) -> Result<T, SignatureRegistr
 
 #[cfg(test)]
 mod tests {
+    use crate::dataset_export::{
+        DecisionCaseSplit, SignatureCaseResult, SignatureCaseSelection,
+        SignatureToolPolicySnapshot, SignatureVerifierOutcome,
+    };
     use probe_protocol::signature_context::SignatureRef;
 
     use super::*;
@@ -870,7 +1368,14 @@ mod tests {
 
         let ids = selected_ids(&context);
         assert!(ids.contains(&"coding.python_package_index"));
-        assert!(ids.contains(&"coding.service_readiness"));
+        let decision = context.selection_decision.as_ref().expect("decision");
+        assert!(
+            decision
+                .runner_up_signatures
+                .iter()
+                .chain(decision.rejected_high_score_signatures.iter())
+                .any(|score| score.signature.id == "coding.service_readiness")
+        );
     }
 
     #[test]
@@ -972,6 +1477,7 @@ mod tests {
                 max_signature_count: 2,
                 min_score_bps: 1_000,
                 max_runner_up_count: 4,
+                ..SignatureSelectorConfig::default()
             },
         )
         .expect("select capped signatures");
@@ -987,6 +1493,231 @@ mod tests {
         assert_eq!(decision.selected_signatures[0].rank, 1);
         assert_eq!(decision.selected_signatures[1].rank, 2);
         assert_eq!(decision.runner_up_signatures[0].rank, 1);
+    }
+
+    #[test]
+    fn selector_budget_modes_cover_no_signature_fixed_top_k_and_full_injection_guard() {
+        let envelope = heavy_terminal_envelope();
+        let no_signature = select_seed_signatures_for_task(
+            &envelope,
+            &SignatureSelectorConfig {
+                budget_mode: SignatureBudgetMode::NoSignature,
+                ..SignatureSelectorConfig::default()
+            },
+        )
+        .expect("no signature baseline is valid");
+        let no_signature_decision = no_signature.selection_decision.as_ref().expect("decision");
+        assert!(no_signature.signature_pack.entries.is_empty());
+        assert_eq!(
+            no_signature_decision.budget_mode.as_deref(),
+            Some("no_signature")
+        );
+        assert_eq!(
+            no_signature_decision.fallback_reason_code.as_deref(),
+            Some("no_signature_budget_selected")
+        );
+
+        let fixed = select_seed_signatures_for_task(
+            &envelope,
+            &SignatureSelectorConfig {
+                budget_mode: SignatureBudgetMode::FixedTopK,
+                fixed_signature_count: Some(1),
+                max_signature_count: 4,
+                min_score_bps: 0,
+                ..SignatureSelectorConfig::default()
+            },
+        )
+        .expect("fixed top-k baseline is valid");
+        assert_eq!(fixed.signature_pack.entries.len(), 1);
+        assert_eq!(
+            fixed
+                .selection_decision
+                .as_ref()
+                .expect("decision")
+                .selected_signature_budget,
+            Some(1)
+        );
+
+        let error = select_seed_signatures_for_task(
+            &envelope,
+            &SignatureSelectorConfig {
+                budget_mode: SignatureBudgetMode::FullInjection,
+                ..SignatureSelectorConfig::default()
+            },
+        )
+        .expect_err("full injection must be blocked by default");
+        assert!(error.to_string().contains("full-injection"));
+    }
+
+    #[test]
+    fn ablation_report_includes_required_baselines() {
+        let registry = seed_signature_registry().expect("valid seed signature registry");
+        let report = build_signature_ablation_report(
+            &registry,
+            &heavy_terminal_envelope(),
+            &SignatureSelectorConfig {
+                max_signature_count: 3,
+                min_score_bps: 1_000,
+                ..SignatureSelectorConfig::default()
+            },
+        )
+        .expect("ablation report");
+
+        let baselines = report
+            .baselines
+            .iter()
+            .map(|baseline| baseline.baseline.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            baselines,
+            vec![
+                "no_signature",
+                "fixed_top_k",
+                "capped_selector",
+                "full_injection"
+            ]
+        );
+        assert!(
+            report.baselines.iter().any(
+                |baseline| baseline.baseline == "full_injection" && baseline.blocked_by_default
+            )
+        );
+    }
+
+    #[test]
+    fn rendered_signature_context_uses_set_aware_neighbor_boundaries() {
+        let registry = seed_signature_registry().expect("valid seed signature registry");
+        let entries = vec![
+            registry
+                .entry_by_id("coding.service_readiness")
+                .expect("service signature")
+                .clone(),
+            registry
+                .entry_by_id("coding.python_package_index")
+                .expect("pypi signature")
+                .clone(),
+        ];
+
+        let rendered = render_signature_set_context(entries.as_slice()).expect("rendered context");
+
+        assert!(rendered.contains("Use for:"));
+        assert!(rendered.contains("Do not use for:"));
+        assert!(rendered.contains("Required evidence:"));
+        assert!(rendered.contains("Neighbor boundaries:"));
+        assert!(rendered.contains("coding.python_package_index handles"));
+        assert!(rendered.contains("coding.service_readiness handles"));
+    }
+
+    #[test]
+    fn threshold_calibration_uses_retained_signature_case_labels() {
+        let labels = utility_labels_from_signature_cases(&[
+            signature_case("case-good", "coding.service_readiness", 8_500, true),
+            signature_case("case-bad", "coding.service_readiness", 1_200, false),
+            signature_case("case-high-bad", "coding.python_package_index", 7_500, false),
+        ]);
+
+        let report = calibrate_signature_threshold(labels.as_slice());
+
+        assert_eq!(report.label_count, 3);
+        assert!(report.recommended_min_score_bps >= 1_200);
+        assert!(!report.thresholds_evaluated.is_empty());
+    }
+
+    fn heavy_terminal_envelope() -> TaskEnvelope {
+        TaskEnvelope {
+            envelope_id: String::from("candidate-heavy"),
+            instruction: Some(String::from(
+                "Run terminal-bench service, PyPI, SQLite WAL, query optimizer, G-code parser, XSS sanitizer, and runner supervision checks.",
+            )),
+            dataset_slug: Some(String::from("terminal-bench")),
+            dataset_version: Some(String::from("2.0")),
+            failure_fingerprints: vec![
+                String::from("port_not_ready"),
+                String::from("pypi_simple_api_mismatch"),
+                String::from("sqlite_wal_partial_recovery"),
+                String::from("gcode_text_format_mismatch"),
+                String::from("xss_case_missed"),
+                String::from("job_stalled_after_verifier"),
+            ],
+            scenario_tags: vec![
+                String::from("service_orchestration"),
+                String::from("python_package_index"),
+                String::from("sqlite_recovery"),
+                String::from("gcode_parsing"),
+                String::from("html_sanitization"),
+                String::from("benchmark_supervision"),
+            ],
+            ..TaskEnvelope::default()
+        }
+    }
+
+    fn signature_case(
+        case_id: &str,
+        signature_id: &str,
+        score_bps: u16,
+        passed: bool,
+    ) -> SignatureSelectionCaseRecord {
+        SignatureSelectionCaseRecord {
+            schema_version: 1,
+            case_id: case_id.to_string(),
+            stable_digest: String::from("digest"),
+            split: DecisionCaseSplit::Validation,
+            session_id: format!("session-{case_id}"),
+            title: String::from("retained fixture"),
+            cwd: String::from("/workspace"),
+            backend_profile: Some(String::from("codex")),
+            harness_profile: Some(String::from("terminal-bench@2")),
+            source_transcript_path: format!("transcripts/{case_id}.jsonl"),
+            pack_id: Some(String::from("probe.seed_failure_signatures.v1")),
+            decision_id: Some(String::from("decision")),
+            selector_mode: Some(String::from("hybrid")),
+            task_envelope_digest: Some(String::from("sha256:task")),
+            signature: SignatureCaseSelection {
+                signature_id: signature_id.to_string(),
+                signature_version: String::from("candidate"),
+                adoption_state: String::from("candidate"),
+                source_ref: None,
+                rank: Some(1),
+                score_bps: Some(u32::from(score_bps)),
+                reason_code: Some(String::from("test")),
+            },
+            selected_signature_ids: vec![signature_id.to_string()],
+            runner_up_signatures: Vec::new(),
+            tool_policy: SignatureToolPolicySnapshot {
+                recommended_tool_set: Some(String::from("coding_bootstrap")),
+                recommended_tool_choice: Some(String::from("auto")),
+                actual_tool_choice: Some(String::from("auto")),
+                forbidden_tools: Vec::new(),
+                auto_allowed_tool_calls: 1,
+                approved_tool_calls: 0,
+                refused_tool_calls: if passed { 0 } else { 1 },
+                paused_tool_calls: 0,
+            },
+            result: SignatureCaseResult {
+                status: if passed {
+                    SignatureCaseResultStatus::Completed
+                } else {
+                    SignatureCaseResultStatus::Failed
+                },
+                failure_type: if passed {
+                    None
+                } else {
+                    Some(String::from("tool_refused"))
+                },
+                verifier_outcome: if passed {
+                    SignatureVerifierOutcome::Passed
+                } else {
+                    SignatureVerifierOutcome::Failed
+                },
+                final_assistant_text_hash: Some(String::from("sha256:text")),
+            },
+            outcome_label: if passed {
+                SignatureOutcomeLabel::Helped
+            } else {
+                SignatureOutcomeLabel::Hurt
+            },
+            transcript_refs: Vec::new(),
+        }
     }
 
     fn selected_ids(context: &SessionSignatureContext) -> Vec<&str> {
