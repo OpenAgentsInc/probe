@@ -141,7 +141,7 @@
         {
           "kind": "recovered_data_digest",
           "required": true,
-          "description": "Record row counts, relevant table hashes, and copied WAL/SHM provenance."
+          "description": "Record row counts, relevant table hashes, and copied DB/WAL/SHM provenance before any SQLite open mutates sidecars."
         }
       ],
       "recommendedTools": [
@@ -158,9 +158,9 @@
       ],
       "forbiddenTools": ["destructive_shell", "production_secret_access"],
       "closeoutArtifacts": ["sqlite-integrity.txt", "wal-recovery-report.txt", "recovered-data-digest.txt"],
-      "failureFingerprints": ["sqlite_wal_partial_recovery", "missing_checkpoint", "row_digest_mismatch"],
+      "failureFingerprints": ["sqlite_removed_wal_before_copy", "missing_checkpoint", "row_digest_mismatch"],
       "fixtureRefs": ["terminal-bench:2.0/db-wal-recovery"],
-      "renderedDescription": "Use for SQLite WAL recovery tasks that need systematic checkpoint/replay and integrity evidence."
+      "renderedDescription": "Use for SQLite WAL recovery tasks that need systematic checkpoint/replay and integrity evidence. First action: copy the database, WAL, and SHM sidecars before running sqlite3 or any library open, because SQLite can delete an unreadable WAL before recovery."
     },
     {
       "signature": {

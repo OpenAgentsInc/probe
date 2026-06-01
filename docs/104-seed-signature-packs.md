@@ -37,6 +37,12 @@ The first coding seeds cover:
 - `coding.xss_sanitizer_policy`
 - `benchmark.runner_supervisor`
 
+The `coding.sqlite_wal_recovery` seed includes a retained failure lesson from
+the SHC Codex rerun: copy the database, WAL, and SHM sidecars before running
+`sqlite3` or any library open. SQLite can delete an unreadable WAL during open,
+which turns a recoverable WAL task into an unrecoverable base-database-only
+attempt.
+
 The first legal seeds cover:
 
 - `legal.deliverable_file_workflow`
