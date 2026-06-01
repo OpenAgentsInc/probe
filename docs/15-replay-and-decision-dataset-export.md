@@ -63,6 +63,8 @@ Each JSONL record currently includes:
 - harness profile when known
 - turn count
 - full serialized transcript
+- managed Codex usage/resource event refs when the source session was mirrored
+  from Cloud or SHC
 
 This is the format to use when later work needs to reconstruct or re-score
 actual controller traces.
@@ -169,6 +171,14 @@ contain:
 - tool arguments
 - tool outputs
 - file contents read through `read_file`
+
+Managed Codex exports should also preserve refs to `model_usage_reported`,
+`usage_unavailable`, and `resource_usage_captured` events when those refs are
+available. Those refs are the join points for Cloud resource receipts, Vortex
+cost reports, failure learning, and contribution compensation. Local-only
+sessions may export local refs for operator debugging, but they must not create
+shared signature-learning or compensation evidence until the owner promotes a
+redacted retained record.
 
 The first implementation makes this boundary explicit rather than pretending
 exports are automatically safe to share.

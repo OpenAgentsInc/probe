@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
+use probe_protocol::codex_workroom::redact_codex_workroom_text;
 use probe_protocol::session::{
     CacheSignal, SessionId, SessionMetadata, ToolPolicyDecision, TranscriptEvent,
     TranscriptItemKind,
@@ -112,6 +113,8 @@ struct ReplayDatasetRecord {
     harness_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     signature_selection: Option<SignatureSelectionExportRefs>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    managed_usage_events: Vec<ManagedUsageEventExportRef>,
     turn_count: usize,
     transcript: Vec<TranscriptEvent>,
 }
@@ -129,6 +132,21 @@ pub struct SignatureSelectionExportRefs {
     pub task_envelope_digest: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedUsageEventExportRef {
+    pub event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count_source: Option<String>,
+    pub turn_index: u64,
+    pub item_sequence: u32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DecisionSessionSummary {
     pub session_id: String,
@@ -138,6 +156,8 @@ pub struct DecisionSessionSummary {
     pub harness_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature_selection: Option<SignatureSelectionExportRefs>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_usage_events: Vec<ManagedUsageEventExportRef>,
     pub turn_count: usize,
     pub first_tool_name: Option<String>,
     pub tool_names: Vec<String>,
@@ -489,6 +509,7 @@ pub fn export_dataset(
                         .as_ref()
                         .map(|profile| format!("{}@{}", profile.name, profile.version)),
                     signature_selection: signature_selection_refs(&metadata),
+                    managed_usage_events: managed_usage_event_refs(transcript.as_slice()),
                     turn_count: transcript.len(),
                     transcript,
                 };
@@ -728,6 +749,7 @@ pub fn build_decision_summary(
             .as_ref()
             .map(|profile| format!("{}@{}", profile.name, profile.version)),
         signature_selection: signature_selection_refs(metadata),
+        managed_usage_events: managed_usage_event_refs(transcript),
         turn_count: transcript.len(),
         first_tool_name,
         tool_names,
@@ -1274,6 +1296,75 @@ fn first_note_field(transcript: &[TranscriptEvent], field: &str) -> Option<Strin
         .find_map(|part| part.strip_prefix(prefix.as_str()).map(String::from))
 }
 
+fn managed_usage_event_refs(transcript: &[TranscriptEvent]) -> Vec<ManagedUsageEventExportRef> {
+    transcript
+        .iter()
+        .flat_map(|event| {
+            event
+                .turn
+                .items
+                .iter()
+                .filter(|item| item.kind == TranscriptItemKind::Note)
+                .filter_map(|item| {
+                    let fields = note_fields(item.text.as_str());
+                    let event_type = first_field(
+                        &fields,
+                        &["managed_event_type", "usage_event_type", "event_type"],
+                    )?;
+                    let event_type = normalize_managed_event_type(event_type);
+                    if !is_managed_usage_event_type(event_type.as_str()) {
+                        return None;
+                    }
+                    Some(ManagedUsageEventExportRef {
+                        event_type,
+                        event_ref: first_field(
+                            &fields,
+                            &["managed_event_ref", "usage_event_ref", "event_ref"],
+                        )
+                        .map(redact_codex_workroom_text),
+                        receipt_digest: first_field(
+                            &fields,
+                            &["receipt_digest", "receipt_ref", "usage_receipt_digest"],
+                        )
+                        .map(redact_codex_workroom_text),
+                        mode: first_field(&fields, &["mode", "usage_mode"])
+                            .map(redact_codex_workroom_text),
+                        count_source: first_field(&fields, &["count_source"])
+                            .map(redact_codex_workroom_text),
+                        turn_index: event.turn.index,
+                        item_sequence: item.sequence,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn note_fields(text: &str) -> BTreeMap<String, String> {
+    text.split_whitespace()
+        .filter_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            Some((key.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+fn first_field<'a>(fields: &'a BTreeMap<String, String>, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| fields.get(*key).map(String::as_str))
+}
+
+fn normalize_managed_event_type(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace(['-', '.'], "_")
+}
+
+fn is_managed_usage_event_type(value: &str) -> bool {
+    matches!(
+        value,
+        "model_usage_reported" | "usage_unavailable" | "resource_usage_captured"
+    )
+}
+
 fn stable_text_hash(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"probe_signature_case_text|");
@@ -1579,6 +1670,10 @@ mod tests {
                 &[
                     NewItem::new(TranscriptItemKind::UserMessage, "hello"),
                     NewItem::new(TranscriptItemKind::AssistantMessage, "world"),
+                    NewItem::new(
+                        TranscriptItemKind::Note,
+                        "managed_event_type=model.usage.reported managed_event_ref=probe://events/run-1/17 mode=signature_selector count_source=provider_reported",
+                    ),
                 ],
             )
             .expect("append turn");
@@ -1601,6 +1696,9 @@ mod tests {
         assert!(body.contains("coding_bootstrap_default"));
         assert!(body.contains("coding.service_readiness"));
         assert!(body.contains("sigsel-dataset-test"));
+        assert!(body.contains("managed_usage_events"));
+        assert!(body.contains("model_usage_reported"));
+        assert!(body.contains("signature_selector"));
     }
 
     #[test]
@@ -1745,6 +1843,15 @@ mod tests {
                 )],
             )
             .expect("append note");
+        store
+            .append_turn(
+                &metadata.id,
+                &[NewItem::new(
+                    TranscriptItemKind::Note,
+                    "managed_event_type=resource.usage.captured managed_event_ref=probe://events/run-1/16 receipt_digest=sha256:resource-usage mode=codex_backend",
+                )],
+            )
+            .expect("append managed usage note");
 
         let output_path = temp.path().join("decision.jsonl");
         export_dataset(
@@ -1771,6 +1878,14 @@ mod tests {
         assert_eq!(value["oracle_calls"], 0);
         assert_eq!(value["long_context_calls"], 0);
         assert_eq!(value["repo_analysis_files"], serde_json::json!([]));
+        assert_eq!(
+            value["managed_usage_events"][0]["event_type"],
+            "resource_usage_captured"
+        );
+        assert_eq!(
+            value["managed_usage_events"][0]["receipt_digest"],
+            "sha256:resource-usage"
+        );
     }
 
     #[test]

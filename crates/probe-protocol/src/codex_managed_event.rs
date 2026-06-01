@@ -25,6 +25,8 @@ pub enum CodexManagedEventType {
     FileEdit,
     ArtifactCreated,
     ReceiptCreated,
+    ResourceUsageCaptured,
+    ModelUsageReported,
     UsageUnavailable,
     RunWaitingForInput,
     FailureClassified,
@@ -141,6 +143,93 @@ pub struct CodexPackageEvidence {
     pub evidence_refs: Vec<CodexManagedArtifactRef>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelUsageCountSource {
+    ProviderReported,
+    CodexReported,
+    ParsedFromStream,
+    Estimated,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelUsageReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    pub count_source: ModelUsageCountSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_microusd: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_basis: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceUsageSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_lane: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_or_profile_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timed_out: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kvm_present: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firecracker_candidate: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_digest: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CodexManagedEventPayload {
@@ -220,12 +309,27 @@ pub enum CodexManagedEventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         receipt: Option<CodexManagedReceiptRef>,
     },
+    ResourceUsage {
+        resource: ResourceUsageSummary,
+    },
+    ModelUsage {
+        usage: ModelUsageReport,
+    },
     UsageUnavailable {
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        backend: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant_ref: Option<String>,
+        count_source: ModelUsageCountSource,
     },
     FailureClassification {
         failure_type: String,
@@ -406,6 +510,12 @@ pub fn codex_managed_event_type_from_str(raw: &str) -> Option<CodexManagedEventT
         "file_edit" => Some(CodexManagedEventType::FileEdit),
         "artifact_created" | "artifact_ref" => Some(CodexManagedEventType::ArtifactCreated),
         "receipt_created" | "receipt_ref" => Some(CodexManagedEventType::ReceiptCreated),
+        "resource_usage_captured" | "resource_usage_reported" => {
+            Some(CodexManagedEventType::ResourceUsageCaptured)
+        }
+        "model_usage_reported" | "usage_reported" | "token_usage_reported" => {
+            Some(CodexManagedEventType::ModelUsageReported)
+        }
         "usage_unavailable" => Some(CodexManagedEventType::UsageUnavailable),
         "run_waiting_for_input" => Some(CodexManagedEventType::RunWaitingForInput),
         "failure_classified" => Some(CodexManagedEventType::FailureClassified),
@@ -522,11 +632,28 @@ fn payload_from_value(
         CodexManagedEventType::ReceiptCreated => CodexManagedEventPayload::Receipt {
             receipt: receipt_refs.first().cloned(),
         },
+        CodexManagedEventType::ResourceUsageCaptured => CodexManagedEventPayload::ResourceUsage {
+            resource: resource_usage_from_value(value, receipt_refs),
+        },
+        CodexManagedEventType::ModelUsageReported => CodexManagedEventPayload::ModelUsage {
+            usage: model_usage_from_value(value, ModelUsageCountSource::ProviderReported),
+        },
         CodexManagedEventType::UsageUnavailable => CodexManagedEventPayload::UsageUnavailable {
             reason: string_field(value, &["reason", "message"])
                 .unwrap_or_else(|| String::from("usage_not_reported")),
             provider: string_field(value, &["provider"]),
+            backend: string_field(value, &["backend"]),
             model: string_field(value, &["model"]),
+            mode: string_field(value, &["mode"]),
+            account_ref: string_field(value, &["accountRef", "account_ref"])
+                .map(|text| redact_codex_workroom_text(&text)),
+            grant_ref: string_field(
+                value,
+                &["grantRef", "grant_ref", "authGrantRef", "auth_grant_ref"],
+            )
+            .map(|text| redact_codex_workroom_text(&text)),
+            count_source: count_source_from_value(value)
+                .unwrap_or(ModelUsageCountSource::Unavailable),
         },
         CodexManagedEventType::FailureClassified => {
             CodexManagedEventPayload::FailureClassification {
@@ -593,6 +720,161 @@ fn codex_package_evidence_from_value(value: &Value) -> Option<CodexPackageEviden
         ),
         evidence_refs: evidence_refs_from_value(package),
     })
+}
+
+fn model_usage_from_value(
+    value: &Value,
+    default_count_source: ModelUsageCountSource,
+) -> ModelUsageReport {
+    let usage = nested_value(value, &["modelUsage", "model_usage", "usage"]).unwrap_or(value);
+    ModelUsageReport {
+        provider: string_field(usage, &["provider"]).or_else(|| string_field(value, &["provider"])),
+        backend: string_field(usage, &["backend"]).or_else(|| string_field(value, &["backend"])),
+        model: string_field(usage, &["model"]).or_else(|| string_field(value, &["model"])),
+        mode: string_field(usage, &["mode"]).or_else(|| string_field(value, &["mode"])),
+        account_ref: string_field(usage, &["accountRef", "account_ref"])
+            .or_else(|| string_field(value, &["accountRef", "account_ref"]))
+            .map(|text| redact_codex_workroom_text(&text)),
+        grant_ref: string_field(
+            usage,
+            &["grantRef", "grant_ref", "authGrantRef", "auth_grant_ref"],
+        )
+        .or_else(|| {
+            string_field(
+                value,
+                &["grantRef", "grant_ref", "authGrantRef", "auth_grant_ref"],
+            )
+        })
+        .map(|text| redact_codex_workroom_text(&text)),
+        input_tokens: u64_field(
+            usage,
+            &[
+                "inputTokens",
+                "input_tokens",
+                "promptTokens",
+                "prompt_tokens",
+            ],
+        ),
+        cached_input_tokens: u64_field(
+            usage,
+            &[
+                "cachedInputTokens",
+                "cached_input_tokens",
+                "cacheReadTokens",
+                "cache_read_tokens",
+            ],
+        ),
+        output_tokens: u64_field(
+            usage,
+            &[
+                "outputTokens",
+                "output_tokens",
+                "completionTokens",
+                "completion_tokens",
+            ],
+        ),
+        reasoning_tokens: u64_field(usage, &["reasoningTokens", "reasoning_tokens"]),
+        tool_call_tokens: u64_field(
+            usage,
+            &[
+                "toolCallTokens",
+                "tool_call_tokens",
+                "functionCallTokens",
+                "function_call_tokens",
+            ],
+        ),
+        total_tokens: u64_field(usage, &["totalTokens", "total_tokens"]),
+        count_source: count_source_from_value(usage)
+            .or_else(|| count_source_from_value(value))
+            .unwrap_or(default_count_source),
+        cost_microusd: u64_field(
+            usage,
+            &[
+                "costMicrousd",
+                "cost_microusd",
+                "costMicroUsd",
+                "cost_micro_usd",
+            ],
+        ),
+        billing_basis: string_field(usage, &["billingBasis", "billing_basis"]),
+        unavailable_reason: string_field(
+            usage,
+            &["unavailableReason", "unavailable_reason", "reason"],
+        ),
+    }
+}
+
+fn resource_usage_from_value(
+    value: &Value,
+    receipt_refs: &[CodexManagedReceiptRef],
+) -> ResourceUsageSummary {
+    let usage = nested_value(value, &["resourceUsage", "resource_usage", "run"]).unwrap_or(value);
+    let host = nested_value(value, &["host"]).unwrap_or(value);
+    let virtualization = nested_value(host, &["virtualization"]).unwrap_or(host);
+    ResourceUsageSummary {
+        provider_lane: string_field(value, &["providerLane", "provider_lane"]),
+        node_ref: string_field(value, &["nodeRef", "node_ref"]),
+        host_ref: string_field(value, &["hostRef", "host_ref"])
+            .map(|text| redact_codex_workroom_text(&text)),
+        device_ref: string_field(value, &["deviceRef", "device_ref"])
+            .map(|text| redact_codex_workroom_text(&text)),
+        sandbox: string_field(usage, &["sandbox"]),
+        image_or_profile_digest: string_field(
+            usage,
+            &["imageOrProfileDigest", "image_or_profile_digest"],
+        ),
+        workspace_digest: string_field(usage, &["workspaceDigest", "workspace_digest"]),
+        wall_time_ms: u64_field(
+            usage,
+            &["wallTimeMs", "wall_time_ms", "durationMs", "duration_ms"],
+        ),
+        exit_code: i64_field(usage, &["exitCode", "exit_code"])
+            .and_then(|code| i32::try_from(code).ok()),
+        timed_out: bool_field(usage, &["timedOut", "timed_out"]),
+        workspace_bytes: u64_field(usage, &["workspaceBytes", "workspace_bytes"]),
+        artifact_bytes: u64_field(usage, &["artifactBytes", "artifact_bytes"]),
+        log_bytes: u64_field(usage, &["logBytes", "log_bytes"]),
+        peak_memory_bytes: u64_field(
+            usage,
+            &[
+                "peakMemoryBytes",
+                "peak_memory_bytes",
+                "memoryPeakBytes",
+                "memory_peak_bytes",
+            ],
+        ),
+        cpu_time_ms: u64_field(usage, &["cpuTimeMs", "cpu_time_ms"]),
+        kvm_present: bool_field(virtualization, &["kvmPresent", "kvm_present"]),
+        firecracker_candidate: bool_field(
+            virtualization,
+            &["firecrackerCandidate", "firecracker_candidate"],
+        ),
+        receipt_digest: string_field(value, &["receiptDigest", "receipt_digest"]).or_else(|| {
+            receipt_refs.iter().find_map(|receipt| {
+                receipt.digest.clone().or_else(|| {
+                    receipt
+                        .resource_ref
+                        .starts_with("sha256:")
+                        .then(|| receipt.resource_ref.clone())
+                })
+            })
+        }),
+    }
+}
+
+fn count_source_from_value(value: &Value) -> Option<ModelUsageCountSource> {
+    let raw = string_field(
+        value,
+        &["countSource", "count_source", "usageSource", "usage_source"],
+    )?;
+    match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "provider_reported" => Some(ModelUsageCountSource::ProviderReported),
+        "codex_reported" => Some(ModelUsageCountSource::CodexReported),
+        "parsed_from_stream" | "parsed" => Some(ModelUsageCountSource::ParsedFromStream),
+        "estimated" => Some(ModelUsageCountSource::Estimated),
+        "unavailable" | "not_available" => Some(ModelUsageCountSource::Unavailable),
+        _ => None,
+    }
 }
 
 fn evidence_refs_from_value(value: &Value) -> Vec<CodexManagedArtifactRef> {
@@ -680,10 +962,13 @@ fn receipt_refs_from_value(value: &Value) -> Vec<CodexManagedReceiptRef> {
 
 fn receipt_ref_from_value(value: &Value) -> Option<CodexManagedReceiptRef> {
     if let Some(resource_ref) = value.as_str() {
+        let digest = resource_ref
+            .starts_with("sha256:")
+            .then(|| resource_ref.to_string());
         return Some(CodexManagedReceiptRef {
             receipt_type: String::from("workroom.receipt"),
             resource_ref: redact_codex_workroom_text(resource_ref),
-            digest: None,
+            digest,
         });
     }
     let resource_ref = string_field(
@@ -707,12 +992,39 @@ fn redacted_details(value: &Value) -> Map<String, Value> {
 
 fn redact_payload(payload: CodexManagedEventPayload) -> (CodexManagedEventPayload, bool) {
     let raw = serde_json::to_value(&payload).unwrap_or(Value::Null);
-    let redacted = redact_codex_workroom_value(raw.clone());
+    let redacted = if matches!(
+        payload,
+        CodexManagedEventPayload::ResourceUsage { .. }
+            | CodexManagedEventPayload::ModelUsage { .. }
+            | CodexManagedEventPayload::UsageUnavailable { .. }
+    ) {
+        redact_codex_workroom_string_values(raw.clone())
+    } else {
+        redact_codex_workroom_value(raw.clone())
+    };
     let payload =
         serde_json::from_value(redacted.clone()).unwrap_or(CodexManagedEventPayload::Generic {
             details: Map::new(),
         });
     (payload, raw != redacted)
+}
+
+fn redact_codex_workroom_string_values(value: Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(redact_codex_workroom_text(&text)),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(redact_codex_workroom_string_values)
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, redact_codex_workroom_string_values(value)))
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 fn retention_mode_from_value(value: &Value) -> Option<CodexManagedRetentionMode> {
@@ -757,6 +1069,22 @@ fn string_vec_field(value: &Value, keys: &[&str]) -> Vec<String> {
         .filter_map(Value::as_str)
         .map(|value| redact_codex_workroom_text(value))
         .collect()
+}
+
+fn nested_value<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    let object = value.as_object()?;
+    keys.iter().find_map(|key| object.get(*key))
+}
+
+fn u64_field(value: &Value, keys: &[&str]) -> Option<u64> {
+    let object = value.as_object()?;
+    keys.iter().find_map(|key| {
+        let value = object.get(*key)?;
+        value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+            .or_else(|| value.as_str()?.parse::<u64>().ok())
+    })
 }
 
 fn i64_field(value: &Value, keys: &[&str]) -> Option<i64> {

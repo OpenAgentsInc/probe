@@ -44,6 +44,8 @@ When present, Probe:
   recommended tool choice, actual Probe tool choice, and `tool_policy=probe_enforced`;
 - emits the managed-runtime `SignatureContextSelected` event on the managed
   session path;
+- emits separate managed usage events for selector/planner or package
+  rendering calls when those calls use a model and report usage;
 - preserves signature-selection refs in replay, decision, and decision-case
   dataset exports.
 
@@ -68,6 +70,11 @@ It does not:
 
 Probe still owns the tool registry, tool choice, approvals, transcript, and
 evidence capture. Codex is still one backend behind the Probe runtime.
+
+Usage accounting follows the same boundary. Selector, signature rendering,
+oracle, verifier, and judge model calls use `model_usage_reported` with their
+own `mode`. Subscription-backed Codex backend calls that do not report token
+counts use `usage_unavailable` joined to Cloud's resource usage receipt.
 
 ## Dataset Exports
 

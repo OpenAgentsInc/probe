@@ -162,6 +162,7 @@ mod tests {
             backend_profile: Some(String::from("psionic")),
             harness_profile: Some(String::from("coding_bootstrap_default@v1")),
             signature_selection: None,
+            managed_usage_events: Vec::new(),
             turn_count: 2,
             first_tool_name: Some(String::from("list_files")),
             tool_names: vec![String::from("list_files"), String::from("read_file")],

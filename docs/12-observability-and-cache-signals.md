@@ -128,3 +128,20 @@ That is acceptable for the first Psionic-backed CLI milestone.
 
 The point is to make repeated-turn performance visible immediately without
 inventing a heavy telemetry system before the core controller exists.
+
+## Managed Codex Event Usage
+
+Account-backed Codex workrooms do not always surface token counters through
+the subscription CLI path. For those runs, Probe's managed Codex event stream
+uses explicit usage events:
+
+- `model_usage_reported` when a selector, signature-rendering step, verifier,
+  judge, oracle, or Codex backend call reports token/cost facts
+- `usage_unavailable` when subscription-backed Codex omits token facts
+- `resource_usage_captured` when Cloud/SHC emits host, workspace, wall-time,
+  artifact/log byte, and receipt-digest evidence
+
+Those events complement `SessionTurn.observability`; they do not replace the
+authoritative Probe transcript. Exports and Vortex projections should preserve
+the event refs so training loops can join model usage, resource usage, and
+failure outcomes without scraping logs.

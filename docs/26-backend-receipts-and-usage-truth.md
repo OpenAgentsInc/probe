@@ -131,3 +131,25 @@ forced into the common transcript grammar:
 That keeps Probe transcript state authoritative while still letting future
 Apple FM versus Qwen comparisons remain honest about what each backend really
 reported.
+
+## Account-Backed Codex Workrooms
+
+Managed Codex workrooms add a second, event-stream-oriented usage contract in
+`docs/110-codex-managed-runtime-event-contract.md`.
+
+Use these events instead of inferring cost from free-form logs:
+
+- `model_usage_reported`
+  - real token/cost accounting for selector/planner, signature rendering,
+    oracle, verifier/judge, or Codex backend calls when a backend reports it
+- `usage_unavailable`
+  - explicit subscription-backed Codex unavailability when the ChatGPT/Codex
+    account path does not expose token counts
+- `resource_usage_captured`
+  - host/workroom resource facts and a joinable
+    `openagents.resource_usage_receipt.v1` digest from Cloud/SHC
+
+The selector/signature layer and the Codex backend must be recorded as
+separate usage modes. That lets Vortex compare raw Codex, selected-signature
+Codex, and verifier/judge cost without double-counting or pretending a missing
+Codex token count is zero.

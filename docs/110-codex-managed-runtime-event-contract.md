@@ -52,6 +52,8 @@ The Cloud/SHC runner should normalize Codex output into these event types:
 | `file_edit` | File create/update/delete or patch summary. |
 | `artifact_created` | Transcript, diff, log, result, verifier output, or proof ref. |
 | `receipt_created` | Closeout, execution, grading, or usage receipt ref. |
+| `resource_usage_captured` | Host/device/workspace/resource usage was captured, usually with an `openagents.resource_usage_receipt.v1` digest. |
+| `model_usage_reported` | A provider, selector, verifier, judge, or other model call reported token/cost usage. |
 | `usage_unavailable` | Token/cost usage was unavailable and why. |
 | `run_waiting_for_input` | Runner needs follow-up input or approval. |
 | `failure_classified` | Probe/runner classified a failure fingerprint. |
@@ -68,6 +70,45 @@ The Cloud/SHC runner should normalize Codex output into these event types:
 
 Cloud's runner may emit dotted names such as `tool.call.started` or
 `shell.output.delta`; Probe normalizes those into the snake-case enum above.
+`resource.usage.captured` and `model.usage.reported` are normalized the same
+way.
+
+## Usage And Resource Evidence
+
+Model usage and machine resource usage are separate event families.
+
+`model_usage_reported` is for model-call accounting that a backend or Probe
+component actually knows. Its typed payload can record:
+
+- `provider`, `backend`, `model`, and `mode`
+- account and grant refs, never raw credentials
+- input, cached-input, output, reasoning, tool/function-call, and total tokens
+- `countSource`: `provider_reported`, `codex_reported`,
+  `parsed_from_stream`, `estimated`, or `unavailable`
+- optional `costMicrousd` and billing basis
+
+Probe should use this event for selector/planner calls, signature rendering or
+validation calls that use a model, oracle calls, verifier/judge calls, and any
+Codex backend call that exposes token usage.
+
+`resource_usage_captured` is for host/workroom facts such as provider lane,
+node ref, sandbox profile, workspace digest, wall time, exit status,
+workspace/artifact/log byte counts, KVM availability, and Firecracker
+candidacy. On Cloud/SHC it should cite an
+`openagents.resource_usage_receipt.v1` receipt digest through `receiptRefs`;
+Probe preserves digest-only Cloud refs as receipt digests so Vortex can join
+the event to the durable receipt.
+
+`usage_unavailable` is not a missing record. It is an explicit accounting fact.
+For subscription-backed ChatGPT/Codex runs where the CLI does not expose token
+counts, the event must include the provider/backend/model/mode when known,
+`countSource=unavailable`, a reason such as
+`codex_subscription_usage_not_reported`, and the same usage receipt digest as
+the paired `resource_usage_captured` event.
+
+Telemetry payload redaction is field-aware: numeric token and cost fields are
+not erased merely because their keys contain `token`, but all string values
+still pass through the Codex workroom redactor.
 
 ## Required Event Shape
 
@@ -167,5 +208,7 @@ The protocol tests include:
 
 - conversion from a representative SHC/Cloud runner JSONL event log;
 - redaction of Codex auth, provider credentials, and local paths;
+- reported model usage, explicit unavailable usage, and resource usage receipt
+  digest joins;
 - signature package evidence with source signature ids and fixture refs;
 - local-only retention that stores metadata instead of content.

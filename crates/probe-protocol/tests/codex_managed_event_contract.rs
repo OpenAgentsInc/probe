@@ -1,6 +1,6 @@
 use probe_protocol::codex_managed_event::{
     CodexManagedEventPayload, CodexManagedEventType, CodexManagedRetentionMode, CodexManagedRunRef,
-    CodexManagedTrainingUse, PROBE_CODEX_MANAGED_EVENT_SCHEMA_VERSION,
+    CodexManagedTrainingUse, ModelUsageCountSource, PROBE_CODEX_MANAGED_EVENT_SCHEMA_VERSION,
     normalize_cloud_codex_runner_event,
 };
 use serde_json::{Value, json};
@@ -22,7 +22,7 @@ fn cloud_runner_jsonl_converts_to_probe_codex_managed_events() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(events.len(), 19);
+    assert_eq!(events.len(), 21);
     assert_eq!(
         events.first().map(|event| event.schema_version.as_str()),
         Some(PROBE_CODEX_MANAGED_EVENT_SCHEMA_VERSION)
@@ -43,10 +43,22 @@ fn cloud_runner_jsonl_converts_to_probe_codex_managed_events() {
     );
     assert_eq!(events[13].event_type, CodexManagedEventType::FileEdit);
     assert_eq!(
+        events[16].event_type,
+        CodexManagedEventType::ResourceUsageCaptured
+    );
+    assert_eq!(
         events[17].event_type,
+        CodexManagedEventType::ModelUsageReported
+    );
+    assert_eq!(
+        events[18].event_type,
+        CodexManagedEventType::UsageUnavailable
+    );
+    assert_eq!(
+        events[19].event_type,
         CodexManagedEventType::ContinuationCheckpoint
     );
-    assert!(events[18].event_type.is_terminal());
+    assert!(events[20].event_type.is_terminal());
 
     let CodexManagedEventPayload::ToolCall {
         call_id,
@@ -84,6 +96,62 @@ fn cloud_runner_jsonl_converts_to_probe_codex_managed_events() {
     assert_eq!(
         events[15].receipt_refs[0].resource_ref,
         "probe://receipts/run-1-closeout"
+    );
+
+    let CodexManagedEventPayload::ResourceUsage { resource } = &events[16].payload else {
+        panic!("expected resource usage payload");
+    };
+    assert_eq!(resource.provider_lane.as_deref(), Some("shc"));
+    assert_eq!(resource.node_ref.as_deref(), Some("oa-shc-katy-01"));
+    assert_eq!(resource.wall_time_ms, Some(2300));
+    assert_eq!(resource.workspace_bytes, Some(2048));
+    assert_eq!(resource.kvm_present, Some(true));
+    assert_eq!(resource.firecracker_candidate, Some(true));
+    assert_eq!(
+        resource.receipt_digest.as_deref(),
+        Some("sha256:resource-usage")
+    );
+    assert_eq!(
+        events[16].receipt_refs[0].digest.as_deref(),
+        Some("sha256:resource-usage")
+    );
+
+    let CodexManagedEventPayload::ModelUsage { usage } = &events[17].payload else {
+        panic!("expected model usage payload");
+    };
+    assert_eq!(usage.provider.as_deref(), Some("openai"));
+    assert_eq!(usage.backend.as_deref(), Some("probe-selector"));
+    assert_eq!(usage.mode.as_deref(), Some("signature_selector"));
+    assert_eq!(usage.input_tokens, Some(1200));
+    assert_eq!(usage.cached_input_tokens, Some(200));
+    assert_eq!(usage.output_tokens, Some(240));
+    assert_eq!(usage.reasoning_tokens, Some(80));
+    assert_eq!(usage.tool_call_tokens, Some(16));
+    assert_eq!(usage.total_tokens, Some(1536));
+    assert_eq!(usage.count_source, ModelUsageCountSource::ProviderReported);
+    assert_eq!(usage.cost_microusd, Some(42));
+
+    let CodexManagedEventPayload::UsageUnavailable {
+        reason,
+        provider,
+        backend,
+        model,
+        mode,
+        count_source,
+        ..
+    } = &events[18].payload
+    else {
+        panic!("expected usage unavailable payload");
+    };
+    assert_eq!(reason, "codex_subscription_usage_not_reported");
+    assert_eq!(provider.as_deref(), Some("chatgpt"));
+    assert_eq!(backend.as_deref(), Some("codex-cli"));
+    assert_eq!(model.as_deref(), Some("codex"));
+    assert_eq!(mode.as_deref(), Some("codex_backend"));
+    assert_eq!(*count_source, ModelUsageCountSource::Unavailable);
+    assert_eq!(
+        events[18].receipt_refs[0].digest.as_deref(),
+        Some("sha256:resource-usage")
     );
     assert_no_secret_payload(&serde_json::to_value(&events).expect("serialize events"));
 }
