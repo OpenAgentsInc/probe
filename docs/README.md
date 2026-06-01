@@ -375,3 +375,7 @@ This folder holds technical planning docs for the Probe runtime.
     Terminal-Bench and Harvey failure-derived candidate signatures, with
     validation, closeout artifact requirements, authority boundaries, and the
     `probe signatures list` CLI path
+- `105-signature-selector.md`
+  - typed `TaskEnvelope` to `SessionSignatureContext` selector using structured
+    boosts, deterministic local cosine scoring, explicit no-match decisions,
+    max-signature caps, and runner-up preservation for later adaptive budgeting
