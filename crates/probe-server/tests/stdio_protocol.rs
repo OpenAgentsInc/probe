@@ -199,6 +199,7 @@ fn stdio_protocol_exposes_managed_runtime_start_replay_resume_and_cancel() {
                 profile: test_profile("http://127.0.0.1:1/v1"),
                 system_prompt: Some(String::from("You are Probe.")),
                 harness_profile: None,
+                signature_context: None,
                 workspace_state: None,
                 mounted_refs: Vec::new(),
                 initial_prompt: Some(String::from("inspect current state")),

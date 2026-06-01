@@ -2,6 +2,7 @@ use probe_protocol::session::{
     SessionChildStatus, SessionId, SessionSummaryArtifactKind, SessionSummaryArtifactRef,
     ToolApprovalResolution, TranscriptEvent,
 };
+use probe_protocol::signature_context::SessionSignatureContext;
 use probe_protocol::website_events::{
     ProbeWebsiteArtifactKind, ProbeWebsiteArtifactRef, ProbeWebsiteEvent, ProbeWebsiteEventActor,
     ProbeWebsiteEventCorrelation, ProbeWebsiteEventSource, ProbeWebsiteEventType,
@@ -279,6 +280,31 @@ pub fn child_session_event(
         correlation,
         payload,
     )
+}
+
+#[must_use]
+pub fn signature_context_event(
+    signature_context: &SessionSignatureContext,
+    sequence: u64,
+    occurred_at_ms: u64,
+    context: &WebsiteEventExportContext,
+) -> ProbeWebsiteEvent {
+    let mut payload = Map::new();
+    payload.insert(
+        String::from("signatureContext"),
+        json!(signature_context.website_safe_projection()),
+    );
+
+    ProbeWebsiteEvent::new(
+        sequence,
+        occurred_at_ms,
+        ProbeWebsiteEventType::SignatureContextSelected,
+        context.actor.clone(),
+        context.source.clone(),
+        context.correlation.clone(),
+        payload,
+    )
+    .with_artifact_refs(context.artifact_refs.clone())
 }
 
 #[must_use]
@@ -560,12 +586,17 @@ mod tests {
         ToolPolicyDecision, ToolRiskClass, TranscriptEvent, TranscriptItem, TranscriptItemKind,
         TurnId,
     };
+    use probe_protocol::signature_context::{
+        PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION, SessionSignatureContext, SignatureAdoptionState,
+        SignaturePack, SignaturePackEntry, SignatureRef, SignatureSelectionDecision,
+        SignatureSelectionScore, SignatureSelectorMode,
+    };
     use probe_protocol::website_events::{ProbeWebsiteEventCorrelation, ProbeWebsiteEventType};
     use serde_json::json;
 
     use super::{
         WebsiteEventExportContext, artifact_ref_event, child_session_event,
-        runtime_event_to_website_event, transcript_artifact_ref,
+        runtime_event_to_website_event, signature_context_event, transcript_artifact_ref,
     };
     use crate::runtime::RuntimeEvent;
     use crate::tools::ExecutedToolCall;
@@ -681,6 +712,67 @@ mod tests {
         assert_eq!(event.event_type, ProbeWebsiteEventType::ArtifactRef);
         assert!(reference.resource_ref.starts_with("probe://sessions/"));
         assert!(reference.stable_digest.is_some());
+    }
+
+    #[test]
+    fn signature_context_event_projects_only_website_safe_fields() {
+        let session_id = SessionId::new("sess-signature");
+        let context = WebsiteEventExportContext::probe_runtime(&session_id);
+        let private_task_text = "private/customer/repo/path: fix billing secret";
+        let signature = SignatureRef {
+            id: String::from("coding.service_readiness"),
+            version: String::from("candidate"),
+            adoption_state: SignatureAdoptionState::Candidate,
+            source_ref: Some(String::from("vortex://signatureTools/service-readiness")),
+        };
+        let signature_context = SessionSignatureContext::new(SignaturePack {
+            schema_version: String::from(PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION),
+            pack_id: Some(String::from("pack-1")),
+            selected_by: Some(String::from("probe-selector")),
+            selected_at_ms: None,
+            max_signature_count: Some(2),
+            entries: vec![SignaturePackEntry {
+                signature: signature.clone(),
+                task_classes: vec![String::from("private_billing_bug")],
+                benchmark_families: Vec::new(),
+                required_evidence: Vec::new(),
+                recommended_tools: Vec::new(),
+                forbidden_tools: Vec::new(),
+                failure_fingerprints: Vec::new(),
+                fixture_refs: Vec::new(),
+                rendered_description: Some(private_task_text.to_string()),
+            }],
+        })
+        .with_selection_decision(SignatureSelectionDecision {
+            schema_version: String::from(PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION),
+            decision_id: String::from("decision-1"),
+            selector_mode: SignatureSelectorMode::SemanticEmbedding,
+            task_envelope_digest: Some(String::from("sha256:redacted-task-envelope")),
+            selected_signatures: vec![SignatureSelectionScore {
+                signature,
+                rank: 1,
+                score_bps: 8_000,
+                reason_code: Some(String::from("semantic_match")),
+            }],
+            runner_up_signatures: Vec::new(),
+            recommended_harness_profile: Some(String::from("coding_bootstrap_codex@v1")),
+            recommended_tool_set: Some(String::from("coding_bootstrap")),
+            recommended_tool_choice: Some(String::from("auto")),
+            forbidden_tools: Vec::new(),
+            fallback_reason_code: None,
+        });
+
+        let event = signature_context_event(&signature_context, 5, 5_000, &context);
+        let encoded = serde_json::to_string(&event).expect("serialize event");
+
+        assert_eq!(
+            event.event_type,
+            ProbeWebsiteEventType::SignatureContextSelected
+        );
+        assert!(encoded.contains("coding.service_readiness"));
+        assert!(encoded.contains("sha256:redacted-task-envelope"));
+        assert!(!encoded.contains(private_task_text));
+        assert!(!encoded.contains("private/customer/repo/path"));
     }
 
     #[test]

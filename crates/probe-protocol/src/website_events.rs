@@ -12,6 +12,7 @@ pub enum ProbeWebsiteEventType {
     ToolCallCompleted,
     ApprovalRequested,
     ApprovalResolved,
+    SignatureContextSelected,
     ChildSessionStarted,
     ChildSessionUpdated,
     ArtifactRef,

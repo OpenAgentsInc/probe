@@ -365,3 +365,8 @@ This folder holds technical planning docs for the Probe runtime.
     including session fields, `codex exec --json --sandbox workspace-write`
     event normalization, artifactRefs, receiptRefs, redaction, failure states,
     Cloud runner compatibility, and future MCP/SDK modes
+- `103-signature-context-contract.md`
+  - Probe-owned `probe.signature_context.v1` contract for carrying selected
+    task signatures, selection decisions, session metadata, managed runtime
+    events, and website-safe redacted signature projections without forking
+    Codex or turning signatures into arbitrary executable tools

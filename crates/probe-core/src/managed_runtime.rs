@@ -111,6 +111,7 @@ impl ManagedRuntimeController {
             profile,
             system_prompt,
             harness_profile,
+            signature_context,
             workspace_state,
             mounted_refs,
             initial_prompt,
@@ -131,6 +132,7 @@ impl ManagedRuntimeController {
             )
             .with_system_prompt(system_prompt)
             .with_harness_profile(harness_profile)
+            .with_signature_context(signature_context.clone())
             .with_backend(SessionBackendTarget::from_profile(&profile))
             .with_workspace_state(workspace_state)
             .with_mounted_refs(mounted_refs),
@@ -183,6 +185,27 @@ impl ManagedRuntimeController {
                 environment_constraints,
             },
         })?);
+        if let Some(signature_context) = signature_context {
+            events.push(
+                self.append_event(ManagedRuntimeEventDraft {
+                    event_type: ManagedRuntimeEventType::SignatureContextSelected,
+                    status: ManagedRuntimeSessionStatus::Running,
+                    actor: actor.clone(),
+                    source: ManagedRuntimeSource {
+                        kind: String::from("signature_selector"),
+                        id: signature_context
+                            .selection_decision
+                            .as_ref()
+                            .map(|decision| decision.decision_id.clone()),
+                        label: Some(String::from("Probe signature context")),
+                    },
+                    session: session_ref.clone(),
+                    correlation: correlation.clone(),
+                    artifact_refs: vec![transcript_ref.clone()],
+                    payload: ManagedRuntimeEventPayload::SignatureContext { signature_context },
+                })?,
+            );
+        }
         if let Some(prompt) = initial_prompt {
             events.push(self.append_event(ManagedRuntimeEventDraft {
                 event_type: ManagedRuntimeEventType::TurnStarted,
@@ -678,6 +701,11 @@ mod tests {
         ManagedSessionStartRequest, PROBE_MANAGED_RUNTIME_SCHEMA_VERSION,
     };
     use probe_protocol::session::ToolApprovalResolution;
+    use probe_protocol::signature_context::{
+        PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION, SessionSignatureContext, SignatureAdoptionState,
+        SignaturePack, SignaturePackEntry, SignatureRef, SignatureSelectionDecision,
+        SignatureSelectionScore, SignatureSelectorMode,
+    };
 
     #[test]
     fn managed_session_start_persists_replayable_events() {
@@ -717,6 +745,40 @@ mod tests {
         assert_eq!(
             replay.events[0].event_type,
             ManagedRuntimeEventType::SessionStarted
+        );
+    }
+
+    #[test]
+    fn managed_session_start_persists_signature_context_before_initial_turn() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let controller = ManagedRuntimeController::new(FilesystemSessionStore::new(temp.path()));
+        let mut request = start_request(temp.path(), "req-start", Some("inspect service task"));
+        request.signature_context = Some(signature_context());
+
+        let response = controller
+            .start_session(request)
+            .expect("start managed session with signature context");
+
+        assert_eq!(response.events.len(), 4);
+        assert_eq!(
+            response.events[2].event_type,
+            ManagedRuntimeEventType::SignatureContextSelected
+        );
+        assert_eq!(
+            response.events[3].event_type,
+            ManagedRuntimeEventType::TurnStarted
+        );
+        let metadata = controller
+            .session_store()
+            .read_metadata(&response.session_ref.probe_session_id)
+            .expect("read metadata");
+        let stored_context = metadata
+            .signature_context
+            .expect("signature context stored in metadata");
+        assert_eq!(stored_context.signature_pack.entries.len(), 1);
+        assert_eq!(
+            stored_context.signature_pack.entries[0].signature.id,
+            "coding.service_readiness"
         );
     }
 
@@ -904,6 +966,7 @@ mod tests {
             profile: named_backend_profile("openai-codex-subscription").expect("profile"),
             system_prompt: Some(String::from("You are Probe.")),
             harness_profile: None,
+            signature_context: None,
             workspace_state: None,
             mounted_refs: Vec::new(),
             initial_prompt: prompt.map(String::from),
@@ -911,6 +974,51 @@ mod tests {
             environment_constraints: None,
             metadata: serde_json::Map::new(),
         }
+    }
+
+    fn signature_context() -> SessionSignatureContext {
+        let signature = SignatureRef {
+            id: String::from("coding.service_readiness"),
+            version: String::from("candidate"),
+            adoption_state: SignatureAdoptionState::Candidate,
+            source_ref: Some(String::from("vortex://signatureTools/service-readiness")),
+        };
+        SessionSignatureContext::new(SignaturePack {
+            schema_version: String::from(PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION),
+            pack_id: Some(String::from("pack-1")),
+            selected_by: Some(String::from("probe-selector")),
+            selected_at_ms: Some(1_777_777_777_000),
+            max_signature_count: Some(4),
+            entries: vec![SignaturePackEntry {
+                signature: signature.clone(),
+                task_classes: vec![String::from("service_readiness")],
+                benchmark_families: vec![String::from("terminal-bench")],
+                required_evidence: Vec::new(),
+                recommended_tools: Vec::new(),
+                forbidden_tools: Vec::new(),
+                failure_fingerprints: vec![String::from("port_not_ready")],
+                fixture_refs: vec![String::from("tb2:pypi-server")],
+                rendered_description: None,
+            }],
+        })
+        .with_selection_decision(SignatureSelectionDecision {
+            schema_version: String::from(PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION),
+            decision_id: String::from("decision-1"),
+            selector_mode: SignatureSelectorMode::Hybrid,
+            task_envelope_digest: Some(String::from("sha256:task-envelope")),
+            selected_signatures: vec![SignatureSelectionScore {
+                signature,
+                rank: 1,
+                score_bps: 9_100,
+                reason_code: Some(String::from("matched_failure_fingerprint")),
+            }],
+            runner_up_signatures: Vec::new(),
+            recommended_harness_profile: Some(String::from("coding_bootstrap_codex@v1")),
+            recommended_tool_set: Some(String::from("coding_bootstrap")),
+            recommended_tool_choice: Some(String::from("auto")),
+            forbidden_tools: Vec::new(),
+            fallback_reason_code: None,
+        })
     }
 
     fn actor() -> ManagedRuntimeActor {

@@ -45,6 +45,7 @@ fn coder_style_start_request_stays_inside_managed_runtime_v1() {
                 "Act as a hosted Probe Coder runtime. Return website-safe event summaries.",
             )),
             harness_profile: None,
+            signature_context: None,
             workspace_state: None,
             mounted_refs: Vec::new(),
             initial_prompt: Some(String::from(
@@ -223,6 +224,7 @@ fn coder_event_name(event_type: &ProbeWebsiteEventType) -> &'static str {
         ProbeWebsiteEventType::ToolCallCompleted => "tool.completed",
         ProbeWebsiteEventType::ApprovalRequested => "approval.requested",
         ProbeWebsiteEventType::ApprovalResolved => "approval.resolved",
+        ProbeWebsiteEventType::SignatureContextSelected => "signature_context.selected",
         ProbeWebsiteEventType::ChildSessionStarted => "child_session.started",
         ProbeWebsiteEventType::ChildSessionUpdated => "child_session.updated",
         ProbeWebsiteEventType::ArtifactRef => "artifact.ref",

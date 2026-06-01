@@ -14,6 +14,7 @@ use probe_protocol::session::{
     TimestampMs, ToolApprovalResolution, ToolExecutionRecord, TranscriptEvent, TranscriptItem,
     TranscriptItemKind, TurnId, TurnObservability,
 };
+use probe_protocol::signature_context::SessionSignatureContext;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -124,6 +125,7 @@ pub struct NewSession {
     pub cwd: PathBuf,
     pub system_prompt: Option<String>,
     pub harness_profile: Option<SessionHarnessProfile>,
+    pub signature_context: Option<SessionSignatureContext>,
     pub backend: Option<SessionBackendTarget>,
     pub runtime_owner: Option<SessionRuntimeOwner>,
     pub workspace_state: Option<SessionWorkspaceState>,
@@ -139,6 +141,7 @@ impl NewSession {
             cwd: cwd.into(),
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             backend: None,
             runtime_owner: None,
             workspace_state: None,
@@ -156,6 +159,15 @@ impl NewSession {
     #[must_use]
     pub fn with_harness_profile(mut self, harness_profile: Option<SessionHarnessProfile>) -> Self {
         self.harness_profile = harness_profile;
+        self
+    }
+
+    #[must_use]
+    pub fn with_signature_context(
+        mut self,
+        signature_context: Option<SessionSignatureContext>,
+    ) -> Self {
+        self.signature_context = signature_context;
         self
     }
 
@@ -240,6 +252,7 @@ impl FilesystemSessionStore {
             cwd: session.cwd,
             system_prompt: session.system_prompt,
             harness_profile: session.harness_profile,
+            signature_context: session.signature_context,
             created_at_ms,
             updated_at_ms: created_at_ms,
             state: SessionState::Active,

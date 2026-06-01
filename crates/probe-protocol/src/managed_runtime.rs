@@ -12,6 +12,7 @@ use crate::session::{
     PendingToolApproval, SessionHarnessProfile, SessionId, SessionMountRef, SessionWorkspaceState,
     TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolRiskClass,
 };
+use crate::signature_context::SessionSignatureContext;
 
 pub const PROBE_MANAGED_RUNTIME_SCHEMA_VERSION: &str = "probe.managed_runtime.v1";
 
@@ -69,6 +70,7 @@ pub enum ManagedRuntimeEventType {
     CustomToolResult,
     ApprovalRequested,
     ApprovalResolved,
+    SignatureContextSelected,
     TranscriptRef,
     ArtifactRef,
     ChildSessionSpawned,
@@ -282,6 +284,9 @@ pub enum ManagedRuntimeEventPayload {
     Approval {
         approval: ManagedRuntimeApproval,
     },
+    SignatureContext {
+        signature_context: SessionSignatureContext,
+    },
     TranscriptRef {
         transcript: ManagedRuntimeArtifactRef,
     },
@@ -380,6 +385,8 @@ pub struct ManagedSessionStartRequest {
     pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_profile: Option<SessionHarnessProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_context: Option<SessionSignatureContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_state: Option<SessionWorkspaceState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

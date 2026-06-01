@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::backend::{BackendControlPlaneKind, BackendProfile, PsionicMeshAttachInfo};
+use crate::signature_context::SessionSignatureContext;
 
 pub type TimestampMs = u64;
 
@@ -1016,6 +1017,8 @@ pub struct SessionMetadata {
     pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_profile: Option<SessionHarnessProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_context: Option<SessionSignatureContext>,
     pub created_at_ms: TimestampMs,
     pub updated_at_ms: TimestampMs,
     pub state: SessionState,
