@@ -172,6 +172,55 @@ pub struct SignatureThresholdCandidate {
     pub utility: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureSelectionTraceStatus {
+    Selected,
+    NoMatch,
+    Ambiguous,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureSelectionTrace {
+    pub schema_version: String,
+    pub trace_id: String,
+    pub task_envelope_digest: String,
+    pub selector_mode: SignatureSelectorMode,
+    pub status: SignatureSelectionTraceStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason_code: Option<String>,
+    pub selected_signatures: Vec<SignatureSelectionTraceScore>,
+    pub runner_up_signatures: Vec<SignatureSelectionTraceScore>,
+    pub rejected_candidates: Vec<SignatureSelectionTraceRejection>,
+    pub package_adapter_requirements: Vec<String>,
+    pub fixture_requirements: Vec<String>,
+    pub evidence_requirements: Vec<String>,
+    pub forbidden_tools: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureSelectionTraceScore {
+    pub signature_id: String,
+    pub signature_version: String,
+    pub adoption_state: SignatureAdoptionState,
+    pub rank: usize,
+    pub score_bps: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureSelectionTraceRejection {
+    pub signature_id: String,
+    pub signature_version: String,
+    pub score_bps: u16,
+    pub reason_code: String,
+    pub rejected_because: String,
+}
+
 impl SeedSignatureRegistry {
     #[must_use]
     pub fn entry_ids(&self) -> Vec<&str> {
@@ -274,6 +323,107 @@ pub fn select_seed_signatures_for_task(
 ) -> Result<SessionSignatureContext, SignatureRegistryError> {
     let registry = seed_signature_registry()?;
     registry.select_for_task(envelope, config)
+}
+
+pub fn select_seed_signatures_with_trace(
+    envelope: &TaskEnvelope,
+    config: &SignatureSelectorConfig,
+) -> Result<(SessionSignatureContext, SignatureSelectionTrace), SignatureRegistryError> {
+    let registry = seed_signature_registry()?;
+    let context = registry.select_for_task(envelope, config)?;
+    let trace = build_signature_selection_trace(&registry, envelope, &context, config)?;
+    Ok((context, trace))
+}
+
+pub fn build_signature_selection_trace(
+    _registry: &SeedSignatureRegistry,
+    envelope: &TaskEnvelope,
+    context: &SessionSignatureContext,
+    config: &SignatureSelectorConfig,
+) -> Result<SignatureSelectionTrace, SignatureRegistryError> {
+    let task_envelope_digest = digest_task_envelope(envelope)?;
+    let decision = context.selection_decision.as_ref().ok_or_else(|| {
+        SignatureRegistryError::InvalidSelectorConfig(String::from("missing selection decision"))
+    })?;
+    let selected_signatures = decision
+        .selected_signatures
+        .iter()
+        .map(trace_score)
+        .collect::<Vec<_>>();
+    let runner_up_signatures = decision
+        .runner_up_signatures
+        .iter()
+        .map(trace_score)
+        .collect::<Vec<_>>();
+    let rejected_candidates = decision
+        .rejected_high_score_signatures
+        .iter()
+        .map(|score| SignatureSelectionTraceRejection {
+            signature_id: score.signature.id.clone(),
+            signature_version: score.signature.version.clone(),
+            score_bps: score.score_bps,
+            reason_code: score
+                .reason_code
+                .clone()
+                .unwrap_or_else(|| String::from("score_above_threshold")),
+            rejected_because: String::from("excluded by signature budget or max-signature cap"),
+        })
+        .collect::<Vec<_>>();
+    let selected_entries = context.signature_pack.entries.as_slice();
+    let status = trace_status(
+        decision,
+        selected_signatures.as_slice(),
+        rejected_candidates.as_slice(),
+        config,
+    );
+
+    Ok(SignatureSelectionTrace {
+        schema_version: String::from("probe.signature_selection_trace.v1"),
+        trace_id: format!("sigtrace-{}", &task_envelope_digest[7..19]),
+        task_envelope_digest,
+        selector_mode: decision.selector_mode,
+        status,
+        fallback_reason_code: decision.fallback_reason_code.clone(),
+        selected_signatures,
+        runner_up_signatures,
+        rejected_candidates,
+        package_adapter_requirements: package_adapter_requirements(selected_entries),
+        fixture_requirements: fixture_requirements(envelope, selected_entries),
+        evidence_requirements: evidence_requirements(selected_entries),
+        forbidden_tools: aggregate_forbidden_tools(selected_entries),
+    })
+}
+
+#[must_use]
+pub fn terminal_bench_task_envelope(
+    dataset_version: impl Into<String>,
+    task_id: impl Into<String>,
+    instruction: impl Into<String>,
+) -> TaskEnvelope {
+    let task_id = task_id.into();
+    TaskEnvelope {
+        envelope_id: format!("terminal-bench-{task_id}"),
+        instruction: Some(instruction.into()),
+        dataset_slug: Some(String::from("terminal-bench")),
+        dataset_version: Some(dataset_version.into()),
+        task_id: Some(task_id),
+        ..TaskEnvelope::default()
+    }
+}
+
+#[must_use]
+pub fn workroom_task_envelope(
+    envelope_id: impl Into<String>,
+    instruction: impl Into<String>,
+    repo: Option<TaskEnvelopeRepo>,
+) -> TaskEnvelope {
+    TaskEnvelope {
+        envelope_id: envelope_id.into(),
+        instruction: Some(instruction.into()),
+        repo,
+        scenario_tags: vec![String::from("coding_workroom")],
+        ..TaskEnvelope::default()
+    }
 }
 
 pub fn build_signature_ablation_report(
@@ -612,6 +762,108 @@ fn selected_signature_ids(
             .collect(),
         SignatureBudgetMode::AdaptiveThreshold => adaptive_signature_ids(scored, config),
     }
+}
+
+fn trace_score(score: &SignatureSelectionScore) -> SignatureSelectionTraceScore {
+    SignatureSelectionTraceScore {
+        signature_id: score.signature.id.clone(),
+        signature_version: score.signature.version.clone(),
+        adoption_state: score.signature.adoption_state,
+        rank: score.rank,
+        score_bps: score.score_bps,
+        reason_code: score.reason_code.clone(),
+    }
+}
+
+fn trace_status(
+    decision: &SignatureSelectionDecision,
+    selected: &[SignatureSelectionTraceScore],
+    rejected: &[SignatureSelectionTraceRejection],
+    config: &SignatureSelectorConfig,
+) -> SignatureSelectionTraceStatus {
+    if selected.is_empty() || decision.selector_mode == SignatureSelectorMode::NoMatch {
+        return SignatureSelectionTraceStatus::NoMatch;
+    }
+    if config.budget_mode == SignatureBudgetMode::CappedSelector && !rejected.is_empty() {
+        return SignatureSelectionTraceStatus::Ambiguous;
+    }
+    let Some(last_selected) = selected.last() else {
+        return SignatureSelectionTraceStatus::NoMatch;
+    };
+    let runner_up_close = decision
+        .runner_up_signatures
+        .first()
+        .is_some_and(|runner_up| {
+            runner_up
+                .score_bps
+                .saturating_add(config.adaptive_neighbor_gap_bps)
+                >= last_selected.score_bps
+        });
+    if runner_up_close && selected.len() >= config.max_signature_count {
+        SignatureSelectionTraceStatus::Ambiguous
+    } else {
+        SignatureSelectionTraceStatus::Selected
+    }
+}
+
+fn package_adapter_requirements(entries: &[SignaturePackEntry]) -> Vec<String> {
+    if entries.is_empty() {
+        return vec![String::from("no Codex signature adapter package")];
+    }
+    unique_sorted(
+        [
+            String::from("rendered_context_required"),
+            String::from("codex_adapter_package_load_evidence"),
+            String::from("signature_context_digest"),
+        ]
+        .into_iter()
+        .chain(entries.iter().map(|entry| {
+            format!(
+                "codex_signature:{}@{}",
+                entry.signature.id, entry.signature.version
+            )
+        })),
+    )
+}
+
+fn fixture_requirements(envelope: &TaskEnvelope, entries: &[SignaturePackEntry]) -> Vec<String> {
+    let selected_fixtures = entries
+        .iter()
+        .flat_map(|entry| entry.fixture_refs.iter().cloned());
+    let task_fixture = match (
+        envelope.dataset_slug.as_deref(),
+        envelope.dataset_version.as_deref(),
+        envelope.task_id.as_deref(),
+    ) {
+        (Some(dataset), Some(version), Some(task_id)) => {
+            Some(format!("{dataset}:{version}/{task_id}"))
+        }
+        _ => None,
+    };
+    unique_sorted(selected_fixtures.chain(task_fixture))
+}
+
+fn evidence_requirements(entries: &[SignaturePackEntry]) -> Vec<String> {
+    if entries.is_empty() {
+        return vec![String::from("operator review for no matching signature")];
+    }
+    unique_sorted(entries.iter().flat_map(|entry| {
+        entry
+            .required_evidence
+            .iter()
+            .map(|evidence| evidence.kind.clone())
+            .chain(entry.closeout_artifacts.iter().cloned())
+            .collect::<Vec<_>>()
+    }))
+}
+
+fn unique_sorted(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    values
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn signature_case_passed(case: &SignatureSelectionCaseRecord) -> bool {
@@ -1379,6 +1631,47 @@ mod tests {
     }
 
     #[test]
+    fn selector_trace_is_serializable_for_vortex_training_records() {
+        let envelope = terminal_bench_task_envelope(
+            "2.0",
+            "pypi-server",
+            "Implement a local PyPI simple repository service and verify pip install works.",
+        );
+        let (_context, trace) =
+            select_seed_signatures_with_trace(&envelope, &SignatureSelectorConfig::default())
+                .expect("selection trace");
+
+        assert_eq!(trace.schema_version, "probe.signature_selection_trace.v1");
+        assert_eq!(trace.status, SignatureSelectionTraceStatus::Selected);
+        assert!(
+            trace
+                .selected_signatures
+                .iter()
+                .any(|score| score.signature_id == "coding.python_package_index")
+        );
+        assert!(
+            trace
+                .package_adapter_requirements
+                .iter()
+                .any(|requirement| requirement.contains("coding.python_package_index"))
+        );
+        assert!(
+            trace
+                .fixture_requirements
+                .contains(&String::from("terminal-bench:2.0/pypi-server"))
+        );
+        assert!(
+            trace
+                .evidence_requirements
+                .contains(&String::from("pep503_index_contract"))
+        );
+
+        let encoded = serde_json::to_string(&trace).expect("serialize trace");
+        assert!(encoded.contains("selectedSignatures"));
+        assert!(encoded.contains("packageAdapterRequirements"));
+    }
+
+    #[test]
     fn selector_pulls_legal_deliverable_and_path_contract() {
         let context = select_seed_signatures_for_task(
             &TaskEnvelope {
@@ -1442,6 +1735,15 @@ mod tests {
                 decision.fallback_reason_code.as_deref(),
                 Some("no_signature_above_threshold")
             );
+            let (_context, trace) =
+                select_seed_signatures_with_trace(&envelope, &SignatureSelectorConfig::default())
+                    .expect("selection trace");
+            assert_eq!(trace.status, SignatureSelectionTraceStatus::NoMatch);
+            assert_eq!(
+                trace.fallback_reason_code.as_deref(),
+                Some("no_signature_above_threshold")
+            );
+            assert!(trace.rejected_candidates.is_empty());
         }
     }
 
@@ -1493,6 +1795,31 @@ mod tests {
         assert_eq!(decision.selected_signatures[0].rank, 1);
         assert_eq!(decision.selected_signatures[1].rank, 2);
         assert_eq!(decision.runner_up_signatures[0].rank, 1);
+    }
+
+    #[test]
+    fn selector_trace_marks_capped_high_score_candidates_ambiguous() {
+        let (_context, trace) = select_seed_signatures_with_trace(
+            &heavy_terminal_envelope(),
+            &SignatureSelectorConfig {
+                budget_mode: SignatureBudgetMode::CappedSelector,
+                max_signature_count: 1,
+                min_score_bps: 1_000,
+                max_runner_up_count: 4,
+                ..SignatureSelectorConfig::default()
+            },
+        )
+        .expect("ambiguous trace");
+
+        assert_eq!(trace.status, SignatureSelectionTraceStatus::Ambiguous);
+        assert_eq!(trace.selected_signatures.len(), 1);
+        assert!(!trace.rejected_candidates.is_empty());
+        assert!(
+            trace
+                .rejected_candidates
+                .iter()
+                .all(|candidate| candidate.rejected_because.contains("cap"))
+        );
     }
 
     #[test]

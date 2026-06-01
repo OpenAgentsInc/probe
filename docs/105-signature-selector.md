@@ -64,6 +64,23 @@ The selector returns a `SessionSignatureContext` with:
 - selector mode: `hybrid` or `no_match`;
 - fallback reason for no-match cases.
 
+For Vortex training/workroom records, Probe can also emit a serializable
+`probe.signature_selection_trace.v1` record. The trace is derived from the same
+typed selector decision and carries:
+
+- selected signatures;
+- runner-up signatures;
+- rejected high-score candidates and rejection rationale;
+- package adapter requirements for Codex signature-pack rendering;
+- fixture requirements;
+- evidence requirements;
+- aggregate forbidden tools;
+- explicit `selected`, `no_match`, or `ambiguous` status.
+
+`terminal_bench_task_envelope(...)` and `workroom_task_envelope(...)` are the
+first helper constructors for normalized task envelopes. They keep Vortex and
+Cloud from passing arbitrary prompt blobs as the selector contract.
+
 Generic greetings, account-login prompts, and unrelated CRM/auth prompts should
 produce an explicit no-match decision.
 
@@ -86,7 +103,9 @@ The scenario tests cover:
 - legal deliverable tasks select `legal.deliverable_file_workflow` and
   `legal.output_path_contract`;
 - greetings and ChatGPT-account/login prompts select no signatures;
+- no-match traces preserve the fallback reason and empty candidate set;
 - candidate-heavy envelopes respect the cap and preserve runner-ups;
+- capped high-score envelopes produce an explicit `ambiguous` trace status;
 - no-signature, fixed-top-k, capped-selector, and full-injection baselines are
   available in the retained fixture ablation report;
 - co-selected signatures render `Use for`, `Do not use for`, `Required
