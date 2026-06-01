@@ -996,6 +996,7 @@ mod tests {
                 required_evidence: Vec::new(),
                 recommended_tools: Vec::new(),
                 forbidden_tools: Vec::new(),
+                closeout_artifacts: vec![String::from("service_readiness_report")],
                 failure_fingerprints: vec![String::from("port_not_ready")],
                 fixture_refs: vec![String::from("tb2:pypi-server")],
                 rendered_description: None,

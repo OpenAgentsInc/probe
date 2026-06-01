@@ -370,3 +370,8 @@ This folder holds technical planning docs for the Probe runtime.
     task signatures, selection decisions, session metadata, managed runtime
     events, and website-safe redacted signature projections without forking
     Codex or turning signatures into arbitrary executable tools
+- `104-seed-signature-packs.md`
+  - repo-local `probe.seed_failure_signatures.v1` registry for the first
+    Terminal-Bench and Harvey failure-derived candidate signatures, with
+    validation, closeout artifact requirements, authority boundaries, and the
+    `probe signatures list` CLI path

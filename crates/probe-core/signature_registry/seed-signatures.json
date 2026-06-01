@@ -1,0 +1,515 @@
+{
+  "schemaVersion": "probe.signature_context.v1",
+  "registryId": "probe.seed_failure_signatures.v1",
+  "sourceRef": "vortex/docs/2026-06-01-codex-terminal-bench-agent-success-analysis.md",
+  "entries": [
+    {
+      "signature": {
+        "id": "coding.service_readiness",
+        "version": "candidate",
+        "adoptionState": "candidate",
+        "sourceRef": "vortex://signatures/coding.service_readiness"
+      },
+      "taskClasses": ["service_orchestration", "daemon_readiness", "http_service"],
+      "benchmarkFamilies": ["terminal-bench"],
+      "requiredEvidence": [
+        {
+          "kind": "port_probe",
+          "required": true,
+          "description": "Record bound host, port, status code, and timeout for every expected service endpoint."
+        },
+        {
+          "kind": "service_log_tail",
+          "required": true,
+          "description": "Capture startup logs and last error lines before verifier closeout."
+        }
+      ],
+      "recommendedTools": [
+        {
+          "toolName": "read_file",
+          "required": true,
+          "reason": "Read service config, task files, and expected port/path contracts."
+        },
+        {
+          "toolName": "shell",
+          "required": true,
+          "reason": "Run bounded health checks such as curl, ss, lsof, or service-specific smoke commands."
+        }
+      ],
+      "forbiddenTools": ["destructive_shell", "unbounded_network", "production_secret_access"],
+      "closeoutArtifacts": ["service-readiness.json", "service-logs.txt", "health-checks.txt"],
+      "failureFingerprints": ["port_not_ready", "service_exit_before_verifier", "http_healthcheck_failed"],
+      "fixtureRefs": [
+        "terminal-bench:2.0/configure-git-webserver",
+        "terminal-bench:2.0/pypi-server"
+      ],
+      "renderedDescription": "Use for tasks that must start a local service and prove readiness before verifier closeout."
+    },
+    {
+      "signature": {
+        "id": "coding.python_package_index",
+        "version": "candidate",
+        "adoptionState": "candidate",
+        "sourceRef": "vortex://signatures/coding.python_package_index"
+      },
+      "taskClasses": ["python_package_index", "simple_repository_api", "service_orchestration"],
+      "benchmarkFamilies": ["terminal-bench"],
+      "requiredEvidence": [
+        {
+          "kind": "pep503_index_contract",
+          "required": true,
+          "description": "Record normalized package names, simple-index HTML paths, package file paths, and served metadata."
+        },
+        {
+          "kind": "pip_install_smoke",
+          "required": true,
+          "description": "Run a bounded local pip install or equivalent package-resolution smoke against the service."
+        }
+      ],
+      "recommendedTools": [
+        {
+          "toolName": "read_file",
+          "required": true,
+          "reason": "Inspect packaging metadata, generated index files, and task instructions."
+        },
+        {
+          "toolName": "shell",
+          "required": true,
+          "reason": "Run bounded package build, local server, and pip smoke commands."
+        }
+      ],
+      "forbiddenTools": ["destructive_shell", "unbounded_network", "production_secret_access"],
+      "closeoutArtifacts": ["simple-index-tree.txt", "pip-install-smoke.txt", "package-index-service.log"],
+      "failureFingerprints": ["pypi_simple_api_mismatch", "package_not_served", "installer_smoke_failed"],
+      "fixtureRefs": ["terminal-bench:2.0/pypi-server"],
+      "renderedDescription": "Use for local PyPI/simple-index tasks that need PEP 503 behavior, package artifacts, and installer smoke evidence."
+    },
+    {
+      "signature": {
+        "id": "coding.query_optimizer_workflow",
+        "version": "candidate",
+        "adoptionState": "candidate",
+        "sourceRef": "vortex://signatures/coding.query_optimizer_workflow"
+      },
+      "taskClasses": ["sql_optimization", "query_planning", "performance_regression"],
+      "benchmarkFamilies": ["terminal-bench"],
+      "requiredEvidence": [
+        {
+          "kind": "result_equivalence",
+          "required": true,
+          "description": "Record before/after row counts or checksums proving the optimized query remains equivalent."
+        },
+        {
+          "kind": "query_plan_trace",
+          "required": true,
+          "description": "Capture EXPLAIN or planner output plus timing for the accepted candidate."
+        }
+      ],
+      "recommendedTools": [
+        {
+          "toolName": "read_file",
+          "required": true,
+          "reason": "Inspect schema, query, and benchmark harness details."
+        },
+        {
+          "toolName": "shell",
+          "required": true,
+          "reason": "Run bounded database verifier, EXPLAIN, and timing commands."
+        }
+      ],
+      "forbiddenTools": ["destructive_shell", "production_secret_access"],
+      "closeoutArtifacts": ["query-plan-before.txt", "query-plan-after.txt", "result-equivalence.txt"],
+      "failureFingerprints": ["missed_one_performance_condition", "query_plan_regression", "verifier_partial_pass"],
+      "fixtureRefs": ["terminal-bench:2.0/query-optimize"],
+      "renderedDescription": "Use for SQL/query optimization tasks that need correctness evidence and planner/timing traces."
+    },
+    {
+      "signature": {
+        "id": "coding.sqlite_wal_recovery",
+        "version": "candidate",
+        "adoptionState": "candidate",
+        "sourceRef": "vortex://signatures/coding.sqlite_wal_recovery"
+      },
+      "taskClasses": ["sqlite_recovery", "wal_checkpoint", "database_forensics"],
+      "benchmarkFamilies": ["terminal-bench"],
+      "requiredEvidence": [
+        {
+          "kind": "sqlite_integrity_check",
+          "required": true,
+          "description": "Record PRAGMA integrity_check or equivalent recovery validation."
+        },
+        {
+          "kind": "recovered_data_digest",
+          "required": true,
+          "description": "Record row counts, relevant table hashes, and copied WAL/SHM provenance."
+        }
+      ],
+      "recommendedTools": [
+        {
+          "toolName": "read_file",
+          "required": true,
+          "reason": "Inspect task instructions and database file layout."
+        },
+        {
+          "toolName": "shell",
+          "required": true,
+          "reason": "Run bounded sqlite3, checkpoint, dump, recover, and hash commands."
+        }
+      ],
+      "forbiddenTools": ["destructive_shell", "production_secret_access"],
+      "closeoutArtifacts": ["sqlite-integrity.txt", "wal-recovery-report.txt", "recovered-data-digest.txt"],
+      "failureFingerprints": ["sqlite_wal_partial_recovery", "missing_checkpoint", "row_digest_mismatch"],
+      "fixtureRefs": ["terminal-bench:2.0/db-wal-recovery"],
+      "renderedDescription": "Use for SQLite WAL recovery tasks that need systematic checkpoint/replay and integrity evidence."
+    },
+    {
+      "signature": {
+        "id": "coding.gcode_parser_guard",
+        "version": "candidate",
+        "adoptionState": "candidate",
+        "sourceRef": "vortex://signatures/coding.gcode_parser_guard"
+      },
+      "taskClasses": ["gcode_parsing", "manufacturing_text_extraction", "format_contract"],
+      "benchmarkFamilies": ["terminal-bench"],
+      "requiredEvidence": [
+        {
+          "kind": "golden_parser_examples",
+          "required": true,
+          "description": "Record representative G-code inputs, parsed state transitions, and expected text output."
+        },
+        {
+          "kind": "normalization_contract",
+          "required": true,
+          "description": "Record numeric tolerance, comment handling, command normalization, and output formatting rules."
+        }
+      ],
+      "recommendedTools": [
+        {
+          "toolName": "read_file",
+          "required": true,
+          "reason": "Inspect parser source, fixtures, and expected output samples."
+        },
+        {
+          "toolName": "shell",
+          "required": false,
+          "reason": "Run bounded parser tests and golden output comparisons."
+        }
+      ],
+      "forbiddenTools": ["destructive_shell", "unbounded_network", "production_secret_access"],
+      "closeoutArtifacts": ["gcode-golden-cases.txt", "parser-normalization-report.txt"],
+      "failureFingerprints": ["gcode_text_format_mismatch", "parser_hidden_case_miss"],
+      "fixtureRefs": ["terminal-bench:2.0/gcode-to-text"],
+      "renderedDescription": "Use for G-code/text extraction tasks that need explicit parser state and format-contract evidence."
+    },
+    {
+      "signature": {
+        "id": "coding.xss_sanitizer_policy",
+        "version": "candidate",
+        "adoptionState": "candidate",
+        "sourceRef": "vortex://signatures/coding.xss_sanitizer_policy"
+      },
+      "taskClasses": ["html_sanitization", "xss_filtering", "security_policy"],
+      "benchmarkFamilies": ["terminal-bench"],
+      "requiredEvidence": [
+        {
+          "kind": "clean_input_preservation",
+          "required": true,
+          "description": "Record benign HTML examples that remain semantically preserved after sanitization."
+        },
+        {
+          "kind": "malicious_input_blocking",
+          "required": true,
+          "description": "Record script/event/URL vectors and proof that executable paths are removed or neutralized."
+        }
+      ],
+      "recommendedTools": [
+        {
+          "toolName": "read_file",
+          "required": true,
+          "reason": "Inspect sanitizer implementation, tests, and task fixtures."
+        },
+        {
+          "toolName": "shell",
+          "required": false,
+          "reason": "Run bounded sanitizer regression tests or JS-runtime alert checks where available."
+        }
+      ],
+      "forbiddenTools": ["destructive_shell", "unbounded_network", "production_secret_access"],
+      "closeoutArtifacts": ["sanitizer-allowed-cases.txt", "sanitizer-blocked-cases.txt", "xss-policy-report.txt"],
+      "failureFingerprints": ["xss_case_missed", "clean_html_over_sanitized", "sanitizer_policy_regression"],
+      "fixtureRefs": ["terminal-bench:2.0/filter-js-from-html"],
+      "renderedDescription": "Use for XSS sanitizer tasks that must preserve benign HTML while proving malicious vectors are blocked."
+    },
+    {
+      "signature": {
+        "id": "benchmark.runner_supervisor",
+        "version": "candidate",
+        "adoptionState": "candidate",
+        "sourceRef": "vortex://signatures/benchmark.runner_supervisor"
+      },
+      "taskClasses": ["benchmark_supervision", "job_finalization", "durable_runner"],
+      "benchmarkFamilies": ["terminal-bench", "harvey-legal"],
+      "requiredEvidence": [
+        {
+          "kind": "heartbeat_trace",
+          "required": true,
+          "description": "Record task heartbeat, timeout, and terminal-state repair decisions."
+        },
+        {
+          "kind": "artifact_finalization",
+          "required": true,
+          "description": "Record whether result files, logs, and partial outputs were finalized after task completion or resume."
+        }
+      ],
+      "recommendedTools": [
+        {
+          "toolName": "read_file",
+          "required": false,
+          "reason": "Inspect result files and runner metadata."
+        },
+        {
+          "toolName": "shell",
+          "required": false,
+          "reason": "Run bounded process/status checks when supervising a local benchmark wrapper."
+        }
+      ],
+      "forbiddenTools": ["destructive_shell", "production_secret_access"],
+      "closeoutArtifacts": ["runner-heartbeats.jsonl", "terminal-state-repair.json", "artifact-finalization.txt"],
+      "failureFingerprints": ["trial_result_exists_without_closeout", "job_stalled_after_verifier", "partial_result_needs_resume"],
+      "fixtureRefs": [
+        "terminal-bench:2.0/query-optimize",
+        "openagents-benchmark:runner-resume-smoke"
+      ],
+      "renderedDescription": "Use for benchmark wrapper runs that need heartbeat, timeout, resume, and artifact-finalization evidence."
+    },
+    {
+      "signature": {
+        "id": "legal.deliverable_file_workflow",
+        "version": "candidate",
+        "adoptionState": "candidate",
+        "sourceRef": "vortex://signatures/legal.deliverable_file_workflow"
+      },
+      "taskClasses": ["legal_deliverable", "document_workflow", "model_authored_file"],
+      "benchmarkFamilies": ["harvey-legal"],
+      "requiredEvidence": [
+        {
+          "kind": "model_authored_file",
+          "required": true,
+          "description": "Record that the agent authored the required deliverable file and did not rely on scorer-side file creation."
+        },
+        {
+          "kind": "deliverable_presence",
+          "required": true,
+          "description": "Record required file path, file type, size, and hash."
+        }
+      ],
+      "recommendedTools": [
+        {
+          "toolName": "read_file",
+          "required": true,
+          "reason": "Inspect task instructions, source bundle, and deliverable requirements."
+        },
+        {
+          "toolName": "code_search",
+          "required": false,
+          "reason": "Search source bundle text for relevant source spans."
+        }
+      ],
+      "forbiddenTools": ["destructive_shell", "unbounded_network", "production_secret_access"],
+      "closeoutArtifacts": ["deliverable-file-manifest.json", "deliverable-hash.txt"],
+      "failureFingerprints": ["required_deliverable_missing", "scorer_created_answer_file"],
+      "fixtureRefs": ["harvey-legal:public-training/deliverable-file-workflow"],
+      "renderedDescription": "Use for legal tasks where the agent must create and close out a required answer file."
+    },
+    {
+      "signature": {
+        "id": "legal.output_path_contract",
+        "version": "candidate",
+        "adoptionState": "candidate",
+        "sourceRef": "vortex://signatures/legal.output_path_contract"
+      },
+      "taskClasses": ["legal_deliverable", "path_contract", "file_format_contract"],
+      "benchmarkFamilies": ["harvey-legal"],
+      "requiredEvidence": [
+        {
+          "kind": "output_path_receipt",
+          "required": true,
+          "description": "Record exact required path, actual path, filename, extension, and hash."
+        },
+        {
+          "kind": "format_validation",
+          "required": true,
+          "description": "Record whether the deliverable matches the requested file type and basic shape."
+        }
+      ],
+      "recommendedTools": [
+        {
+          "toolName": "read_file",
+          "required": true,
+          "reason": "Read task instructions and path contract before execution."
+        },
+        {
+          "toolName": "shell",
+          "required": false,
+          "reason": "Run bounded ls, file, shasum, or format checks."
+        }
+      ],
+      "forbiddenTools": ["destructive_shell", "unbounded_network", "production_secret_access"],
+      "closeoutArtifacts": ["output-path-receipt.json", "format-validation.txt"],
+      "failureFingerprints": ["wrong_output_path", "wrong_filename", "wrong_deliverable_type"],
+      "fixtureRefs": ["harvey-legal:public-training/output-path-contract"],
+      "renderedDescription": "Use for legal benchmark tasks where the required output path and file type are part of the grade."
+    },
+    {
+      "signature": {
+        "id": "legal.source_grounding_trace",
+        "version": "candidate",
+        "adoptionState": "candidate",
+        "sourceRef": "vortex://signatures/legal.source_grounding_trace"
+      },
+      "taskClasses": ["legal_source_grounding", "document_bundle", "citation_required"],
+      "benchmarkFamilies": ["harvey-legal"],
+      "requiredEvidence": [
+        {
+          "kind": "source_span_refs",
+          "required": true,
+          "description": "Record source document ids and span references used for material assertions."
+        },
+        {
+          "kind": "unused_source_check",
+          "required": false,
+          "description": "Record whether required source bundles were inspected."
+        }
+      ],
+      "recommendedTools": [
+        {
+          "toolName": "read_file",
+          "required": true,
+          "reason": "Read source bundle documents and prompt requirements."
+        },
+        {
+          "toolName": "code_search",
+          "required": false,
+          "reason": "Search source text for relevant clauses, dates, parties, or legal terms."
+        }
+      ],
+      "forbiddenTools": ["destructive_shell", "unbounded_network", "production_secret_access"],
+      "closeoutArtifacts": ["source-grounding-trace.json", "source-span-refs.txt"],
+      "failureFingerprints": ["missing_source_use", "unsupported_legal_assertion", "source_bundle_not_opened"],
+      "fixtureRefs": ["harvey-legal:public-training/source-grounding"],
+      "renderedDescription": "Use for legal tasks requiring answers grounded in provided source bundles without exposing hidden rubric labels."
+    },
+    {
+      "signature": {
+        "id": "legal.citation_provenance_check",
+        "version": "candidate",
+        "adoptionState": "candidate",
+        "sourceRef": "vortex://signatures/legal.citation_provenance_check"
+      },
+      "taskClasses": ["legal_citations", "provenance_check", "hallucination_guard"],
+      "benchmarkFamilies": ["harvey-legal"],
+      "requiredEvidence": [
+        {
+          "kind": "citation_source_match",
+          "required": true,
+          "description": "Record each cited authority or source span and the document where it was observed."
+        },
+        {
+          "kind": "citation_nonfabrication_check",
+          "required": true,
+          "description": "Record that citations were copied from source material or verified allowable references, not invented."
+        }
+      ],
+      "recommendedTools": [
+        {
+          "toolName": "read_file",
+          "required": true,
+          "reason": "Read source material containing cited authorities or contract provisions."
+        },
+        {
+          "toolName": "code_search",
+          "required": false,
+          "reason": "Search source bundle text for cited phrases or citation strings."
+        }
+      ],
+      "forbiddenTools": ["destructive_shell", "unbounded_network", "production_secret_access"],
+      "closeoutArtifacts": ["citation-provenance.json", "citation-check-report.txt"],
+      "failureFingerprints": ["hallucinated_citation", "citation_missing_source_span", "citation_not_in_bundle"],
+      "fixtureRefs": ["harvey-legal:public-training/citation-provenance"],
+      "renderedDescription": "Use for legal tasks where citations or legal authorities must be traceable to provided sources."
+    },
+    {
+      "signature": {
+        "id": "legal.answer_integrity_guard",
+        "version": "candidate",
+        "adoptionState": "candidate",
+        "sourceRef": "vortex://signatures/legal.answer_integrity_guard"
+      },
+      "taskClasses": ["legal_answer_integrity", "artifact_integrity", "actor_attribution"],
+      "benchmarkFamilies": ["harvey-legal"],
+      "requiredEvidence": [
+        {
+          "kind": "actor_attribution",
+          "required": true,
+          "description": "Record whether the model, runner, grader, or human authored each answer artifact."
+        },
+        {
+          "kind": "pre_post_hash",
+          "required": true,
+          "description": "Record relevant pre/post hashes for answer files and immutable source bundles."
+        }
+      ],
+      "recommendedTools": [
+        {
+          "toolName": "read_file",
+          "required": false,
+          "reason": "Inspect artifacts and source bundle metadata."
+        },
+        {
+          "toolName": "shell",
+          "required": false,
+          "reason": "Run bounded hash and file-inspection commands."
+        }
+      ],
+      "forbiddenTools": ["destructive_shell", "unbounded_network", "production_secret_access"],
+      "closeoutArtifacts": ["answer-integrity.json", "artifact-hashes.txt", "actor-attribution.txt"],
+      "failureFingerprints": ["answer_integrity_failure", "artifact_actor_mismatch", "source_bundle_modified"],
+      "fixtureRefs": ["harvey-legal:public-training/answer-integrity"],
+      "renderedDescription": "Use for legal tasks needing artifact hashes, actor attribution, and no scorer-written answers."
+    },
+    {
+      "signature": {
+        "id": "benchmark.legal_judge_supervisor",
+        "version": "candidate",
+        "adoptionState": "shadow",
+        "sourceRef": "vortex://signatures/benchmark.legal_judge_supervisor"
+      },
+      "taskClasses": ["legal_benchmark_judge", "scorer_supervision", "criterion_scoring"],
+      "benchmarkFamilies": ["harvey-legal"],
+      "requiredEvidence": [
+        {
+          "kind": "judge_retry_trace",
+          "required": true,
+          "description": "Record judge/scorer attempts, retry reasons, final status, and timeout boundaries."
+        },
+        {
+          "kind": "criterion_score_receipt",
+          "required": true,
+          "description": "Record criterion-scoped scorer outputs without exposing hidden labels or private answers."
+        }
+      ],
+      "recommendedTools": [
+        {
+          "toolName": "read_file",
+          "required": false,
+          "reason": "Inspect public scorer outputs and retained score reports."
+        }
+      ],
+      "forbiddenTools": ["destructive_shell", "unbounded_network", "production_secret_access"],
+      "closeoutArtifacts": ["judge-retry-trace.json", "criterion-score-receipt.json", "score-finalization.txt"],
+      "failureFingerprints": ["judge_timeout", "scorer_outage", "criterion_score_missing"],
+      "fixtureRefs": ["harvey-legal:public-training/judge-supervisor-smoke"],
+      "renderedDescription": "Use in shadow for legal scorer retry/finalization supervision without treating outages as model failures."
+    }
+  ]
+}

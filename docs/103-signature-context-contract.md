@@ -41,6 +41,7 @@ Vortex records product Program Runs and acceptance
 - required evidence
 - recommended tools
 - forbidden tools
+- closeout artifacts
 - failure fingerprints
 - fixture refs
 - optional rendered description

@@ -11,7 +11,7 @@ pub mod website_events;
 
 use std::path::{Path, PathBuf};
 
-pub const PROBE_PROTOCOL_VERSION: u32 = 22;
+pub const PROBE_PROTOCOL_VERSION: u32 = 23;
 pub const PROBE_RUNTIME_NAME: &str = "probe";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,7 +54,7 @@ mod tests {
     fn current_descriptor_is_stable() {
         let descriptor = ProtocolDescriptor::current();
         assert_eq!(descriptor.runtime_name, "probe");
-        assert_eq!(descriptor.version, 22);
+        assert_eq!(descriptor.version, 23);
     }
 
     #[test]

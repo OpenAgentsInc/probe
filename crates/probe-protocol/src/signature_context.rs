@@ -67,6 +67,8 @@ pub struct SignaturePackEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forbidden_tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closeout_artifacts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failure_fingerprints: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fixture_refs: Vec<String>,
@@ -323,6 +325,7 @@ mod tests {
                     reason: Some(String::from("Run bounded readiness checks.")),
                 }],
                 forbidden_tools: vec![String::from("destructive_shell")],
+                closeout_artifacts: vec![String::from("service_readiness_report")],
                 failure_fingerprints: vec![String::from("port_not_ready")],
                 fixture_refs: vec![String::from("tb2:pypi-server")],
                 rendered_description: Some(String::from("Use for service readiness checks.")),
@@ -399,6 +402,7 @@ mod tests {
                 required_evidence: Vec::new(),
                 recommended_tools: Vec::new(),
                 forbidden_tools: Vec::new(),
+                closeout_artifacts: Vec::new(),
                 failure_fingerprints: Vec::new(),
                 fixture_refs: Vec::new(),
                 rendered_description: Some(private_task_text.to_string()),

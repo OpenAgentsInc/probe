@@ -74,6 +74,7 @@ use probe_core::server_control::{
     ServerProcessGuard,
 };
 use probe_core::session_store::FilesystemSessionStore;
+use probe_core::signature_registry::seed_signature_registry;
 use probe_core::tools::{
     ExecutedToolCall, ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLongContextConfig,
     ToolLoopConfig, ToolOracleConfig,
@@ -109,6 +110,7 @@ use probe_protocol::session::{
     SessionTurn, ToolPolicyDecision, ToolRiskClass, TranscriptEvent, TranscriptItemKind,
     UsageMeasurement, UsageTruth,
 };
+use probe_protocol::signature_context::{SignatureAdoptionState, SignaturePackEntry};
 use probe_server::detached_watchdog::DetachedTurnWatchdogPolicy;
 use probe_server::server::{run_local_daemon_with_watchdog_policy, run_stdio_server};
 use probe_tui::{AppShell, TuiLaunchConfig, UiEvent, run_probe_tui_with_config};
@@ -167,6 +169,8 @@ enum Commands {
     OptimizeHarness(OptimizeHarnessArgs),
     OptimizeSkillPacks(OptimizeSkillPacksArgs),
     AdoptCandidate(AdoptCandidateArgs),
+    #[command(about = "Inspect Probe's seed signature registry")]
+    Signatures(SignatureArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -1130,6 +1134,24 @@ struct AdoptCandidateArgs {
     state: String,
 }
 
+#[derive(clap::Args, Debug)]
+struct SignatureArgs {
+    #[command(subcommand)]
+    command: SignatureCommands,
+}
+
+#[derive(Subcommand, Debug)]
+enum SignatureCommands {
+    #[command(about = "List seed signatures and validate their registry schema")]
+    List(SignatureListArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct SignatureListArgs {
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
 struct ServerArgs {
     #[arg(long, default_value = "attach")]
@@ -1216,6 +1238,7 @@ fn run() -> Result<(), String> {
         Commands::OptimizeHarness(args) => run_optimize_harness(args),
         Commands::OptimizeSkillPacks(args) => run_optimize_skill_packs(args),
         Commands::AdoptCandidate(args) => run_adopt_candidate(args),
+        Commands::Signatures(args) => run_signatures(args),
     }
 }
 
@@ -3886,6 +3909,53 @@ fn run_optimize_skill_packs(args: OptimizeSkillPacksArgs) -> Result<(), String> 
     Ok(())
 }
 
+fn run_signatures(args: SignatureArgs) -> Result<(), String> {
+    match args.command {
+        SignatureCommands::List(args) => run_signature_list(args),
+    }
+}
+
+fn run_signature_list(args: SignatureListArgs) -> Result<(), String> {
+    let registry = seed_signature_registry().map_err(|error| error.to_string())?;
+    if args.json {
+        let json = serde_json::to_string_pretty(&registry).map_err(|error| error.to_string())?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    println!(
+        "registry={} signatures={}",
+        registry.registry_id,
+        registry.entries.len()
+    );
+    for entry in registry.entries {
+        println!("{}", render_signature_summary_line(&entry));
+    }
+    Ok(())
+}
+
+fn render_signature_summary_line(entry: &SignaturePackEntry) -> String {
+    format!(
+        "{}@{} state={} evidence={} closeout_artifacts={} fixtures={} fingerprints={}",
+        entry.signature.id,
+        entry.signature.version,
+        signature_adoption_state_label(entry.signature.adoption_state),
+        entry.required_evidence.len(),
+        entry.closeout_artifacts.len(),
+        entry.fixture_refs.len(),
+        entry.failure_fingerprints.len()
+    )
+}
+
+fn signature_adoption_state_label(state: SignatureAdoptionState) -> &'static str {
+    match state {
+        SignatureAdoptionState::Candidate => "candidate",
+        SignatureAdoptionState::Shadow => "shadow",
+        SignatureAdoptionState::Promoted => "promoted",
+        SignatureAdoptionState::Deprecated => "deprecated",
+    }
+}
+
 fn read_decision_dataset(path: &Path) -> Result<Vec<DecisionSessionSummary>, String> {
     let body = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     body.lines()
@@ -5443,10 +5513,10 @@ mod tests {
     use super::{
         BackendKind, Cli, Commands, HostedConnectArgs, ManagedCloudRunJobCommands,
         ManagedCloudRunWorkerPoolCommands, ManagedCommands, ManagedDaytonaCommands,
-        ProbeClientTransportConfig, PsionicServerConfig, ServerArgs, ToolApprovalConfig, TuiArgs,
-        build_tui_runtime_config, operator_client_config, render_detached_summary_line,
-        render_turn_backend_receipt, render_turn_observability, resolve_server_config,
-        resolve_tui_profile,
+        ProbeClientTransportConfig, PsionicServerConfig, ServerArgs, SignatureCommands,
+        ToolApprovalConfig, TuiArgs, build_tui_runtime_config, operator_client_config,
+        render_detached_summary_line, render_signature_summary_line, render_turn_backend_receipt,
+        render_turn_observability, resolve_server_config, resolve_tui_profile,
     };
 
     #[test]
@@ -5777,6 +5847,34 @@ mod tests {
             },
             other => panic!("expected managed daytona command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn signatures_list_command_parses() {
+        let cli = Cli::try_parse_from(["probe", "signatures", "list", "--json"])
+            .expect("signature list command should parse");
+        match cli.command {
+            Some(Commands::Signatures(args)) => match args.command {
+                SignatureCommands::List(args) => assert!(args.json),
+            },
+            other => panic!("expected signatures list command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn signature_summary_line_reports_registry_counts() {
+        let registry =
+            probe_core::signature_registry::seed_signature_registry().expect("seed registry");
+        let entry = registry
+            .entry_by_id("coding.python_package_index")
+            .expect("python package index signature");
+        let line = render_signature_summary_line(entry);
+
+        assert!(line.contains("coding.python_package_index@candidate"));
+        assert!(line.contains("state=candidate"));
+        assert!(line.contains("evidence=2"));
+        assert!(line.contains("closeout_artifacts=3"));
+        assert!(line.contains("fixtures=1"));
     }
 
     #[test]

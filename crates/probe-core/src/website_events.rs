@@ -738,6 +738,7 @@ mod tests {
                 required_evidence: Vec::new(),
                 recommended_tools: Vec::new(),
                 forbidden_tools: Vec::new(),
+                closeout_artifacts: Vec::new(),
                 failure_fingerprints: Vec::new(),
                 fixture_refs: Vec::new(),
                 rendered_description: Some(private_task_text.to_string()),
