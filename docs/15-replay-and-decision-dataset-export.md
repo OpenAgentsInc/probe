@@ -33,6 +33,14 @@ cargo run -p probe-cli -- export \
   --output ~/.probe/reports/probe_decision_cases
 ```
 
+and:
+
+```bash
+cargo run -p probe-cli -- export \
+  --dataset signature-cases \
+  --output ~/.probe/reports/probe_signature_cases
+```
+
 Optional scope controls:
 
 - `--session <id>`
@@ -117,6 +125,35 @@ The export path writes a bundle directory containing:
 That split manifest is the canonical retained-case inventory for later Probe to
 Psionic optimizer jobs.
 
+## Signature Case Bundle
+
+`signature-cases` emits one validation-only case for each selected signature on
+a session that carried `SessionSignatureContext`.
+
+Each case records:
+
+- selected signature id, version, adoption state, source ref, rank, score, and
+  reason code
+- selected signature ids and runner-up signatures from the selection decision
+- recommended tool set, recommended tool choice, actual tool choice when
+  observed, forbidden tools, and tool-policy counts
+- result status, typed failure type, verifier outcome, and a hash of final
+  assistant text when present
+- source session id, transcript path, and transcript item refs
+- an explicit `outcome_label`, currently `unknown` until an evaluator or human
+  marks the signature as helped, hurt, or irrelevant
+
+The export path writes:
+
+- `signature_cases_all.jsonl`
+- `signature_cases_val.jsonl`
+- `signature_case_manifest.json`
+
+The manifest sets `train_cases` to `0`. These cases are intentionally
+validation-only until a separate signature-promotion job admits them into a
+training set. This keeps raw selection scores and adoption state separate from
+promotion authority.
+
 ## Privacy And Scope Boundary
 
 The export path is intentionally local-first.
@@ -148,6 +185,8 @@ Probe can now produce:
   verification, approval behavior, and cache effects
 - decision-case bundles with stable train or validation membership and
   transcript provenance for module-family evaluation
+- signature-case bundles for clustering failures by selected signature and
+  typed failure reason before writing new failure-derived signatures
 
 That means later DSPy/GEPA work can consume stable exported data instead of
 scraping ad hoc logs or trying to infer policy behavior from free-form text.

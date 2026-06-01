@@ -75,6 +75,12 @@ Exports include compact signature refs:
 This is enough for replay, failure learning, and promotion analysis without
 leaking raw task envelopes or private customer data.
 
+`probe export --dataset signature-cases` now emits validation-only
+signature-selection cases. Those cases add selected and runner-up signatures,
+tool-policy counts, typed failure type, verifier outcome, and an explicit
+unknown/helped/hurt/irrelevant outcome-label hook. They are not training data
+until a later promotion flow admits them.
+
 ## Validation
 
 The targeted smoke path covers:

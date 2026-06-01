@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -7,7 +8,10 @@ use probe_protocol::session::{
     CacheSignal, SessionId, SessionMetadata, ToolPolicyDecision, TranscriptEvent,
     TranscriptItemKind,
 };
-use probe_protocol::signature_context::SignatureSelectorMode;
+use probe_protocol::signature_context::{
+    SessionSignatureContext, SignatureAdoptionState, SignatureRef, SignatureSelectionScore,
+    SignatureSelectorMode,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -18,6 +22,7 @@ pub enum DatasetKind {
     Replay,
     Decision,
     DecisionCases,
+    SignatureCases,
 }
 
 impl DatasetKind {
@@ -26,8 +31,9 @@ impl DatasetKind {
             "replay" => Ok(Self::Replay),
             "decision" => Ok(Self::Decision),
             "decision-cases" | "decision_cases" => Ok(Self::DecisionCases),
+            "signature-cases" | "signature_cases" => Ok(Self::SignatureCases),
             other => Err(format!(
-                "unknown dataset kind `{other}`; expected `replay`, `decision`, or `decision-cases`"
+                "unknown dataset kind `{other}`; expected `replay`, `decision`, `decision-cases`, or `signature-cases`"
             )),
         }
     }
@@ -38,6 +44,7 @@ impl DatasetKind {
             Self::Replay => "replay",
             Self::Decision => "decision",
             Self::DecisionCases => "decision-cases",
+            Self::SignatureCases => "signature-cases",
         }
     }
 }
@@ -319,6 +326,118 @@ pub struct DecisionCaseSplitManifest {
     pub validation_cases_path: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureCaseResultStatus {
+    Completed,
+    Failed,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureVerifierOutcome {
+    NotObserved,
+    Passed,
+    Failed,
+    Error,
+    Timeout,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureOutcomeLabel {
+    Unknown,
+    Helped,
+    Hurt,
+    Irrelevant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureCaseSelection {
+    pub signature_id: String,
+    pub signature_version: String,
+    pub adoption_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_bps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureToolPolicySnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_tool_set: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_tool_choice: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_tool_choice: Option<String>,
+    pub forbidden_tools: Vec<String>,
+    pub auto_allowed_tool_calls: usize,
+    pub approved_tool_calls: usize,
+    pub refused_tool_calls: usize,
+    pub paused_tool_calls: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureCaseResult {
+    pub status: SignatureCaseResultStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_type: Option<String>,
+    pub verifier_outcome: SignatureVerifierOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_assistant_text_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureSelectionCaseRecord {
+    pub schema_version: u16,
+    pub case_id: String,
+    pub stable_digest: String,
+    pub split: DecisionCaseSplit,
+    pub session_id: String,
+    pub title: String,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_profile: Option<String>,
+    pub source_transcript_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_envelope_digest: Option<String>,
+    pub signature: SignatureCaseSelection,
+    pub selected_signature_ids: Vec<String>,
+    pub runner_up_signatures: Vec<SignatureCaseSelection>,
+    pub tool_policy: SignatureToolPolicySnapshot,
+    pub result: SignatureCaseResult,
+    pub outcome_label: SignatureOutcomeLabel,
+    pub transcript_refs: Vec<DecisionCaseTranscriptRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureCaseManifest {
+    pub schema_version: u16,
+    pub report_id: String,
+    pub output_dir: String,
+    pub total_sessions: usize,
+    pub total_cases: usize,
+    pub train_cases: usize,
+    pub validation_cases: usize,
+    pub all_cases_path: String,
+    pub validation_cases_path: String,
+    pub training_policy: String,
+}
+
 pub fn export_dataset(
     session_store: &FilesystemSessionStore,
     config: &DatasetExportConfig,
@@ -326,13 +445,20 @@ pub fn export_dataset(
     let sessions = session_store.list_sessions()?;
     let mut sessions_exported = 0_usize;
     let mut decision_cases = Vec::new();
+    let mut signature_cases = Vec::new();
 
-    if config.kind != DatasetKind::DecisionCases {
+    if !matches!(
+        config.kind,
+        DatasetKind::DecisionCases | DatasetKind::SignatureCases
+    ) {
         if let Some(parent) = config.output_path.parent() {
             fs::create_dir_all(parent)?;
         }
     }
-    let mut writer = if config.kind == DatasetKind::DecisionCases {
+    let mut writer = if matches!(
+        config.kind,
+        DatasetKind::DecisionCases | DatasetKind::SignatureCases
+    ) {
         None
     } else {
         let file = File::create(&config.output_path)?;
@@ -375,6 +501,12 @@ pub fn export_dataset(
             DatasetKind::DecisionCases => {
                 decision_cases.extend(build_decision_cases(&metadata, transcript.as_slice()));
             }
+            DatasetKind::SignatureCases => {
+                signature_cases.extend(build_signature_selection_cases(
+                    &metadata,
+                    transcript.as_slice(),
+                ));
+            }
         }
         if let Some(writer) = writer.as_mut() {
             writer.write_all(b"\n")?;
@@ -387,12 +519,19 @@ pub fn export_dataset(
     if config.kind == DatasetKind::DecisionCases {
         write_decision_case_bundle(config.output_path.as_path(), decision_cases.as_slice())?;
     }
+    if config.kind == DatasetKind::SignatureCases {
+        write_signature_case_bundle(config.output_path.as_path(), signature_cases.as_slice())?;
+    }
 
     Ok(DatasetExportReport {
         kind: config.kind,
         output_path: config.output_path.clone(),
         sessions_exported,
-        cases_exported: decision_cases.len(),
+        cases_exported: match config.kind {
+            DatasetKind::DecisionCases => decision_cases.len(),
+            DatasetKind::SignatureCases => signature_cases.len(),
+            DatasetKind::Replay | DatasetKind::Decision => 0,
+        },
     })
 }
 
@@ -412,10 +551,14 @@ fn should_export_session(
     }
 
     metadata
-        .harness_profile
+        .signature_context
         .as_ref()
-        .map(|profile| profile.name.starts_with("coding_bootstrap"))
-        .unwrap_or(false)
+        .is_some_and(|context| !context.signature_pack.entries.is_empty())
+        || metadata
+            .harness_profile
+            .as_ref()
+            .map(|profile| profile.name.starts_with("coding_bootstrap"))
+            .unwrap_or(false)
         || transcript
             .iter()
             .flat_map(|event| event.turn.items.iter())
@@ -720,6 +863,100 @@ pub fn build_decision_cases(
     cases
 }
 
+pub fn build_signature_selection_cases(
+    metadata: &SessionMetadata,
+    transcript: &[TranscriptEvent],
+) -> Vec<SignatureSelectionCaseRecord> {
+    let Some(signature_context) = metadata.signature_context.as_ref() else {
+        return Vec::new();
+    };
+    if signature_context.signature_pack.entries.is_empty() {
+        return Vec::new();
+    }
+
+    let summary = build_decision_summary(metadata, transcript);
+    let result = signature_case_result(&summary, transcript);
+    let decision = signature_context.selection_decision.as_ref();
+    let selected_scores = signature_score_index(
+        decision
+            .map(|decision| decision.selected_signatures.as_slice())
+            .unwrap_or(&[]),
+    );
+    let selected_signature_ids = signature_context
+        .signature_pack
+        .entries
+        .iter()
+        .map(|entry| entry.signature.id.clone())
+        .collect::<Vec<_>>();
+    let runner_up_signatures = decision
+        .map(|decision| {
+            decision
+                .runner_up_signatures
+                .iter()
+                .map(|score| signature_selection_from_ref(&score.signature, Some(score)))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let transcript_refs = signature_case_transcript_refs(transcript);
+    let tool_policy = signature_tool_policy_snapshot(signature_context, &summary, transcript);
+
+    signature_context
+        .signature_pack
+        .entries
+        .iter()
+        .map(|entry| {
+            let score = selected_scores.get(&signature_score_key(
+                entry.signature.id.as_str(),
+                entry.signature.version.as_str(),
+            ));
+            let decision_id = decision.map(|decision| decision.decision_id.clone());
+            let case_id = format!(
+                "signature_selection:{}:{}:{}:{}",
+                metadata.id.as_str(),
+                decision_id.as_deref().unwrap_or("none"),
+                entry.signature.id,
+                entry.signature.version
+            );
+            let mut record = SignatureSelectionCaseRecord {
+                schema_version: 1,
+                case_id,
+                stable_digest: String::new(),
+                // Signature outcomes are validation-only until an explicit
+                // promotion job admits them into a training set.
+                split: DecisionCaseSplit::Validation,
+                session_id: metadata.id.as_str().to_string(),
+                title: metadata.title.clone(),
+                cwd: metadata.cwd.display().to_string(),
+                backend_profile: metadata
+                    .backend
+                    .as_ref()
+                    .map(|backend| backend.profile_name.clone()),
+                harness_profile: metadata
+                    .harness_profile
+                    .as_ref()
+                    .map(|profile| format!("{}@{}", profile.name, profile.version)),
+                source_transcript_path: metadata.transcript_path.display().to_string(),
+                pack_id: signature_context.signature_pack.pack_id.clone(),
+                decision_id,
+                selector_mode: decision.map(|decision| {
+                    signature_selector_mode_label(decision.selector_mode).to_string()
+                }),
+                task_envelope_digest: decision
+                    .and_then(|decision| decision.task_envelope_digest.clone()),
+                signature: signature_selection_from_ref(&entry.signature, score.copied()),
+                selected_signature_ids: selected_signature_ids.clone(),
+                runner_up_signatures: runner_up_signatures.clone(),
+                tool_policy: tool_policy.clone(),
+                result: result.clone(),
+                outcome_label: SignatureOutcomeLabel::Unknown,
+                transcript_refs: transcript_refs.clone(),
+            };
+            record.stable_digest = signature_case_digest(&record);
+            record
+        })
+        .collect()
+}
+
 fn write_decision_case_bundle(
     output_dir: &std::path::Path,
     cases: &[DecisionCaseRecord],
@@ -797,6 +1034,56 @@ fn write_decision_case_bundle(
     Ok(())
 }
 
+fn write_signature_case_bundle(
+    output_dir: &std::path::Path,
+    cases: &[SignatureSelectionCaseRecord],
+) -> Result<(), DatasetExportError> {
+    fs::create_dir_all(output_dir)?;
+    let all_cases_path = output_dir.join("signature_cases_all.jsonl");
+    let validation_cases_path = output_dir.join("signature_cases_val.jsonl");
+    let manifest_path = output_dir.join("signature_case_manifest.json");
+
+    write_jsonl_records(all_cases_path.as_path(), cases)?;
+    write_jsonl_records(
+        validation_cases_path.as_path(),
+        &cases
+            .iter()
+            .filter(|case| case.split == DecisionCaseSplit::Validation)
+            .collect::<Vec<_>>(),
+    )?;
+
+    let manifest = SignatureCaseManifest {
+        schema_version: 1,
+        report_id: String::from("probe.signature_case_manifest.v1"),
+        output_dir: output_dir.display().to_string(),
+        total_sessions: cases
+            .iter()
+            .map(|case| case.session_id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        total_cases: cases.len(),
+        train_cases: cases
+            .iter()
+            .filter(|case| case.split == DecisionCaseSplit::Train)
+            .count(),
+        validation_cases: cases
+            .iter()
+            .filter(|case| case.split == DecisionCaseSplit::Validation)
+            .count(),
+        all_cases_path: all_cases_path.display().to_string(),
+        validation_cases_path: validation_cases_path.display().to_string(),
+        training_policy: String::from(
+            "validation_only_until_explicit_signature_promotion_admits_training_use",
+        ),
+    };
+    fs::write(
+        manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest)?),
+    )?;
+
+    Ok(())
+}
+
 fn write_jsonl_records<T: Serialize>(
     output_path: &std::path::Path,
     records: &[T],
@@ -809,6 +1096,189 @@ fn write_jsonl_records<T: Serialize>(
     }
     writer.flush()?;
     Ok(())
+}
+
+fn signature_score_index<'a>(
+    scores: &'a [SignatureSelectionScore],
+) -> BTreeMap<String, &'a SignatureSelectionScore> {
+    scores
+        .iter()
+        .map(|score| {
+            (
+                signature_score_key(
+                    score.signature.id.as_str(),
+                    score.signature.version.as_str(),
+                ),
+                score,
+            )
+        })
+        .collect()
+}
+
+fn signature_score_key(id: &str, version: &str) -> String {
+    format!("{id}@{version}")
+}
+
+fn signature_selection_from_ref(
+    signature: &SignatureRef,
+    score: Option<&SignatureSelectionScore>,
+) -> SignatureCaseSelection {
+    SignatureCaseSelection {
+        signature_id: signature.id.clone(),
+        signature_version: signature.version.clone(),
+        adoption_state: signature_adoption_state_label(signature.adoption_state).to_string(),
+        source_ref: signature.source_ref.clone(),
+        rank: score.map(|score| score.rank as u32),
+        score_bps: score.map(|score| u32::from(score.score_bps)),
+        reason_code: score.and_then(|score| score.reason_code.clone()),
+    }
+}
+
+fn signature_tool_policy_snapshot(
+    signature_context: &SessionSignatureContext,
+    summary: &DecisionSessionSummary,
+    transcript: &[TranscriptEvent],
+) -> SignatureToolPolicySnapshot {
+    let decision = signature_context.selection_decision.as_ref();
+    SignatureToolPolicySnapshot {
+        recommended_tool_set: decision.and_then(|decision| decision.recommended_tool_set.clone()),
+        recommended_tool_choice: decision
+            .and_then(|decision| decision.recommended_tool_choice.clone()),
+        actual_tool_choice: first_note_field(transcript, "actual_tool_choice"),
+        forbidden_tools: decision
+            .map(|decision| decision.forbidden_tools.clone())
+            .unwrap_or_else(|| {
+                signature_context
+                    .signature_pack
+                    .entries
+                    .iter()
+                    .flat_map(|entry| entry.forbidden_tools.iter().cloned())
+                    .fold(Vec::new(), |mut acc, tool| {
+                        push_unique(&mut acc, tool);
+                        acc
+                    })
+            }),
+        auto_allowed_tool_calls: summary.auto_allowed_tool_calls,
+        approved_tool_calls: summary.approved_tool_calls,
+        refused_tool_calls: summary.refused_tool_calls,
+        paused_tool_calls: summary.paused_tool_calls,
+    }
+}
+
+fn signature_case_result(
+    summary: &DecisionSessionSummary,
+    transcript: &[TranscriptEvent],
+) -> SignatureCaseResult {
+    let failure_type = signature_failure_type(summary, transcript);
+    let status = if failure_type.is_some() {
+        SignatureCaseResultStatus::Failed
+    } else if summary.final_assistant_text.is_some() {
+        SignatureCaseResultStatus::Completed
+    } else {
+        SignatureCaseResultStatus::Unknown
+    };
+    SignatureCaseResult {
+        status,
+        failure_type,
+        verifier_outcome: signature_verifier_outcome(transcript),
+        final_assistant_text_hash: summary
+            .final_assistant_text
+            .as_deref()
+            .map(stable_text_hash),
+    }
+}
+
+fn signature_failure_type(
+    summary: &DecisionSessionSummary,
+    transcript: &[TranscriptEvent],
+) -> Option<String> {
+    if summary.too_many_turns {
+        return Some(String::from("tool_round_trip_bound"));
+    }
+    if summary.refused_tool_calls > 0 {
+        return Some(String::from("tool_refused"));
+    }
+    if summary.paused_tool_calls > 0 {
+        return Some(String::from("tool_approval_paused"));
+    }
+    if summary.failed_patch_attempts > 0 && summary.successful_patch_attempts == 0 {
+        return Some(String::from("patch_failed"));
+    }
+    if transcript
+        .iter()
+        .flat_map(|event| event.turn.items.iter())
+        .any(|item| {
+            item.kind == TranscriptItemKind::Note
+                && item.text.to_ascii_lowercase().contains("provider request")
+        })
+    {
+        return Some(String::from("provider_request_failed"));
+    }
+    if summary.final_assistant_text.is_none()
+        && transcript
+            .iter()
+            .flat_map(|event| event.turn.items.iter())
+            .any(|item| item.kind == TranscriptItemKind::Note)
+    {
+        return Some(String::from("runtime_note"));
+    }
+    None
+}
+
+fn signature_verifier_outcome(transcript: &[TranscriptEvent]) -> SignatureVerifierOutcome {
+    match first_note_field(transcript, "verifier_outcome").as_deref() {
+        Some("passed") => SignatureVerifierOutcome::Passed,
+        Some("failed") => SignatureVerifierOutcome::Failed,
+        Some("error") => SignatureVerifierOutcome::Error,
+        Some("timeout") => SignatureVerifierOutcome::Timeout,
+        _ => SignatureVerifierOutcome::NotObserved,
+    }
+}
+
+fn signature_case_transcript_refs(
+    transcript: &[TranscriptEvent],
+) -> Vec<DecisionCaseTranscriptRef> {
+    transcript
+        .iter()
+        .flat_map(|event| {
+            event.turn.items.iter().filter_map(|item| {
+                if matches!(
+                    item.kind,
+                    TranscriptItemKind::Note
+                        | TranscriptItemKind::ToolResult
+                        | TranscriptItemKind::AssistantMessage
+                ) {
+                    Some(DecisionCaseTranscriptRef {
+                        turn_index: event.turn.index,
+                        item_sequence: item.sequence,
+                        item_kind: item.kind,
+                        item_name: item.name.clone(),
+                        tool_call_id: item.tool_call_id.clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+        })
+        .take(16)
+        .collect()
+}
+
+fn first_note_field(transcript: &[TranscriptEvent], field: &str) -> Option<String> {
+    let prefix = format!("{field}=");
+    transcript
+        .iter()
+        .flat_map(|event| event.turn.items.iter())
+        .filter(|item| item.kind == TranscriptItemKind::Note)
+        .flat_map(|item| item.text.split_whitespace())
+        .find_map(|part| part.strip_prefix(prefix.as_str()).map(String::from))
+}
+
+fn stable_text_hash(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"probe_signature_case_text|");
+    hasher.update(value.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 fn build_decision_case_record(
@@ -900,6 +1370,39 @@ fn signature_selector_mode_label(mode: SignatureSelectorMode) -> &'static str {
         SignatureSelectorMode::Manual => "manual",
         SignatureSelectorMode::NoMatch => "no_match",
     }
+}
+
+fn signature_adoption_state_label(state: SignatureAdoptionState) -> &'static str {
+    match state {
+        SignatureAdoptionState::Candidate => "candidate",
+        SignatureAdoptionState::Shadow => "shadow",
+        SignatureAdoptionState::Promoted => "promoted",
+        SignatureAdoptionState::Deprecated => "deprecated",
+    }
+}
+
+fn signature_case_digest(record: &SignatureSelectionCaseRecord) -> String {
+    let payload = serde_json::json!({
+        "schema_version": record.schema_version,
+        "case_id": record.case_id,
+        "split": record.split,
+        "session_id": record.session_id,
+        "pack_id": record.pack_id,
+        "decision_id": record.decision_id,
+        "selector_mode": record.selector_mode,
+        "task_envelope_digest": record.task_envelope_digest,
+        "signature": record.signature,
+        "selected_signature_ids": record.selected_signature_ids,
+        "runner_up_signatures": record.runner_up_signatures,
+        "tool_policy": record.tool_policy,
+        "result": record.result,
+        "outcome_label": record.outcome_label,
+        "transcript_refs": record.transcript_refs,
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(b"probe_signature_selection_case|");
+    hasher.update(payload.to_string().as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 fn decision_case_digest(
@@ -1042,6 +1545,19 @@ mod tests {
     use crate::session_store::{FilesystemSessionStore, NewItem, NewSession};
 
     use super::{DatasetExportConfig, DatasetKind, export_dataset};
+
+    #[test]
+    fn dataset_kind_parses_signature_cases_aliases() {
+        assert_eq!(
+            DatasetKind::parse("signature-cases").expect("signature cases kind"),
+            DatasetKind::SignatureCases
+        );
+        assert_eq!(
+            DatasetKind::parse("signature_cases").expect("signature cases alias"),
+            DatasetKind::SignatureCases
+        );
+        assert_eq!(DatasetKind::SignatureCases.as_str(), "signature-cases");
+    }
 
     #[test]
     fn export_replay_dataset_writes_jsonl_for_coding_session() {
@@ -1391,6 +1907,107 @@ mod tests {
         );
     }
 
+    #[test]
+    fn export_signature_case_bundle_writes_validation_only_failure_cases() {
+        let temp = tempdir().expect("temp dir");
+        let store = FilesystemSessionStore::new(temp.path());
+        let metadata = store
+            .create_session_with(
+                NewSession::new("signature failure", temp.path())
+                    .with_harness_profile(Some(SessionHarnessProfile {
+                        name: String::from("coding_bootstrap_codex"),
+                        version: String::from("v1"),
+                    }))
+                    .with_signature_context(Some(signature_context_fixture())),
+            )
+            .expect("create session");
+        store
+            .append_turn(
+                &metadata.id,
+                &[NewItem::new(
+                    TranscriptItemKind::Note,
+                    "signature_context decision=sigsel-dataset-test selected=[coding.service_readiness@candidate] recommended_tool_choice=auto actual_tool_choice=auto tool_policy=probe_enforced verifier_outcome=failed",
+                )],
+            )
+            .expect("append signature note");
+        store
+            .append_turn(
+                &metadata.id,
+                &[NewItem::tool_result(
+                    "shell",
+                    "call_shell",
+                    "{\"error\":\"network shell refused\"}",
+                    ToolExecutionRecord {
+                        risk_class: ToolRiskClass::Network,
+                        policy_decision: ToolPolicyDecision::Refused,
+                        approval_state: ToolApprovalState::Refused,
+                        command: Some(String::from("curl http://127.0.0.1:8080/health")),
+                        exit_code: None,
+                        timed_out: Some(false),
+                        truncated: Some(false),
+                        bytes_returned: Some(34),
+                        files_touched: Vec::new(),
+                        reason: Some(String::from("network shell disabled")),
+                    },
+                )],
+            )
+            .expect("append refused tool");
+
+        let output_path = temp.path().join("signature_cases");
+        let report = export_dataset(
+            &store,
+            &DatasetExportConfig {
+                kind: DatasetKind::SignatureCases,
+                output_path: output_path.clone(),
+                session_ids: Vec::new(),
+                include_all_sessions: false,
+            },
+        )
+        .expect("export signature cases");
+
+        assert_eq!(report.sessions_exported, 1);
+        assert_eq!(report.cases_exported, 1);
+
+        let all_cases = fs::read_to_string(output_path.join("signature_cases_all.jsonl"))
+            .expect("read signature cases");
+        let first_case: serde_json::Value =
+            serde_json::from_str(all_cases.lines().next().expect("first case line"))
+                .expect("parse signature case");
+        assert_eq!(first_case["split"], "validation");
+        assert_eq!(
+            first_case["signature"]["signature_id"],
+            "coding.service_readiness"
+        );
+        assert_eq!(first_case["signature"]["score_bps"], 9000);
+        assert_eq!(first_case["result"]["status"], "failed");
+        assert_eq!(first_case["result"]["failure_type"], "tool_refused");
+        assert_eq!(first_case["result"]["verifier_outcome"], "failed");
+        assert_eq!(first_case["outcome_label"], "unknown");
+        assert_eq!(first_case["tool_policy"]["actual_tool_choice"], "auto");
+        assert_eq!(first_case["tool_policy"]["refused_tool_calls"], 1);
+        assert_eq!(
+            first_case["runner_up_signatures"][0]["signature_id"],
+            "coding.python_package_index"
+        );
+        assert!(first_case["stable_digest"].as_str().is_some());
+        assert!(!all_cases.contains("Prove service readiness before declaring success"));
+
+        let val_cases = fs::read_to_string(output_path.join("signature_cases_val.jsonl"))
+            .expect("read validation signature cases");
+        assert_eq!(val_cases.lines().count(), 1);
+        let manifest = fs::read_to_string(output_path.join("signature_case_manifest.json"))
+            .expect("read signature case manifest");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&manifest).expect("parse signature manifest");
+        assert_eq!(manifest["total_cases"], 1);
+        assert_eq!(manifest["train_cases"], 0);
+        assert_eq!(manifest["validation_cases"], 1);
+        assert_eq!(
+            manifest["training_policy"],
+            "validation_only_until_explicit_signature_promotion_admits_training_use"
+        );
+    }
+
     fn signature_context_fixture() -> SessionSignatureContext {
         let signature = SignatureRef {
             id: String::from("coding.service_readiness"),
@@ -1430,7 +2047,19 @@ mod tests {
                 score_bps: 9_000,
                 reason_code: Some(String::from("structured_match")),
             }],
-            runner_up_signatures: Vec::new(),
+            runner_up_signatures: vec![SignatureSelectionScore {
+                signature: SignatureRef {
+                    id: String::from("coding.python_package_index"),
+                    version: String::from("candidate"),
+                    adoption_state: SignatureAdoptionState::Candidate,
+                    source_ref: Some(String::from(
+                        "vortex://signatures/coding.python_package_index",
+                    )),
+                },
+                rank: 2,
+                score_bps: 4_800,
+                reason_code: Some(String::from("semantic_runner_up")),
+            }],
             recommended_harness_profile: Some(String::from("coding_bootstrap_codex@v1")),
             recommended_tool_set: Some(String::from("coding_bootstrap")),
             recommended_tool_choice: Some(String::from("auto")),
