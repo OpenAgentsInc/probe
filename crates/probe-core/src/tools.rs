@@ -16,6 +16,7 @@ use probe_provider_openai::{
     ChatToolDefinition, ChatToolDefinitionEnvelope,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use wait_timeout::ChildExt;
 
 use crate::long_context::{
@@ -34,6 +35,8 @@ const TOOL_SUMMARY_MAX_CHARS: usize = 512;
 const TOOL_SUMMARY_MAX_ARRAY_ITEMS: usize = 12;
 const LONG_CONTEXT_DEFAULT_MAX_LINES_PER_FILE: u64 = 160;
 const LONG_CONTEXT_DEFAULT_MAX_EVIDENCE_FILES: usize = 6;
+const LEGAL_INSPECT_DEFAULT_MAX_BYTES: u64 = 1_000_000;
+const LEGAL_INSPECT_HARD_MAX_BYTES: u64 = 2_000_000;
 
 pub type ToolHandler = fn(
     &ToolExecutionContext,
@@ -661,6 +664,28 @@ impl ToolRegistry {
     }
 
     #[must_use]
+    pub fn coding_bootstrap_with_domain_helpers(
+        include_oracle: bool,
+        include_long_context: bool,
+        include_domain_helpers: bool,
+    ) -> Self {
+        let registry = Self::coding_bootstrap(include_oracle, include_long_context);
+        if include_domain_helpers {
+            registry.register(
+                String::from("legal.inspect_answer_file"),
+                Some(String::from(
+                    "Inspect a legal benchmark answer file without returning raw answer content; reports digests, size, line count, and required-substring presence.",
+                )),
+                Some(legal_inspect_answer_file_parameters()),
+                RegisteredToolRisk::Fixed(ToolRiskClass::ReadOnly),
+                legal_inspect_answer_file,
+            )
+        } else {
+            registry
+        }
+    }
+
+    #[must_use]
     fn register(
         mut self,
         name: String,
@@ -851,6 +876,14 @@ fn redaction_behavior_for_tool(tool_name: &str) -> ToolRedactionBehavior {
         "consult_oracle" | "analyze_repository" => ToolRedactionBehavior {
             input_summary: String::from("task metadata and bounded redacted question preview"),
             output_summary: String::from("bounded redacted answer or analysis preview plus counts"),
+        },
+        "legal.inspect_answer_file" => ToolRedactionBehavior {
+            input_summary: String::from(
+                "path, marker count, and byte cap only; raw legal answer markers are never exposed",
+            ),
+            output_summary: String::from(
+                "path, size, line count, file digest, marker digests, and presence flags without raw answer content",
+            ),
         },
         _ => ToolRedactionBehavior {
             input_summary: String::from("bounded JSON summary with secret-looking values redacted"),
@@ -1839,6 +1872,89 @@ fn analyze_repository(
     })
 }
 
+fn legal_inspect_answer_file(
+    context: &ToolExecutionContext,
+    arguments: &serde_json::Value,
+) -> Result<ToolInvocationOutcome, ToolInvocationError> {
+    let path = expect_string(arguments, "path", "legal.inspect_answer_file")?;
+    let required_substrings = match arguments.get("required_substrings") {
+        Some(_) => expect_string_array(
+            arguments,
+            "required_substrings",
+            "legal.inspect_answer_file",
+        )?,
+        None => Vec::new(),
+    };
+    let max_bytes = expect_u64(arguments, "max_bytes")
+        .unwrap_or(LEGAL_INSPECT_DEFAULT_MAX_BYTES)
+        .min(LEGAL_INSPECT_HARD_MAX_BYTES);
+    if max_bytes == 0 {
+        return Err(ToolInvocationError::InvalidArguments(String::from(
+            "legal.inspect_answer_file requires max_bytes >= 1",
+        )));
+    }
+
+    let resolved_path = resolve_workspace_path(context.cwd(), path)?;
+    let metadata = fs::metadata(&resolved_path).map_err(|error| {
+        ToolInvocationError::ExecutionFailed(format!(
+            "failed to stat legal answer file `{path}`: {error}"
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(ToolInvocationError::InvalidArguments(format!(
+            "legal.inspect_answer_file requires a file path, got `{path}`"
+        )));
+    }
+
+    let bytes = fs::read(&resolved_path).map_err(|error| {
+        ToolInvocationError::ExecutionFailed(format!(
+            "failed to read legal answer file `{path}`: {error}"
+        ))
+    })?;
+    let inspected_len = bytes.len().min(max_bytes as usize);
+    let truncated = inspected_len < bytes.len();
+    let inspected_text = String::from_utf8_lossy(&bytes[..inspected_len]);
+    let full_text = String::from_utf8_lossy(bytes.as_slice());
+    let required_substring_results = required_substrings
+        .iter()
+        .map(|substring| {
+            serde_json::json!({
+                "substring_sha256": sha256_hex_prefixed(substring.as_bytes()),
+                "present": inspected_text.contains(substring),
+                "search_complete": !truncated,
+            })
+        })
+        .collect::<Vec<_>>();
+    let all_required_substrings_present = required_substring_results.iter().all(|entry| {
+        entry
+            .get("present")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    });
+    let relative_path = display_relative_path(context.cwd(), &resolved_path);
+
+    Ok(ToolInvocationOutcome {
+        output: serde_json::json!({
+            "path": relative_path.clone(),
+            "exists": true,
+            "bytes": bytes.len() as u64,
+            "bytes_inspected": inspected_len as u64,
+            "line_count": full_text.lines().count() as u64,
+            "sha256": sha256_hex_prefixed(bytes.as_slice()),
+            "truncated": truncated,
+            "required_substring_count": required_substrings.len(),
+            "required_substrings": required_substring_results,
+            "all_required_substrings_present": all_required_substrings_present,
+        }),
+        command: None,
+        exit_code: None,
+        timed_out: Some(false),
+        truncated: Some(truncated),
+        bytes_returned: Some(bytes.len() as u64),
+        files_touched: vec![relative_path],
+    })
+}
+
 fn build_long_context_evidence(
     base: &Path,
     requested_path: &str,
@@ -2289,6 +2405,18 @@ pub fn tool_input_summary(tool_name: &str, arguments: &serde_json::Value) -> ser
             "question_chars": arguments.get("question").and_then(serde_json::Value::as_str).map(str::len),
             "evidence_paths": redact_json_value(arguments.get("evidence_paths").unwrap_or(&serde_json::Value::Null))
         }),
+        "legal.inspect_answer_file" => {
+            let required_substring_count = arguments
+                .get("required_substrings")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            serde_json::json!({
+                "path": redacted_json_string_field(arguments, "path"),
+                "required_substring_count": required_substring_count,
+                "max_bytes": arguments.get("max_bytes").and_then(serde_json::Value::as_u64)
+            })
+        }
         _ => redact_json_value(arguments),
     }
 }
@@ -2410,6 +2538,22 @@ pub fn tool_output_summary(tool_name: &str, output: &serde_json::Value) -> serde
                 .unwrap_or(0),
             "calls_used_after": output.get("calls_used_after").and_then(serde_json::Value::as_u64),
             "max_calls": output.get("max_calls").and_then(serde_json::Value::as_u64)
+        }),
+        "legal.inspect_answer_file" => serde_json::json!({
+            "path": redacted_json_string_field(output, "path"),
+            "exists": output.get("exists").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            "bytes": output.get("bytes").and_then(serde_json::Value::as_u64),
+            "bytes_inspected": output.get("bytes_inspected").and_then(serde_json::Value::as_u64),
+            "line_count": output.get("line_count").and_then(serde_json::Value::as_u64),
+            "sha256": redacted_json_string_field(output, "sha256"),
+            "truncated": output.get("truncated").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            "required_substring_count": output
+                .get("required_substring_count")
+                .and_then(serde_json::Value::as_u64),
+            "all_required_substrings_present": output
+                .get("all_required_substrings_present")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
         }),
         _ => redact_json_value(output),
     }
@@ -2775,6 +2919,33 @@ fn tool_result_schema(tool_name: &str) -> serde_json::Value {
                 "evidence": { "type": "array" }
             }
         }),
+        "legal.inspect_answer_file" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "exists": { "type": "boolean" },
+                "bytes": { "type": "integer" },
+                "bytes_inspected": { "type": "integer" },
+                "line_count": { "type": "integer" },
+                "sha256": { "type": "string" },
+                "truncated": { "type": "boolean" },
+                "required_substring_count": { "type": "integer" },
+                "required_substrings": { "type": "array" },
+                "all_required_substrings_present": { "type": "boolean" }
+            },
+            "required": [
+                "path",
+                "exists",
+                "bytes",
+                "bytes_inspected",
+                "line_count",
+                "sha256",
+                "truncated",
+                "required_substring_count",
+                "required_substrings",
+                "all_required_substrings_present"
+            ]
+        }),
         _ => serde_json::json!({
             "type": "object",
             "additionalProperties": true
@@ -2880,6 +3051,27 @@ fn analyze_repository_parameters() -> serde_json::Value {
     })
 }
 
+fn legal_inspect_answer_file_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string", "description": "Relative path to the legal benchmark answer file inside the session cwd." },
+            "required_substrings": {
+                "type": "array",
+                "description": "Optional exact answer markers to check for. Raw markers are not returned in tool output.",
+                "items": { "type": "string" }
+            },
+            "max_bytes": {
+                "type": "integer",
+                "description": "Maximum leading bytes to inspect for substring presence. Hard-capped by Probe.",
+                "minimum": 1
+            }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+    })
+}
+
 fn expect_string<'a>(
     arguments: &'a serde_json::Value,
     key: &str,
@@ -2924,6 +3116,12 @@ fn expect_string_array(
                 })
                 .collect()
         })
+}
+
+fn sha256_hex_prefixed(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 fn resolve_workspace_path(
@@ -3097,6 +3295,7 @@ pub fn tool_result_model_text(tool_name: &str, output: &serde_json::Value) -> St
         "apply_patch" => render_apply_patch_model_text(output),
         "consult_oracle" => render_consult_oracle_model_text(output),
         "analyze_repository" => render_analyze_repository_model_text(output),
+        "legal.inspect_answer_file" => render_legal_inspect_answer_file_model_text(output),
         _ => serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string()),
     })
 }
@@ -3374,6 +3573,53 @@ fn render_analyze_repository_model_text(output: &serde_json::Value) -> String {
     lines.join("\n")
 }
 
+fn render_legal_inspect_answer_file_model_text(output: &serde_json::Value) -> String {
+    let path = output
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let bytes = output
+        .get("bytes")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let bytes_inspected = output
+        .get("bytes_inspected")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let line_count = output
+        .get("line_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let sha256 = output
+        .get("sha256")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("sha256:unknown");
+    let required_substring_count = output
+        .get("required_substring_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let all_required_substrings_present = output
+        .get("all_required_substrings_present")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let truncated = output
+        .get("truncated")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    [
+        format!("path: {path}"),
+        format!("bytes: {bytes}"),
+        format!("bytes_inspected: {bytes_inspected}"),
+        format!("line_count: {line_count}"),
+        format!("sha256: {sha256}"),
+        format!("tool_truncated: {truncated}"),
+        format!("required_substring_count: {required_substring_count}"),
+        format!("all_required_substrings_present: {all_required_substrings_present}"),
+        String::from("raw_content_returned: false"),
+    ]
+    .join("\n")
+}
+
 fn truncate_model_text(text: &str) -> String {
     let total = text.chars().count();
     if total <= TOOL_MODEL_TEXT_MAX_CHARS {
@@ -3396,7 +3642,7 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
-    use probe_protocol::session::{ToolPolicyDecision, ToolRiskClass};
+    use probe_protocol::session::{ToolPermissionDecision, ToolPolicyDecision, ToolRiskClass};
     use probe_provider_openai::{ChatToolCall, ChatToolCallFunction};
     use probe_test_support::FakeAppleFmServer;
     use tempfile::tempdir;
@@ -3409,7 +3655,8 @@ mod tests {
         ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolExecutionContext,
         ToolLongContextConfig, ToolLongContextContext, ToolLoopConfig, ToolOracleConfig,
         ToolOracleContext, ToolRegistry, ToolWriteGate, code_search_without_ripgrep,
-        stored_tool_result_model_text, tool_result_model_text,
+        stored_tool_result_model_text, tool_input_summary, tool_output_summary,
+        tool_result_model_text,
     };
 
     #[test]
@@ -3431,6 +3678,136 @@ mod tests {
                 "shell"
             ]
         );
+    }
+
+    #[test]
+    fn coding_bootstrap_domain_helper_manifest_projects_read_only_legal_helper() {
+        let registry = ToolRegistry::coding_bootstrap_with_domain_helpers(false, false, true);
+        let manifest = registry.managed_tool_manifest(&ToolApprovalConfig::conservative());
+        let helper = manifest
+            .tools
+            .iter()
+            .find(|tool| tool.name == "legal.inspect_answer_file")
+            .expect("legal helper manifest entry");
+
+        assert_eq!(helper.declared_risk_class, Some(ToolRiskClass::ReadOnly));
+        assert_eq!(helper.possible_risk_classes, vec![ToolRiskClass::ReadOnly]);
+        assert_eq!(helper.execution_owner, "probe_runtime");
+        assert_eq!(
+            helper.input_schema["required"]
+                .as_array()
+                .expect("required array")[0],
+            "path"
+        );
+        assert_eq!(
+            helper.result_schema["required"]
+                .as_array()
+                .expect("result required")
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>(),
+            vec![
+                "path",
+                "exists",
+                "bytes",
+                "bytes_inspected",
+                "line_count",
+                "sha256",
+                "truncated",
+                "required_substring_count",
+                "required_substrings",
+                "all_required_substrings_present"
+            ]
+        );
+        assert!(
+            helper
+                .redaction
+                .input_summary
+                .contains("raw legal answer markers")
+        );
+        let read_only_policy = manifest
+            .policy
+            .default_decisions
+            .iter()
+            .find(|entry| entry.risk_class == ToolRiskClass::ReadOnly)
+            .expect("read-only policy");
+        assert_eq!(read_only_policy.decision, ToolPermissionDecision::Allow);
+
+        let default_registry = ToolRegistry::coding_bootstrap(false, false);
+        assert!(
+            default_registry
+                .declared_tools()
+                .iter()
+                .all(|tool| tool.function.name != "legal.inspect_answer_file")
+        );
+    }
+
+    #[test]
+    fn legal_answer_helper_inspects_file_without_returning_raw_content() {
+        let tempdir = tempdir().expect("tempdir");
+        fs::write(
+            tempdir.path().join("answer.md"),
+            "The contract answer turns on contingency fee limits.\nPrivileged fact pattern.\n",
+        )
+        .expect("write answer");
+        let registry = ToolRegistry::coding_bootstrap_with_domain_helpers(false, false, true);
+        let context = ToolExecutionContext::new(tempdir.path());
+        let arguments = "{\"path\":\"answer.md\",\"required_substrings\":[\"contingency fee\",\"missing marker\"]}";
+        let results = registry.execute_batch(
+            &context,
+            &[ChatToolCall {
+                id: String::from("call_legal_inspect"),
+                kind: String::from("function"),
+                function: ChatToolCallFunction {
+                    name: String::from("legal.inspect_answer_file"),
+                    arguments: String::from(arguments),
+                },
+            }],
+            &ToolApprovalConfig::conservative(),
+        );
+
+        let result = &results[0];
+        assert_eq!(result.tool_execution.risk_class, ToolRiskClass::ReadOnly);
+        assert_eq!(
+            result.tool_execution.policy_decision,
+            ToolPolicyDecision::AutoAllow
+        );
+        assert_eq!(result.output["path"], "answer.md");
+        assert_eq!(result.output["exists"], true);
+        assert_eq!(result.output["required_substring_count"], 2);
+        assert_eq!(
+            result.output["required_substrings"][0]["present"],
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(
+            result.output["required_substrings"][1]["present"],
+            serde_json::Value::Bool(false)
+        );
+        assert_eq!(result.output["all_required_substrings_present"], false);
+        assert_eq!(result.tool_execution.files_touched, vec!["answer.md"]);
+
+        let serialized_output = serde_json::to_string(&result.output).expect("serialize output");
+        assert!(!serialized_output.contains("contingency fee"));
+        assert!(!serialized_output.contains("Privileged fact pattern"));
+        assert!(serialized_output.contains("substring_sha256"));
+        assert!(serialized_output.contains("sha256:"));
+
+        let parsed_arguments =
+            serde_json::from_str::<serde_json::Value>(arguments).expect("parse arguments");
+        let input_summary = tool_input_summary("legal.inspect_answer_file", &parsed_arguments);
+        let output_summary = tool_output_summary("legal.inspect_answer_file", &result.output);
+        assert_eq!(input_summary["required_substring_count"], 2);
+        assert!(!input_summary.to_string().contains("contingency fee"));
+        assert!(
+            !output_summary
+                .to_string()
+                .contains("Privileged fact pattern")
+        );
+
+        let rendered = tool_result_model_text("legal.inspect_answer_file", &result.output);
+        assert!(rendered.contains("raw_content_returned: false"));
+        assert!(!rendered.contains("contingency fee"));
+        assert!(!rendered.contains("Privileged fact pattern"));
     }
 
     #[test]

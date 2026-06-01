@@ -9,6 +9,7 @@ Related:
 - `docs/103-signature-context-contract.md`
 - `docs/105-signature-selector.md`
 - `docs/106-codex-signature-attachment.md`
+- `docs/109-domain-helper-tool-evaluation.md`
 - `../crates/probe-core/src/signature_registry.rs`
 - `../crates/probe-core/src/harness.rs`
 
@@ -86,3 +87,12 @@ fallback reason. The full-injection row is marked `blocked_by_default=true`.
 The current implementation is intentionally simple and deterministic. It picks
 the threshold with the best retained utility. A learned selector can replace it
 later after retained ablations prove the need.
+
+## Helper Tool Boundary
+
+Adaptive signature rendering remains the default improvement path. Executable
+domain helpers are evaluated separately in
+`docs/109-domain-helper-tool-evaluation.md` and stay opt-in through managed
+tool manifests. A selected signature can recommend a helper in evaluation, but
+the normal Codex path should still run with context packs and the standard
+`coding_bootstrap` tools unless retained evidence proves the helper is needed.
