@@ -20,6 +20,7 @@ use probe_protocol::managed_runtime::{
 use probe_protocol::session::{SessionBackendTarget, SessionId, TimestampMs};
 use sha2::{Digest, Sha256};
 
+use crate::harness::attach_signature_context_to_system_prompt;
 use crate::session_store::{FilesystemSessionStore, NewSession, SessionStoreError};
 
 const SESSIONS_DIR: &str = "sessions";
@@ -120,6 +121,8 @@ impl ManagedRuntimeController {
         } = request;
 
         correlation.request_id = correlation.request_id.or_else(|| Some(request_id.clone()));
+        let system_prompt =
+            attach_signature_context_to_system_prompt(system_prompt, signature_context.as_ref());
         let session = self.session_store.create_session_with(
             NewSession::new(
                 title.unwrap_or_else(|| {

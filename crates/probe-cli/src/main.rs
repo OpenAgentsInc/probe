@@ -2457,6 +2457,7 @@ fn run_exec(args: ExecArgs) -> Result<(), String> {
             cwd,
             system_prompt,
             harness_profile,
+            signature_context: None,
             tool_loop,
         })
         .map_err(|error| error.to_string())?;
@@ -2669,6 +2670,7 @@ fn run_chat(args: ChatArgs) -> Result<(), String> {
                     cwd: cwd.clone(),
                     system_prompt: system_prompt.clone(),
                     harness_profile: harness_profile.clone(),
+                    signature_context: None,
                     tool_loop: tool_loop.clone(),
                 })
                 .map_err(|error| error.to_string())?

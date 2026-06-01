@@ -379,3 +379,8 @@ This folder holds technical planning docs for the Probe runtime.
   - typed `TaskEnvelope` to `SessionSignatureContext` selector using structured
     boosts, deterministic local cosine scoring, explicit no-match decisions,
     max-signature caps, and runner-up preservation for later adaptive budgeting
+- `106-codex-signature-attachment.md`
+  - Codex-backed Probe session attachment path for selected signature packs,
+    including harness prompt addenda, persisted metadata, transcript policy
+    notes, managed runtime propagation, dataset export refs, and the
+    no-Codex-fork authority boundary

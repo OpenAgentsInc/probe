@@ -1076,6 +1076,7 @@ fn run_case_backend_failure_is_honest(
                     cwd: workspace.to_path_buf(),
                     system_prompt: None,
                     harness_profile: None,
+                    signature_context: None,
                     tool_loop: None,
                 })
                 .map_err(AcceptanceExecutionError::Runtime)
@@ -1354,6 +1355,7 @@ fn execute_coding_case_with_harness(
             cwd: workspace.to_path_buf(),
             system_prompt: Some(resolved.system_prompt),
             harness_profile: Some(resolved.profile),
+            signature_context: None,
             tool_loop: Some(tool_loop),
         })
         .map_err(AcceptanceExecutionError::Runtime)
@@ -1388,6 +1390,7 @@ fn execute_eventful_case_with_harness(
                 cwd: workspace.to_path_buf(),
                 system_prompt: Some(resolved.system_prompt),
                 harness_profile: Some(resolved.profile),
+                signature_context: None,
                 tool_loop: None,
             },
             Arc::new(move |event| {

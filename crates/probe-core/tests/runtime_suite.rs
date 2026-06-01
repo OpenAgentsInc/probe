@@ -59,6 +59,7 @@ fn runtime_suite_persists_and_resumes_plain_text_sessions() {
             cwd: environment.workspace().to_path_buf(),
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             tool_loop: None,
         })
         .expect("first runtime turn should succeed");
@@ -139,6 +140,7 @@ fn runtime_suite_emits_turn_lifecycle_events() {
                 cwd: environment.workspace().to_path_buf(),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: None,
             },
             Arc::new(move |event| {

@@ -140,6 +140,7 @@ impl ForgeAssignedRunExecutor {
                 cwd: execution_cwd(&assignment, &request.default_cwd),
                 system_prompt: request.system_prompt,
                 harness_profile: request.harness_profile,
+                signature_context: None,
                 tool_loop: request.tool_loop,
             },
             event_sink,

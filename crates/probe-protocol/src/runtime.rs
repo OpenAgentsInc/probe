@@ -16,6 +16,7 @@ use crate::session::{
     TimestampMs, ToolApprovalResolution, ToolExecutionRecord, ToolPermissionOverride,
     ToolRiskClass, TranscriptEvent, UsageMeasurement,
 };
+use crate::signature_context::SessionSignatureContext;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -152,6 +153,8 @@ pub struct StartSessionRequest {
     pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_profile: Option<SessionHarnessProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_context: Option<SessionSignatureContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_state: Option<SessionWorkspaceState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

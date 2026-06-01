@@ -52,6 +52,7 @@ fn daemon_accepts_multiple_sequential_clients_and_preserves_sessions() {
             cwd: environment.workspace().to_path_buf(),
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             tool_loop: None,
         })
         .expect("daemon turn should succeed");
@@ -124,6 +125,7 @@ fn detached_session_registry_tracks_background_work_after_client_disconnect() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             workspace_state: None,
             mounted_refs: Vec::new(),
         })
@@ -187,6 +189,7 @@ fn daemon_restart_keeps_approval_paused_sessions_resumable() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             workspace_state: None,
             mounted_refs: Vec::new(),
         })
@@ -248,6 +251,7 @@ fn daemon_emits_parent_child_updates_when_child_sessions_are_spawned() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             workspace_state: None,
             mounted_refs: Vec::new(),
         })
@@ -322,6 +326,7 @@ fn daemon_emits_workspace_state_updates_for_git_bound_sessions() {
             profile,
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             workspace_state: None,
             mounted_refs: Vec::new(),
         })
@@ -363,6 +368,7 @@ fn daemon_projects_persisted_summary_artifact_refs_for_detached_sessions() {
             profile,
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             workspace_state: None,
             mounted_refs: Vec::new(),
         })
@@ -448,6 +454,7 @@ fn daemon_restart_marks_running_turns_as_failed_when_the_process_dies() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             workspace_state: None,
             mounted_refs: Vec::new(),
         })
@@ -514,6 +521,7 @@ fn detached_session_log_replays_recent_events_with_resume_cursor() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             workspace_state: None,
             mounted_refs: Vec::new(),
         })
@@ -600,6 +608,7 @@ fn detached_session_watch_surfaces_approval_pause_updates_without_polling() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             workspace_state: None,
             mounted_refs: Vec::new(),
         })
@@ -695,6 +704,7 @@ fn detached_watchdog_times_out_stalled_turn_and_cancels_follow_up_queue() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             workspace_state: None,
             mounted_refs: Vec::new(),
         })
@@ -791,6 +801,7 @@ fn approval_paused_detached_turns_are_exempt_from_watchdog_timeout() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             workspace_state: None,
             mounted_refs: Vec::new(),
         })
@@ -859,6 +870,7 @@ fn detached_session_summary_projects_mounted_refs() {
             profile: test_profile("http://127.0.0.1:9/v1"),
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             workspace_state: None,
             mounted_refs: vec![SessionMountRef {
                 mount_id: String::from("knowledge-docs"),

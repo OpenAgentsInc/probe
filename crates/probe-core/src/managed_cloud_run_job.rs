@@ -380,6 +380,7 @@ impl ManagedCloudRunJobRunner {
                         .unwrap_or_else(|| request.default_cwd.clone()),
                     system_prompt: request.system_prompt.clone(),
                     harness_profile: request.harness_profile.clone(),
+                    signature_context: None,
                     tool_loop: request.tool_loop.clone(),
                 },
                 event_sink,

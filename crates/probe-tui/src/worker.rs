@@ -561,6 +561,7 @@ fn run_probe_runtime_turn(
                 cwd: config.cwd.clone(),
                 system_prompt: config.system_prompt.clone(),
                 harness_profile: config.harness_profile.clone(),
+                signature_context: None,
                 tool_loop: config.tool_loop.clone(),
             },
             event_sink,
@@ -573,6 +574,7 @@ fn run_probe_runtime_turn(
             cwd: config.cwd.clone(),
             system_prompt: config.system_prompt.clone(),
             harness_profile: config.harness_profile.clone(),
+            signature_context: None,
             tool_loop: config.tool_loop.clone(),
         })
     };

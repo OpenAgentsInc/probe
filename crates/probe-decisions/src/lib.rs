@@ -2060,6 +2060,7 @@ mod tests {
             cwd: String::from("/tmp"),
             backend_profile: Some(String::from("local")),
             harness_profile: Some(String::from("coding_bootstrap_default@v1")),
+            signature_selection: None,
             turn_count: 4,
             first_tool_name: Some(String::from("list_files")),
             tool_names: vec![String::from("list_files"), String::from("read_file")],
@@ -2172,6 +2173,7 @@ mod tests {
             cwd: String::from("/tmp"),
             backend_profile: Some(String::from("local")),
             harness_profile: Some(String::from("coding_bootstrap_default@v1")),
+            signature_selection: None,
             source_transcript_path: String::from("/tmp/probe/transcript.jsonl"),
             turn_index: 0,
             context: DecisionCaseContext::ToolRoute(ToolRouteDecisionCaseContext {

@@ -7,6 +7,7 @@ use probe_protocol::session::{
     CacheSignal, SessionId, SessionMetadata, ToolPolicyDecision, TranscriptEvent,
     TranscriptItemKind,
 };
+use probe_protocol::signature_context::SignatureSelectorMode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -102,8 +103,23 @@ struct ReplayDatasetRecord {
     backend_profile: Option<String>,
     backend_model: Option<String>,
     harness_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signature_selection: Option<SignatureSelectionExportRefs>,
     turn_count: usize,
     transcript: Vec<TranscriptEvent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureSelectionExportRefs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_id: Option<String>,
+    pub selected_signature_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_envelope_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -113,6 +129,8 @@ pub struct DecisionSessionSummary {
     pub cwd: String,
     pub backend_profile: Option<String>,
     pub harness_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_selection: Option<SignatureSelectionExportRefs>,
     pub turn_count: usize,
     pub first_tool_name: Option<String>,
     pub tool_names: Vec<String>,
@@ -269,6 +287,8 @@ pub struct DecisionCaseRecord {
     pub backend_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_selection: Option<SignatureSelectionExportRefs>,
     pub source_transcript_path: String,
     pub turn_index: u64,
     pub context: DecisionCaseContext,
@@ -342,6 +362,7 @@ pub fn export_dataset(
                         .harness_profile
                         .as_ref()
                         .map(|profile| format!("{}@{}", profile.name, profile.version)),
+                    signature_selection: signature_selection_refs(&metadata),
                     turn_count: transcript.len(),
                     transcript,
                 };
@@ -563,6 +584,7 @@ pub fn build_decision_summary(
             .harness_profile
             .as_ref()
             .map(|profile| format!("{}@{}", profile.name, profile.version)),
+        signature_selection: signature_selection_refs(metadata),
         turn_count: transcript.len(),
         first_tool_name,
         tool_names,
@@ -832,11 +854,51 @@ fn build_decision_case_record(
             .harness_profile
             .as_ref()
             .map(|profile| format!("{}@{}", profile.name, profile.version)),
+        signature_selection: signature_selection_refs(metadata),
         source_transcript_path: metadata.transcript_path.display().to_string(),
         turn_index,
         context,
         observed_label,
         transcript_refs,
+    }
+}
+
+fn signature_selection_refs(metadata: &SessionMetadata) -> Option<SignatureSelectionExportRefs> {
+    let context = metadata.signature_context.as_ref()?;
+    if context.signature_pack.entries.is_empty() && context.selection_decision.is_none() {
+        return None;
+    }
+    Some(SignatureSelectionExportRefs {
+        pack_id: context.signature_pack.pack_id.clone(),
+        selected_signature_ids: context
+            .signature_pack
+            .entries
+            .iter()
+            .map(|entry| entry.signature.id.clone())
+            .collect(),
+        decision_id: context
+            .selection_decision
+            .as_ref()
+            .map(|decision| decision.decision_id.clone()),
+        selector_mode: context
+            .selection_decision
+            .as_ref()
+            .map(|decision| signature_selector_mode_label(decision.selector_mode).to_string()),
+        task_envelope_digest: context
+            .selection_decision
+            .as_ref()
+            .and_then(|decision| decision.task_envelope_digest.clone()),
+    })
+}
+
+fn signature_selector_mode_label(mode: SignatureSelectorMode) -> &'static str {
+    match mode {
+        SignatureSelectorMode::ExactRef => "exact_ref",
+        SignatureSelectorMode::SemanticEmbedding => "semantic_embedding",
+        SignatureSelectorMode::StructuredQuery => "structured_query",
+        SignatureSelectorMode::Hybrid => "hybrid",
+        SignatureSelectorMode::Manual => "manual",
+        SignatureSelectorMode::NoMatch => "no_match",
     }
 }
 
@@ -971,6 +1033,11 @@ mod tests {
         SessionHarnessProfile, ToolApprovalState, ToolExecutionRecord, ToolPolicyDecision,
         ToolRiskClass, TranscriptItemKind,
     };
+    use probe_protocol::signature_context::{
+        PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION, SessionSignatureContext, SignatureAdoptionState,
+        SignaturePack, SignaturePackEntry, SignatureRef, SignatureSelectionDecision,
+        SignatureSelectionScore, SignatureSelectorMode,
+    };
 
     use crate::session_store::{FilesystemSessionStore, NewItem, NewSession};
 
@@ -982,12 +1049,12 @@ mod tests {
         let store = FilesystemSessionStore::new(temp.path());
         let metadata = store
             .create_session_with(
-                NewSession::new("coding replay", temp.path()).with_harness_profile(Some(
-                    SessionHarnessProfile {
+                NewSession::new("coding replay", temp.path())
+                    .with_harness_profile(Some(SessionHarnessProfile {
                         name: String::from("coding_bootstrap_default"),
                         version: String::from("v1"),
-                    },
-                )),
+                    }))
+                    .with_signature_context(Some(signature_context_fixture())),
             )
             .expect("create session");
         store
@@ -1016,6 +1083,8 @@ mod tests {
         assert_eq!(report.sessions_exported, 1);
         assert!(body.contains("coding replay"));
         assert!(body.contains("coding_bootstrap_default"));
+        assert!(body.contains("coding.service_readiness"));
+        assert!(body.contains("sigsel-dataset-test"));
     }
 
     #[test]
@@ -1189,6 +1258,66 @@ mod tests {
     }
 
     #[test]
+    fn export_decision_dataset_preserves_signature_selection_refs() {
+        let temp = tempdir().expect("temp dir");
+        let store = FilesystemSessionStore::new(temp.path());
+        let metadata = store
+            .create_session_with(
+                NewSession::new("signature decision", temp.path())
+                    .with_harness_profile(Some(SessionHarnessProfile {
+                        name: String::from("coding_bootstrap_codex"),
+                        version: String::from("v1"),
+                    }))
+                    .with_signature_context(Some(signature_context_fixture())),
+            )
+            .expect("create session");
+
+        store
+            .append_turn(
+                &metadata.id,
+                &[NewItem::tool_call(
+                    "read_file",
+                    "call_read",
+                    serde_json::json!({ "path": "README.md" }),
+                )],
+            )
+            .expect("append tool call");
+
+        let output_path = temp.path().join("signature-decision.jsonl");
+        export_dataset(
+            &store,
+            &DatasetExportConfig {
+                kind: DatasetKind::Decision,
+                output_path: output_path.clone(),
+                session_ids: Vec::new(),
+                include_all_sessions: false,
+            },
+        )
+        .expect("export decision dataset");
+
+        let line = fs::read_to_string(output_path).expect("read decision export");
+        let value: serde_json::Value = serde_json::from_str(line.lines().next().unwrap_or("{}"))
+            .expect("parse decision export");
+        assert_eq!(
+            value["signature_selection"]["pack_id"],
+            "probe.seed_failure_signatures.v1"
+        );
+        assert_eq!(
+            value["signature_selection"]["selected_signature_ids"],
+            serde_json::json!(["coding.service_readiness"])
+        );
+        assert_eq!(
+            value["signature_selection"]["decision_id"],
+            "sigsel-dataset-test"
+        );
+        assert_eq!(value["signature_selection"]["selector_mode"], "hybrid");
+        assert_eq!(
+            value["signature_selection"]["task_envelope_digest"],
+            "sha256:dataset"
+        );
+    }
+
+    #[test]
     fn export_decision_case_bundle_writes_train_and_validation_artifacts() {
         let temp = tempdir().expect("temp dir");
         let store = FilesystemSessionStore::new(temp.path());
@@ -1260,5 +1389,53 @@ mod tests {
                 + manifest["validation_cases"].as_u64().unwrap_or(0),
             3
         );
+    }
+
+    fn signature_context_fixture() -> SessionSignatureContext {
+        let signature = SignatureRef {
+            id: String::from("coding.service_readiness"),
+            version: String::from("candidate"),
+            adoption_state: SignatureAdoptionState::Candidate,
+            source_ref: Some(String::from("vortex://signatures/coding.service_readiness")),
+        };
+        SessionSignatureContext::new(SignaturePack {
+            schema_version: String::from(PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION),
+            pack_id: Some(String::from("probe.seed_failure_signatures.v1")),
+            selected_by: Some(String::from("probe_signature_selector")),
+            selected_at_ms: None,
+            max_signature_count: Some(4),
+            entries: vec![SignaturePackEntry {
+                signature: signature.clone(),
+                task_classes: vec![String::from("service_orchestration")],
+                benchmark_families: vec![String::from("terminal-bench")],
+                required_evidence: Vec::new(),
+                recommended_tools: Vec::new(),
+                forbidden_tools: vec![String::from("destructive_shell")],
+                closeout_artifacts: vec![String::from("service-readiness.json")],
+                failure_fingerprints: vec![String::from("port_not_ready")],
+                fixture_refs: vec![String::from("terminal-bench:2.0/pypi-server")],
+                rendered_description: Some(String::from(
+                    "Prove service readiness before declaring success.",
+                )),
+            }],
+        })
+        .with_selection_decision(SignatureSelectionDecision {
+            schema_version: String::from(PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION),
+            decision_id: String::from("sigsel-dataset-test"),
+            selector_mode: SignatureSelectorMode::Hybrid,
+            task_envelope_digest: Some(String::from("sha256:dataset")),
+            selected_signatures: vec![SignatureSelectionScore {
+                signature,
+                rank: 1,
+                score_bps: 9_000,
+                reason_code: Some(String::from("structured_match")),
+            }],
+            runner_up_signatures: Vec::new(),
+            recommended_harness_profile: Some(String::from("coding_bootstrap_codex@v1")),
+            recommended_tool_set: Some(String::from("coding_bootstrap")),
+            recommended_tool_choice: Some(String::from("auto")),
+            forbidden_tools: vec![String::from("destructive_shell")],
+            fallback_reason_code: None,
+        })
     }
 }

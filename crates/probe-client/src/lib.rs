@@ -310,6 +310,7 @@ impl ProbeClient {
             profile: request.profile.clone(),
             system_prompt: request.system_prompt,
             harness_profile: request.harness_profile,
+            signature_context: request.signature_context,
             workspace_state: None,
             mounted_refs: Vec::new(),
         })?;
@@ -1751,6 +1752,7 @@ mod tests {
                     cwd: environment.workspace().to_path_buf(),
                     system_prompt: None,
                     harness_profile: None,
+                    signature_context: None,
                     tool_loop: None,
                 },
                 sink,
@@ -1835,6 +1837,7 @@ mod tests {
                 profile: test_profile("http://127.0.0.1:9/v1"),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 workspace_state: Some(SessionWorkspaceState {
                     boot_mode: SessionWorkspaceBootMode::PreparedBaseline,
                     baseline: Some(SessionPreparedBaselineRef {
@@ -1997,6 +2000,7 @@ mod tests {
                 profile: test_profile("http://127.0.0.1:9/v1"),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 workspace_state: None,
                 mounted_refs: Vec::new(),
             })
@@ -2097,6 +2101,7 @@ mod tests {
                 cwd: environment.workspace().to_path_buf(),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: None,
             })
             .expect("hosted turn should succeed");
@@ -2175,6 +2180,7 @@ mod tests {
                 cwd: environment.workspace().to_path_buf(),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: None,
             })
             .expect("hosted turn should succeed");
@@ -2236,6 +2242,7 @@ mod tests {
                 profile: test_profile("http://127.0.0.1:9/v1"),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 workspace_state: None,
                 mounted_refs: Vec::new(),
             })
@@ -2419,6 +2426,7 @@ mod tests {
                 profile: test_profile("http://127.0.0.1:9/v1"),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 workspace_state: None,
                 mounted_refs: Vec::new(),
             })
@@ -2508,6 +2516,7 @@ mod tests {
                 profile: profile.clone(),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 workspace_state: None,
                 mounted_refs: Vec::new(),
             })
@@ -2623,6 +2632,7 @@ mod tests {
                 profile: profile.clone(),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 workspace_state: None,
                 mounted_refs: Vec::new(),
             })
@@ -2719,6 +2729,7 @@ mod tests {
                 profile: profile.clone(),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 workspace_state: None,
                 mounted_refs: Vec::new(),
             })
@@ -2815,6 +2826,7 @@ mod tests {
                 profile: test_profile("http://127.0.0.1:9/v1"),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 workspace_state: None,
                 mounted_refs: Vec::new(),
             })
@@ -2878,6 +2890,7 @@ mod tests {
                 profile: test_profile("http://127.0.0.1:9/v1"),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 workspace_state: Some(SessionWorkspaceState {
                     boot_mode: SessionWorkspaceBootMode::PreparedBaseline,
                     baseline: Some(SessionPreparedBaselineRef {

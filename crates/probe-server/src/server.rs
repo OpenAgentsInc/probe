@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use probe_core::harness::attach_signature_context_to_system_prompt;
 use probe_core::managed_runtime::{ManagedRuntimeController, ManagedRuntimeError};
 use probe_core::runtime::{
     PlainTextResumeRequest, ProbeRuntime, ResolvePendingToolApprovalOutcome,
@@ -2401,6 +2402,7 @@ impl ProbeServerConnection {
             profile,
             system_prompt,
             harness_profile,
+            signature_context,
             workspace_state,
             mounted_refs,
         } = request;
@@ -2410,6 +2412,8 @@ impl ProbeServerConnection {
             workspace_state,
         );
         let mounted_refs = validate_session_mounts(mounted_refs)?;
+        let system_prompt =
+            attach_signature_context_to_system_prompt(system_prompt, signature_context.as_ref());
         let session = self
             .core
             .runtime
@@ -2418,6 +2422,7 @@ impl ProbeServerConnection {
                 NewSession::new(normalize_session_title(title), cwd)
                     .with_system_prompt(system_prompt)
                     .with_harness_profile(harness_profile)
+                    .with_signature_context(signature_context)
                     .with_backend(SessionBackendTarget::from_profile(&profile))
                     .with_runtime_owner(Some(self.core.runtime_owner.clone()))
                     .with_workspace_state(workspace_state)

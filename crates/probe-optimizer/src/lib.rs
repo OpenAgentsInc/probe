@@ -2010,6 +2010,7 @@ mod tests {
                 cwd: String::from("/tmp"),
                 backend_profile: Some(String::from("local")),
                 harness_profile: Some(String::from("coding_bootstrap_default@v1")),
+                signature_selection: None,
                 source_transcript_path: String::from("/tmp/probe/transcript.jsonl"),
                 turn_index: 0,
                 context: DecisionCaseContext::ToolRoute(ToolRouteDecisionCaseContext {
@@ -2035,6 +2036,7 @@ mod tests {
                 cwd: String::from("/tmp"),
                 backend_profile: Some(String::from("local")),
                 harness_profile: Some(String::from("coding_bootstrap_default@v1")),
+                signature_selection: None,
                 source_transcript_path: String::from("/tmp/probe/transcript.jsonl"),
                 turn_index: 1,
                 context: DecisionCaseContext::ToolRoute(ToolRouteDecisionCaseContext {
@@ -2060,6 +2062,7 @@ mod tests {
                 cwd: String::from("/tmp"),
                 backend_profile: Some(String::from("local")),
                 harness_profile: Some(String::from("coding_bootstrap_default@v1")),
+                signature_selection: None,
                 source_transcript_path: String::from("/tmp/probe/transcript.jsonl"),
                 turn_index: 2,
                 context: DecisionCaseContext::LongContextEscalation(
@@ -2290,6 +2293,7 @@ mod tests {
                 cwd: String::from("/tmp"),
                 backend_profile: Some(String::from("local")),
                 harness_profile: Some(String::from("coding_bootstrap_default@v1")),
+                signature_selection: None,
                 source_transcript_path: String::from("/tmp/probe/transcript.jsonl"),
                 turn_index: 0,
                 context: DecisionCaseContext::ToolRoute(ToolRouteDecisionCaseContext {
@@ -2315,6 +2319,7 @@ mod tests {
                 cwd: String::from("/tmp"),
                 backend_profile: Some(String::from("local")),
                 harness_profile: Some(String::from("coding_bootstrap_default@v1")),
+                signature_selection: None,
                 source_transcript_path: String::from("/tmp/probe/transcript.jsonl"),
                 turn_index: 1,
                 context: DecisionCaseContext::ToolRoute(ToolRouteDecisionCaseContext {

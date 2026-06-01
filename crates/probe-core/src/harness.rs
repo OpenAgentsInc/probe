@@ -2,6 +2,9 @@ use std::path::Path;
 
 use probe_protocol::backend::BackendKind;
 use probe_protocol::session::SessionHarnessProfile;
+use probe_protocol::signature_context::{
+    SessionSignatureContext, SignatureAdoptionState, SignaturePackEntry, SignatureSelectorMode,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -146,6 +149,56 @@ pub fn resolve_prompt_contract(
     }
 }
 
+#[must_use]
+pub fn attach_signature_context_to_system_prompt(
+    base: Option<String>,
+    signature_context: Option<&SessionSignatureContext>,
+) -> Option<String> {
+    let Some(addendum) = signature_context.and_then(render_signature_harness_addendum) else {
+        return base;
+    };
+    Some(match base {
+        Some(base) if !base.trim().is_empty() => {
+            format!("{base}\n\nProbe Signature Addendum:\n{addendum}")
+        }
+        _ => format!("Probe Signature Addendum:\n{addendum}"),
+    })
+}
+
+#[must_use]
+pub fn render_signature_harness_addendum(
+    signature_context: &SessionSignatureContext,
+) -> Option<String> {
+    if signature_context.signature_pack.entries.is_empty() {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    if let Some(decision) = signature_context.selection_decision.as_ref() {
+        lines.push(format!(
+            "- decision: {} mode={} digest={}",
+            decision.decision_id,
+            selector_mode_label(decision.selector_mode),
+            decision.task_envelope_digest.as_deref().unwrap_or("none")
+        ));
+        if let Some(tool_set) = decision.recommended_tool_set.as_ref() {
+            lines.push(format!("- recommended_tool_set: {}", compact(tool_set, 80)));
+        }
+        if let Some(tool_choice) = decision.recommended_tool_choice.as_ref() {
+            lines.push(format!(
+                "- recommended_tool_choice: {}",
+                compact(tool_choice, 80)
+            ));
+        }
+    }
+    lines.push(String::from("- authority: signatures are context and evidence hints only; Probe tool policy and approvals still control all tool use."));
+    lines.push(String::from("- selected_signatures:"));
+    for entry in &signature_context.signature_pack.entries {
+        lines.push(format_signature_entry(entry));
+    }
+    Some(lines.join("\n"))
+}
+
 fn resolve_manifest(manifest: HarnessCandidateManifest, cwd: &Path) -> ResolvedHarnessProfile {
     let shell = if cfg!(target_family = "windows") {
         "cmd"
@@ -197,6 +250,63 @@ fn append_operator_addendum(base: Option<String>, operator_system: Option<&str>)
         (None, Some(operator_system)) => Some(operator_system.to_string()),
         (None, None) => None,
     }
+}
+
+fn format_signature_entry(entry: &SignaturePackEntry) -> String {
+    let evidence = entry
+        .required_evidence
+        .iter()
+        .map(|evidence| evidence.kind.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let closeout = entry.closeout_artifacts.join(",");
+    let scope = entry
+        .rendered_description
+        .as_ref()
+        .map(|value| compact(value, 220))
+        .unwrap_or_else(|| compact(&entry.task_classes.join(","), 160));
+    format!(
+        "  - {}@{} state={} scope=\"{}\" evidence=[{}] closeout=[{}]",
+        entry.signature.id,
+        entry.signature.version,
+        adoption_state_label(entry.signature.adoption_state),
+        scope,
+        compact(&evidence, 220),
+        compact(&closeout, 220)
+    )
+}
+
+fn adoption_state_label(state: SignatureAdoptionState) -> &'static str {
+    match state {
+        SignatureAdoptionState::Candidate => "candidate",
+        SignatureAdoptionState::Shadow => "shadow",
+        SignatureAdoptionState::Promoted => "promoted",
+        SignatureAdoptionState::Deprecated => "deprecated",
+    }
+}
+
+fn selector_mode_label(mode: SignatureSelectorMode) -> &'static str {
+    match mode {
+        SignatureSelectorMode::ExactRef => "exact_ref",
+        SignatureSelectorMode::SemanticEmbedding => "semantic_embedding",
+        SignatureSelectorMode::StructuredQuery => "structured_query",
+        SignatureSelectorMode::Hybrid => "hybrid",
+        SignatureSelectorMode::Manual => "manual",
+        SignatureSelectorMode::NoMatch => "no_match",
+    }
+}
+
+fn compact(value: &str, max_chars: usize) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let mut truncated = normalized
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    truncated.push_str("...");
+    truncated
 }
 
 fn codex_plain_system_prompt(cwd: &Path) -> String {
@@ -338,8 +448,16 @@ mod tests {
     use std::path::Path;
 
     use probe_protocol::backend::BackendKind;
+    use probe_protocol::signature_context::{
+        PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION, SessionSignatureContext, SignatureAdoptionState,
+        SignatureEvidenceRequirement, SignaturePack, SignaturePackEntry, SignatureRef,
+        SignatureSelectionDecision, SignatureSelectionScore, SignatureSelectorMode,
+    };
 
-    use super::{render_harness_profile, resolve_harness_profile, resolve_prompt_contract};
+    use super::{
+        attach_signature_context_to_system_prompt, render_harness_profile,
+        render_signature_harness_addendum, resolve_harness_profile, resolve_prompt_contract,
+    };
 
     #[test]
     fn coding_bootstrap_default_profile_is_selected_automatically() {
@@ -376,6 +494,37 @@ mod tests {
             resolved
                 .system_prompt
                 .contains("Always explain the next verification step.")
+        );
+    }
+
+    #[test]
+    fn signature_context_addendum_is_compact_and_policy_bound() {
+        let context = signature_context_fixture();
+        let prompt = attach_signature_context_to_system_prompt(
+            Some(String::from("Base Codex prompt.")),
+            Some(&context),
+        )
+        .expect("signature addendum prompt");
+
+        assert!(prompt.contains("Base Codex prompt."));
+        assert!(prompt.contains("Probe Signature Addendum"));
+        assert!(prompt.contains("coding.service_readiness@candidate"));
+        assert!(prompt.contains("recommended_tool_choice: auto"));
+        assert!(prompt.contains("Probe tool policy and approvals still control all tool use"));
+        assert!(!prompt.contains("apply_patch is required"));
+    }
+
+    #[test]
+    fn no_signature_context_leaves_prompt_unchanged() {
+        assert_eq!(
+            attach_signature_context_to_system_prompt(Some(String::from("Base")), None),
+            Some(String::from("Base"))
+        );
+        assert!(
+            render_signature_harness_addendum(
+                &SessionSignatureContext::new(SignaturePack::empty())
+            )
+            .is_none()
         );
     }
 
@@ -443,5 +592,57 @@ mod tests {
                 .as_deref()
                 .is_some_and(|prompt| prompt.contains("hosted Codex backend lane"))
         );
+    }
+
+    fn signature_context_fixture() -> SessionSignatureContext {
+        let signature = SignatureRef {
+            id: String::from("coding.service_readiness"),
+            version: String::from("candidate"),
+            adoption_state: SignatureAdoptionState::Candidate,
+            source_ref: Some(String::from("vortex://signatures/coding.service_readiness")),
+        };
+        SessionSignatureContext::new(SignaturePack {
+            schema_version: String::from(PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION),
+            pack_id: Some(String::from("probe.seed_failure_signatures.v1")),
+            selected_by: Some(String::from("probe_signature_selector")),
+            selected_at_ms: None,
+            max_signature_count: Some(4),
+            entries: vec![SignaturePackEntry {
+                signature: signature.clone(),
+                task_classes: vec![String::from("service_orchestration")],
+                benchmark_families: vec![String::from("terminal-bench")],
+                required_evidence: vec![SignatureEvidenceRequirement {
+                    kind: String::from("port_probe"),
+                    required: true,
+                    description: None,
+                }],
+                recommended_tools: Vec::new(),
+                forbidden_tools: vec![String::from("destructive_shell")],
+                closeout_artifacts: vec![String::from("service-readiness.json")],
+                failure_fingerprints: vec![String::from("port_not_ready")],
+                fixture_refs: vec![String::from("terminal-bench:2.0/pypi-server")],
+                rendered_description: Some(String::from(
+                    "Use only to prove service readiness with logs and bounded health checks.",
+                )),
+            }],
+        })
+        .with_selection_decision(SignatureSelectionDecision {
+            schema_version: String::from(PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION),
+            decision_id: String::from("sigsel-test"),
+            selector_mode: SignatureSelectorMode::Hybrid,
+            task_envelope_digest: Some(String::from("sha256:test")),
+            selected_signatures: vec![SignatureSelectionScore {
+                signature,
+                rank: 1,
+                score_bps: 9_000,
+                reason_code: Some(String::from("structured_match")),
+            }],
+            runner_up_signatures: Vec::new(),
+            recommended_harness_profile: Some(String::from("coding_bootstrap_codex@v1")),
+            recommended_tool_set: Some(String::from("coding_bootstrap")),
+            recommended_tool_choice: Some(String::from("auto")),
+            forbidden_tools: vec![String::from("destructive_shell")],
+            fallback_reason_code: None,
+        })
     }
 }

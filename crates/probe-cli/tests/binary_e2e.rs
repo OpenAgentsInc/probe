@@ -394,6 +394,7 @@ fn daemon_operator_commands_manage_detached_sessions() {
             profile: profile.clone(),
             system_prompt: None,
             harness_profile: None,
+            signature_context: None,
             workspace_state: None,
             mounted_refs: Vec::new(),
         })

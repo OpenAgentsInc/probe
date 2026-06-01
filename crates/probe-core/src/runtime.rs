@@ -12,6 +12,7 @@ use probe_protocol::session::{
     ToolApprovalResolution, ToolRiskClass, TranscriptEvent, TranscriptItem, TranscriptItemKind,
     TurnObservability,
 };
+use probe_protocol::signature_context::SessionSignatureContext;
 use probe_provider_openai::{ChatCompletionChunk, ChatMessage, ChatToolCall};
 use psionic_apple_fm::{
     APPLE_FM_TRANSCRIPT_TYPE, APPLE_FM_TRANSCRIPT_VERSION, AppleFmTextStreamEvent,
@@ -21,6 +22,7 @@ use psionic_apple_fm::{
 use serde_json::Value;
 
 use crate::dataset_export::build_decision_summary;
+use crate::harness::attach_signature_context_to_system_prompt;
 use crate::provider::{
     OpenAiRequestContext, PlainTextMessage, ProviderError, ProviderUsage,
     apple_fm_tool_loop_response, apple_fm_tool_loop_response_with_callback,
@@ -71,6 +73,7 @@ pub struct PlainTextExecRequest {
     pub cwd: PathBuf,
     pub system_prompt: Option<String>,
     pub harness_profile: Option<SessionHarnessProfile>,
+    pub signature_context: Option<SessionSignatureContext>,
     pub tool_loop: Option<ToolLoopConfig>,
 }
 
@@ -421,6 +424,10 @@ impl ProbeRuntime {
         request: PlainTextExecRequest,
         event_sink: Option<Arc<dyn RuntimeEventSink>>,
     ) -> Result<PlainTextExecOutcome, RuntimeError> {
+        let system_prompt = attach_signature_context_to_system_prompt(
+            request.system_prompt.clone(),
+            request.signature_context.as_ref(),
+        );
         let session = self.session_store.create_session_with(
             NewSession::new(
                 request
@@ -429,10 +436,18 @@ impl ProbeRuntime {
                     .unwrap_or_else(|| default_session_title(request.prompt.as_str())),
                 request.cwd,
             )
-            .with_system_prompt(request.system_prompt.clone())
+            .with_system_prompt(system_prompt)
             .with_harness_profile(request.harness_profile.clone())
+            .with_signature_context(request.signature_context.clone())
             .with_backend(SessionBackendTarget::from_profile(&request.profile)),
         )?;
+        if let Some(signature_context) = request.signature_context.as_ref() {
+            self.append_signature_context_note(
+                &session.id,
+                signature_context,
+                request.tool_loop.as_ref(),
+            )?;
+        }
 
         self.run_plain_text_turn(
             session,
@@ -441,6 +456,45 @@ impl ProbeRuntime {
             request.tool_loop,
             event_sink,
         )
+    }
+
+    fn append_signature_context_note(
+        &self,
+        session_id: &SessionId,
+        signature_context: &SessionSignatureContext,
+        tool_loop: Option<&ToolLoopConfig>,
+    ) -> Result<(), RuntimeError> {
+        let selected = signature_context
+            .signature_pack
+            .entries
+            .iter()
+            .map(|entry| format!("{}@{}", entry.signature.id, entry.signature.version))
+            .collect::<Vec<_>>()
+            .join(",");
+        let decision = signature_context
+            .selection_decision
+            .as_ref()
+            .map(|decision| decision.decision_id.as_str())
+            .unwrap_or("none");
+        let recommended_tool_choice = signature_context
+            .selection_decision
+            .as_ref()
+            .and_then(|decision| decision.recommended_tool_choice.as_deref())
+            .unwrap_or("none");
+        let actual_tool_choice = tool_loop
+            .map(|tool_loop| render_probe_tool_choice(&tool_loop.tool_choice))
+            .unwrap_or_else(|| String::from("none"));
+        self.session_store.append_turn(
+            session_id,
+            &[NewItem::new(
+                TranscriptItemKind::Note,
+                format!(
+                    "signature_context decision={} selected=[{}] recommended_tool_choice={} actual_tool_choice={} tool_policy=probe_enforced",
+                    decision, selected, recommended_tool_choice, actual_tool_choice
+                ),
+            )],
+        )?;
+        Ok(())
     }
 
     pub fn continue_plain_text_session(
@@ -784,6 +838,15 @@ fn render_tool_approval_resolution(value: ToolApprovalResolution) -> &'static st
     match value {
         ToolApprovalResolution::Approved => "approved",
         ToolApprovalResolution::Rejected => "rejected",
+    }
+}
+
+fn render_probe_tool_choice(value: &crate::tools::ProbeToolChoice) -> String {
+    match value {
+        crate::tools::ProbeToolChoice::None => String::from("none"),
+        crate::tools::ProbeToolChoice::Auto => String::from("auto"),
+        crate::tools::ProbeToolChoice::Required => String::from("required"),
+        crate::tools::ProbeToolChoice::Named(name) => format!("named:{name}"),
     }
 }
 
@@ -2286,6 +2349,11 @@ mod tests {
         CacheSignal, SessionHarnessProfile, ToolApprovalResolution, ToolApprovalState,
         ToolPolicyDecision, TranscriptItemKind, UsageTruth,
     };
+    use probe_protocol::signature_context::{
+        PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION, SessionSignatureContext, SignatureAdoptionState,
+        SignatureEvidenceRequirement, SignaturePack, SignaturePackEntry, SignatureRef,
+        SignatureSelectionDecision, SignatureSelectionScore, SignatureSelectorMode,
+    };
     use probe_test_support::{
         FakeAppleFmServer, FakeHttpRequest, FakeHttpResponse, FakeOpenAiServer,
         ProbeTestEnvironment,
@@ -2450,6 +2518,58 @@ mod tests {
             .push(request_json);
     }
 
+    fn signature_context_fixture() -> SessionSignatureContext {
+        let signature = SignatureRef {
+            id: String::from("coding.service_readiness"),
+            version: String::from("candidate"),
+            adoption_state: SignatureAdoptionState::Candidate,
+            source_ref: Some(String::from("vortex://signatures/coding.service_readiness")),
+        };
+        SessionSignatureContext::new(SignaturePack {
+            schema_version: String::from(PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION),
+            pack_id: Some(String::from("probe.seed_failure_signatures.v1")),
+            selected_by: Some(String::from("probe_signature_selector")),
+            selected_at_ms: None,
+            max_signature_count: Some(4),
+            entries: vec![SignaturePackEntry {
+                signature: signature.clone(),
+                task_classes: vec![String::from("service_orchestration")],
+                benchmark_families: vec![String::from("terminal-bench")],
+                required_evidence: vec![SignatureEvidenceRequirement {
+                    kind: String::from("port_probe"),
+                    required: true,
+                    description: None,
+                }],
+                recommended_tools: Vec::new(),
+                forbidden_tools: vec![String::from("destructive_shell")],
+                closeout_artifacts: vec![String::from("service-readiness.json")],
+                failure_fingerprints: vec![String::from("port_not_ready")],
+                fixture_refs: vec![String::from("terminal-bench:2.0/pypi-server")],
+                rendered_description: Some(String::from(
+                    "Use only to prove service readiness with logs and bounded health checks.",
+                )),
+            }],
+        })
+        .with_selection_decision(SignatureSelectionDecision {
+            schema_version: String::from(PROBE_SIGNATURE_CONTEXT_SCHEMA_VERSION),
+            decision_id: String::from("sigsel-runtime-test"),
+            selector_mode: SignatureSelectorMode::Hybrid,
+            task_envelope_digest: Some(String::from("sha256:runtime")),
+            selected_signatures: vec![SignatureSelectionScore {
+                signature,
+                rank: 1,
+                score_bps: 9_000,
+                reason_code: Some(String::from("structured_match")),
+            }],
+            runner_up_signatures: Vec::new(),
+            recommended_harness_profile: Some(String::from("coding_bootstrap_codex@v1")),
+            recommended_tool_set: Some(String::from("coding_bootstrap")),
+            recommended_tool_choice: Some(String::from("auto")),
+            forbidden_tools: vec![String::from("destructive_shell")],
+            fallback_reason_code: None,
+        })
+    }
+
     #[test]
     fn default_title_is_trimmed_for_exec_prompts() {
         assert_eq!(default_session_title("  hello world  "), "hello world");
@@ -2491,6 +2611,7 @@ mod tests {
                     name: String::from("coding_bootstrap_default"),
                     version: String::from("v1"),
                 }),
+                signature_context: None,
                 tool_loop: None,
             })
             .expect("exec should succeed");
@@ -2569,6 +2690,102 @@ mod tests {
     }
 
     #[test]
+    fn exec_plain_text_attaches_signature_context_to_codex_harness_prompt() {
+        let server = FakeOpenAiServer::from_json_responses(vec![serde_json::json!({
+            "id": "chatcmpl_signature_test",
+            "model": "qwen3.5-2b-q8_0-registry.gguf",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "checked the service path"},
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
+                "total_tokens": 14
+            }
+        })]);
+
+        let environment = ProbeTestEnvironment::new();
+        let runtime = ProbeRuntime::new(environment.probe_home().to_path_buf());
+        let mut profile = psionic_qwen35_2b_q8_registry();
+        profile.base_url = String::from(server.base_url());
+        let signature_context = signature_context_fixture();
+
+        let outcome = runtime
+            .exec_plain_text(PlainTextExecRequest {
+                profile,
+                prompt: String::from("fix the flaky service readiness task"),
+                title: Some(String::from("Signature Context Test")),
+                cwd: environment.workspace().to_path_buf(),
+                system_prompt: Some(String::from("Base Codex harness.")),
+                harness_profile: Some(SessionHarnessProfile {
+                    name: String::from("coding_bootstrap_codex"),
+                    version: String::from("v1"),
+                }),
+                signature_context: Some(signature_context),
+                tool_loop: Some(ToolLoopConfig::coding_bootstrap(
+                    ProbeToolChoice::Auto,
+                    false,
+                )),
+            })
+            .expect("exec should succeed");
+
+        assert_eq!(outcome.assistant_text, "checked the service path");
+        assert_eq!(
+            outcome
+                .session
+                .signature_context
+                .as_ref()
+                .expect("signature context should persist")
+                .signature_pack
+                .entries[0]
+                .signature
+                .id,
+            "coding.service_readiness"
+        );
+        let system_prompt = outcome
+            .session
+            .system_prompt
+            .as_ref()
+            .expect("system prompt should persist");
+        assert!(system_prompt.contains("Base Codex harness."));
+        assert!(system_prompt.contains("Probe Signature Addendum"));
+        assert!(system_prompt.contains("coding.service_readiness@candidate"));
+        assert!(
+            system_prompt.contains("Probe tool policy and approvals still control all tool use")
+        );
+
+        let transcript = runtime
+            .session_store()
+            .read_transcript(&outcome.session.id)
+            .expect("read transcript");
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[0].turn.items[0].kind, TranscriptItemKind::Note);
+        assert!(
+            transcript[0].turn.items[0]
+                .text
+                .contains("signature_context decision=sigsel-runtime-test")
+        );
+        assert!(
+            transcript[0].turn.items[0]
+                .text
+                .contains("actual_tool_choice=auto")
+        );
+        assert_eq!(
+            transcript[1].turn.items[0].text,
+            "fix the flaky service readiness task"
+        );
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("Probe Signature Addendum"));
+        assert!(requests[0].contains("coding.service_readiness"));
+    }
+
+    #[test]
     fn apple_fm_exec_plain_text_persists_session_and_transcript() {
         let server = FakeAppleFmServer::from_json_responses(vec![serde_json::json!({
             "id": "apple_fm_exec_test",
@@ -2600,6 +2817,7 @@ mod tests {
                 cwd: environment.workspace().to_path_buf(),
                 system_prompt: Some(String::from("You are helpful")),
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: None,
             })
             .expect("apple fm exec should succeed");
@@ -2688,6 +2906,7 @@ mod tests {
                 cwd: environment.workspace().to_path_buf(),
                 system_prompt: Some(String::from("You are helpful")),
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: None,
             })
             .expect("apple fm exec with metadata noise should succeed");
@@ -2745,6 +2964,7 @@ mod tests {
                     cwd: environment.workspace().to_path_buf(),
                     system_prompt: Some(String::from("You are helpful")),
                     harness_profile: None,
+                    signature_context: None,
                     tool_loop: None,
                 },
                 collector.clone(),
@@ -2833,6 +3053,7 @@ mod tests {
                     cwd: environment.workspace().to_path_buf(),
                     system_prompt: Some(String::from("You are helpful")),
                     harness_profile: None,
+                    signature_context: None,
                     tool_loop: None,
                 },
                 collector.clone(),
@@ -2930,6 +3151,7 @@ mod tests {
                 cwd: temp.path().to_path_buf(),
                 system_prompt: Some(String::from("You are helpful")),
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: None,
             })
             .expect("first turn should succeed");
@@ -3022,6 +3244,7 @@ mod tests {
                 cwd: temp.path().to_path_buf(),
                 system_prompt: Some(String::from("You are helpful")),
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: None,
             })
             .expect("first turn should succeed");
@@ -3118,6 +3341,7 @@ mod tests {
                 cwd: environment.workspace().to_path_buf(),
                 system_prompt: Some(String::from("You are helpful")),
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: Some(ToolLoopConfig::coding_bootstrap(
                     ProbeToolChoice::Required,
                     false,
@@ -3236,6 +3460,7 @@ mod tests {
                 cwd: environment.workspace().to_path_buf(),
                 system_prompt: Some(String::from("You are helpful")),
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: Some(ToolLoopConfig::coding_bootstrap(
                     ProbeToolChoice::Required,
                     false,
@@ -3335,6 +3560,7 @@ mod tests {
                 cwd: environment.workspace().to_path_buf(),
                 system_prompt: Some(String::from("You are helpful")),
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: Some(tool_loop),
             })
             .expect_err("apple fm pause should surface pending approval");
@@ -3457,6 +3683,7 @@ mod tests {
                 cwd: environment.workspace().to_path_buf(),
                 system_prompt: Some(String::from("You are helpful")),
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: Some(ToolLoopConfig::coding_bootstrap(
                     ProbeToolChoice::Required,
                     false,
@@ -3544,6 +3771,7 @@ mod tests {
                 cwd: environment.workspace().to_path_buf(),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: None,
             })
             .expect_err("apple fm request should fail");
@@ -3679,6 +3907,7 @@ mod tests {
                 cwd: temp.path().to_path_buf(),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: Some(ToolLoopConfig::coding_bootstrap(
                     ProbeToolChoice::Required,
                     false,
@@ -3781,6 +4010,7 @@ mod tests {
                     cwd: environment.workspace().to_path_buf(),
                     system_prompt: None,
                     harness_profile: None,
+                    signature_context: None,
                     tool_loop: Some(ToolLoopConfig::coding_bootstrap(
                         ProbeToolChoice::Required,
                         false,
@@ -3867,6 +4097,7 @@ mod tests {
                     cwd: environment.workspace().to_path_buf(),
                     system_prompt: None,
                     harness_profile: None,
+                    signature_context: None,
                     tool_loop: None,
                 },
                 collector.clone(),
@@ -3981,6 +4212,7 @@ mod tests {
                     cwd: environment.workspace().to_path_buf(),
                     system_prompt: None,
                     harness_profile: None,
+                    signature_context: None,
                     tool_loop: None,
                 },
                 collector.clone(),
@@ -4048,6 +4280,7 @@ mod tests {
                     cwd: environment.workspace().to_path_buf(),
                     system_prompt: None,
                     harness_profile: None,
+                    signature_context: None,
                     tool_loop: Some(ToolLoopConfig::coding_bootstrap(
                         ProbeToolChoice::Required,
                         false,
@@ -4184,6 +4417,7 @@ mod tests {
                     cwd: environment.workspace().to_path_buf(),
                     system_prompt: Some(String::from("You are helpful")),
                     harness_profile: None,
+                    signature_context: None,
                     tool_loop: Some(ToolLoopConfig::coding_bootstrap(
                         ProbeToolChoice::Required,
                         false,
@@ -4280,6 +4514,7 @@ mod tests {
                 cwd: environment.workspace().to_path_buf(),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: Some(tool_loop),
             })
             .expect_err("tool loop should pause");
@@ -4370,6 +4605,7 @@ mod tests {
                 cwd: environment.workspace().to_path_buf(),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: Some(tool_loop.clone()),
             })
             .expect_err("tool loop should pause");
@@ -4481,6 +4717,7 @@ mod tests {
                 cwd: environment.workspace().to_path_buf(),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: Some(tool_loop.clone()),
             })
             .expect_err("tool loop should pause");
@@ -4575,6 +4812,7 @@ mod tests {
                     cwd: environment.workspace().to_path_buf(),
                     system_prompt: None,
                     harness_profile: None,
+                    signature_context: None,
                     tool_loop: Some(tool_loop),
                 },
                 collector.clone(),
@@ -4760,6 +4998,7 @@ mod tests {
                 cwd: temp.path().to_path_buf(),
                 system_prompt: None,
                 harness_profile: None,
+                signature_context: None,
                 tool_loop: Some(ToolLoopConfig::coding_bootstrap(
                     ProbeToolChoice::Required,
                     true,
