@@ -9,6 +9,7 @@ Related:
 - `docs/103-signature-context-contract.md`
 - `docs/104-seed-signature-packs.md`
 - `docs/105-signature-selector.md`
+- `docs/107-signature-promotion-and-failure-contributions.md`
 - `../crates/probe-core/src/harness.rs`
 - `../crates/probe-core/src/runtime.rs`
 - `../crates/probe-core/src/dataset_export.rs`
@@ -80,6 +81,15 @@ signature-selection cases. Those cases add selected and runner-up signatures,
 tool-policy counts, typed failure type, verifier outcome, and an explicit
 unknown/helped/hurt/irrelevant outcome-label hook. They are not training data
 until a later promotion flow admits them.
+
+The contribution handoff is:
+
+```bash
+probe signatures propose --signature-cases ./signature_cases
+```
+
+That command turns failed signature cases into candidate review proposals. It
+does not let Codex, Probe, or an optimizer self-promote a runtime signature.
 
 ## Validation
 

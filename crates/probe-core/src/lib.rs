@@ -22,6 +22,7 @@ pub mod runtime;
 pub mod server_control;
 pub mod session_store;
 pub mod session_summary_artifacts;
+pub mod signature_promotion;
 pub mod signature_registry;
 pub mod tools;
 pub mod website_events;

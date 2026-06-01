@@ -7,6 +7,7 @@ Date: 2026-06-01
 Related:
 
 - `docs/103-signature-context-contract.md`
+- `docs/107-signature-promotion-and-failure-contributions.md`
 - `../crates/probe-core/signature_registry/seed-signatures.json`
 - `../crates/probe-core/src/signature_registry.rs`
 - `../crates/probe-protocol/src/signature_context.rs`
@@ -58,6 +59,11 @@ Probe's existing tool policy remains the authority gate.
 The validator rejects promoted seed signatures and rejects recommended tools
 whose names imply write, network, destructive, patch, or secret authority.
 
+Failed runs can create candidate proposal records through the signature
+contribution flow, but those proposals remain separate from the seed registry
+until fixture evidence, retained-run evidence, and review acceptance admit them
+into shadow or promoted routing.
+
 ## CLI
 
 List and validate the seed registry:
@@ -65,6 +71,7 @@ List and validate the seed registry:
 ```bash
 probe signatures list
 probe signatures list --json
+probe signatures propose --signature-cases ./signature_cases --output ./signature_contributions.json
 ```
 
 The non-JSON output is for quick operator inspection. The JSON output is the

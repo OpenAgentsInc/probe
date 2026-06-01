@@ -31,7 +31,8 @@ use probe_core::backend_profiles::{
     resolved_reasoning_level_for_backend,
 };
 use probe_core::dataset_export::{
-    DatasetExportConfig, DatasetKind, DecisionCaseRecord, DecisionSessionSummary, export_dataset,
+    DatasetExportConfig, DatasetKind, DecisionCaseRecord, DecisionSessionSummary,
+    SignatureSelectionCaseRecord, export_dataset,
 };
 use probe_core::forge_rlm::{
     ForgeRlmExecutionOutcome, ForgeRlmExecutionPlan, ForgeRlmExecutionRequest,
@@ -74,6 +75,9 @@ use probe_core::server_control::{
     ServerProcessGuard,
 };
 use probe_core::session_store::FilesystemSessionStore;
+use probe_core::signature_promotion::{
+    SignatureContributionConfig, build_signature_contribution_report,
+};
 use probe_core::signature_registry::seed_signature_registry;
 use probe_core::tools::{
     ExecutedToolCall, ProbeToolChoice, ToolApprovalConfig, ToolDeniedAction, ToolLongContextConfig,
@@ -1144,10 +1148,30 @@ struct SignatureArgs {
 enum SignatureCommands {
     #[command(about = "List seed signatures and validate their registry schema")]
     List(SignatureListArgs),
+    #[command(about = "Create failure-derived candidate signature proposals from signature cases")]
+    Propose(SignatureProposeArgs),
 }
 
 #[derive(clap::Args, Debug)]
 struct SignatureListArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct SignatureProposeArgs {
+    #[arg(long = "signature-cases")]
+    signature_cases: PathBuf,
+    #[arg(long)]
+    output: Option<PathBuf>,
+    #[arg(long)]
+    owner: Option<String>,
+    #[arg(long)]
+    reviewer: Option<String>,
+    #[arg(long, default_value_t = 1)]
+    min_failure_cases: usize,
+    #[arg(long, default_value_t = 1)]
+    required_fixture_runs: usize,
     #[arg(long)]
     json: bool,
 }
@@ -3914,6 +3938,7 @@ fn run_optimize_skill_packs(args: OptimizeSkillPacksArgs) -> Result<(), String> 
 fn run_signatures(args: SignatureArgs) -> Result<(), String> {
     match args.command {
         SignatureCommands::List(args) => run_signature_list(args),
+        SignatureCommands::Propose(args) => run_signature_propose(args),
     }
 }
 
@@ -3932,6 +3957,52 @@ fn run_signature_list(args: SignatureListArgs) -> Result<(), String> {
     );
     for entry in registry.entries {
         println!("{}", render_signature_summary_line(&entry));
+    }
+    Ok(())
+}
+
+fn run_signature_propose(args: SignatureProposeArgs) -> Result<(), String> {
+    let cases = read_signature_case_dataset(args.signature_cases.as_path())?;
+    let report = build_signature_contribution_report(
+        cases.as_slice(),
+        &SignatureContributionConfig {
+            owner: args.owner,
+            reviewer: args.reviewer,
+            min_failure_cases: args.min_failure_cases,
+            required_fixture_runs: args.required_fixture_runs,
+        },
+    );
+
+    if let Some(output) = args.output.as_ref() {
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let json = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
+        std::fs::write(output, format!("{json}\n")).map_err(|error| error.to_string())?;
+    }
+
+    if args.json || args.output.is_none() {
+        let json = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    println!(
+        "signature_contributions source_cases={} failed_cases={} proposals={}",
+        report.source_case_count,
+        report.failed_case_count,
+        report.proposals.len()
+    );
+    for proposal in &report.proposals {
+        println!(
+            "proposal={} stage={} source={} failure={} cases={} fixtures_required={}",
+            proposal.proposal_id,
+            signature_adoption_state_label(proposal.stage),
+            proposal.source_signature_id,
+            proposal.failure_type,
+            proposal.failure_case_ids.len(),
+            proposal.required_fixture_refs.len()
+        );
     }
     Ok(())
 }
@@ -3979,6 +4050,22 @@ fn read_decision_case_dataset(path: &Path) -> Result<Vec<DecisionCaseRecord>, St
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
             serde_json::from_str::<DecisionCaseRecord>(line).map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+fn read_signature_case_dataset(path: &Path) -> Result<Vec<SignatureSelectionCaseRecord>, String> {
+    let dataset_path = if path.is_dir() {
+        path.join("signature_cases_all.jsonl")
+    } else {
+        path.to_path_buf()
+    };
+    let body = std::fs::read_to_string(&dataset_path).map_err(|error| error.to_string())?;
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<SignatureSelectionCaseRecord>(line)
+                .map_err(|error| error.to_string())
         })
         .collect()
 }
@@ -5494,7 +5581,7 @@ fn render_usage_value(value: Option<u64>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
     use clap::Parser;
@@ -5858,8 +5945,50 @@ mod tests {
         match cli.command {
             Some(Commands::Signatures(args)) => match args.command {
                 SignatureCommands::List(args) => assert!(args.json),
+                other => panic!("expected signatures list command, got {other:?}"),
             },
             other => panic!("expected signatures list command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn signatures_propose_command_parses() {
+        let cli = Cli::try_parse_from([
+            "probe",
+            "signatures",
+            "propose",
+            "--signature-cases",
+            "signature_cases_all.jsonl",
+            "--output",
+            "signature_contributions.json",
+            "--owner",
+            "probe",
+            "--reviewer",
+            "autopilot",
+            "--min-failure-cases",
+            "2",
+            "--json",
+        ])
+        .expect("signature propose command should parse");
+        match cli.command {
+            Some(Commands::Signatures(args)) => match args.command {
+                SignatureCommands::Propose(args) => {
+                    assert_eq!(
+                        args.signature_cases,
+                        PathBuf::from("signature_cases_all.jsonl")
+                    );
+                    assert_eq!(
+                        args.output.as_deref(),
+                        Some(Path::new("signature_contributions.json"))
+                    );
+                    assert_eq!(args.owner.as_deref(), Some("probe"));
+                    assert_eq!(args.reviewer.as_deref(), Some("autopilot"));
+                    assert_eq!(args.min_failure_cases, 2);
+                    assert!(args.json);
+                }
+                other => panic!("expected signatures propose command, got {other:?}"),
+            },
+            other => panic!("expected signatures propose command, got {other:?}"),
         }
     }
 
