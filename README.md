@@ -56,6 +56,11 @@ Current shipped surface:
   reconstruction after worker restart, heartbeats, approvals, transcript refs,
   artifact refs, and child-session hooks without making Codex the product
   contract
+- `probe_protocol::codex_workroom` for the Codex VM workroom adapter contract:
+  `probe.codex_workroom.v1` normalizes `codex exec --json --sandbox
+  workspace-write`, Cloud runner events, artifact refs, receipt refs,
+  redaction, and terminal failure states without making Probe or Cloud the
+  Autopilot acceptance authority
 - `docs/101-openagents-coder-runtime-adapter.md` for the OpenAgents Coder
   compatibility note: hosted Probe remains one Coder runtime adapter behind
   Autopilot-owned jobs, events, approvals, evidence, and receipts, while raw

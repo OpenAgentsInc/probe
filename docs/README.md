@@ -360,3 +360,8 @@ This folder holds technical planning docs for the Probe runtime.
     runtime adapter, including managed-runtime operations, website-safe event
     mapping, auth boundaries, hosted worker identity, child-session constraints,
     and the fixture-backed minimal smoke path
+- `102-codex-vm-workroom-adapter-contract.md`
+  - Probe-owned `probe.codex_workroom.v1` contract for Codex VM workrooms,
+    including session fields, `codex exec --json --sandbox workspace-write`
+    event normalization, artifactRefs, receiptRefs, redaction, failure states,
+    Cloud runner compatibility, and future MCP/SDK modes
