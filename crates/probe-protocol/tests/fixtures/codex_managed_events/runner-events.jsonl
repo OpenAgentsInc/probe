@@ -1,0 +1,19 @@
+{"kind":"run.queued","message":"training run queued","retentionMode":"retained","trainingUse":"allowed","dataRightsRef":"openagents://data-rights/org-retained"}
+{"kind":"run.started","message":"account-backed Codex run started","threadId":"codex-thread-1"}
+{"kind":"signature.pack.selected","selectedSignatureIds":["terminal-bench.db-wal-recovery@1","terminal-bench.service-persistence@1"],"packageEvidence":{"packageId":"codex-package.tb2-db-wal.1","adapterKind":"codex_skill_adapter","renderedRef":"probe://signature-packages/codex-package.tb2-db-wal.1/SKILL.md","renderedDigest":"sha256:package-render","validationStatus":"selected","sourceSignatureIds":["terminal-bench.db-wal-recovery@1"],"evidenceRefs":[{"resourceRef":"probe://fixtures/terminal-bench/db-wal-recovery","digest":"sha256:fixture","kind":"fixture","redactionState":"redacted"}]}}
+{"kind":"codex.package.rendered","packageEvidence":{"packageId":"codex-package.tb2-db-wal.1","adapterKind":"codex_skill_adapter","renderedRef":"probe://signature-packages/codex-package.tb2-db-wal.1/SKILL.md","renderedDigest":"sha256:package-render","validationStatus":"rendered","sourceSignatureIds":["terminal-bench.db-wal-recovery@1"]}}
+{"kind":"codex.package.validated","packageEvidence":{"packageId":"codex-package.tb2-db-wal.1","adapterKind":"codex_skill_adapter","renderedRef":"probe://signature-packages/codex-package.tb2-db-wal.1/SKILL.md","renderedDigest":"sha256:package-render","validationStatus":"valid","sourceSignatureIds":["terminal-bench.db-wal-recovery@1"]}}
+{"kind":"codex.package.loaded","packageEvidence":{"packageId":"codex-package.tb2-db-wal.1","adapterKind":"codex_skill_adapter","renderedRef":"probe://signature-packages/codex-package.tb2-db-wal.1/SKILL.md","renderedDigest":"sha256:package-render","validationStatus":"loaded","loadedAtMs":1777777777005,"sourceSignatureIds":["terminal-bench.db-wal-recovery@1"]}}
+{"kind":"turn.started","turnId":"turn-1","promptSha256":"sha256:prompt"}
+{"kind":"message.delta","messageId":"msg-1","delta":"I will inspect the database recovery test first."}
+{"kind":"tool.call.started","callId":"tool-1","toolName":"shell","arguments":{"command":"pytest tests/test_wal.py"}}
+{"kind":"shell.command.started","commandId":"cmd-1","commandSha256":"sha256:cmd","argvSummary":"pytest tests/test_wal.py","cwd":"/workspace/task"}
+{"kind":"shell.output.delta","commandId":"cmd-1","stream":"stdout","text":"1 failed, expected WAL replay"}
+{"kind":"shell.command.completed","commandId":"cmd-1","exitCode":1,"durationMs":1200}
+{"kind":"tool.call.completed","callId":"tool-1","toolName":"shell","result":{"exitCode":1,"summary":"tests failed"}}
+{"kind":"file.edit","path":"db/recovery.py","operation":"update","beforeDigest":"sha256:before","afterDigest":"sha256:after","diffSha256":"sha256:diff"}
+{"kind":"artifact.created","artifactRefs":[{"resourceRef":"gs://oa-benchmark-artifacts/run-1/transcript.md","digest":"sha256:transcript","kind":"transcript","visibility":"workroom","redactionState":"redacted"}]}
+{"kind":"receipt.created","receiptRefs":[{"receiptType":"workroom.closeout","resourceRef":"probe://receipts/run-1-closeout","digest":"sha256:receipt"}]}
+{"kind":"usage.unavailable","reason":"codex_subscription_usage_not_reported","provider":"chatgpt","model":"codex"}
+{"kind":"continuation.checkpoint","checkpointRef":"probe://checkpoints/run-1/seq-18","afterSequence":18,"resumeHint":"resume from Codex thread id only, no auth material"}
+{"kind":"run.completed","message":"training task completed"}

@@ -1,0 +1,69 @@
+{
+  "kind": "codex.package.loaded",
+  "selectedSignatureIds": [
+    "terminal-bench.service-persistence@1"
+  ],
+  "signatureContext": {
+    "schemaVersion": "probe.signature_context.v1",
+    "signaturePack": {
+      "schemaVersion": "probe.signature_context.v1",
+      "packId": "tb2-service-pack",
+      "selectedBy": "probe.selector.fixture",
+      "selectedAtMs": 1777777777000,
+      "entries": [
+        {
+          "signature": {
+            "id": "terminal-bench.service-persistence",
+            "version": "1",
+            "adoptionState": "candidate"
+          },
+          "taskClasses": [
+            "terminal-bench"
+          ],
+          "benchmarkFamilies": [
+            "terminal-bench-2"
+          ],
+          "requiredEvidence": [
+            {
+              "kind": "service_process_probe",
+              "required": true,
+              "description": "Show the service remains reachable while verifier runs."
+            }
+          ],
+          "recommendedTools": [
+            {
+              "toolName": "shell",
+              "required": true,
+              "reason": "Start and probe service lifecycle explicitly."
+            }
+          ],
+          "failureFingerprints": [
+            "service_not_persistent"
+          ],
+          "fixtureRefs": [
+            "probe://fixtures/terminal-bench/pypi-server"
+          ]
+        }
+      ]
+    }
+  },
+  "packageEvidence": {
+    "packageId": "codex-package.tb2-service-persistence.1",
+    "adapterKind": "codex_skill_adapter",
+    "renderedRef": "probe://signature-packages/codex-package.tb2-service-persistence.1/SKILL.md",
+    "renderedDigest": "sha256:service-package",
+    "validationStatus": "loaded",
+    "loadedAtMs": 1777777777999,
+    "sourceSignatureIds": [
+      "terminal-bench.service-persistence@1"
+    ],
+    "evidenceRefs": [
+      {
+        "resourceRef": "probe://fixtures/terminal-bench/pypi-server",
+        "digest": "sha256:pypi-fixture",
+        "kind": "fixture",
+        "redactionState": "redacted"
+      }
+    ]
+  }
+}

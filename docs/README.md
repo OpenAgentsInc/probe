@@ -218,6 +218,10 @@ This folder holds technical planning docs for the Probe runtime.
     daemon event logs, cursor-based replay, authoritative versus best-effort
     truth labels, daemon watch subscriptions, and the shared `probe-client`
     helpers above that event stream
+- `110-codex-managed-runtime-event-contract.md`
+  - canonical detailed event contract for SHC/Cloud account-backed Codex
+    workrooms, including normalized message/tool/shell/file events, signature
+    package evidence, retention policy, redaction, and continuation checkpoints
 - `64-daemon-operator-cli.md`
   - the first human-facing daemon operator surface for Phase 2, including
     `probe daemon run|stop`, `probe ps|attach|logs|stop`, daemon autostart,

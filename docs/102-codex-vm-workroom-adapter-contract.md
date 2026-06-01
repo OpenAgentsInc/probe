@@ -31,6 +31,12 @@ This contract is intentionally narrower than the full managed runtime API. It
 is the normalized event and artifact shape for a Codex-backed workroom runner.
 Vortex decides acceptance; Probe and Cloud only report execution evidence.
 
+The richer per-turn, per-tool, per-shell-command stream for SHC training and
+continuation is `probe.codex_managed_event.v1`, documented in
+`110-codex-managed-runtime-event-contract.md`. Use that stream when Vortex
+needs replay, failure learning, signature package evidence, or continuation
+checkpoints.
+
 ## Session Model
 
 `CodexWorkroomSessionSpec` carries the declared execution boundary:

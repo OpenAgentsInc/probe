@@ -1,5 +1,6 @@
 pub mod admin_chat;
 pub mod backend;
+pub mod codex_managed_event;
 pub mod codex_workroom;
 pub mod managed_environment;
 pub mod managed_runtime;
@@ -11,7 +12,7 @@ pub mod website_events;
 
 use std::path::{Path, PathBuf};
 
-pub const PROBE_PROTOCOL_VERSION: u32 = 25;
+pub const PROBE_PROTOCOL_VERSION: u32 = 26;
 pub const PROBE_RUNTIME_NAME: &str = "probe";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,7 +55,7 @@ mod tests {
     fn current_descriptor_is_stable() {
         let descriptor = ProtocolDescriptor::current();
         assert_eq!(descriptor.runtime_name, "probe");
-        assert_eq!(descriptor.version, 25);
+        assert_eq!(descriptor.version, 26);
     }
 
     #[test]
