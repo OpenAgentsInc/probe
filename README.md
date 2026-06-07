@@ -53,12 +53,16 @@ Tracked files should stay minimal until the new architecture lands:
   Probe materialization plans.
 - `packages/runtime/src/auth/materializer.ts` materializes brokered auth only
   inside per-run env/file targets and scrubs it on closeout.
+- `packages/runtime/src/runner/identity.ts` gates Omega grant use on linked
+  Probe runner identity before resolving and materializing auth.
 - `docs/probe-omega-auth-contract.md` records the implemented account-contract
   slice.
 - `docs/probe-omega-run-assignment.md` records the implemented assignment and
   grant-resolution slice.
 - `docs/probe-auth-materialization.md` records the implemented per-run auth
   materialization slice.
+- `docs/probe-runner-identity.md` records the SHC/Pylon/sandbox runner
+  identity slice.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 
