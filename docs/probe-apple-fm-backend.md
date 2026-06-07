@@ -4,7 +4,7 @@ Date: 2026-06-07
 
 Status: implemented contract, attach/status, plain-text smoke,
 assignment-routing, snapshot-streaming, and tool-callback slices for Probe
-issues #163 through #168.
+issues #163 through #169.
 
 ## Contract
 
@@ -134,6 +134,30 @@ Raw callback tokens and callback URLs are not included in public descriptors,
 transcript entries, or receipts. Callback receipts carry
 `callbackTokenRedacted: true` and `callbackUrl: "[redacted]"`.
 
+## Pylon And SHC Capability Reporting
+
+`packages/runtime/src/fleet/backend-capability.ts` implements Apple FM backend
+capability reporting for local, SHC, Pylon, and sandbox runners.
+
+The report is based on live `GET /health` readiness. Static local config can
+choose where to check, but Probe advertises `probe.backend.apple_fm_bridge`
+only when live health returns ready.
+
+The capability report includes:
+
+- backend kind `apple_fm_bridge`
+- profile id
+- model id
+- redacted base URL
+- typed status and unavailable reason
+- Apple Silicon and Apple Intelligence requirement facts
+- snapshot-streaming support
+- tool-callback support
+- redacted availability receipt
+
+Unavailable and unsupported states are still reported for operator visibility,
+but `advertisedCapabilities` remains empty until live health is ready.
+
 ## Tests
 
 `packages/runtime/src/backends/apple-fm/fake-server.test.ts` covers:
@@ -156,5 +180,9 @@ replacement, final commit separation, and typed stream failure receipts.
 `packages/runtime/tests/apple-fm-tools.test.ts` covers loopback callback
 execution, approval-pending transcript persistence, round-trip limits, and
 resume from Probe transcript state.
+
+`packages/runtime/tests/backend-capability.test.ts` covers ready capability
+advertisement, unsupported health reporting, backend identity, support flags,
+and redaction.
 
 The fake bridge tests do not require admitted Apple hardware.

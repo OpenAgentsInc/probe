@@ -47,6 +47,22 @@ Auth/account failures with a lease ref request Omega failover through the
 operator lease failover route. Successful and non-auth failures do not request
 account failover.
 
+## Backend Capabilities
+
+`packages/runtime/src/fleet/backend-capability.ts` adds the first backend
+capability report for Pylon/SHC-style provider routing:
+
+- capability: `probe.backend.apple_fm_bridge`
+- backend kind: `apple_fm_bridge`
+- profile: `apple-fm-local`
+- readiness source: live Apple FM `/health`
+
+Probe advertises the capability only when live Apple FM health is ready.
+Unavailable and unsupported states are still reported as typed capability
+status, with redacted availability receipts, so Omega/OpenAgents can distinguish
+Apple FM from Qwen, Codex, MLX, or other future backends without leaking local
+paths, callback secrets, or transcript payloads.
+
 ## Tests
 
 `packages/runtime/tests/fleet-telemetry.test.ts` covers:
@@ -57,3 +73,4 @@ account failover.
 - no failover for success/non-auth failures
 - skipping low-credit, cooldown, unhealthy, and exhausted accounts
 - raw credential rejection in telemetry metadata
+- ready and unsupported Apple FM backend capability reports

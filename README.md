@@ -61,6 +61,8 @@ Tracked files should stay minimal until the new architecture lands:
   linking and account management.
 - `packages/runtime/src/fleet/telemetry.ts` reports auth/account health signals
   and requests Omega failover without locally iterating raw account tokens.
+- `packages/runtime/src/fleet/backend-capability.ts` reports Apple FM backend
+  capability for Pylon/SHC/sandbox routing from live health.
 - `packages/runtime/src/backends/registry.ts` registers the first Apple FM
   backend profile.
 - `packages/runtime/src/backends/apple-fm/contract.ts` defines the Effect v4

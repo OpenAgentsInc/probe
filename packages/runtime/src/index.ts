@@ -8,6 +8,7 @@ export * from "./backends/registry";
 export * from "./cli";
 export * from "./contracts/assignment";
 export * from "./contracts/provider-account";
+export * from "./fleet/backend-capability";
 export * from "./fleet/telemetry";
 export * from "./omega/account-client";
 export * from "./omega/grant-client";
