@@ -6,6 +6,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "bin": {
+    "probe": "./src/cli.ts"
+  },
   "scripts": {
     "test": "bun test"
   },

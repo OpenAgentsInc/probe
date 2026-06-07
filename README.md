@@ -55,6 +55,8 @@ Tracked files should stay minimal until the new architecture lands:
   inside per-run env/file targets and scrubs it on closeout.
 - `packages/runtime/src/runner/identity.ts` gates Omega grant use on linked
   Probe runner identity before resolving and materializing auth.
+- `packages/runtime/src/cli.ts` exposes the first Probe CLI commands for Omega
+  linking and account management.
 - `docs/probe-omega-auth-contract.md` records the implemented account-contract
   slice.
 - `docs/probe-omega-run-assignment.md` records the implemented assignment and
@@ -63,6 +65,7 @@ Tracked files should stay minimal until the new architecture lands:
   materialization slice.
 - `docs/probe-runner-identity.md` records the SHC/Pylon/sandbox runner
   identity slice.
+- `docs/probe-cli-omega-auth.md` records the CLI account-management slice.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 
