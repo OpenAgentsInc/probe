@@ -2,7 +2,50 @@ import { Effect, Schema as S } from "effect";
 import { makeAppleFmClient } from "../backends/apple-fm/client";
 import { APPLE_FM_BACKEND_KIND } from "../backends/apple-fm/contract";
 import { redactUrl } from "../backends/apple-fm/receipts";
+import {
+  BlueprintProgramRegistryProjection,
+  validateBlueprintRegistryProjection,
+  type BlueprintProgramRegistryProjection as BlueprintProgramRegistryProjectionType,
+} from "../blueprint/contracts";
+import { STATIC_BLUEPRINT_PROGRAM_REGISTRY, STATIC_BLUEPRINT_REGISTRY_VERSION_REF } from "../blueprint/fixtures";
 import { PROBE_APPLE_FM_BACKEND_CAPABILITY, type ProbeRunnerIdentity } from "../runner/identity";
+
+const APPLE_FM_BLUEPRINT_TOOL_PROJECTION_ADAPTER = "adapter.probe.apple_fm.blueprint_tools.v1" as const;
+const PROBE_LOCAL_PROGRAM_RUN_EVIDENCE_CAPABILITY = "probe.program_run.evidence.local_offline" as const;
+const DEFAULT_MAX_PROJECTED_APPLE_FM_TOOL_COUNT = 8;
+
+export const ProbeBackendAvailabilityProjection = S.Struct({
+  api: S.Boolean,
+  local: S.Boolean,
+  swarm: S.Boolean,
+});
+export type ProbeBackendAvailabilityProjection = typeof ProbeBackendAvailabilityProjection.Type;
+
+export const ProbeAppleFmSchemaProjectionSupport = S.Struct({
+  maxProjectedToolCount: S.Number,
+  supported: S.Boolean,
+  supportedInputSchemaRefs: S.Array(S.String),
+  unsupportedReason: S.optional(S.String),
+});
+export type ProbeAppleFmSchemaProjectionSupport = typeof ProbeAppleFmSchemaProjectionSupport.Type;
+
+export const ProbeBlueprintBackendCapabilitySupport = S.Struct({
+  appleFmSchemaProjection: ProbeAppleFmSchemaProjectionSupport,
+  backendAvailability: ProbeBackendAvailabilityProjection,
+  backendToolProjectionAdapters: S.Array(S.String),
+  localProgramRunEvidenceOffline: S.Boolean,
+  moduleVersionRefs: S.Array(S.String),
+  programFamilies: S.Array(S.String),
+  programSignatureRefs: S.Array(S.String),
+  programTypeRefs: S.Array(S.String),
+  registryVersionRefs: S.Array(S.String),
+  safeProjection: S.Boolean,
+  safeProjectionPolicyRefs: S.Array(S.String),
+  supportedBlueprintCapabilityRefs: S.Array(S.String),
+  toolRefs: S.Array(S.String),
+  warnings: S.Array(S.String),
+});
+export type ProbeBlueprintBackendCapabilitySupport = typeof ProbeBlueprintBackendCapabilitySupport.Type;
 
 export const ProbeBackendCapabilityReport = S.Struct({
   kind: S.Literal("probe_backend_capability_report"),
@@ -29,6 +72,7 @@ export const ProbeBackendCapabilityReport = S.Struct({
     snapshotStreaming: S.Boolean,
     toolCallbacks: S.Boolean,
   }),
+  blueprintSupport: ProbeBlueprintBackendCapabilitySupport,
   receipt: S.Unknown,
   observedAt: S.String,
   contentRedacted: S.Literal(true),
@@ -38,8 +82,12 @@ export type ProbeBackendCapabilityReport = typeof ProbeBackendCapabilityReport.T
 export interface ReportAppleFmBackendCapabilityInput {
   readonly runner: ProbeRunnerIdentity;
   readonly trustedBackendBaseUrl?: string;
+  readonly backendAvailability?: Partial<ProbeBackendAvailabilityProjection>;
+  readonly blueprintRegistry?: unknown;
+  readonly blueprintRegistryVersionRef?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly fetch?: typeof fetch;
+  readonly maxProjectedAppleFmToolCount?: number;
   readonly now?: Date;
 }
 
@@ -53,8 +101,34 @@ export function reportAppleFmBackendCapability(
     now: input.now,
   }).pipe(
     Effect.flatMap((client) =>
-      client.health().pipe(
-        Effect.map((readiness): ProbeBackendCapabilityReport => ({
+      Effect.gen(function* () {
+        const blueprintSupport = yield* buildBlueprintBackendCapabilitySupport(input);
+        const readiness = yield* client.health();
+        const backendAvailability = {
+          api: input.backendAvailability?.api ?? false,
+          local: readiness.ready,
+          swarm: input.backendAvailability?.swarm ?? false,
+        };
+        const routedBlueprintSupport: ProbeBlueprintBackendCapabilitySupport = {
+          ...blueprintSupport,
+          backendAvailability,
+        };
+        const blueprintRunnable =
+          readiness.ready &&
+          routedBlueprintSupport.safeProjection &&
+          routedBlueprintSupport.appleFmSchemaProjection.supported;
+        const advertisedCapabilities = blueprintRunnable
+          ? uniqueStrings([
+              PROBE_APPLE_FM_BACKEND_CAPABILITY,
+              ...routedBlueprintSupport.supportedBlueprintCapabilityRefs,
+              ...routedBlueprintSupport.backendToolProjectionAdapters,
+              ...(routedBlueprintSupport.localProgramRunEvidenceOffline
+                ? [PROBE_LOCAL_PROGRAM_RUN_EVIDENCE_CAPABILITY]
+                : []),
+            ])
+          : [];
+
+        return {
           kind: "probe_backend_capability_report",
           runnerId: input.runner.runnerId,
           runnerKind: input.runner.kind,
@@ -62,14 +136,17 @@ export function reportAppleFmBackendCapability(
           profileId: client.profile.id,
           model: readiness.health?.modelId ?? readiness.health?.model ?? client.profile.model,
           capability: PROBE_APPLE_FM_BACKEND_CAPABILITY,
-          advertisedCapabilities: readiness.ready ? [PROBE_APPLE_FM_BACKEND_CAPABILITY] : [],
-          available: readiness.ready,
-          status: readiness.status,
+          advertisedCapabilities,
+          available: blueprintRunnable,
+          status: readiness.ready && !blueprintRunnable ? "malformed" : readiness.status,
           baseUrl: redactUrl(client.profile.baseUrl),
           platform: readiness.health?.platform,
           version: readiness.health?.version,
-          unavailableReason: readiness.unavailableReason,
-          message: readiness.message,
+          unavailableReason:
+            readiness.unavailableReason ?? (readiness.ready && !blueprintRunnable ? "malformed_blueprint_support" : undefined),
+          message:
+            readiness.message ??
+            (readiness.ready && !blueprintRunnable ? routedBlueprintSupport.warnings.join("; ") : undefined),
           requirements: {
             appleSilicon: "required",
             appleIntelligence: "required",
@@ -79,11 +156,12 @@ export function reportAppleFmBackendCapability(
             snapshotStreaming: true,
             toolCallbacks: true,
           },
+          blueprintSupport: routedBlueprintSupport,
           receipt: readiness.receipt,
           observedAt: (input.now ?? new Date()).toISOString(),
           contentRedacted: true,
-        })),
-      ),
+        } satisfies ProbeBackendCapabilityReport;
+      }),
     ),
     Effect.catch(() =>
       Effect.succeed({
@@ -109,6 +187,31 @@ export function reportAppleFmBackendCapability(
           snapshotStreaming: true,
           toolCallbacks: true,
         },
+        blueprintSupport: {
+          appleFmSchemaProjection: {
+            maxProjectedToolCount: input.maxProjectedAppleFmToolCount ?? DEFAULT_MAX_PROJECTED_APPLE_FM_TOOL_COUNT,
+            supported: false,
+            supportedInputSchemaRefs: [],
+            unsupportedReason: "malformed_backend_profile",
+          },
+          backendAvailability: {
+            api: input.backendAvailability?.api ?? false,
+            local: false,
+            swarm: input.backendAvailability?.swarm ?? false,
+          },
+          backendToolProjectionAdapters: [],
+          localProgramRunEvidenceOffline: false,
+          moduleVersionRefs: [],
+          programFamilies: [],
+          programSignatureRefs: [],
+          programTypeRefs: [],
+          registryVersionRefs: [],
+          safeProjection: false,
+          safeProjectionPolicyRefs: [],
+          supportedBlueprintCapabilityRefs: [],
+          toolRefs: [],
+          warnings: ["Apple FM backend capability profile could not be resolved"],
+        },
         receipt: {
           kind: "probe_backend_availability",
           backendKind: APPLE_FM_BACKEND_KIND,
@@ -128,3 +231,112 @@ export function reportAppleFmBackendCapability(
   );
 }
 
+function buildBlueprintBackendCapabilitySupport(
+  input: ReportAppleFmBackendCapabilityInput,
+): Effect.Effect<ProbeBlueprintBackendCapabilitySupport, never> {
+  const maxProjectedToolCount = input.maxProjectedAppleFmToolCount ?? DEFAULT_MAX_PROJECTED_APPLE_FM_TOOL_COUNT;
+
+  return S.decodeUnknownEffect(BlueprintProgramRegistryProjection)(
+    input.blueprintRegistry ?? STATIC_BLUEPRINT_PROGRAM_REGISTRY,
+  ).pipe(
+    Effect.flatMap(validateBlueprintRegistryProjection),
+    Effect.map((registry) =>
+      blueprintSupportFromRegistry({
+        maxProjectedToolCount,
+        registry,
+        registryVersionRef: input.blueprintRegistryVersionRef ?? STATIC_BLUEPRINT_REGISTRY_VERSION_REF,
+      }),
+    ),
+    Effect.catch((error) =>
+      Effect.succeed({
+        appleFmSchemaProjection: {
+          maxProjectedToolCount,
+          supported: false,
+          supportedInputSchemaRefs: [],
+          unsupportedReason: "malformed_blueprint_registry_projection",
+        },
+        backendAvailability: {
+          api: input.backendAvailability?.api ?? false,
+          local: false,
+          swarm: input.backendAvailability?.swarm ?? false,
+        },
+        backendToolProjectionAdapters: [],
+        localProgramRunEvidenceOffline: false,
+        moduleVersionRefs: [],
+        programFamilies: [],
+        programSignatureRefs: [],
+        programTypeRefs: [],
+        registryVersionRefs: [],
+        safeProjection: false,
+        safeProjectionPolicyRefs: [],
+        supportedBlueprintCapabilityRefs: [],
+        toolRefs: [],
+        warnings: [`Blueprint capability support is not safe to advertise: ${String(error._tag)}`],
+      }),
+    ),
+  );
+}
+
+function blueprintSupportFromRegistry(input: {
+  readonly maxProjectedToolCount: number;
+  readonly registry: BlueprintProgramRegistryProjectionType;
+  readonly registryVersionRef: string;
+}): ProbeBlueprintBackendCapabilitySupport {
+  const toolRefs = uniqueStrings(input.registry.programTypes.flatMap((programType) => programType.toolScopes.map((tool) => tool.toolRef)));
+  const inputSchemaRefs = toolRefs
+    .map((toolRef) => supportedInputSchemaRef(toolRef))
+    .filter((schemaRef): schemaRef is string => schemaRef !== undefined);
+  const appleFmSchemaProjectionSupported = input.maxProjectedToolCount > 0 && inputSchemaRefs.length === toolRefs.length;
+  const warnings = appleFmSchemaProjectionSupported
+    ? []
+    : [
+        input.maxProjectedToolCount <= 0
+          ? "Apple FM projected tool count must be greater than zero"
+          : "One or more Blueprint tool refs cannot be projected into Apple FM schemas",
+      ];
+
+  return {
+    appleFmSchemaProjection: {
+      maxProjectedToolCount: input.maxProjectedToolCount,
+      supported: appleFmSchemaProjectionSupported,
+      supportedInputSchemaRefs: inputSchemaRefs,
+      unsupportedReason: appleFmSchemaProjectionSupported ? undefined : "unsupported_tool_schema_projection",
+    },
+    backendAvailability: {
+      api: false,
+      local: false,
+      swarm: false,
+    },
+    backendToolProjectionAdapters: [APPLE_FM_BLUEPRINT_TOOL_PROJECTION_ADAPTER],
+    localProgramRunEvidenceOffline: true,
+    moduleVersionRefs: uniqueStrings(input.registry.moduleVersions.map((moduleVersion) => moduleVersion.id)),
+    programFamilies: uniqueStrings(input.registry.programTypes.map((programType) => programType.family)),
+    programSignatureRefs: uniqueStrings(input.registry.programSignatures.map((signature) => signature.id)),
+    programTypeRefs: uniqueStrings(input.registry.programTypes.map((programType) => programType.id)),
+    registryVersionRefs: [input.registryVersionRef],
+    safeProjection: true,
+    safeProjectionPolicyRefs: [input.registry.policyRef],
+    supportedBlueprintCapabilityRefs: uniqueStrings(input.registry.entries.flatMap((entry) => entry.capabilityRefs)),
+    toolRefs,
+    warnings,
+  };
+}
+
+function supportedInputSchemaRef(toolRef: string): string | undefined {
+  switch (toolRef) {
+    case "tool.probe.code_search":
+      return "schema.probe.tool.code_search.input.v1";
+    case "tool.probe.propose_action_submission":
+      return "schema.probe.tool.propose_action_submission.input.v1";
+    case "tool.probe.read_file":
+      return "schema.probe.tool.read_file.input.v1";
+    case "tool.probe.record_evidence":
+      return "schema.probe.tool.record_evidence.input.v1";
+    default:
+      return undefined;
+  }
+}
+
+function uniqueStrings(values: ReadonlyArray<string>): Array<string> {
+  return [...new Set(values)].sort();
+}

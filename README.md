@@ -110,6 +110,8 @@ Tracked files should stay minimal until the new architecture lands:
   Probe tool menu planner.
 - `docs/probe-blueprint-program-run-evidence.md` records the evidence-only
   Program Run shape emitted by Apple FM tool streams.
+- `docs/probe-blueprint-backend-capability-routing.md` records the
+  Blueprint-aware backend capability facts used by Pylon/SHC routing.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 
