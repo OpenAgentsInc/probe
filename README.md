@@ -57,6 +57,8 @@ Tracked files should stay minimal until the new architecture lands:
   Probe runner identity before resolving and materializing auth.
 - `packages/runtime/src/cli.ts` exposes the first Probe CLI commands for Omega
   linking and account management.
+- `packages/runtime/src/fleet/telemetry.ts` reports auth/account health signals
+  and requests Omega failover without locally iterating raw account tokens.
 - `docs/probe-omega-auth-contract.md` records the implemented account-contract
   slice.
 - `docs/probe-omega-run-assignment.md` records the implemented assignment and
@@ -66,6 +68,8 @@ Tracked files should stay minimal until the new architecture lands:
 - `docs/probe-runner-identity.md` records the SHC/Pylon/sandbox runner
   identity slice.
 - `docs/probe-cli-omega-auth.md` records the CLI account-management slice.
+- `docs/probe-fleet-telemetry.md` records the fleet telemetry and failover
+  slice.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 

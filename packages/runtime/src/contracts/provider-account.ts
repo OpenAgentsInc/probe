@@ -149,6 +149,30 @@ export function canIssueProviderAccountGrant(account: PublicProviderAccount): bo
   );
 }
 
+export function canSelectProviderAccountForLease(account: PublicProviderAccount, now: Date = new Date()): boolean {
+  if (!canIssueProviderAccountGrant(account)) {
+    return false;
+  }
+
+  if (account.lowCredit === true) {
+    return false;
+  }
+
+  if (account.cooldownUntil !== undefined) {
+    const cooldownUntilMs = Date.parse(account.cooldownUntil);
+
+    if (Number.isNaN(cooldownUntilMs) || cooldownUntilMs > now.getTime()) {
+      return false;
+    }
+  }
+
+  if (account.leaseLimit !== undefined && account.leaseLimit <= 0) {
+    return false;
+  }
+
+  return true;
+}
+
 export function assertProbePublicProjection(value: unknown, path = "projection"): void {
   Effect.runSync(validateProbePublicProjection(value, path));
 }
