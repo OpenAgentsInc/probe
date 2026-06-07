@@ -10,7 +10,17 @@ import {
   type AppleFmReadiness,
   type AppleFmToolStreamResult,
 } from "./backends/apple-fm/client";
-import { makeAppleFmToolCallbackSession, type AppleFmToolDefinition } from "./backends/apple-fm/tools";
+import {
+  type AppleFmBlueprintToolProjection,
+  projectProbeToolMenuToAppleFm,
+} from "./backends/apple-fm/blueprint-tools";
+import { makeAppleFmToolCallbackSession } from "./backends/apple-fm/tools";
+import {
+  loadBlueprintSignatureRegistry,
+  lookupBlueprintSignatures,
+  planProbeToolMenu,
+} from "./blueprint";
+import { PROBE_APPLE_FM_BACKEND_CAPABILITY } from "./runner/identity";
 import { makeOmegaAccountClient, type OmegaAccountClient } from "./omega/account-client";
 import { sanitizeProbePublicProjection } from "./contracts/provider-account";
 import { type ProbeRunnerIdentity } from "./runner/identity";
@@ -103,8 +113,45 @@ function appleFmToolStreamDemo(
     const prompt =
       stringOption(options, "prompt") ??
       `Use the read_file tool to read ${requestedPath}, then stream one concise sentence naming the file and its first heading.`;
+    const registryView = yield* loadBlueprintSignatureRegistry({ sourceKind: "staticFixture" }).pipe(
+      Effect.mapError((error) => new ProbeCliError({ message: error.reason })),
+    );
+    const lookup = yield* lookupBlueprintSignatures({
+      backendCapabilityRefs: [PROBE_APPLE_FM_BACKEND_CAPABILITY, "probe.blueprint.tool_menu"],
+      lookupId: "blueprint_signature_lookup.apple_fm.tool_stream_demo",
+      registryView,
+      request: {
+        actorRef: "actor.probe.cli",
+        allowedSurfaces: ["agent_api"],
+        backendKind: "apple_fm_bridge",
+        contextPackRef: `context_pack.probe.cli.${requestedPath}`,
+        programSignatureIds: ["program_signature.probe.tool_menu.project.v1"],
+        riskCeiling: "medium",
+      },
+    }).pipe(Effect.mapError((error) => new ProbeCliError({ message: error.reason })));
+    const menu = yield* planProbeToolMenu({
+      backendKind: "apple_fm_bridge",
+      contextPackRefs: [lookup.contextPackRef ?? `context_pack.probe.cli.${requestedPath}`],
+      deniedToolRefs: [],
+      lookup,
+      maxToolCount: 1,
+      menuId: "probe_tool_menu.apple_fm.tool_stream_demo",
+      sourceAuthorityRefs: [`source_authority.probe.workspace.${requestedPath}`],
+      supportedToolRefs: ["tool.probe.read_file"],
+    }).pipe(Effect.mapError((error) => new ProbeCliError({ message: error.reason })));
+    const projectedMenu = yield* projectProbeToolMenuToAppleFm({
+      enumHints: {
+        "tool.probe.read_file": {
+          path: [requestedPath],
+        },
+      },
+      executors: {
+        "tool.probe.read_file": (input) => readWorkspaceFile(input, requestedPath),
+      },
+      menu,
+    }).pipe(Effect.mapError((error) => new ProbeCliError({ message: error.reason })));
     const toolSession = makeAppleFmToolCallbackSession({
-      tools: [readFileTool(requestedPath)],
+      tools: projectedMenu.toolDefinitions,
       maxModelRoundTrips: 4,
       now: deps.now,
     });
@@ -116,7 +163,7 @@ function appleFmToolStreamDemo(
 
     return {
       exitCode: 0,
-      stdout: formatAppleFmToolStreamDemo(result),
+      stdout: formatAppleFmToolStreamDemo(result, projectedMenu.projection),
       stderr: "",
     };
   });
@@ -410,12 +457,23 @@ function formatUsage(usage: AppleFmPlainTextCompletion["usage"]): string {
   return parts.join(" ");
 }
 
-function formatAppleFmToolStreamDemo(result: AppleFmToolStreamResult): string {
+function formatAppleFmToolStreamDemo(
+  result: AppleFmToolStreamResult,
+  projection?: AppleFmBlueprintToolProjection,
+): string {
   const lines = [
     "Apple FM tool stream demo",
     `bridgeSessionId: ${result.bridgeSessionId}`,
     `events: ${result.events.map((event) => event.kind).join(" -> ")}`,
   ];
+
+  if (projection !== undefined) {
+    lines.push(`blueprintLookupId: ${projection.lookupId}`);
+    lines.push(`blueprintMenuId: ${projection.menuId}`);
+    lines.push(`blueprintRegistryVersionRef: ${projection.registryVersionRef}`);
+    lines.push(`blueprintProgramSignatures: ${projection.programSignatureIds.join(",")}`);
+    lines.push(`blueprintTools: ${projection.toolRefs.map((tool) => `${tool.toolRef}:${tool.toolName}`).join(",")}`);
+  }
 
   for (const event of result.events) {
     if (event.kind === "assistant_snapshot" && event.content !== undefined) {
@@ -434,55 +492,42 @@ function formatAppleFmToolStreamDemo(result: AppleFmToolStreamResult): string {
   return `${lines.join("\n")}\n`;
 }
 
-function readFileTool(allowedPath: string): AppleFmToolDefinition {
-  return {
-    name: "read_file",
-    description: `Read ${allowedPath} from the current Probe workspace.`,
-    inputSchema: {
-      type: "object",
-      title: "ReadFileArguments",
-      properties: {
-        path: {
-          type: "string",
-          title: "path",
-          description: "workspace-relative file path to read.",
-          enum: [allowedPath],
-        },
-      },
-      required: ["path"],
-      "x-order": ["path"],
-      additionalProperties: false,
-    },
-    policy: "allow",
-    execute: (input) =>
-      Effect.gen(function* () {
-        const path = typeof input.path === "string" ? input.path : "README.md";
-        const workspace = resolveProbeWorkspaceRoot();
-        const absolutePath = resolve(workspace, path);
-        const relativePath = relative(workspace, absolutePath);
+function readWorkspaceFile(
+  input: Readonly<Record<string, unknown>>,
+  allowedPath: string,
+): Effect.Effect<{ readonly path: string; readonly content?: string; readonly error?: string }, never> {
+  return Effect.gen(function* () {
+    const path = typeof input.path === "string" ? input.path : allowedPath;
+    const workspace = resolveProbeWorkspaceRoot();
+    const absolutePath = resolve(workspace, path);
+    const relativePath = relative(workspace, absolutePath);
 
-        if (relativePath.startsWith("..") || relativePath === "" || relativePath.split(sep).includes("..")) {
-          return {
-            path,
-            error: "path escapes workspace",
-          };
-        }
+    if (
+      path !== allowedPath ||
+      relativePath.startsWith("..") ||
+      relativePath === "" ||
+      relativePath.split(sep).includes("..")
+    ) {
+      return {
+        path,
+        error: "path is outside the Blueprint-selected file scope",
+      };
+    }
 
-        const content = yield* Effect.tryPromise({
-          try: () => readFile(absolutePath, "utf8"),
-          catch: (error) => error,
-        }).pipe(
-          Effect.catch((error) =>
-            Effect.succeed(`failed to read ${path}: ${String(error)}`),
-          ),
-        );
+    const content = yield* Effect.tryPromise({
+      try: () => readFile(absolutePath, "utf8"),
+      catch: (error) => error,
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.succeed(`failed to read ${path}: ${String(error)}`),
+      ),
+    );
 
-        return {
-          path,
-          content: typeof content === "string" ? content.slice(0, 4000) : String(content),
-        };
-      }),
-  };
+    return {
+      path,
+      content: typeof content === "string" ? content.slice(0, 4000) : String(content),
+    };
+  });
 }
 
 function resolveProbeWorkspaceRoot(start = process.cwd()): string {

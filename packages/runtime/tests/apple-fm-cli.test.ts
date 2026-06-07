@@ -205,6 +205,9 @@ describe("Probe CLI Apple FM commands", () => {
             const body = JSON.parse(String(init?.body));
             callbackUrl = body.tool_callback.url;
             callbackToken = body.tool_callback.session_token;
+            expect(body.tools).toHaveLength(1);
+            expect(body.tools[0].name).toBe("read_file");
+            expect(body.tools[0].arguments_schema.properties.path.enum).toEqual(["README.md"]);
 
             return Response.json({
               session: {
@@ -251,6 +254,8 @@ describe("Probe CLI Apple FM commands", () => {
     );
 
     expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("blueprintLookupId: blueprint_signature_lookup.apple_fm.tool_stream_demo");
+    expect(result.stdout).toContain("blueprintTools: tool.probe.read_file:read_file");
     expect(result.stdout).toContain("tool: read_file success");
     expect(result.stdout).toContain("final: README.md first heading is Probe.");
     expect(callbackOutput).toContain("# Probe");
