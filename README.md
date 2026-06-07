@@ -93,6 +93,9 @@ Tracked files should stay minimal until the new architecture lands:
   contract slice.
 - `docs/apple-fm-admitted-mac-acceptance.md` records the live admitted-Mac
   Apple FM acceptance runbook.
+- `docs/2026-06-07-blueprint-signature-lookup-apple-fm-tool-use-audit.md`
+  audits Guidance Module and Blueprint prior art and records the roadmap for
+  shared Blueprint signature lookup feeding Apple FM and other Probe backends.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 
