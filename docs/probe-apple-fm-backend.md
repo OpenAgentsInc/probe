@@ -2,8 +2,9 @@
 
 Date: 2026-06-07
 
-Status: implemented contract, attach/status, plain-text smoke, and
-assignment-routing slices for Probe issues #163 through #166.
+Status: implemented contract, attach/status, plain-text smoke,
+assignment-routing, and snapshot-streaming slices for Probe issues #163
+through #167.
 
 ## Contract
 
@@ -54,6 +55,19 @@ Plain-text completion posts to `/v1/chat/completions`, normalizes the bridge
 response into Probe's Apple FM contract, and emits redacted transcript receipts.
 Usage truth is preserved as `exact`, `estimated`, or `unknown`; OpenAI-shaped
 token counts without explicit truth are treated as `estimated`, not exact.
+
+Snapshot streaming is implemented separately through
+`streamPlainTextSnapshots(messages)`. It requests `streamMode: "snapshot"` and
+maps bridge snapshots into runtime events:
+
+- `assistant_stream_started`
+- `assistant_snapshot`
+- `assistant_stream_finished`
+- `assistant_final_commit`
+
+Each `assistant_snapshot` is a full replacement value. Probe does not fake
+OpenAI-style token deltas for Apple FM, and the final transcript receipt is
+attached only to the final commit event.
 
 `packages/runtime/src/cli.ts` exposes:
 
@@ -106,5 +120,8 @@ normalization, and typed completion failures without admitted Apple hardware.
 `packages/runtime/tests/backend-assignment.test.ts` covers Apple FM assignment
 routing, missing backend capability rejection, and non-ready live health
 rejection with an availability receipt.
+
+`packages/runtime/tests/apple-fm-streaming.test.ts` covers multi-snapshot
+replacement, final commit separation, and typed stream failure receipts.
 
 The fake bridge tests do not require admitted Apple hardware.

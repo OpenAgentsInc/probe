@@ -3,6 +3,7 @@ import { type ResolvedProbeBackendProfile, type ResolveProbeBackendProfileOption
 import { resolveAppleFmBackendProfile, type ProbeBackendRegistryError } from "../registry";
 import {
   AppleFmChatCompletionResponse,
+  AppleFmStreamSnapshotEvent,
   AppleFmHealthResponse,
   type AppleFmChatCompletionResponse,
   type AppleFmChatMessage,
@@ -44,6 +45,9 @@ export interface AppleFmClient {
   readonly completePlainText: (
     messages: ReadonlyArray<AppleFmChatMessage>,
   ) => Effect.Effect<AppleFmPlainTextCompletion, AppleFmBackendError>;
+  readonly streamPlainTextSnapshots: (
+    messages: ReadonlyArray<AppleFmChatMessage>,
+  ) => Effect.Effect<AppleFmSnapshotStreamResult, AppleFmBackendError>;
   readonly smoke: (prompt: string) => Effect.Effect<AppleFmPlainTextCompletion, AppleFmBackendError>;
 }
 
@@ -53,6 +57,29 @@ export interface AppleFmPlainTextCompletion {
   readonly response: AppleFmChatCompletionResponse;
   readonly usage: AppleFmUsageMeasurement;
   readonly receipt: AppleFmBackendTranscriptReceipt;
+}
+
+export const AppleFmRuntimeStreamEvent = S.Struct({
+  kind: S.Literals([
+    "assistant_stream_started",
+    "assistant_snapshot",
+    "assistant_stream_finished",
+    "assistant_final_commit",
+    "assistant_stream_failed",
+  ]),
+  sequence: S.optional(S.Number),
+  content: S.optional(S.String),
+  timeToFirstSnapshotMs: S.optional(S.Number),
+  observedAt: S.String,
+  receipt: S.optional(S.Unknown),
+});
+export type AppleFmRuntimeStreamEvent = typeof AppleFmRuntimeStreamEvent.Type;
+
+export interface AppleFmSnapshotStreamResult {
+  readonly profile: ResolvedProbeBackendProfile;
+  readonly snapshots: ReadonlyArray<typeof AppleFmStreamSnapshotEvent.Type>;
+  readonly completion: AppleFmPlainTextCompletion;
+  readonly events: ReadonlyArray<AppleFmRuntimeStreamEvent>;
 }
 
 export class AppleFmBackendError extends S.TaggedErrorClass<AppleFmBackendError>()("AppleFmBackendError", {
@@ -94,6 +121,7 @@ export function makeAppleFmClient(
           ),
         ),
       completePlainText: (messages) => completeAppleFmPlainText(profile, messages, fetchImpl, now()),
+      streamPlainTextSnapshots: (messages) => streamAppleFmPlainTextSnapshots(profile, messages, fetchImpl, now()),
       smoke: (prompt) =>
         client.requireReady().pipe(
           Effect.flatMap(() =>
@@ -113,6 +141,176 @@ export function makeAppleFmClient(
     };
 
     return client;
+  });
+}
+
+export function streamAppleFmPlainTextSnapshots(
+  profile: ResolvedProbeBackendProfile,
+  messages: ReadonlyArray<AppleFmChatMessage>,
+  fetchImpl: typeof fetch = fetch,
+  observedAt = new Date().toISOString(),
+): Effect.Effect<AppleFmSnapshotStreamResult, AppleFmBackendError> {
+  return Effect.gen(function* () {
+    const startedAt = Date.now();
+    const endpoint = new URL("/v1/chat/completions", withTrailingSlash(profile.baseUrl));
+    const started: AppleFmRuntimeStreamEvent = {
+      kind: "assistant_stream_started",
+      observedAt,
+    };
+    const response = yield* Effect.tryPromise({
+      try: () =>
+        fetchImpl(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: profile.model,
+            messages,
+            stream: true,
+            streamMode: "snapshot",
+          }),
+        }),
+      catch: (error) =>
+        new AppleFmBackendError({
+          reason: `Apple FM snapshot stream request failed: ${String(error)}`,
+          failureClass: "bridge_unreachable",
+          receipt: makeAppleFmFailureReceipt({
+            profileId: profile.id,
+            model: profile.model,
+            baseUrl: profile.baseUrl,
+            failureClass: "bridge_unreachable",
+            message: `Apple FM snapshot stream request failed: ${String(error)}`,
+            observedAt,
+          }),
+        }),
+    });
+
+    const rawText = yield* Effect.tryPromise({
+      try: () => response.text(),
+      catch: (error) =>
+        new AppleFmBackendError({
+          reason: `Apple FM snapshot stream response could not be read: ${String(error)}`,
+          failureClass: "malformed_response",
+          receipt: makeAppleFmFailureReceipt({
+            profileId: profile.id,
+            model: profile.model,
+            baseUrl: profile.baseUrl,
+            failureClass: "malformed_response",
+            message: `Apple FM snapshot stream response could not be read: ${String(error)}`,
+            observedAt,
+          }),
+        }),
+    });
+
+    if (!response.ok) {
+      const errorMessage = bridgeErrorMessage(parseMaybeJson(rawText)) ?? `Apple FM snapshot stream returned HTTP ${response.status}`;
+      return yield* Effect.fail(
+        new AppleFmBackendError({
+          reason: errorMessage,
+          failureClass: `stream_http_${response.status}`,
+          receipt: makeAppleFmFailureReceipt({
+            profileId: profile.id,
+            model: profile.model,
+            baseUrl: profile.baseUrl,
+            failureClass: `stream_http_${response.status}`,
+            message: errorMessage,
+            observedAt,
+          }),
+        }),
+      );
+    }
+
+    const snapshots = yield* decodeSnapshotStream(rawText, observedAt).pipe(
+      Effect.mapError(
+        (error) =>
+          new AppleFmBackendError({
+            reason: error,
+            failureClass: "malformed_response",
+            receipt: makeAppleFmFailureReceipt({
+              profileId: profile.id,
+              model: profile.model,
+              baseUrl: profile.baseUrl,
+              failureClass: "malformed_response",
+              message: error,
+              observedAt,
+            }),
+          }),
+      ),
+    );
+    const finalSnapshot = snapshots.at(-1);
+
+    if (finalSnapshot === undefined) {
+      return yield* Effect.fail(
+        new AppleFmBackendError({
+          reason: "Apple FM snapshot stream did not include any assistant snapshots",
+          failureClass: "empty_stream",
+          receipt: makeAppleFmFailureReceipt({
+            profileId: profile.id,
+            model: profile.model,
+            baseUrl: profile.baseUrl,
+            failureClass: "empty_stream",
+            message: "Apple FM snapshot stream did not include any assistant snapshots",
+            observedAt,
+          }),
+        }),
+      );
+    }
+
+    const usage: AppleFmUsageMeasurement = { truth: "unknown" };
+    const receipt = makeAppleFmTranscriptReceipt({
+      profileId: profile.id,
+      model: profile.model,
+      usage,
+      observedAt,
+    });
+    const completion: AppleFmPlainTextCompletion = {
+      profile,
+      text: finalSnapshot.content,
+      response: {
+        model: profile.model,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: finalSnapshot.content,
+            },
+            finishReason: finalSnapshot.finishReason ?? "stop",
+          },
+        ],
+        usage,
+      },
+      usage,
+      receipt,
+    };
+    const firstSnapshotAt = Date.now();
+    const snapshotEvents: AppleFmRuntimeStreamEvent[] = snapshots.map((snapshot) => ({
+      kind: "assistant_snapshot",
+      sequence: snapshot.sequence,
+      content: snapshot.content,
+      observedAt: snapshot.observedAt,
+      ...(snapshot.sequence === snapshots[0]?.sequence
+        ? { timeToFirstSnapshotMs: Math.max(0, firstSnapshotAt - startedAt) }
+        : {}),
+    }));
+    const finished: AppleFmRuntimeStreamEvent = {
+      kind: "assistant_stream_finished",
+      observedAt,
+    };
+    const committed: AppleFmRuntimeStreamEvent = {
+      kind: "assistant_final_commit",
+      content: finalSnapshot.content,
+      observedAt,
+      receipt,
+    };
+
+    return {
+      profile,
+      snapshots,
+      completion,
+      events: [started, ...snapshotEvents, finished, committed],
+    };
   });
 }
 
@@ -488,4 +686,69 @@ function bridgeErrorMessage(value: unknown): string | undefined {
   }
 
   return undefined;
+}
+
+function decodeSnapshotStream(
+  rawText: string,
+  observedAt: string,
+): Effect.Effect<ReadonlyArray<typeof AppleFmStreamSnapshotEvent.Type>, string> {
+  return Effect.gen(function* () {
+    const rawEvents = parseSnapshotLines(rawText);
+    const snapshots = rawEvents.map((event, index) => normalizeSnapshotEvent(event, index, observedAt));
+
+    return yield* S.decodeUnknownEffect(S.Array(AppleFmStreamSnapshotEvent))(snapshots).pipe(
+      Effect.mapError((error) => `Apple FM snapshot stream was malformed: ${String(error)}`),
+    );
+  });
+}
+
+function parseSnapshotLines(rawText: string): unknown[] {
+  const trimmed = rawText.trim();
+
+  if (trimmed.length === 0) {
+    return [];
+  }
+
+  const parsed = parseMaybeJson(trimmed);
+
+  if (Array.isArray(parsed)) {
+    return parsed;
+  }
+
+  if (parsed !== undefined) {
+    return [parsed];
+  }
+
+  return trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => line !== "data: [DONE]" && line !== "[DONE]")
+    .map((line) => line.startsWith("data: ") ? line.slice("data: ".length) : line)
+    .map((line) => JSON.parse(line) as unknown);
+}
+
+function normalizeSnapshotEvent(value: unknown, index: number, observedAt: string): unknown {
+  if (typeof value !== "object" || value === null) {
+    return value;
+  }
+
+  const input = value as Record<string, unknown>;
+  const content = input.content ?? input.snapshot ?? input.text;
+
+  return {
+    kind: "apple_fm_assistant_snapshot",
+    sequence: typeof input.sequence === "number" ? input.sequence : index,
+    content: typeof content === "string" ? content : "",
+    observedAt: typeof input.observedAt === "string" ? input.observedAt : observedAt,
+    finishReason: normalizeFinishReason(input.finishReason ?? input.finish_reason),
+  };
+}
+
+function parseMaybeJson(value: string): unknown | undefined {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
 }
