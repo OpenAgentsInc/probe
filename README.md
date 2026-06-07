@@ -59,6 +59,12 @@ Tracked files should stay minimal until the new architecture lands:
   linking and account management.
 - `packages/runtime/src/fleet/telemetry.ts` reports auth/account health signals
   and requests Omega failover without locally iterating raw account tokens.
+- `packages/runtime/src/backends/registry.ts` registers the first Apple FM
+  backend profile.
+- `packages/runtime/src/backends/apple-fm/contract.ts` defines the Effect v4
+  Apple FM backend contract.
+- `packages/runtime/src/backends/apple-fm/receipts.ts` defines redacted Apple
+  FM availability, failure, and transcript receipts.
 - `docs/probe-omega-auth-contract.md` records the implemented account-contract
   slice.
 - `docs/probe-omega-run-assignment.md` records the implemented assignment and
@@ -70,6 +76,11 @@ Tracked files should stay minimal until the new architecture lands:
 - `docs/probe-cli-omega-auth.md` records the CLI account-management slice.
 - `docs/probe-fleet-telemetry.md` records the fleet telemetry and failover
   slice.
+- `docs/2026-06-07-apple-fm-first-backend-audit.md` audits the previous Apple
+  FM implementations and records the plan for making Apple FM the first
+  supported backend in the new Probe runtime.
+- `docs/probe-apple-fm-backend.md` records the implemented Apple FM backend
+  contract slice.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 
