@@ -43,6 +43,12 @@ treated as complete.
 Tracked files should stay minimal until the new architecture lands:
 
 - `README.md` explains the reset and target direction.
+- `package.json` defines a Bun workspace/catalog layout modeled after the
+  OpenCode workspace style while pinning the Effect line used by Omega.
+- `packages/runtime/src/contracts/provider-account.ts` defines the first
+  Probe/Omega ChatGPT/Codex account contract.
+- `docs/probe-omega-auth-contract.md` records the implemented account-contract
+  slice.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 
