@@ -47,8 +47,14 @@ Tracked files should stay minimal until the new architecture lands:
   OpenCode workspace style while pinning the Effect line used by Omega.
 - `packages/runtime/src/contracts/provider-account.ts` defines the first
   Probe/Omega ChatGPT/Codex account contract.
+- `packages/runtime/src/contracts/assignment.ts` defines the Probe run
+  assignment contract for Omega refs and grants.
+- `packages/runtime/src/omega/grant-client.ts` resolves Omega auth grants into
+  Probe materialization plans.
 - `docs/probe-omega-auth-contract.md` records the implemented account-contract
   slice.
+- `docs/probe-omega-run-assignment.md` records the implemented assignment and
+  grant-resolution slice.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 

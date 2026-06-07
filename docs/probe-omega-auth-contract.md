@@ -46,6 +46,7 @@ rejection of raw credential material.
 ## Open Boundaries
 
 Omega still needs to expose the runner-authorized grant resolution route and
-Probe-shaped materialization names. Later Probe issues add assignment parsing,
-grant resolution, per-run materialization, SHC/Pylon runner identity, CLI
-account management, and fleet telemetry.
+Probe-shaped materialization names. The first assignment and grant-resolution
+slice is documented in `docs/probe-omega-run-assignment.md`. Later Probe
+issues add per-run materialization, SHC/Pylon runner identity, CLI account
+management, and fleet telemetry.
