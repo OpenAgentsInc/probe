@@ -2,7 +2,8 @@
 
 Date: 2026-06-07
 
-Status: implemented contract slice for Probe issue #163.
+Status: implemented contract and attach/status slices for Probe issues #163 and
+#164.
 
 ## Contract
 
@@ -39,6 +40,19 @@ usage as exact.
 `packages/runtime/src/backends/registry.ts` registers the first Apple FM local
 profile and resolves base URL overrides.
 
+`packages/runtime/src/backends/apple-fm/client.ts` implements the attach-only
+readiness path. It checks `GET /health`, decodes typed availability, and returns
+redacted availability receipts for ready, unavailable, unsupported, malformed,
+and unreachable bridge states.
+
+`packages/runtime/src/cli.ts` exposes:
+
+- `probe apple-fm status [--base-url URL] [--profile apple-fm-local]`
+
+The status command performs no inference. It exits with `0` only when live
+health is ready, and exits nonzero with typed status output when the bridge is
+unavailable, unsupported, unreachable, or malformed.
+
 ## Tests
 
 `packages/runtime/src/backends/apple-fm/fake-server.test.ts` covers:
@@ -47,5 +61,7 @@ profile and resolves base URL overrides.
 - CI-safe fake bridge health and completion response decoding
 - redacted availability/transcript receipt behavior
 
-The fake bridge tests do not require admitted Apple hardware.
+`packages/runtime/tests/apple-fm-cli.test.ts` covers ready, unsupported, and
+unreachable status output without admitted Apple hardware.
 
+The fake bridge tests do not require admitted Apple hardware.

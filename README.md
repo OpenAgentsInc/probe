@@ -63,6 +63,8 @@ Tracked files should stay minimal until the new architecture lands:
   backend profile.
 - `packages/runtime/src/backends/apple-fm/contract.ts` defines the Effect v4
   Apple FM backend contract.
+- `packages/runtime/src/backends/apple-fm/client.ts` attaches to Apple FM
+  bridge health and preserves typed availability.
 - `packages/runtime/src/backends/apple-fm/receipts.ts` defines redacted Apple
   FM availability, failure, and transcript receipts.
 - `docs/probe-omega-auth-contract.md` records the implemented account-contract

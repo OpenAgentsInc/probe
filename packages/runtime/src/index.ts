@@ -1,4 +1,5 @@
 export * from "./auth/materializer";
+export * from "./backends/apple-fm/client";
 export * from "./backends/apple-fm/contract";
 export * from "./backends/apple-fm/receipts";
 export * from "./backends/backend-profile";

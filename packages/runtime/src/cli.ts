@@ -2,6 +2,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { Effect, Schema as S } from "effect";
+import { makeAppleFmClient, type AppleFmReadiness } from "./backends/apple-fm/client";
 import { makeOmegaAccountClient, type OmegaAccountClient } from "./omega/account-client";
 import { sanitizeProbePublicProjection } from "./contracts/provider-account";
 import { type ProbeRunnerIdentity } from "./runner/identity";
@@ -15,6 +16,7 @@ export interface ProbeCliResult {
 export interface ProbeCliDeps {
   readonly accountClient?: OmegaAccountClient;
   readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly fetch?: typeof fetch;
   readonly now?: Date;
 }
 
@@ -54,9 +56,35 @@ function handleProbeCli(
       return yield* addChatGptAccount(parseOptions(rest.slice(1)), deps);
     }
 
+    if (namespace === "apple-fm" && command === "status") {
+      return yield* appleFmStatus(options, deps);
+    }
+
     return {
       exitCode: 1,
       stdout: usage(),
+      stderr: "",
+    };
+  });
+}
+
+function appleFmStatus(
+  options: Record<string, string | true>,
+  deps: ProbeCliDeps,
+): Effect.Effect<ProbeCliResult, ProbeCliError> {
+  return Effect.gen(function* () {
+    const client = yield* makeAppleFmClient({
+      profileId: stringOption(options, "profile"),
+      explicitBaseUrl: stringOption(options, "base-url"),
+      env: deps.env,
+      fetch: deps.fetch,
+      now: deps.now,
+    }).pipe(Effect.mapError((error) => new ProbeCliError({ message: error.reason })));
+    const readiness = yield* client.health();
+
+    return {
+      exitCode: readiness.ready ? 0 : 1,
+      stdout: formatAppleFmStatus(readiness),
       stderr: "",
     };
   });
@@ -213,7 +241,40 @@ function usage(): string {
     "  probe omega link [--base-url URL] [--runner-id ID] [--subject USER_OR_TEAM] [--kind local|shc|pylon|sandbox]",
     "  probe auth accounts [--base-url URL]",
     "  probe auth add chatgpt [--base-url URL]",
+    "  probe apple-fm status [--base-url URL] [--profile apple-fm-local]",
   ].join("\n") + "\n";
+}
+
+function formatAppleFmStatus(readiness: AppleFmReadiness): string {
+  const health = readiness.health;
+  const lines = [
+    "Apple FM backend status",
+    `profile: ${readiness.profile.id}`,
+    `kind: ${readiness.profile.kind}`,
+    `baseUrl: ${readiness.profile.baseUrl}`,
+    `model: ${health?.modelId ?? health?.model ?? readiness.profile.model}`,
+    `status: ${readiness.status}`,
+  ];
+
+  if (readiness.unavailableReason !== undefined) {
+    lines.push(`unavailableReason: ${readiness.unavailableReason}`);
+  }
+
+  if (readiness.message !== undefined) {
+    lines.push(`message: ${readiness.message}`);
+  }
+
+  if (health?.platform !== undefined) {
+    lines.push(`platform: ${health.platform}`);
+  }
+
+  if (health?.version !== undefined) {
+    lines.push(`version: ${health.version}`);
+  }
+
+  lines.push(`receipt: ${JSON.stringify(readiness.receipt)}`);
+
+  return `${lines.join("\n")}\n`;
 }
 
 if (import.meta.main) {
