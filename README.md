@@ -51,10 +51,14 @@ Tracked files should stay minimal until the new architecture lands:
   assignment contract for Omega refs and grants.
 - `packages/runtime/src/omega/grant-client.ts` resolves Omega auth grants into
   Probe materialization plans.
+- `packages/runtime/src/auth/materializer.ts` materializes brokered auth only
+  inside per-run env/file targets and scrubs it on closeout.
 - `docs/probe-omega-auth-contract.md` records the implemented account-contract
   slice.
 - `docs/probe-omega-run-assignment.md` records the implemented assignment and
   grant-resolution slice.
+- `docs/probe-auth-materialization.md` records the implemented per-run auth
+  materialization slice.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 
