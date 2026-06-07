@@ -4,7 +4,7 @@ Date: 2026-06-07
 
 Status: implemented contract, attach/status, plain-text smoke,
 assignment-routing, snapshot-streaming, and tool-callback slices for Probe
-issues #163 through #169.
+issues #163 through #170.
 
 ## Contract
 
@@ -184,5 +184,17 @@ resume from Probe transcript state.
 `packages/runtime/tests/backend-capability.test.ts` covers ready capability
 advertisement, unsupported health reporting, backend identity, support flags,
 and redaction.
+
+`packages/runtime/src/backends/apple-fm/acceptance.ts` defines the retained
+Apple FM acceptance case names and comparison receipt shape. Receipts preserve
+backend kind, model, availability, usage truth, and tool/refusal facts.
+
+`docs/apple-fm-admitted-mac-acceptance.md` documents the live admitted-Mac
+runbook. Live Apple FM checks are excluded from default CI; unsupported hardware
+or unavailable Apple Intelligence must be recorded as `unsupported` or
+`unavailable`, not `failed`.
+
+`packages/runtime/tests/apple-fm-acceptance.test.ts` covers the six retained
+cases through fake Probe tool/runtime behavior.
 
 The fake bridge tests do not require admitted Apple hardware.

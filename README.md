@@ -73,6 +73,8 @@ Tracked files should stay minimal until the new architecture lands:
   FM availability, failure, and transcript receipts.
 - `packages/runtime/src/backends/apple-fm/tools.ts` defines the Probe-owned
   Apple FM tool-callback session runtime.
+- `packages/runtime/src/backends/apple-fm/acceptance.ts` defines retained
+  Apple FM acceptance cases and comparison receipts.
 - `docs/probe-omega-auth-contract.md` records the implemented account-contract
   slice.
 - `docs/probe-omega-run-assignment.md` records the implemented assignment and
@@ -89,6 +91,8 @@ Tracked files should stay minimal until the new architecture lands:
   supported backend in the new Probe runtime.
 - `docs/probe-apple-fm-backend.md` records the implemented Apple FM backend
   contract slice.
+- `docs/apple-fm-admitted-mac-acceptance.md` records the live admitted-Mac
+  Apple FM acceptance runbook.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 
