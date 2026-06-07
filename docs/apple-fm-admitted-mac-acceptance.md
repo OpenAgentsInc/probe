@@ -55,6 +55,12 @@ Run a plain-text smoke:
 bun run --cwd packages/runtime probe apple-fm smoke --prompt "Summarize this repository in one sentence."
 ```
 
+Run a live tool-use stream through the local Swift Foundation bridge:
+
+```sh
+bun run --cwd packages/runtime probe apple-fm tool-stream-demo --path README.md --prompt "Use the read_file tool to read README.md, then answer with one short sentence naming the file and its first heading."
+```
+
 Use a non-default bridge URL only from trusted local configuration:
 
 ```sh
@@ -87,4 +93,3 @@ bun run test
 That command intentionally runs fake bridge/runtime coverage only. Live
 admitted-Mac checks should remain an operator/local runbook until the project
 adds an explicit hardware-gated live test lane.
-

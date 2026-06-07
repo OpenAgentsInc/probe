@@ -175,4 +175,84 @@ describe("Probe CLI Apple FM commands", () => {
     expect(result.stdout).toContain("Foundation Models refused the request.");
     expect(result.stdout).toContain("\"kind\":\"probe_backend_failure\"");
   });
+
+  test("probe apple-fm tool-stream-demo reads files relative to the Probe workspace root", async () => {
+    let callbackUrl = "";
+    let callbackToken = "";
+    let callbackOutput = "";
+    const result = await Effect.runPromise(
+      runProbeCli([
+        "apple-fm",
+        "tool-stream-demo",
+        "--base-url",
+        "http://127.0.0.1:11439",
+        "--path",
+        "README.md",
+        "--prompt",
+        "Use the read_file tool to inspect README.md.",
+      ], {
+        fetch: async (input, init) => {
+          const url = new URL(String(input));
+
+          if (url.pathname === "/health") {
+            return Response.json({
+              ready: true,
+              modelId: APPLE_FM_DEFAULT_MODEL_ID,
+            });
+          }
+
+          if (url.pathname === "/v1/sessions") {
+            const body = JSON.parse(String(init?.body));
+            callbackUrl = body.tool_callback.url;
+            callbackToken = body.tool_callback.session_token;
+
+            return Response.json({
+              session: {
+                id: "sess-cli-tool-demo",
+              },
+            });
+          }
+
+          const callbackResponse = await fetch(callbackUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              session_token: callbackToken,
+              tool_name: "read_file",
+              arguments: {
+                generation_id: "gen-cli-1",
+                content: {
+                  path: "README.md",
+                },
+                is_complete: true,
+              },
+            }),
+          });
+          const callbackBody = await callbackResponse.json() as { readonly output?: string };
+          callbackOutput = callbackBody.output ?? "";
+
+          return new Response(
+            [
+              "event: completed",
+              "data: {\"kind\":\"completed\",\"model\":\"apple-foundation-model\",\"output\":\"README.md first heading is Probe.\"}",
+              "",
+            ].join("\n"),
+            {
+              headers: {
+                "Content-Type": "text/event-stream",
+              },
+            },
+          );
+        },
+        now: new Date("2026-06-07T00:00:00.000Z"),
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("tool: read_file success");
+    expect(result.stdout).toContain("final: README.md first heading is Probe.");
+    expect(callbackOutput).toContain("# Probe");
+  });
 });

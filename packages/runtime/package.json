@@ -10,6 +10,7 @@
     "probe": "./src/cli.ts"
   },
   "scripts": {
+    "probe": "bun src/cli.ts",
     "test": "bun test"
   },
   "dependencies": {

@@ -19,6 +19,11 @@ import {
   type AppleFmBackendAvailabilityReceipt,
   type AppleFmBackendTranscriptReceipt,
 } from "./receipts";
+import {
+  startAppleFmToolCallbackServer,
+  type AppleFmToolCallbackServer,
+  type AppleFmToolCallbackSession,
+} from "./tools";
 
 export const AppleFmHealthStatus = S.Literals(["ready", "unavailable", "unsupported", "malformed", "unreachable"]);
 export type AppleFmHealthStatus = typeof AppleFmHealthStatus.Type;
@@ -48,6 +53,9 @@ export interface AppleFmClient {
   readonly streamPlainTextSnapshots: (
     messages: ReadonlyArray<AppleFmChatMessage>,
   ) => Effect.Effect<AppleFmSnapshotStreamResult, AppleFmBackendError>;
+  readonly streamSessionWithTools: (
+    input: AppleFmToolStreamInput,
+  ) => Effect.Effect<AppleFmToolStreamResult, AppleFmBackendError>;
   readonly smoke: (prompt: string) => Effect.Effect<AppleFmPlainTextCompletion, AppleFmBackendError>;
 }
 
@@ -80,6 +88,23 @@ export interface AppleFmSnapshotStreamResult {
   readonly snapshots: ReadonlyArray<typeof AppleFmStreamSnapshotEvent.Type>;
   readonly completion: AppleFmPlainTextCompletion;
   readonly events: ReadonlyArray<AppleFmRuntimeStreamEvent>;
+}
+
+export interface AppleFmToolStreamInput {
+  readonly prompt: string;
+  readonly toolSession: AppleFmToolCallbackSession;
+  readonly instructions?: string;
+}
+
+export interface AppleFmToolStreamResult {
+  readonly profile: ResolvedProbeBackendProfile;
+  readonly bridgeSessionId: string;
+  readonly callbackServer: {
+    readonly callbackUrl: "[redacted]";
+  };
+  readonly events: ReadonlyArray<AppleFmRuntimeStreamEvent>;
+  readonly completion: AppleFmPlainTextCompletion;
+  readonly toolTranscript: AppleFmToolCallbackSession["transcript"];
 }
 
 export class AppleFmBackendError extends S.TaggedErrorClass<AppleFmBackendError>()("AppleFmBackendError", {
@@ -122,6 +147,7 @@ export function makeAppleFmClient(
         ),
       completePlainText: (messages) => completeAppleFmPlainText(profile, messages, fetchImpl, now()),
       streamPlainTextSnapshots: (messages) => streamAppleFmPlainTextSnapshots(profile, messages, fetchImpl, now()),
+      streamSessionWithTools: (input) => streamAppleFmSessionWithTools(profile, input, fetchImpl, now()),
       smoke: (prompt) =>
         client.requireReady().pipe(
           Effect.flatMap(() =>
@@ -142,6 +168,19 @@ export function makeAppleFmClient(
 
     return client;
   });
+}
+
+export function streamAppleFmSessionWithTools(
+  profile: ResolvedProbeBackendProfile,
+  input: AppleFmToolStreamInput,
+  fetchImpl: typeof fetch = fetch,
+  observedAt = new Date().toISOString(),
+): Effect.Effect<AppleFmToolStreamResult, AppleFmBackendError> {
+  return Effect.acquireUseRelease(
+    Effect.sync(() => startAppleFmToolCallbackServer(input.toolSession)),
+    (callbackServer) => streamAppleFmSessionWithCallbackServer(profile, input, callbackServer, fetchImpl, observedAt),
+    (callbackServer) => Effect.sync(() => callbackServer.stop()),
+  );
 }
 
 export function streamAppleFmPlainTextSnapshots(
@@ -439,6 +478,198 @@ export function completeAppleFmPlainText(
   });
 }
 
+function streamAppleFmSessionWithCallbackServer(
+  profile: ResolvedProbeBackendProfile,
+  input: AppleFmToolStreamInput,
+  callbackServer: AppleFmToolCallbackServer,
+  fetchImpl: typeof fetch,
+  observedAt: string,
+): Effect.Effect<AppleFmToolStreamResult, AppleFmBackendError> {
+  return Effect.gen(function* () {
+    const sessionResponse = yield* requestJson(fetchImpl, new URL("/v1/sessions", withTrailingSlash(profile.baseUrl)), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        instructions: input.instructions,
+        model: {
+          id: profile.model,
+          use_case: "general",
+          guardrails: "default",
+        },
+        tools: input.toolSession.projectedTools.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          arguments_schema: tool.inputSchema,
+        })),
+        tool_callback: {
+          url: callbackServer.callbackUrl,
+          session_token: input.toolSession.token,
+        },
+      }),
+    }, {
+      profile,
+      operation: "session_create",
+      observedAt,
+    });
+    const bridgeSessionId = yield* readBridgeSessionId(sessionResponse, profile, observedAt);
+    const streamResponse = yield* Effect.tryPromise({
+      try: () =>
+        fetchImpl(new URL(`/v1/sessions/${encodeURIComponent(bridgeSessionId)}/responses/stream`, withTrailingSlash(profile.baseUrl)), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            prompt: input.prompt,
+          }),
+        }),
+      catch: (error) =>
+        new AppleFmBackendError({
+          reason: `Apple FM tool stream request failed: ${String(error)}`,
+          failureClass: "tool_stream_unreachable",
+          receipt: makeAppleFmFailureReceipt({
+            profileId: profile.id,
+            model: profile.model,
+            baseUrl: profile.baseUrl,
+            failureClass: "tool_stream_unreachable",
+            message: `Apple FM tool stream request failed: ${String(error)}`,
+            observedAt,
+          }),
+        }),
+    });
+    const streamText = yield* Effect.tryPromise({
+      try: () => streamResponse.text(),
+      catch: (error) =>
+        new AppleFmBackendError({
+          reason: `Apple FM tool stream response could not be read: ${String(error)}`,
+          failureClass: "tool_stream_malformed",
+          receipt: makeAppleFmFailureReceipt({
+            profileId: profile.id,
+            model: profile.model,
+            baseUrl: profile.baseUrl,
+            failureClass: "tool_stream_malformed",
+            message: `Apple FM tool stream response could not be read: ${String(error)}`,
+            observedAt,
+          }),
+        }),
+    });
+
+    if (!streamResponse.ok) {
+      const errorMessage = bridgeErrorMessage(parseMaybeJson(streamText)) ?? `Apple FM tool stream returned HTTP ${streamResponse.status}`;
+      return yield* Effect.fail(
+        new AppleFmBackendError({
+          reason: errorMessage,
+          failureClass: `tool_stream_http_${streamResponse.status}`,
+          receipt: makeAppleFmFailureReceipt({
+            profileId: profile.id,
+            model: profile.model,
+            baseUrl: profile.baseUrl,
+            failureClass: `tool_stream_http_${streamResponse.status}`,
+            message: errorMessage,
+            observedAt,
+          }),
+        }),
+      );
+    }
+
+    const sseEvents = parseSseFrames(streamText);
+    const snapshots = sseEvents
+      .filter((event) => event.event === "snapshot")
+      .map((event, index) => normalizeBridgeTextStreamEvent(event.data, index, observedAt));
+    const completed = sseEvents.find((event) => event.event === "completed");
+    const error = sseEvents.find((event) => event.event === "error");
+
+    if (error !== undefined) {
+      const errorMessage = bridgeErrorMessage(error.data) ?? "Apple FM tool stream emitted an error event";
+      return yield* Effect.fail(
+        new AppleFmBackendError({
+          reason: errorMessage,
+          failureClass: "tool_stream_error_event",
+          receipt: makeAppleFmFailureReceipt({
+            profileId: profile.id,
+            model: profile.model,
+            baseUrl: profile.baseUrl,
+            failureClass: "tool_stream_error_event",
+            message: errorMessage,
+            observedAt,
+          }),
+        }),
+      );
+    }
+
+    const finalEvent = completed?.data ?? snapshots.at(-1);
+    const finalOutput = readStringField(finalEvent, "output") ?? readStringField(finalEvent, "content") ?? "";
+
+    if (finalOutput.length === 0) {
+      return yield* Effect.fail(
+        new AppleFmBackendError({
+          reason: "Apple FM tool stream did not include final assistant output",
+          failureClass: "tool_stream_empty",
+          receipt: makeAppleFmFailureReceipt({
+            profileId: profile.id,
+            model: profile.model,
+            baseUrl: profile.baseUrl,
+            failureClass: "tool_stream_empty",
+            message: "Apple FM tool stream did not include final assistant output",
+            observedAt,
+          }),
+        }),
+      );
+    }
+
+    const usage = normalizeUsage(readObjectField(finalEvent, "usage"));
+    const receipt = makeAppleFmTranscriptReceipt({
+      profileId: profile.id,
+      model: readStringField(finalEvent, "model") ?? profile.model,
+      usage,
+      observedAt,
+    });
+    const events: AppleFmRuntimeStreamEvent[] = [
+      { kind: "assistant_stream_started", observedAt },
+      ...snapshots.map((snapshot, index) => ({
+        kind: "assistant_snapshot" as const,
+        sequence: index,
+        content: readStringField(snapshot, "output") ?? "",
+        observedAt,
+      })),
+      { kind: "assistant_stream_finished", observedAt },
+      { kind: "assistant_final_commit", content: finalOutput, receipt, observedAt },
+    ];
+
+    return {
+      profile,
+      bridgeSessionId,
+      callbackServer: {
+        callbackUrl: "[redacted]",
+      },
+      events,
+      completion: {
+        profile,
+        text: finalOutput,
+        response: {
+          model: readStringField(finalEvent, "model") ?? profile.model,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: finalOutput,
+              },
+              finishReason: "stop",
+            },
+          ],
+          usage,
+        },
+        usage,
+        receipt,
+      },
+      toolTranscript: input.toolSession.transcript,
+    };
+  });
+}
+
 export function checkAppleFmHealth(
   profile: ResolvedProbeBackendProfile,
   fetchImpl: typeof fetch = fetch,
@@ -485,7 +716,7 @@ export function checkAppleFmHealth(
       return raw;
     }
 
-    const decoded = yield* S.decodeUnknownEffect(AppleFmHealthResponse)(raw).pipe(
+    const decoded = yield* S.decodeUnknownEffect(AppleFmHealthResponse)(normalizeHealthResponse(raw, profile.model)).pipe(
       Effect.mapError((error) =>
         unavailableReadiness(profile, {
           status: "malformed",
@@ -620,12 +851,17 @@ function normalizeUsage(value: unknown): AppleFmUsageMeasurement {
   }
 
   const input = value as Record<string, unknown>;
-  const promptTokens = numberField(input.promptTokens) ?? numberField(input.prompt_tokens);
-  const completionTokens = numberField(input.completionTokens) ?? numberField(input.completion_tokens);
-  const totalTokens = numberField(input.totalTokens) ?? numberField(input.total_tokens);
+  const promptTokens = numberField(input.promptTokens) ?? numberField(input.prompt_tokens) ?? measurementValue(input.prompt_tokens_detail);
+  const completionTokens =
+    numberField(input.completionTokens) ?? numberField(input.completion_tokens) ?? measurementValue(input.completion_tokens_detail);
+  const totalTokens = numberField(input.totalTokens) ?? numberField(input.total_tokens) ?? measurementValue(input.total_tokens_detail);
   const hasTokenCounts = promptTokens !== undefined || completionTokens !== undefined || totalTokens !== undefined;
+  const detailTruth =
+    measurementTruth(input.total_tokens_detail) ?? measurementTruth(input.prompt_tokens_detail) ?? measurementTruth(input.completion_tokens_detail);
   const truth = input.truth === "exact" || input.truth === "estimated" || input.truth === "unknown"
     ? input.truth
+    : detailTruth !== undefined
+      ? detailTruth
     : hasTokenCounts
       ? "estimated"
       : "unknown";
@@ -640,6 +876,19 @@ function normalizeUsage(value: unknown): AppleFmUsageMeasurement {
 
 function numberField(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function measurementValue(value: unknown): number | undefined {
+  return typeof value === "object" && value !== null ? numberField((value as Record<string, unknown>).value) : undefined;
+}
+
+function measurementTruth(value: unknown): AppleFmUsageMeasurement["truth"] | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+
+  const truth = (value as Record<string, unknown>).truth;
+  return truth === "exact" || truth === "estimated" ? truth : undefined;
 }
 
 function normalizeRole(value: unknown): AppleFmChatMessage["role"] {
@@ -751,4 +1000,207 @@ function parseMaybeJson(value: string): unknown | undefined {
   } catch {
     return undefined;
   }
+}
+
+function normalizeHealthResponse(value: unknown, fallbackModel: string): unknown {
+  if (typeof value !== "object" || value === null) {
+    return value;
+  }
+
+  const input = value as Record<string, unknown>;
+  const ready = booleanField(input.ready) ?? booleanField(input.modelAvailable) ?? booleanField(input.model_available) ?? input.status === "ok";
+
+  return {
+    ready,
+    model: readStringField(input, "model"),
+    modelId: readStringField(input, "modelId") ?? readStringField(input, "model_id") ?? fallbackModel,
+    unavailableReason: normalizeUnavailableReason(input.unavailableReason ?? input.unavailable_reason),
+    message: readStringField(input, "message") ?? readStringField(input, "availabilityMessage") ?? readStringField(input, "availability_message"),
+    platform: readStringField(input, "platform"),
+    version: readStringField(input, "version"),
+  };
+}
+
+function normalizeUnavailableReason(value: unknown): AppleFmUnavailableReason | undefined {
+  if (value === "apple_intelligence_not_enabled" || value === "appleIntelligenceNotEnabled") {
+    return "apple_intelligence_disabled";
+  }
+
+  if (value === "device_not_eligible" || value === "deviceNotEligible") {
+    return "unsupported_hardware";
+  }
+
+  if (value === "model_not_ready" || value === "modelNotReady") {
+    return "model_unavailable";
+  }
+
+  return value === "bridge_unreachable" ||
+    value === "apple_intelligence_disabled" ||
+    value === "unsupported_hardware" ||
+    value === "model_unavailable" ||
+    value === "permission_denied" ||
+    value === "malformed_response" ||
+    value === "not_ready" ||
+    value === "unknown"
+    ? value
+    : undefined;
+}
+
+function booleanField(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function readBridgeSessionId(
+  value: unknown,
+  profile: ResolvedProbeBackendProfile,
+  observedAt: string,
+): Effect.Effect<string, AppleFmBackendError> {
+  const session = readObjectField(value, "session");
+  const id = readStringField(session, "id");
+
+  if (id === undefined) {
+    return Effect.fail(
+      new AppleFmBackendError({
+        reason: "Apple FM session create response did not include session.id",
+        failureClass: "session_create_malformed",
+        receipt: makeAppleFmFailureReceipt({
+          profileId: profile.id,
+          model: profile.model,
+          baseUrl: profile.baseUrl,
+          failureClass: "session_create_malformed",
+          message: "Apple FM session create response did not include session.id",
+          observedAt,
+        }),
+      }),
+    );
+  }
+
+  return Effect.succeed(id);
+}
+
+function requestJson(
+  fetchImpl: typeof fetch,
+  endpoint: URL,
+  init: RequestInit,
+  context: {
+    readonly profile: ResolvedProbeBackendProfile;
+    readonly operation: string;
+    readonly observedAt: string;
+  },
+): Effect.Effect<unknown, AppleFmBackendError> {
+  return Effect.gen(function* () {
+    const response = yield* Effect.tryPromise({
+      try: () => fetchImpl(endpoint, init),
+      catch: (error) =>
+        new AppleFmBackendError({
+          reason: `Apple FM ${context.operation} request failed: ${String(error)}`,
+          failureClass: `${context.operation}_unreachable`,
+          receipt: makeAppleFmFailureReceipt({
+            profileId: context.profile.id,
+            model: context.profile.model,
+            baseUrl: context.profile.baseUrl,
+            failureClass: `${context.operation}_unreachable`,
+            message: `Apple FM ${context.operation} request failed: ${String(error)}`,
+            observedAt: context.observedAt,
+          }),
+        }),
+    });
+    const raw = yield* Effect.tryPromise({
+      try: () => response.json(),
+      catch: (error) =>
+        new AppleFmBackendError({
+          reason: `Apple FM ${context.operation} response was not JSON: ${String(error)}`,
+          failureClass: `${context.operation}_malformed`,
+          receipt: makeAppleFmFailureReceipt({
+            profileId: context.profile.id,
+            model: context.profile.model,
+            baseUrl: context.profile.baseUrl,
+            failureClass: `${context.operation}_malformed`,
+            message: `Apple FM ${context.operation} response was not JSON: ${String(error)}`,
+            observedAt: context.observedAt,
+          }),
+        }),
+    });
+
+    if (!response.ok) {
+      const errorMessage = bridgeErrorMessage(raw) ?? `Apple FM ${context.operation} returned HTTP ${response.status}`;
+      return yield* Effect.fail(
+        new AppleFmBackendError({
+          reason: errorMessage,
+          failureClass: `${context.operation}_http_${response.status}`,
+          receipt: makeAppleFmFailureReceipt({
+            profileId: context.profile.id,
+            model: context.profile.model,
+            baseUrl: context.profile.baseUrl,
+            failureClass: `${context.operation}_http_${response.status}`,
+            message: errorMessage,
+            observedAt: context.observedAt,
+          }),
+        }),
+      );
+    }
+
+    return raw;
+  });
+}
+
+function parseSseFrames(value: string): ReadonlyArray<{ readonly event: string; readonly data: unknown }> {
+  const frames: Array<{ readonly event: string; readonly data: unknown }> = [];
+  let event = "message";
+  const dataLines: string[] = [];
+
+  for (const line of value.split(/\r?\n/)) {
+    if (line.length === 0) {
+      if (dataLines.length > 0) {
+        const data = dataLines.join("\n");
+        frames.push({ event, data: parseMaybeJson(data) ?? data });
+      }
+      event = "message";
+      dataLines.length = 0;
+      continue;
+    }
+
+    if (line.startsWith("event:")) {
+      event = line.slice("event:".length).trim();
+      continue;
+    }
+
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice("data:".length).trimStart());
+    }
+  }
+
+  if (dataLines.length > 0) {
+    const data = dataLines.join("\n");
+    frames.push({ event, data: parseMaybeJson(data) ?? data });
+  }
+
+  return frames;
+}
+
+function normalizeBridgeTextStreamEvent(value: unknown, sequence: number, observedAt: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null) {
+    return {
+      sequence,
+      output: "",
+      observedAt,
+    };
+  }
+
+  return {
+    sequence,
+    ...value as Record<string, unknown>,
+    observedAt,
+  };
+}
+
+function readStringField(value: unknown, key: string): string | undefined {
+  return typeof value === "object" && value !== null && typeof (value as Record<string, unknown>)[key] === "string"
+    ? (value as Record<string, string>)[key]
+    : undefined;
+}
+
+function readObjectField(value: unknown, key: string): Record<string, unknown> | undefined {
+  const field = typeof value === "object" && value !== null ? (value as Record<string, unknown>)[key] : undefined;
+  return typeof field === "object" && field !== null ? field as Record<string, unknown> : undefined;
 }

@@ -269,18 +269,30 @@ export function startAppleFmToolCallbackServer(
     port: options.port ?? 0,
     fetch: async (request) => {
       const authorization = request.headers.get("Authorization") ?? "";
-      const token = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : "";
       const body = await request.json() as {
+        readonly session_token?: string;
+        readonly tool_name?: string;
+        readonly arguments?: {
+          readonly generation_id?: string;
+          readonly content?: unknown;
+          readonly is_complete?: boolean;
+        };
+        readonly tool_call_id?: string;
         readonly toolCallId?: string;
         readonly toolName?: string;
         readonly input?: Readonly<Record<string, unknown>>;
       };
-      const response = await Effect.runPromise(
+      const swiftBridgePayload = body.session_token !== undefined || body.tool_name !== undefined || body.arguments !== undefined;
+      const token = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : body.session_token ?? "";
+      const toolCallId = body.toolCallId ?? body.tool_call_id ?? body.arguments?.generation_id ?? `tool_call_${randomUUID()}`;
+      const toolName = body.toolName ?? body.tool_name ?? "read_file";
+      const input = body.input ?? generatedContentToInput(body.arguments?.content);
+      const callbackResponse = await Effect.runPromise(
         session.handleCallback({
           token,
-          toolCallId: body.toolCallId ?? `tool_call_${randomUUID()}`,
-          toolName: body.toolName ?? "read_file",
-          input: body.input ?? {},
+          toolCallId,
+          toolName,
+          input,
         }).pipe(
           Effect.catch((error: AppleFmToolCallbackError) =>
             Effect.succeed({
@@ -290,7 +302,7 @@ export function startAppleFmToolCallbackServer(
                 kind: "probe_backend_tool_callback" as const,
                 backendKind: APPLE_FM_BACKEND_KIND,
                 sessionId: session.sessionId,
-                toolCallId: body.toolCallId ?? "unknown",
+                toolCallId,
                 toolName: "read_file" as const,
                 status: "unauthorized" as const,
                 callbackUrl: "[redacted]" as const,
@@ -302,7 +314,7 @@ export function startAppleFmToolCallbackServer(
                 kind: "probe_tool_callback" as const,
                 backendKind: APPLE_FM_BACKEND_KIND,
                 sessionId: session.sessionId,
-                toolCallId: body.toolCallId ?? "unknown",
+                toolCallId,
                 toolName: "read_file" as const,
                 status: "unauthorized" as const,
                 input: {},
@@ -316,7 +328,23 @@ export function startAppleFmToolCallbackServer(
         ),
       );
 
-      return Response.json(response, { status: response.status === "unauthorized" ? 401 : 200 });
+      if (swiftBridgePayload) {
+        if (callbackResponse.status === "success") {
+          return Response.json({
+            output: stringifyToolOutput(callbackResponse.output),
+          });
+        }
+
+        return Response.json(
+          {
+            tool_name: toolName,
+            underlying_error: callbackResponse.message ?? callbackResponse.status,
+          },
+          { status: callbackResponse.status === "unauthorized" ? 401 : 409 },
+        );
+      }
+
+      return Response.json(callbackResponse, { status: callbackResponse.status === "unauthorized" ? 401 : 200 });
     },
   });
   const callbackUrl = `http://127.0.0.1:${server.port}/apple-fm/tool-callback`;
@@ -414,4 +442,18 @@ function redactCallbackUrl(value: string): string {
   } catch {
     return "[redacted]";
   }
+}
+
+function generatedContentToInput(value: unknown): Readonly<Record<string, unknown>> {
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    return value as Readonly<Record<string, unknown>>;
+  }
+
+  return {
+    value,
+  };
+}
+
+function stringifyToolOutput(value: unknown): string {
+  return typeof value === "string" ? value : JSON.stringify(value);
 }

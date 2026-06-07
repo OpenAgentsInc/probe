@@ -72,6 +72,45 @@ describe("Apple FM tool callback session", () => {
     }
   });
 
+  test("serves the Swift bridge callback payload shape", async () => {
+    const session = makeAppleFmToolCallbackSession({
+      sessionId: "session_swift",
+      token: "swift-secret",
+      tools: [readFileTool],
+      now: new Date("2026-06-07T00:00:00.000Z"),
+    });
+    const server = startAppleFmToolCallbackServer(session);
+
+    try {
+      const response = await fetch(server.callbackUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          session_token: "swift-secret",
+          tool_name: "read_file",
+          arguments: {
+            generation_id: "gen_1",
+            content: {
+              path: "README.md",
+            },
+            is_complete: true,
+          },
+        }),
+      });
+      const body = await response.json() as { readonly output?: string };
+
+      expect(response.status).toBe(200);
+      expect(body.output).toContain("hello from README");
+      expect(session.transcript[0]?.toolCallId).toBe("gen_1");
+      expect(session.transcript[0]?.input).toEqual({ path: "README.md" });
+      expect(JSON.stringify(body)).not.toContain("swift-secret");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("approval-required tools persist approval-pending transcript truth", async () => {
     const session = makeAppleFmToolCallbackSession({
       sessionId: "session_approval",
@@ -154,4 +193,3 @@ describe("Apple FM tool callback session", () => {
     expect(JSON.stringify(resumed.publicDescriptor())).not.toContain("resume-secret");
   });
 });
-

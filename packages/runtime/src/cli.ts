@@ -1,13 +1,16 @@
 #!/usr/bin/env bun
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import { Effect, Schema as S } from "effect";
 import {
   AppleFmBackendError,
   makeAppleFmClient,
   type AppleFmPlainTextCompletion,
   type AppleFmReadiness,
+  type AppleFmToolStreamResult,
 } from "./backends/apple-fm/client";
+import { makeAppleFmToolCallbackSession, type AppleFmToolDefinition } from "./backends/apple-fm/tools";
 import { makeOmegaAccountClient, type OmegaAccountClient } from "./omega/account-client";
 import { sanitizeProbePublicProjection } from "./contracts/provider-account";
 import { type ProbeRunnerIdentity } from "./runner/identity";
@@ -69,9 +72,51 @@ function handleProbeCli(
       return yield* appleFmSmoke(options, deps);
     }
 
+    if (namespace === "apple-fm" && command === "tool-stream-demo") {
+      return yield* appleFmToolStreamDemo(options, deps);
+    }
+
     return {
       exitCode: 1,
       stdout: usage(),
+      stderr: "",
+    };
+  });
+}
+
+function appleFmToolStreamDemo(
+  options: Record<string, string | true>,
+  deps: ProbeCliDeps,
+): Effect.Effect<ProbeCliResult, ProbeCliError> {
+  return Effect.gen(function* () {
+    const client = yield* makeAppleFmClient({
+      profileId: stringOption(options, "profile"),
+      explicitBaseUrl: stringOption(options, "base-url"),
+      env: deps.env,
+      fetch: deps.fetch,
+      now: deps.now,
+    }).pipe(Effect.mapError((error) => new ProbeCliError({ message: error.reason })));
+    yield* client.requireReady().pipe(
+      Effect.mapError((error) => new ProbeCliError({ message: `${error.failureClass}: ${error.reason}` })),
+    );
+    const requestedPath = stringOption(options, "path") ?? "README.md";
+    const prompt =
+      stringOption(options, "prompt") ??
+      `Use the read_file tool to read ${requestedPath}, then stream one concise sentence naming the file and its first heading.`;
+    const toolSession = makeAppleFmToolCallbackSession({
+      tools: [readFileTool(requestedPath)],
+      maxModelRoundTrips: 4,
+      now: deps.now,
+    });
+    const result = yield* client.streamSessionWithTools({
+      prompt,
+      instructions: "Use available tools when the user asks to inspect a local file. Keep the final answer concise.",
+      toolSession,
+    }).pipe(Effect.mapError((error) => new ProbeCliError({ message: `${error.failureClass}: ${error.reason}` })));
+
+    return {
+      exitCode: 0,
+      stdout: formatAppleFmToolStreamDemo(result),
       stderr: "",
     };
   });
@@ -285,6 +330,7 @@ function usage(): string {
     "  probe auth add chatgpt [--base-url URL]",
     "  probe apple-fm status [--base-url URL] [--profile apple-fm-local]",
     "  probe apple-fm smoke [--base-url URL] [--profile apple-fm-local] [--prompt TEXT]",
+    "  probe apple-fm tool-stream-demo [--base-url URL] [--path FILE] [--prompt TEXT]",
   ].join("\n") + "\n";
 }
 
@@ -362,6 +408,99 @@ function formatUsage(usage: AppleFmPlainTextCompletion["usage"]): string {
   }
 
   return parts.join(" ");
+}
+
+function formatAppleFmToolStreamDemo(result: AppleFmToolStreamResult): string {
+  const lines = [
+    "Apple FM tool stream demo",
+    `bridgeSessionId: ${result.bridgeSessionId}`,
+    `events: ${result.events.map((event) => event.kind).join(" -> ")}`,
+  ];
+
+  for (const event of result.events) {
+    if (event.kind === "assistant_snapshot" && event.content !== undefined) {
+      lines.push(`snapshot: ${event.content}`);
+    }
+  }
+
+  for (const entry of result.toolTranscript) {
+    lines.push(`tool: ${entry.toolName} ${entry.status} ${JSON.stringify(entry.input)}`);
+  }
+
+  lines.push(`final: ${result.completion.text}`);
+  lines.push(`usage: ${formatUsage(result.completion.usage)}`);
+  lines.push(`receipt: ${JSON.stringify(result.completion.receipt)}`);
+
+  return `${lines.join("\n")}\n`;
+}
+
+function readFileTool(allowedPath: string): AppleFmToolDefinition {
+  return {
+    name: "read_file",
+    description: `Read ${allowedPath} from the current Probe workspace.`,
+    inputSchema: {
+      type: "object",
+      title: "ReadFileArguments",
+      properties: {
+        path: {
+          type: "string",
+          title: "path",
+          description: "workspace-relative file path to read.",
+          enum: [allowedPath],
+        },
+      },
+      required: ["path"],
+      "x-order": ["path"],
+      additionalProperties: false,
+    },
+    policy: "allow",
+    execute: (input) =>
+      Effect.gen(function* () {
+        const path = typeof input.path === "string" ? input.path : "README.md";
+        const workspace = resolveProbeWorkspaceRoot();
+        const absolutePath = resolve(workspace, path);
+        const relativePath = relative(workspace, absolutePath);
+
+        if (relativePath.startsWith("..") || relativePath === "" || relativePath.split(sep).includes("..")) {
+          return {
+            path,
+            error: "path escapes workspace",
+          };
+        }
+
+        const content = yield* Effect.tryPromise({
+          try: () => readFile(absolutePath, "utf8"),
+          catch: (error) => error,
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.succeed(`failed to read ${path}: ${String(error)}`),
+          ),
+        );
+
+        return {
+          path,
+          content: typeof content === "string" ? content.slice(0, 4000) : String(content),
+        };
+      }),
+  };
+}
+
+function resolveProbeWorkspaceRoot(start = process.cwd()): string {
+  let current = resolve(start);
+
+  for (;;) {
+    if (existsSync(resolve(current, "packages/runtime/src/cli.ts")) && existsSync(resolve(current, "README.md"))) {
+      return current;
+    }
+
+    const parent = dirname(current);
+
+    if (parent === current) {
+      return resolve(start);
+    }
+
+    current = parent;
+  }
 }
 
 if (import.meta.main) {
