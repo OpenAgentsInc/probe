@@ -78,7 +78,8 @@ Tracked files should stay minimal until the new architecture lands:
 - `packages/runtime/src/blueprint/` defines the narrowed Blueprint consumer
   contracts, static registry fixtures, and registry source client Probe needs
   before live Omega Blueprint routes exist, plus the typed signature lookup
-  service and backend-independent tool menu planner used for backend preflight.
+  service, backend-independent tool menu planner, and local Program Run evidence
+  contracts used for backend preflight.
 - `docs/probe-omega-auth-contract.md` records the implemented account-contract
   slice.
 - `docs/probe-omega-run-assignment.md` records the implemented assignment and
@@ -106,6 +107,8 @@ Tracked files should stay minimal until the new architecture lands:
   service and no-keyword-routing selector posture.
 - `docs/probe-blueprint-tool-menu-planner.md` records the backend-independent
   Probe tool menu planner.
+- `docs/probe-blueprint-program-run-evidence.md` records the evidence-only
+  Program Run shape emitted by Apple FM tool streams.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 

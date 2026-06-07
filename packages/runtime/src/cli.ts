@@ -14,6 +14,7 @@ import {
   type AppleFmBlueprintToolProjection,
   projectProbeToolMenuToAppleFm,
 } from "./backends/apple-fm/blueprint-tools";
+import { makeAppleFmToolStreamProgramRunEvidence } from "./backends/apple-fm/program-run-evidence";
 import { makeAppleFmToolCallbackSession } from "./backends/apple-fm/tools";
 import {
   loadBlueprintSignatureRegistry,
@@ -160,10 +161,18 @@ function appleFmToolStreamDemo(
       instructions: "Use available tools when the user asks to inspect a local file. Keep the final answer concise.",
       toolSession,
     }).pipe(Effect.mapError((error) => new ProbeCliError({ message: `${error.failureClass}: ${error.reason}` })));
+    const programRunEvidence = yield* makeAppleFmToolStreamProgramRunEvidence({
+      actorRef: "actor.probe.cli",
+      menu,
+      observedAt: (deps.now ?? new Date()).toISOString(),
+      promptSummaryRef: `prompt_summary.probe.cli.${requestedPath}`,
+      projection: projectedMenu.projection,
+      result,
+    }).pipe(Effect.mapError((error) => new ProbeCliError({ message: error.reason })));
 
     return {
       exitCode: 0,
-      stdout: formatAppleFmToolStreamDemo(result, projectedMenu.projection),
+      stdout: formatAppleFmToolStreamDemo(result, projectedMenu.projection, programRunEvidence),
       stderr: "",
     };
   });
@@ -460,6 +469,7 @@ function formatUsage(usage: AppleFmPlainTextCompletion["usage"]): string {
 function formatAppleFmToolStreamDemo(
   result: AppleFmToolStreamResult,
   projection?: AppleFmBlueprintToolProjection,
+  programRunEvidence?: { readonly programRunRef: string; readonly inputSnapshotHash: string },
 ): string {
   const lines = [
     "Apple FM tool stream demo",
@@ -473,6 +483,11 @@ function formatAppleFmToolStreamDemo(
     lines.push(`blueprintRegistryVersionRef: ${projection.registryVersionRef}`);
     lines.push(`blueprintProgramSignatures: ${projection.programSignatureIds.join(",")}`);
     lines.push(`blueprintTools: ${projection.toolRefs.map((tool) => `${tool.toolRef}:${tool.toolName}`).join(",")}`);
+  }
+
+  if (programRunEvidence !== undefined) {
+    lines.push(`programRunRef: ${programRunEvidence.programRunRef}`);
+    lines.push(`programRunInputSnapshotHash: ${programRunEvidence.inputSnapshotHash}`);
   }
 
   for (const event of result.events) {

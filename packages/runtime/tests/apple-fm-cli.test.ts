@@ -256,6 +256,8 @@ describe("Probe CLI Apple FM commands", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("blueprintLookupId: blueprint_signature_lookup.apple_fm.tool_stream_demo");
     expect(result.stdout).toContain("blueprintTools: tool.probe.read_file:read_file");
+    expect(result.stdout).toContain("programRunRef: program_run.probe.apple_fm.sess-cli-tool-demo");
+    expect(result.stdout).toContain("programRunInputSnapshotHash: sha256:");
     expect(result.stdout).toContain("tool: read_file success");
     expect(result.stdout).toContain("final: README.md first heading is Probe.");
     expect(callbackOutput).toContain("# Probe");

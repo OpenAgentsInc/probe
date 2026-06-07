@@ -3,6 +3,7 @@ export * from "./backends/apple-fm/acceptance";
 export * from "./backends/apple-fm/blueprint-tools";
 export * from "./backends/apple-fm/client";
 export * from "./backends/apple-fm/contract";
+export * from "./backends/apple-fm/program-run-evidence";
 export * from "./backends/apple-fm/receipts";
 export * from "./backends/apple-fm/tools";
 export * from "./backends/backend-profile";
