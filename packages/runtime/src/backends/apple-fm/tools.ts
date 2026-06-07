@@ -11,6 +11,7 @@ export const AppleFmToolName = S.Literals([
   "apply_patch",
   "consult_oracle",
   "analyze_repository",
+  "propose_action_submission",
 ]);
 export type AppleFmToolName = typeof AppleFmToolName.Type;
 
@@ -430,7 +431,8 @@ function normalizeToolName(value: string): AppleFmToolName {
     value === "shell" ||
     value === "apply_patch" ||
     value === "consult_oracle" ||
-    value === "analyze_repository"
+    value === "analyze_repository" ||
+    value === "propose_action_submission"
     ? value
     : "read_file";
 }

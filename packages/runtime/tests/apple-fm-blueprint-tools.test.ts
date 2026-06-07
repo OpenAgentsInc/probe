@@ -95,6 +95,56 @@ describe("Apple FM Blueprint tool projection", () => {
     });
   });
 
+  test("projects Action Submission proposals as approval-required Apple FM tools", async () => {
+    const registryView = await Effect.runPromise(loadBlueprintSignatureRegistry({ sourceKind: "staticFixture" }));
+    const lookup = await Effect.runPromise(
+      lookupBlueprintSignatures({
+        backendCapabilityRefs: ["probe.backend.apple_fm_bridge", "probe.blueprint.tool_menu"],
+        lookupId: "lookup.apple_projection.action_submission.test",
+        registryView,
+        request: {
+          actorRef: "actor.probe.test",
+          allowedSurfaces: ["agent_api"],
+          backendKind: "apple_fm_bridge",
+          contextPackRef: "context_pack.test",
+          programSignatureIds: ["program_signature.probe.tool_menu.project.v1"],
+          riskCeiling: "medium",
+        },
+      }),
+    );
+    const menu = await Effect.runPromise(
+      planProbeToolMenu({
+        backendKind: "apple_fm_bridge",
+        contextPackRefs: ["context_pack.test"],
+        deniedToolRefs: [],
+        lookup,
+        menuId: "menu.apple_projection.action_submission.test",
+        sourceAuthorityRefs: ["source_authority.test"],
+        supportedToolRefs: [
+          "tool.probe.read_file",
+          "tool.probe.code_search",
+          "tool.probe.propose_action_submission",
+        ],
+      }),
+    );
+
+    const projected = await Effect.runPromise(
+      projectProbeToolMenuToAppleFm({
+        executors: {
+          "tool.probe.code_search": () => Effect.succeed({ resultRefs: [] }),
+          "tool.probe.propose_action_submission": () => Effect.succeed({ proposalRef: "action_submission.test" }),
+          "tool.probe.read_file": () => Effect.succeed({ path: "README.md", contentRef: "artifact.readme" }),
+        },
+        menu,
+      }),
+    );
+    const proposalTool = projected.toolDefinitions.find((tool) => tool.name === "propose_action_submission");
+
+    expect(proposalTool?.policy).toBe("approval_required");
+    expect(proposalTool?.inputSchema.additionalProperties).toBe(false);
+    expect(projected.projection.toolRefs.map((tool) => tool.toolRef)).toContain("tool.probe.propose_action_submission");
+  });
+
   test("fails before Apple FM session creation for unbounded object schemas", async () => {
     const menu = await readFileMenu();
     const unsafeMenu: ProbeToolMenu = {

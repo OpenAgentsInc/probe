@@ -112,6 +112,8 @@ Tracked files should stay minimal until the new architecture lands:
   Program Run shape emitted by Apple FM tool streams.
 - `docs/probe-blueprint-backend-capability-routing.md` records the
   Blueprint-aware backend capability facts used by Pylon/SHC routing.
+- `docs/probe-blueprint-action-submission-boundary.md` records the proposal-only
+  write boundary for external effects.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 

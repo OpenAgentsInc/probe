@@ -154,9 +154,9 @@ function appleFmToolNameFromProbe(toolName: ProbeToolName): AppleFmToolName | un
   switch (toolName) {
     case "read_file":
     case "code_search":
+    case "propose_action_submission":
       return toolName;
     case "record_evidence":
-    case "propose_action_submission":
       return undefined;
   }
 }

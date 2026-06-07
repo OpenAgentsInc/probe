@@ -125,9 +125,11 @@ const TOOL_CATALOG: Readonly<Record<string, ToolCatalogEntry>> = {
       type: "object",
       properties: {
         actionKind: { type: "string" },
+        programRunRef: { type: "string" },
         evidenceRef: { type: "string" },
+        summaryRef: { type: "string" },
       },
-      required: ["actionKind", "evidenceRef"],
+      required: ["actionKind", "programRunRef", "evidenceRef", "summaryRef"],
       additionalProperties: false,
     },
     inputSchemaRef: "schema.probe.tool.propose_action_submission.input.v1",
