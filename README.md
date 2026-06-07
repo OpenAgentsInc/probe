@@ -77,7 +77,8 @@ Tracked files should stay minimal until the new architecture lands:
   Apple FM acceptance cases and comparison receipts.
 - `packages/runtime/src/blueprint/` defines the narrowed Blueprint consumer
   contracts, static registry fixtures, and registry source client Probe needs
-  before live Omega Blueprint routes exist.
+  before live Omega Blueprint routes exist, plus the typed signature lookup
+  service used for backend preflight.
 - `docs/probe-omega-auth-contract.md` records the implemented account-contract
   slice.
 - `docs/probe-omega-run-assignment.md` records the implemented assignment and
@@ -101,6 +102,8 @@ Tracked files should stay minimal until the new architecture lands:
   shared Blueprint signature lookup feeding Apple FM and other Probe backends.
 - `docs/probe-blueprint-consumer-contracts.md` records the local narrowed
   Blueprint mirror and safety posture.
+- `docs/probe-blueprint-signature-lookup-service.md` records the typed lookup
+  service and no-keyword-routing selector posture.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 

@@ -297,6 +297,8 @@ export type BlueprintProgramRunDetailProjection = typeof BlueprintProgramRunDeta
 
 export const BlueprintProgramRegistryEntry = S.Struct({
   approvalRequired: S.Boolean,
+  backendKinds: S.Array(S.String),
+  capabilityRefs: S.Array(S.String),
   directMutationAllowed: S.Boolean,
   evidenceRefs: S.Array(S.String),
   failureRefs: S.Array(S.String),

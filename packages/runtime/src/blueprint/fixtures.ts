@@ -280,6 +280,8 @@ export const STATIC_BLUEPRINT_PROGRAM_REGISTRY: BlueprintProgramRegistryProjecti
   entries: [
     {
       approvalRequired: false,
+      backendKinds: ["apple_fm_bridge"],
+      capabilityRefs: ["probe.backend.apple_fm_bridge", "probe.blueprint.signature_lookup"],
       directMutationAllowed: false,
       evidenceRefs: ["evidence.blueprint.signature_lookup.registry_projection_ref"],
       failureRefs: [],
@@ -298,6 +300,8 @@ export const STATIC_BLUEPRINT_PROGRAM_REGISTRY: BlueprintProgramRegistryProjecti
     },
     {
       approvalRequired: true,
+      backendKinds: ["apple_fm_bridge"],
+      capabilityRefs: ["probe.backend.apple_fm_bridge", "probe.blueprint.tool_menu"],
       directMutationAllowed: false,
       evidenceRefs: ["evidence.blueprint.tool_menu.projected_from_signature_scopes"],
       failureRefs: [],
