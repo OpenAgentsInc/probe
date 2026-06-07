@@ -75,6 +75,9 @@ Tracked files should stay minimal until the new architecture lands:
   Apple FM tool-callback session runtime.
 - `packages/runtime/src/backends/apple-fm/acceptance.ts` defines retained
   Apple FM acceptance cases and comparison receipts.
+- `packages/runtime/src/blueprint/` defines the narrowed Blueprint consumer
+  contracts and static registry fixtures Probe needs before live Omega
+  Blueprint routes exist.
 - `docs/probe-omega-auth-contract.md` records the implemented account-contract
   slice.
 - `docs/probe-omega-run-assignment.md` records the implemented assignment and
@@ -96,6 +99,8 @@ Tracked files should stay minimal until the new architecture lands:
 - `docs/2026-06-07-blueprint-signature-lookup-apple-fm-tool-use-audit.md`
   audits Guidance Module and Blueprint prior art and records the roadmap for
   shared Blueprint signature lookup feeding Apple FM and other Probe backends.
+- `docs/probe-blueprint-consumer-contracts.md` records the local narrowed
+  Blueprint mirror and safety posture.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 
