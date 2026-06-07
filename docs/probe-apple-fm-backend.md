@@ -3,8 +3,8 @@
 Date: 2026-06-07
 
 Status: implemented contract, attach/status, plain-text smoke,
-assignment-routing, and snapshot-streaming slices for Probe issues #163
-through #167.
+assignment-routing, snapshot-streaming, and tool-callback slices for Probe
+issues #163 through #168.
 
 ## Contract
 
@@ -105,6 +105,35 @@ start/finish/failure events.
 Apple FM assignments do not require ChatGPT accounts, OpenAI API keys, Omega
 provider auth grants, or local auth materialization.
 
+## Tool Callback Lane
+
+`packages/runtime/src/backends/apple-fm/tools.ts` implements the first
+Probe-owned Apple FM tool-callback runtime. Apple FM can receive projected tool
+schemas and call back into a session-local loopback server, but Probe remains
+the authority for:
+
+- tool registry and schema normalization
+- callback token validation
+- approval-required and refused tools
+- `maxModelRoundTrips`
+- transcript entries
+- redacted callback receipts
+- resume from Probe transcript state
+
+Projected tools are limited to the retained Probe names:
+
+- `read_file`
+- `list_files`
+- `code_search`
+- `shell`
+- `apply_patch`
+- `consult_oracle`
+- `analyze_repository`
+
+Raw callback tokens and callback URLs are not included in public descriptors,
+transcript entries, or receipts. Callback receipts carry
+`callbackTokenRedacted: true` and `callbackUrl: "[redacted]"`.
+
 ## Tests
 
 `packages/runtime/src/backends/apple-fm/fake-server.test.ts` covers:
@@ -123,5 +152,9 @@ rejection with an availability receipt.
 
 `packages/runtime/tests/apple-fm-streaming.test.ts` covers multi-snapshot
 replacement, final commit separation, and typed stream failure receipts.
+
+`packages/runtime/tests/apple-fm-tools.test.ts` covers loopback callback
+execution, approval-pending transcript persistence, round-trip limits, and
+resume from Probe transcript state.
 
 The fake bridge tests do not require admitted Apple hardware.

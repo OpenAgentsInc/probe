@@ -69,6 +69,8 @@ Tracked files should stay minimal until the new architecture lands:
   bridge health and preserves typed availability.
 - `packages/runtime/src/backends/apple-fm/receipts.ts` defines redacted Apple
   FM availability, failure, and transcript receipts.
+- `packages/runtime/src/backends/apple-fm/tools.ts` defines the Probe-owned
+  Apple FM tool-callback session runtime.
 - `docs/probe-omega-auth-contract.md` records the implemented account-contract
   slice.
 - `docs/probe-omega-run-assignment.md` records the implemented assignment and
