@@ -1,4 +1,5 @@
 import { Effect, Schema as S } from "effect";
+import { APPLE_FM_BACKEND_KIND } from "../backends/apple-fm/contract";
 import {
   ChatGptCodexProvider,
   ProviderAccountRef,
@@ -15,11 +16,18 @@ export const ProbeRepositoryRef = S.Struct({
 });
 export type ProbeRepositoryRef = typeof ProbeRepositoryRef.Type;
 
+export const ProbeAssignmentBackend = S.Struct({
+  kind: S.Literal(APPLE_FM_BACKEND_KIND),
+  profile: S.optional(S.String),
+});
+export type ProbeAssignmentBackend = typeof ProbeAssignmentBackend.Type;
+
 export const ProbeRunAssignment = S.Struct({
   assignmentId: S.String,
   runnerSessionId: S.String,
   goal: S.String,
   runtime: S.optional(S.String),
+  backend: S.optional(ProbeAssignmentBackend),
   provider: S.optional(ChatGptCodexProvider),
   providerAccountRef: S.optional(ProviderAccountRef),
   authGrantRef: S.optional(ProviderAuthGrantRef),
@@ -53,6 +61,20 @@ export function decodeProbeRunAssignment(
 
 export function assignmentRequiresProviderGrant(assignment: ProbeRunAssignment): boolean {
   return assignment.provider === "chatgpt_codex" || assignment.providerAccountRef !== undefined || assignment.authGrantRef !== undefined;
+}
+
+export function assignmentSelectsAppleFmBackend(
+  assignment: ProbeRunAssignment,
+): assignment is ProbeRunAssignment & { readonly backend: ProbeAssignmentBackend } {
+  return assignment.backend?.kind === APPLE_FM_BACKEND_KIND;
+}
+
+export function requireAppleFmAssignmentBackend(
+  assignment: ProbeRunAssignment,
+): Effect.Effect<ProbeAssignmentBackend, ProbeAssignmentParseError> {
+  return assignmentSelectsAppleFmBackend(assignment)
+    ? Effect.succeed(assignment.backend)
+    : Effect.fail(new ProbeAssignmentParseError({ reason: "assignment is not selecting apple_fm_bridge" }));
 }
 
 export function requireAssignmentGrantRefs(

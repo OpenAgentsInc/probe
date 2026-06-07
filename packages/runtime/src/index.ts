@@ -11,3 +11,4 @@ export * from "./fleet/telemetry";
 export * from "./omega/account-client";
 export * from "./omega/grant-client";
 export * from "./runner/identity";
+export * from "./runtime/backend-assignment";

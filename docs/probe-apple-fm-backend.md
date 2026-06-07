@@ -2,8 +2,8 @@
 
 Date: 2026-06-07
 
-Status: implemented contract, attach/status, and plain-text smoke slices for
-Probe issues #163, #164, and #165.
+Status: implemented contract, attach/status, plain-text smoke, and
+assignment-routing slices for Probe issues #163 through #166.
 
 ## Contract
 
@@ -69,6 +69,28 @@ The smoke command runs readiness first. It sends one plain-text prompt only
 after `requireReady()` succeeds, prints assistant text, reports usage truth, and
 prints a redacted backend transcript or failure receipt.
 
+## Assignment Routing
+
+Probe assignments can now select Apple FM without provider account refs:
+
+```json
+{
+  "backend": {
+    "kind": "apple_fm_bridge",
+    "profile": "apple-fm-local"
+  }
+}
+```
+
+`packages/runtime/src/runtime/backend-assignment.ts` implements the no-auth
+assignment path. It requires runner capability
+`probe.backend.apple_fm_bridge`, checks live Apple FM health, runs the same
+plain-text client used by the CLI, and emits redacted backend
+start/finish/failure events.
+
+Apple FM assignments do not require ChatGPT accounts, OpenAI API keys, Omega
+provider auth grants, or local auth materialization.
+
 ## Tests
 
 `packages/runtime/src/backends/apple-fm/fake-server.test.ts` covers:
@@ -80,5 +102,9 @@ prints a redacted backend transcript or failure receipt.
 `packages/runtime/tests/apple-fm-cli.test.ts` covers ready, unsupported, and
 unreachable status output, smoke readiness gating, estimated usage
 normalization, and typed completion failures without admitted Apple hardware.
+
+`packages/runtime/tests/backend-assignment.test.ts` covers Apple FM assignment
+routing, missing backend capability rejection, and non-ready live health
+rejection with an availability receipt.
 
 The fake bridge tests do not require admitted Apple hardware.

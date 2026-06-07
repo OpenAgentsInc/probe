@@ -5,8 +5,11 @@ import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
 import {
   authorizeRunnerForAssignment,
+  assignmentRequiresProviderGrant,
   CHATGPT_CODEX_PROVIDER,
   decodeProbeRunAssignment,
+  PROBE_APPLE_FM_BACKEND_CAPABILITY,
+  requiredRunnerCapabilitiesForAssignment,
   makeStaticOmegaGrantResolver,
   makeStaticProbeSecretBroker,
   prepareAuthorizedProbeAuthRun,
@@ -24,6 +27,16 @@ const assignment = (): ProbeRunAssignment => ({
   provider: CHATGPT_CODEX_PROVIDER,
   providerAccountRef: "provider-account_primary" as ProbeRunAssignment["providerAccountRef"],
   authGrantRef: "provider-auth-grant_1" as ProbeRunAssignment["authGrantRef"],
+});
+
+const appleFmAssignment = (): ProbeRunAssignment => ({
+  assignmentId: "assignment_1",
+  runnerSessionId: "runner_session_1",
+  goal: "Summarize the repository locally",
+  backend: {
+    kind: "apple_fm_bridge",
+    profile: "apple-fm-local",
+  },
 });
 
 const runner = (overrides: Partial<ProbeRunnerIdentity> = {}): ProbeRunnerIdentity => ({
@@ -130,5 +143,35 @@ describe("Probe runner identity gate", () => {
         }),
       ),
     ).rejects.toMatchObject({ _tag: "ProbePublicProjectionUnsafe" });
+  });
+
+  test("Apple FM assignments require backend capability but no Omega grant capability", async () => {
+    await Effect.runPromise(
+      authorizeRunnerForAssignment(
+        runner({
+          capabilities: ["probe.run", PROBE_APPLE_FM_BACKEND_CAPABILITY],
+        }),
+        proof(),
+        appleFmAssignment(),
+      ),
+    );
+
+    expect(assignmentRequiresProviderGrant(appleFmAssignment())).toBe(false);
+    expect(requiredRunnerCapabilitiesForAssignment(appleFmAssignment())).toEqual([
+      "probe.run",
+      PROBE_APPLE_FM_BACKEND_CAPABILITY,
+    ]);
+
+    await expect(
+      Effect.runPromise(
+        authorizeRunnerForAssignment(
+          runner({
+            capabilities: ["probe.run"],
+          }),
+          proof(),
+          appleFmAssignment(),
+        ),
+      ),
+    ).rejects.toMatchObject({ _tag: "ProbeRunnerAuthorizationError" });
   });
 });

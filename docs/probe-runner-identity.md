@@ -25,7 +25,9 @@ for one assigned execution context.
 
 The authorization gate checks:
 
-- runner capabilities include `probe.run` and `omega.grant.resolve`
+- runner capabilities include `probe.run`
+- ChatGPT/Codex assignments also include `omega.grant.resolve`
+- Apple FM assignments include `probe.backend.apple_fm_bridge`
 - proof runner id matches linked runner id
 - proof assignment id matches the assignment
 - proof runner session id matches the assignment
@@ -35,6 +37,11 @@ The authorization gate checks:
 `prepareAuthorizedProbeAuthRun` authorizes the runner, resolves the Omega
 grant, asks a secret broker for the matching secret ref, and materializes auth
 inside the run home.
+
+Apple FM backend assignments use the same runner/proof identity gate but skip
+grant resolution and auth materialization. The assignment runner rejects the run
+unless the linked runner declares `probe.backend.apple_fm_bridge` and live Apple
+FM health is ready.
 
 ## Future Integration
 
@@ -52,3 +59,5 @@ should plug into this boundary before production runners resolve grants.
 - mismatched assignment proof denial
 - raw credential rejection in SHC/Pylon assignment payloads
 - scrub receipt emission after sandbox closeout
+- Apple FM backend assignments requiring backend capability without
+  `omega.grant.resolve`

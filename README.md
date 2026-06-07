@@ -55,6 +55,8 @@ Tracked files should stay minimal until the new architecture lands:
   inside per-run env/file targets and scrubs it on closeout.
 - `packages/runtime/src/runner/identity.ts` gates Omega grant use on linked
   Probe runner identity before resolving and materializing auth.
+- `packages/runtime/src/runtime/backend-assignment.ts` routes no-auth Apple FM
+  assignments through live backend health and emits backend run events.
 - `packages/runtime/src/cli.ts` exposes the first Probe CLI commands for Omega
   linking and account management.
 - `packages/runtime/src/fleet/telemetry.ts` reports auth/account health signals

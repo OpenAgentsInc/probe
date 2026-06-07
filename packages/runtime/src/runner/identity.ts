@@ -1,5 +1,9 @@
 import { Effect, Schema as S } from "effect";
-import { type ProbeRunAssignment } from "../contracts/assignment";
+import {
+  assignmentRequiresProviderGrant,
+  assignmentSelectsAppleFmBackend,
+  type ProbeRunAssignment,
+} from "../contracts/assignment";
 import { validateProbePublicProjection, type ProbePublicProjectionUnsafe } from "../contracts/provider-account";
 import {
   materializeProbeAuthGrant,
@@ -11,6 +15,8 @@ import { type OmegaGrantResolver, type ProbeAuthGrantError } from "../omega/gran
 
 export const ProbeRunnerKind = S.Literals(["local", "shc", "pylon", "sandbox"]);
 export type ProbeRunnerKind = typeof ProbeRunnerKind.Type;
+
+export const PROBE_APPLE_FM_BACKEND_CAPABILITY = "probe.backend.apple_fm_bridge" as const;
 
 export const ProbeRunnerIdentity = S.Struct({
   runnerId: S.String,
@@ -74,10 +80,14 @@ export function authorizeRunnerForAssignment(
     yield* validateProbePublicProjection(proof, "proof");
     yield* validateProbePublicProjection(assignment, "assignment");
 
-    if (!runner.capabilities.includes("probe.run") || !runner.capabilities.includes("omega.grant.resolve")) {
+    const missingCapabilities = requiredRunnerCapabilitiesForAssignment(assignment).filter(
+      (capability) => !runner.capabilities.includes(capability),
+    );
+
+    if (missingCapabilities.length > 0) {
       return yield* Effect.fail(
         new ProbeRunnerAuthorizationError({
-          reason: "runner is missing required Probe/Omega capabilities",
+          reason: `runner is missing required capabilities: ${missingCapabilities.join(", ")}`,
         }),
       );
     }
@@ -110,6 +120,20 @@ export function authorizeRunnerForAssignment(
       }
     }
   });
+}
+
+export function requiredRunnerCapabilitiesForAssignment(assignment: ProbeRunAssignment): ReadonlyArray<string> {
+  const capabilities = ["probe.run"];
+
+  if (assignmentRequiresProviderGrant(assignment)) {
+    capabilities.push("omega.grant.resolve");
+  }
+
+  if (assignmentSelectsAppleFmBackend(assignment)) {
+    capabilities.push(PROBE_APPLE_FM_BACKEND_CAPABILITY);
+  }
+
+  return capabilities;
 }
 
 export function prepareAuthorizedProbeAuthRun(

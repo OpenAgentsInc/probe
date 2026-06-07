@@ -19,6 +19,22 @@ Probe runtime assignments may carry Omega provider auth references:
 Assignments must carry refs and grants only. They must not include raw
 ChatGPT/OAuth token material.
 
+Assignments may also select a no-auth backend instead of a provider account.
+The first implemented backend selection is:
+
+```json
+{
+  "backend": {
+    "kind": "apple_fm_bridge",
+    "profile": "apple-fm-local"
+  }
+}
+```
+
+That Apple FM path uses local attach configuration and live health. It does not
+use `providerAccountRef`, `authGrantRef`, ChatGPT account linking, or Omega
+grant resolution.
+
 ## Grant Resolution
 
 `packages/runtime/src/omega/grant-client.ts` implements an Effect-based Omega
