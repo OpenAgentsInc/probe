@@ -2,8 +2,8 @@
 
 Date: 2026-06-07
 
-Status: implemented contract and attach/status slices for Probe issues #163 and
-#164.
+Status: implemented contract, attach/status, and plain-text smoke slices for
+Probe issues #163, #164, and #165.
 
 ## Contract
 
@@ -45,13 +45,29 @@ readiness path. It checks `GET /health`, decodes typed availability, and returns
 redacted availability receipts for ready, unavailable, unsupported, malformed,
 and unreachable bridge states.
 
+The same client implements the first inference path:
+
+- `completePlainText(messages)`
+- `smoke(prompt)`
+
+Plain-text completion posts to `/v1/chat/completions`, normalizes the bridge
+response into Probe's Apple FM contract, and emits redacted transcript receipts.
+Usage truth is preserved as `exact`, `estimated`, or `unknown`; OpenAI-shaped
+token counts without explicit truth are treated as `estimated`, not exact.
+
 `packages/runtime/src/cli.ts` exposes:
 
 - `probe apple-fm status [--base-url URL] [--profile apple-fm-local]`
+- `probe apple-fm smoke [--base-url URL] [--profile apple-fm-local]
+  [--prompt TEXT]`
 
 The status command performs no inference. It exits with `0` only when live
 health is ready, and exits nonzero with typed status output when the bridge is
 unavailable, unsupported, unreachable, or malformed.
+
+The smoke command runs readiness first. It sends one plain-text prompt only
+after `requireReady()` succeeds, prints assistant text, reports usage truth, and
+prints a redacted backend transcript or failure receipt.
 
 ## Tests
 
@@ -62,6 +78,7 @@ unavailable, unsupported, unreachable, or malformed.
 - redacted availability/transcript receipt behavior
 
 `packages/runtime/tests/apple-fm-cli.test.ts` covers ready, unsupported, and
-unreachable status output without admitted Apple hardware.
+unreachable status output, smoke readiness gating, estimated usage
+normalization, and typed completion failures without admitted Apple hardware.
 
 The fake bridge tests do not require admitted Apple hardware.

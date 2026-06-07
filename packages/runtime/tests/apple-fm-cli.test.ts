@@ -66,5 +66,113 @@ describe("Probe CLI Apple FM commands", () => {
     expect(result.stdout).toContain("unavailableReason: bridge_unreachable");
     expect(result.stdout).toContain("\"ready\":false");
   });
-});
 
+  test("probe apple-fm smoke requires readiness before completing plain text", async () => {
+    const seenPaths: string[] = [];
+    const result = await Effect.runPromise(
+      runProbeCli(["apple-fm", "smoke", "--base-url", "http://127.0.0.1:11439", "--prompt", "hello"], {
+        fetch: async (input, init) => {
+          const url = new URL(String(input));
+          seenPaths.push(`${init?.method ?? "GET"} ${url.pathname}`);
+
+          if (url.pathname === "/health") {
+            return Response.json({
+              ready: true,
+              modelId: APPLE_FM_DEFAULT_MODEL_ID,
+            });
+          }
+
+          expect(url.pathname).toBe("/v1/chat/completions");
+          expect(init?.method).toBe("POST");
+          const body = JSON.parse(String(init?.body));
+          expect(body.messages).toEqual([{ role: "user", content: "hello" }]);
+
+          return Response.json({
+            id: "fake_completion_1",
+            model: APPLE_FM_DEFAULT_MODEL_ID,
+            choices: [
+              {
+                index: 0,
+                message: {
+                  role: "assistant",
+                  content: "probe apple fm smoke ok",
+                },
+                finish_reason: "stop",
+              },
+            ],
+            usage: {
+              prompt_tokens: 2,
+              completion_tokens: 5,
+              total_tokens: 7,
+            },
+          });
+        },
+        now: new Date("2026-06-07T00:00:00.000Z"),
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("assistant: probe apple fm smoke ok");
+    expect(result.stdout).toContain("usage: truth=estimated prompt=2 completion=5 total=7");
+    expect(result.stdout).toContain("\"kind\":\"probe_backend_transcript\"");
+    expect(seenPaths).toEqual(["GET /health", "POST /v1/chat/completions"]);
+  });
+
+  test("probe apple-fm smoke refuses to complete when health is unavailable", async () => {
+    const seenPaths: string[] = [];
+    const result = await Effect.runPromise(
+      runProbeCli(["apple-fm", "smoke"], {
+        fetch: async (input, init) => {
+          const url = new URL(String(input));
+          seenPaths.push(`${init?.method ?? "GET"} ${url.pathname}`);
+          return Response.json({
+            ready: false,
+            modelId: APPLE_FM_DEFAULT_MODEL_ID,
+            unavailableReason: "model_unavailable",
+            message: "model not ready",
+          });
+        },
+        now: new Date("2026-06-07T00:00:00.000Z"),
+      }),
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("Apple FM smoke failed");
+    expect(result.stdout).toContain("failureClass: model_unavailable");
+    expect(result.stdout).toContain("model not ready");
+    expect(seenPaths).toEqual(["GET /health"]);
+  });
+
+  test("probe apple-fm smoke surfaces typed completion errors", async () => {
+    const result = await Effect.runPromise(
+      runProbeCli(["apple-fm", "smoke"], {
+        fetch: async (input) => {
+          const url = new URL(String(input));
+
+          if (url.pathname === "/health") {
+            return Response.json({
+              ready: true,
+              modelId: APPLE_FM_DEFAULT_MODEL_ID,
+            });
+          }
+
+          return Response.json(
+            {
+              error: {
+                code: "foundation_model_refused",
+                message: "Foundation Models refused the request.",
+              },
+            },
+            { status: 500 },
+          );
+        },
+        now: new Date("2026-06-07T00:00:00.000Z"),
+      }),
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("failureClass: completion_http_500");
+    expect(result.stdout).toContain("Foundation Models refused the request.");
+    expect(result.stdout).toContain("\"kind\":\"probe_backend_failure\"");
+  });
+});

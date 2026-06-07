@@ -2,7 +2,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { Effect, Schema as S } from "effect";
-import { makeAppleFmClient, type AppleFmReadiness } from "./backends/apple-fm/client";
+import {
+  AppleFmBackendError,
+  makeAppleFmClient,
+  type AppleFmPlainTextCompletion,
+  type AppleFmReadiness,
+} from "./backends/apple-fm/client";
 import { makeOmegaAccountClient, type OmegaAccountClient } from "./omega/account-client";
 import { sanitizeProbePublicProjection } from "./contracts/provider-account";
 import { type ProbeRunnerIdentity } from "./runner/identity";
@@ -60,9 +65,46 @@ function handleProbeCli(
       return yield* appleFmStatus(options, deps);
     }
 
+    if (namespace === "apple-fm" && command === "smoke") {
+      return yield* appleFmSmoke(options, deps);
+    }
+
     return {
       exitCode: 1,
       stdout: usage(),
+      stderr: "",
+    };
+  });
+}
+
+function appleFmSmoke(
+  options: Record<string, string | true>,
+  deps: ProbeCliDeps,
+): Effect.Effect<ProbeCliResult, ProbeCliError> {
+  return Effect.gen(function* () {
+    const client = yield* makeAppleFmClient({
+      profileId: stringOption(options, "profile"),
+      explicitBaseUrl: stringOption(options, "base-url"),
+      env: deps.env,
+      fetch: deps.fetch,
+      now: deps.now,
+    }).pipe(Effect.mapError((error) => new ProbeCliError({ message: error.reason })));
+    const prompt = stringOption(options, "prompt") ?? "Reply with: probe apple fm smoke ok.";
+    const result = yield* client.smoke(prompt).pipe(
+      Effect.catch((error: AppleFmBackendError) => Effect.succeed(error)),
+    );
+
+    if (result instanceof AppleFmBackendError) {
+      return {
+        exitCode: 1,
+        stdout: formatAppleFmSmokeFailure(result),
+        stderr: "",
+      };
+    }
+
+    return {
+      exitCode: 0,
+      stdout: formatAppleFmSmokeCompletion(result),
       stderr: "",
     };
   });
@@ -242,6 +284,7 @@ function usage(): string {
     "  probe auth accounts [--base-url URL]",
     "  probe auth add chatgpt [--base-url URL]",
     "  probe apple-fm status [--base-url URL] [--profile apple-fm-local]",
+    "  probe apple-fm smoke [--base-url URL] [--profile apple-fm-local] [--prompt TEXT]",
   ].join("\n") + "\n";
 }
 
@@ -275,6 +318,50 @@ function formatAppleFmStatus(readiness: AppleFmReadiness): string {
   lines.push(`receipt: ${JSON.stringify(readiness.receipt)}`);
 
   return `${lines.join("\n")}\n`;
+}
+
+function formatAppleFmSmokeCompletion(completion: AppleFmPlainTextCompletion): string {
+  return [
+    "Apple FM smoke",
+    `profile: ${completion.profile.id}`,
+    `kind: ${completion.profile.kind}`,
+    `model: ${completion.response.model ?? completion.profile.model}`,
+    `assistant: ${completion.text}`,
+    `usage: ${formatUsage(completion.usage)}`,
+    `receipt: ${JSON.stringify(completion.receipt)}`,
+  ].join("\n") + "\n";
+}
+
+function formatAppleFmSmokeFailure(error: AppleFmBackendError): string {
+  const lines = [
+    "Apple FM smoke failed",
+    `failureClass: ${error.failureClass}`,
+    `message: ${error.reason}`,
+  ];
+
+  if (error.receipt !== undefined) {
+    lines.push(`receipt: ${JSON.stringify(error.receipt)}`);
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+function formatUsage(usage: AppleFmPlainTextCompletion["usage"]): string {
+  const parts = [`truth=${usage.truth}`];
+
+  if (usage.promptTokens !== undefined) {
+    parts.push(`prompt=${usage.promptTokens}`);
+  }
+
+  if (usage.completionTokens !== undefined) {
+    parts.push(`completion=${usage.completionTokens}`);
+  }
+
+  if (usage.totalTokens !== undefined) {
+    parts.push(`total=${usage.totalTokens}`);
+  }
+
+  return parts.join(" ");
 }
 
 if (import.meta.main) {
