@@ -83,7 +83,8 @@ Tracked files should stay minimal until the new architecture lands:
 - `docs/probe-omega-auth-contract.md` records the implemented account-contract
   slice.
 - `docs/probe-omega-run-assignment.md` records the implemented assignment and
-  grant-resolution slice.
+  grant-resolution slice, including Blueprint-scoped assignment refs for
+  Pylon/Omega dispatch.
 - `docs/probe-auth-materialization.md` records the implemented per-run auth
   materialization slice.
 - `docs/probe-runner-identity.md` records the SHC/Pylon/sandbox runner

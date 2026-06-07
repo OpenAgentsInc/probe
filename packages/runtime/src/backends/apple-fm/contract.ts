@@ -4,6 +4,7 @@ export const APPLE_FM_BACKEND_KIND = "apple_fm_bridge" as const;
 export const APPLE_FM_LOCAL_PROFILE_ID = "apple-fm-local" as const;
 export const APPLE_FM_DEFAULT_MODEL_ID = "apple-foundation-model" as const;
 export const APPLE_FM_DEFAULT_BASE_URL = "http://127.0.0.1:11435" as const;
+export const PROBE_APPLE_FM_BACKEND_CAPABILITY = "probe.backend.apple_fm_bridge" as const;
 
 export const AppleFmBackendKind = S.Literal(APPLE_FM_BACKEND_KIND);
 export type AppleFmBackendKind = typeof AppleFmBackendKind.Type;
@@ -90,4 +91,3 @@ export const AppleFmStreamSnapshotEvent = S.Struct({
   finishReason: S.optional(AppleFmFinishReason),
 });
 export type AppleFmStreamSnapshotEvent = typeof AppleFmStreamSnapshotEvent.Type;
-

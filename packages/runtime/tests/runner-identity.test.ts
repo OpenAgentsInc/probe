@@ -174,4 +174,24 @@ describe("Probe runner identity gate", () => {
       ),
     ).rejects.toMatchObject({ _tag: "ProbeRunnerAuthorizationError" });
   });
+
+  test("runner authorization rejects Blueprint capability refs outside the selected backend", async () => {
+    await expect(
+      Effect.runPromise(
+        authorizeRunnerForAssignment(
+          runner({
+            capabilities: ["probe.run", PROBE_APPLE_FM_BACKEND_CAPABILITY],
+          }),
+          proof(),
+          {
+            ...appleFmAssignment(),
+            blueprint: {
+              backendCapabilityRefs: ["probe.backend.openai_responses"],
+              registryVersionRef: "blueprint_registry.test.v1",
+            },
+          },
+        ),
+      ),
+    ).rejects.toMatchObject({ _tag: "ProbeRunnerAuthorizationError" });
+  });
 });

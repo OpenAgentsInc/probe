@@ -1,7 +1,10 @@
 import { Effect, Schema as S } from "effect";
+import { PROBE_APPLE_FM_BACKEND_CAPABILITY } from "../backends/apple-fm/contract";
 import {
   assignmentRequiresProviderGrant,
   assignmentSelectsAppleFmBackend,
+  validateProbeAssignmentBlueprintScope,
+  validateProbeAssignmentProjection,
   type ProbeRunAssignment,
 } from "../contracts/assignment";
 import { validateProbePublicProjection, type ProbePublicProjectionUnsafe } from "../contracts/provider-account";
@@ -15,8 +18,7 @@ import { type OmegaGrantResolver, type ProbeAuthGrantError } from "../omega/gran
 
 export const ProbeRunnerKind = S.Literals(["local", "shc", "pylon", "sandbox"]);
 export type ProbeRunnerKind = typeof ProbeRunnerKind.Type;
-
-export const PROBE_APPLE_FM_BACKEND_CAPABILITY = "probe.backend.apple_fm_bridge" as const;
+export { PROBE_APPLE_FM_BACKEND_CAPABILITY } from "../backends/apple-fm/contract";
 
 export const ProbeRunnerIdentity = S.Struct({
   runnerId: S.String,
@@ -78,7 +80,15 @@ export function authorizeRunnerForAssignment(
   return Effect.gen(function* () {
     yield* validateProbePublicProjection(runner, "runner");
     yield* validateProbePublicProjection(proof, "proof");
-    yield* validateProbePublicProjection(assignment, "assignment");
+    yield* validateProbeAssignmentProjection(assignment);
+    yield* validateProbeAssignmentBlueprintScope(assignment).pipe(
+      Effect.mapError(
+        (error) =>
+          new ProbeRunnerAuthorizationError({
+            reason: `assignment Blueprint scope is invalid: ${"reason" in error ? error.reason : error._tag}`,
+          }),
+      ),
+    );
 
     const missingCapabilities = requiredRunnerCapabilitiesForAssignment(assignment).filter(
       (capability) => !runner.capabilities.includes(capability),

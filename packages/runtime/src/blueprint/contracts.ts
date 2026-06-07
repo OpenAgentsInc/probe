@@ -465,8 +465,17 @@ export class BlueprintProjectionUnsafe extends S.TaggedErrorClass<BlueprintProje
 const PRIVATE_FIELD_PATTERN =
   /(^|[._-])(access_token|authorization|bearer|callback_url|callback_token|client_secret|customer_email|id_token|mnemonic|oauth|password|payment_preimage|private_key|private_repo|provider_payload|raw_email|raw_prompt|refresh_token|secret|token|wallet|xprv)([._-]|$)/i;
 
+const PRIVATE_CAMEL_FIELD_PATTERN =
+  /^(accessToken|authorization|bearer|callbackUrl|callbackToken|clientSecret|customerEmail|idToken|mnemonic|oauth|password|paymentPreimage|privateKey|privateRepo|providerPayload|rawEmail|rawPrompt|refreshToken|secret|token|wallet|xprv)$/i;
+
 const PRIVATE_VALUE_PATTERN =
   /\b(access_token|authorization|bearer|callback_url|callback_token|client_secret|customer_email|id_token|mnemonic|oauth|payment_preimage|private_key|private_repo|provider_payload|raw_email|raw_prompt|refresh_token|wallet|xprv)\b/i;
+
+type BlueprintJsonPrimitive = string | number | boolean | null;
+type BlueprintJsonValue =
+  | BlueprintJsonPrimitive
+  | ReadonlyArray<BlueprintJsonValue>
+  | { readonly [key: string]: BlueprintJsonValue };
 
 export function blueprintProgramRunEvidenceFlagsAreEvidenceOnly(
   flags: BlueprintProgramRunEvidenceFlags,
@@ -556,10 +565,44 @@ export function isBlueprintProjectionPrivateDataSafe(value: unknown): boolean {
   }
 
   for (const [key, child] of Object.entries(value)) {
-    if (PRIVATE_FIELD_PATTERN.test(key) || !isBlueprintProjectionPrivateDataSafe(child)) {
+    if (blueprintPrivateFieldKey(key) || !isBlueprintProjectionPrivateDataSafe(child)) {
       return false;
     }
   }
 
   return true;
+}
+
+export function sanitizeBlueprintProjection<T extends BlueprintJsonValue>(value: T): T {
+  return sanitizeBlueprintJsonValue(value) as T;
+}
+
+function sanitizeBlueprintJsonValue(value: BlueprintJsonValue): BlueprintJsonValue {
+  if (typeof value === "string") {
+    return PRIVATE_VALUE_PATTERN.test(value) ? "[redacted]" : value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => sanitizeBlueprintJsonValue(entry));
+  }
+
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+
+  const sanitized: Record<string, BlueprintJsonValue> = {};
+
+  for (const [key, child] of Object.entries(value)) {
+    if (blueprintPrivateFieldKey(key)) {
+      continue;
+    }
+
+    sanitized[key] = sanitizeBlueprintJsonValue(child);
+  }
+
+  return sanitized;
+}
+
+function blueprintPrivateFieldKey(key: string): boolean {
+  return PRIVATE_FIELD_PATTERN.test(key) || PRIVATE_CAMEL_FIELD_PATTERN.test(key);
 }

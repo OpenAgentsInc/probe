@@ -35,6 +35,53 @@ That Apple FM path uses local attach configuration and live health. It does not
 use `providerAccountRef`, `authGrantRef`, ChatGPT account linking, or Omega
 grant resolution.
 
+## Blueprint Scope
+
+Omega or Pylon dispatch can attach a nested `blueprint` section to narrow the
+run without requiring Probe to fetch the full registry on every assignment:
+
+```json
+{
+  "assignmentId": "assignment_blueprint_1",
+  "runnerSessionId": "runner_session_1",
+  "goal": "Project the allowed local repo tools.",
+  "backend": {
+    "kind": "apple_fm_bridge",
+    "profile": "apple-fm-local"
+  },
+  "blueprint": {
+    "registryVersionRef": "blueprint_registry.probe_static_fixture.v1",
+    "programTypeRefs": ["program_type.probe.tool_menu.project"],
+    "programSignatureRefs": ["program_signature.probe.tool_menu.project.v1"],
+    "moduleVersionRefs": ["module_version.probe.tool_menu.seed.v1"],
+    "contextPackRefs": ["context_pack.openagents.thread_1"],
+    "sourceAuthorityRefs": ["source_authority.repo.openagents.probe"],
+    "toolScopeRefs": ["tool.probe.read_file", "tool.probe.code_search"],
+    "releaseGateRefs": ["release_gate.probe.tool_menu.seed.v1"],
+    "backendCapabilityRefs": ["probe.backend.apple_fm_bridge"],
+    "actionSubmissionPolicyRef": "policy.blueprint.action_submission.proposals_only.v1",
+    "programRunPurposeRef": "purpose.probe.tool_menu.project"
+  }
+}
+```
+
+The optional inline registry slice lives under `blueprint.registry`, with an
+optional `blueprint.contractExport`. Probe treats those as untrusted until they
+decode against the Blueprint schemas and pass the same safe-projection checks
+used by the registry client.
+
+Blueprint refs can narrow runtime scope but cannot widen runner authority. For
+example, `backendCapabilityRefs` must match the selected backend; an Apple FM
+assignment can name `probe.backend.apple_fm_bridge`, but cannot claim some
+other backend capability. Inline registry slices are also cross-checked: when
+a slice is present, requested Program Type, Program Signature, Module Version,
+and Release Gate refs must appear inside that slice.
+
+Blueprint assignment sections are public/operator refs only. The parser rejects
+raw prompts, callback URLs, callback tokens, provider payloads, private repo
+content, wallet material, and private customer data. The assignment sanitizer
+preserves safe Blueprint refs and strips private-data-shaped Blueprint fields.
+
 ## Grant Resolution
 
 `packages/runtime/src/omega/grant-client.ts` implements an Effect-based Omega
@@ -68,3 +115,14 @@ Probe-compatible materialization plan.
 - already-used grant records without materialization
 - OpenCode env name rejection
 - unavailable Omega responses
+
+`packages/runtime/tests/blueprint-assignment.test.ts` covers:
+
+- valid Blueprint-scoped Apple FM assignments
+- no-auth Apple FM assignments without Blueprint fields
+- missing and invalid registry version refs
+- private-data-shaped Blueprint fields
+- assignment sanitization preserving refs while stripping unsafe content
+- unsafe inline registry slices
+- mismatched backend capability refs
+- refs outside an attached inline registry slice

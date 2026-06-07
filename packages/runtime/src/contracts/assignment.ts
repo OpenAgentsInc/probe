@@ -1,11 +1,22 @@
 import { Effect, Schema as S } from "effect";
-import { APPLE_FM_BACKEND_KIND } from "../backends/apple-fm/contract";
+import { APPLE_FM_BACKEND_KIND, PROBE_APPLE_FM_BACKEND_CAPABILITY } from "../backends/apple-fm/contract";
+import {
+  BlueprintContractExportSeed,
+  BlueprintProgramRegistryProjection,
+  isBlueprintProjectionPrivateDataSafe,
+  sanitizeBlueprintProjection,
+  validateBlueprintContractExportSeed,
+  validateBlueprintRegistryProjection,
+  type BlueprintProjectionUnsafe,
+} from "../blueprint/contracts";
 import {
   ChatGptCodexProvider,
   ProviderAccountRef,
   ProviderAuthGrantRef,
+  ProbePublicProjectionUnsafe,
+  sanitizeProbePublicProjection,
   validateProbePublicProjection,
-  type ProbePublicProjectionUnsafe,
+  type JsonValue,
 } from "./provider-account";
 
 export const ProbeRepositoryRef = S.Struct({
@@ -22,12 +33,30 @@ export const ProbeAssignmentBackend = S.Struct({
 });
 export type ProbeAssignmentBackend = typeof ProbeAssignmentBackend.Type;
 
+export const ProbeBlueprintAssignmentScope = S.Struct({
+  actionSubmissionPolicyRef: S.optional(S.String),
+  backendCapabilityRefs: S.optional(S.Array(S.String)),
+  contextPackRefs: S.optional(S.Array(S.String)),
+  contractExport: S.optional(BlueprintContractExportSeed),
+  moduleVersionRefs: S.optional(S.Array(S.String)),
+  programRunPurposeRef: S.optional(S.String),
+  programSignatureRefs: S.optional(S.Array(S.String)),
+  programTypeRefs: S.optional(S.Array(S.String)),
+  registry: S.optional(BlueprintProgramRegistryProjection),
+  registryVersionRef: S.String,
+  releaseGateRefs: S.optional(S.Array(S.String)),
+  sourceAuthorityRefs: S.optional(S.Array(S.String)),
+  toolScopeRefs: S.optional(S.Array(S.String)),
+});
+export type ProbeBlueprintAssignmentScope = typeof ProbeBlueprintAssignmentScope.Type;
+
 export const ProbeRunAssignment = S.Struct({
   assignmentId: S.String,
   runnerSessionId: S.String,
   goal: S.String,
   runtime: S.optional(S.String),
   backend: S.optional(ProbeAssignmentBackend),
+  blueprint: S.optional(ProbeBlueprintAssignmentScope),
   provider: S.optional(ChatGptCodexProvider),
   providerAccountRef: S.optional(ProviderAccountRef),
   authGrantRef: S.optional(ProviderAuthGrantRef),
@@ -47,16 +76,133 @@ export class ProbeAssignmentParseError extends S.TaggedErrorClass<ProbeAssignmen
 
 export function decodeProbeRunAssignment(
   value: unknown,
-): Effect.Effect<ProbeRunAssignment, ProbeAssignmentParseError | ProbePublicProjectionUnsafe> {
-  return S.decodeUnknownEffect(ProbeRunAssignment)(value).pipe(
-    Effect.mapError(
-      (error) =>
-        new ProbeAssignmentParseError({
-          reason: String(error),
-        }),
-    ),
-    Effect.tap((assignment) => validateProbePublicProjection(assignment, "assignment")),
-  );
+): Effect.Effect<ProbeRunAssignment, ProbeAssignmentParseError | ProbePublicProjectionUnsafe | BlueprintProjectionUnsafe> {
+  return Effect.gen(function* () {
+    yield* validateProbeAssignmentProjection(value);
+    const assignment = yield* S.decodeUnknownEffect(ProbeRunAssignment)(value).pipe(
+      Effect.mapError(
+        (error) =>
+          new ProbeAssignmentParseError({
+            reason: String(error),
+          }),
+      ),
+    );
+
+    yield* validateProbeAssignmentBlueprintScope(assignment);
+
+    return assignment;
+  });
+}
+
+export function validateProbeAssignmentProjection(
+  value: unknown,
+): Effect.Effect<void, ProbePublicProjectionUnsafe> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return validateProbePublicProjection(value, "assignment");
+  }
+
+  const { blueprint, ...assignmentWithoutBlueprint } = value as Record<string, unknown>;
+
+  return Effect.gen(function* () {
+    yield* validateProbePublicProjection(assignmentWithoutBlueprint, "assignment");
+
+    if (blueprint !== undefined) {
+      if (!isBlueprintProjectionPrivateDataSafe(blueprint)) {
+        return yield* Effect.fail(
+          new ProbePublicProjectionUnsafe({
+            path: "assignment.blueprint",
+            reason: "contains private-data-shaped material",
+          }),
+        );
+      }
+    }
+  });
+}
+
+export function sanitizeProbeRunAssignmentProjection<T extends JsonValue>(value: T): T {
+  if (value === null || typeof value !== "object" || Array.isArray(value) || !("blueprint" in value)) {
+    return sanitizeProbePublicProjection(value);
+  }
+
+  const { blueprint, ...assignmentWithoutBlueprint } = value as { readonly [key: string]: JsonValue };
+  const sanitized = sanitizeProbePublicProjection(assignmentWithoutBlueprint);
+
+  return {
+    ...sanitized,
+    blueprint: blueprint === undefined ? undefined : sanitizeBlueprintProjection(blueprint),
+  } as T;
+}
+
+export function validateProbeAssignmentBlueprintScope(
+  assignment: ProbeRunAssignment,
+): Effect.Effect<void, ProbeAssignmentParseError | BlueprintProjectionUnsafe> {
+  const scope = assignment.blueprint;
+
+  if (scope === undefined) {
+    return Effect.void;
+  }
+
+  return Effect.gen(function* () {
+    yield* requireBlueprintRefPrefix(scope.registryVersionRef, "blueprint.registryVersionRef", [
+      "blueprint_registry.",
+    ]);
+    yield* requireOptionalBlueprintRefPrefixes(scope.programTypeRefs, "blueprint.programTypeRefs", ["program_type."]);
+    yield* requireOptionalBlueprintRefPrefixes(scope.programSignatureRefs, "blueprint.programSignatureRefs", [
+      "program_signature.",
+    ]);
+    yield* requireOptionalBlueprintRefPrefixes(scope.moduleVersionRefs, "blueprint.moduleVersionRefs", [
+      "module_version.",
+    ]);
+    yield* requireOptionalBlueprintRefPrefixes(scope.contextPackRefs, "blueprint.contextPackRefs", ["context_pack."]);
+    yield* requireOptionalBlueprintRefPrefixes(scope.sourceAuthorityRefs, "blueprint.sourceAuthorityRefs", [
+      "source_authority.",
+    ]);
+    yield* requireOptionalBlueprintRefPrefixes(scope.toolScopeRefs, "blueprint.toolScopeRefs", ["tool."]);
+    yield* requireOptionalBlueprintRefPrefixes(scope.releaseGateRefs, "blueprint.releaseGateRefs", ["release_gate."]);
+    yield* requireOptionalBlueprintRefPrefixes(scope.backendCapabilityRefs, "blueprint.backendCapabilityRefs", [
+      "probe.backend.",
+    ]);
+
+    if (scope.actionSubmissionPolicyRef !== undefined) {
+      yield* requireBlueprintRefPrefix(scope.actionSubmissionPolicyRef, "blueprint.actionSubmissionPolicyRef", [
+        "policy.",
+      ]);
+    }
+
+    if (scope.programRunPurposeRef !== undefined) {
+      yield* requireBlueprintRefPrefix(scope.programRunPurposeRef, "blueprint.programRunPurposeRef", ["purpose."]);
+    }
+
+    yield* validateBackendCapabilityRefs(assignment);
+
+    if (scope.registry !== undefined) {
+      yield* validateBlueprintRegistryProjection(scope.registry);
+      yield* requireOptionalRefsInKnownSet(
+        scope.programTypeRefs,
+        new Set(scope.registry.programTypes.map((programType) => programType.id)),
+        "blueprint.programTypeRefs",
+      );
+      yield* requireOptionalRefsInKnownSet(
+        scope.programSignatureRefs,
+        new Set(scope.registry.programSignatures.map((signature) => signature.id)),
+        "blueprint.programSignatureRefs",
+      );
+      yield* requireOptionalRefsInKnownSet(
+        scope.moduleVersionRefs,
+        new Set(scope.registry.moduleVersions.map((moduleVersion) => moduleVersion.id)),
+        "blueprint.moduleVersionRefs",
+      );
+      yield* requireOptionalRefsInKnownSet(
+        scope.releaseGateRefs,
+        new Set(scope.registry.releaseGates.map((gate) => gate.id)),
+        "blueprint.releaseGateRefs",
+      );
+    }
+
+    if (scope.contractExport !== undefined) {
+      yield* validateBlueprintContractExportSeed(scope.contractExport);
+    }
+  });
 }
 
 export function assignmentRequiresProviderGrant(assignment: ProbeRunAssignment): boolean {
@@ -67,6 +213,79 @@ export function assignmentSelectsAppleFmBackend(
   assignment: ProbeRunAssignment,
 ): assignment is ProbeRunAssignment & { readonly backend: ProbeAssignmentBackend } {
   return assignment.backend?.kind === APPLE_FM_BACKEND_KIND;
+}
+
+export function assignmentInlineBlueprintRegistrySource(
+  assignment: ProbeRunAssignment,
+): Readonly<{
+  blueprintContractExport?: unknown;
+  blueprintRegistry?: unknown;
+  blueprintRegistryVersionRef?: string;
+}> {
+  return {
+    blueprintContractExport: assignment.blueprint?.contractExport,
+    blueprintRegistry: assignment.blueprint?.registry,
+    blueprintRegistryVersionRef: assignment.blueprint?.registryVersionRef,
+  };
+}
+
+function validateBackendCapabilityRefs(assignment: ProbeRunAssignment): Effect.Effect<void, ProbeAssignmentParseError> {
+  const refs = assignment.blueprint?.backendCapabilityRefs ?? [];
+
+  if (refs.length === 0) {
+    return Effect.void;
+  }
+
+  const allowedRefs = assignmentSelectsAppleFmBackend(assignment) ? [PROBE_APPLE_FM_BACKEND_CAPABILITY] : [];
+  const mismatched = refs.filter((ref) => !allowedRefs.includes(ref));
+
+  return mismatched.length === 0
+    ? Effect.void
+    : Effect.fail(
+        new ProbeAssignmentParseError({
+          reason: `assignment Blueprint backend capability refs do not match selected backend: ${mismatched.join(", ")}`,
+        }),
+      );
+}
+
+function requireOptionalBlueprintRefPrefixes(
+  refs: ReadonlyArray<string> | undefined,
+  path: string,
+  prefixes: ReadonlyArray<string>,
+): Effect.Effect<void, ProbeAssignmentParseError> {
+  return Effect.forEach(refs ?? [], (ref, index) =>
+    requireBlueprintRefPrefix(ref, `${path}[${index}]`, prefixes),
+  ).pipe(Effect.asVoid);
+}
+
+function requireBlueprintRefPrefix(
+  ref: string,
+  path: string,
+  prefixes: ReadonlyArray<string>,
+): Effect.Effect<void, ProbeAssignmentParseError> {
+  return prefixes.some((prefix) => ref.startsWith(prefix))
+    ? Effect.void
+    : Effect.fail(
+        new ProbeAssignmentParseError({
+          reason: `${path} must use one of these public ref prefixes: ${prefixes.join(", ")}`,
+        }),
+      );
+}
+
+function requireOptionalRefsInKnownSet(
+  refs: ReadonlyArray<string> | undefined,
+  knownRefs: ReadonlySet<string>,
+  path: string,
+): Effect.Effect<void, ProbeAssignmentParseError> {
+  const missing = (refs ?? []).filter((ref) => !knownRefs.has(ref));
+
+  return missing.length === 0
+    ? Effect.void
+    : Effect.fail(
+        new ProbeAssignmentParseError({
+          reason: `${path} includes refs outside the inline Blueprint registry slice: ${missing.join(", ")}`,
+        }),
+      );
 }
 
 export function requireAppleFmAssignmentBackend(
