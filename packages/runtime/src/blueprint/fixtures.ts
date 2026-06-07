@@ -21,6 +21,8 @@ export const BLUEPRINT_CONTRACT_CONSUMERS: ReadonlyArray<BlueprintContractConsum
   "treasury",
 ];
 
+export const STATIC_BLUEPRINT_REGISTRY_VERSION_REF = "blueprint_registry.probe_static_fixture.v1";
+
 const operatorConsumers = (): Array<BlueprintContractConsumer> => [
   "ai_agent",
   "nexus",

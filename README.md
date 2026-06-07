@@ -76,8 +76,8 @@ Tracked files should stay minimal until the new architecture lands:
 - `packages/runtime/src/backends/apple-fm/acceptance.ts` defines retained
   Apple FM acceptance cases and comparison receipts.
 - `packages/runtime/src/blueprint/` defines the narrowed Blueprint consumer
-  contracts and static registry fixtures Probe needs before live Omega
-  Blueprint routes exist.
+  contracts, static registry fixtures, and registry source client Probe needs
+  before live Omega Blueprint routes exist.
 - `docs/probe-omega-auth-contract.md` records the implemented account-contract
   slice.
 - `docs/probe-omega-run-assignment.md` records the implemented assignment and

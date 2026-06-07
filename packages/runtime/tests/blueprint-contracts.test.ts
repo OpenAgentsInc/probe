@@ -51,7 +51,7 @@ describe("Blueprint consumer contracts", () => {
         allowedSurfaces: ["agent_api", "omni_workroom"],
         backendKind: "apple_fm_bridge",
         preferredFamily: "routing",
-        registrySource: "fixture",
+        registrySource: "staticFixture",
         riskCeiling: "medium",
       }),
     );
@@ -65,7 +65,7 @@ describe("Blueprint consumer contracts", () => {
         registryPolicyRef: STATIC_BLUEPRINT_PROGRAM_REGISTRY.policyRef,
         releaseGates: STATIC_BLUEPRINT_PROGRAM_REGISTRY.releaseGates,
         safeProjection: STATIC_BLUEPRINT_PROGRAM_REGISTRY.safeProjection,
-        source: "fixture",
+        source: "staticFixture",
       }),
     );
 

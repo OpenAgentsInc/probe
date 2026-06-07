@@ -25,8 +25,23 @@ uses refs instead of raw prompts, callback URLs, provider payloads, secrets,
 wallet material, private repo content, or customer data.
 
 This local mirror is temporary infrastructure for the next steps. Issue #173
-will add registry sources for fixture, assignment-carried projection, and Omega
+adds registry sources for fixture, assignment-carried projection, and Omega
 HTTP. Once Omega ships `GET /api/blueprint/program-registry` and
 `GET /api/blueprint/contracts`, Probe should use those routes as the source of
 truth and keep the static fixture only for tests, offline development, and
 emergency bootstrap.
+
+Issue #173 adds that source client under
+`packages/runtime/src/blueprint/registry-client.ts`. The client normalizes three
+source modes into the same safe registry view:
+
+- `staticFixture` for the checked-in seed mirror.
+- `assignmentInline` for a safe registry slice attached to a Probe assignment.
+- `omegaHttp` for the future authenticated Omega Blueprint routes.
+
+Each source is decoded through Effect Schema and then checked for
+`safeProjection`, evidence-only Program Run flags, no direct mutation, no
+self-promoting release gates, and private-data-shaped refs. The normalized view
+records `sourceKind`, `registryVersionRef`, `safeProjectionPolicyRef`, and the
+contract export version when present. The static fixture remains a bridge until
+Omega becomes the live source of truth.

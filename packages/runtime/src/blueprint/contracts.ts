@@ -405,7 +405,7 @@ export const BlueprintContractExportSeed = S.Struct({
 });
 export type BlueprintContractExportSeed = typeof BlueprintContractExportSeed.Type;
 
-export const BlueprintRegistrySourceKind = S.Literals(["fixture", "assignment", "omega_http"]);
+export const BlueprintRegistrySourceKind = S.Literals(["staticFixture", "assignmentInline", "omegaHttp"]);
 export type BlueprintRegistrySourceKind = typeof BlueprintRegistrySourceKind.Type;
 
 export const BlueprintSignatureLookupRequest = S.Struct({
@@ -521,6 +521,19 @@ export function validateBlueprintRegistryProjection(
 
     return projection;
   });
+}
+
+export function validateBlueprintContractExportSeed(
+  seed: BlueprintContractExportSeed,
+): Effect.Effect<BlueprintContractExportSeed, BlueprintProjectionUnsafe> {
+  return blueprintContractExportSeedIsPrivateDataSafe(seed)
+    ? Effect.succeed(seed)
+    : Effect.fail(
+        new BlueprintProjectionUnsafe({
+          path: "contractExport",
+          reason: "contract export contains private-data-shaped material",
+        }),
+      );
 }
 
 export function isBlueprintProjectionPrivateDataSafe(value: unknown): boolean {
