@@ -14,13 +14,19 @@ architecture and execution plans. They are not public benchmark claims.
    Pylon, Omega, and historical repos. Start here when deciding which repo owns
    which part of the benchmark apparatus.
 
-2. `2026-06-08-probe-continual-benchmark-learning-apparatus.md`
+2. `2026-06-08-omni-continual-learning-training-loop.md`
+   Big-picture bridge from the root-level Omni docs and OpenAgents transcript
+   arc into Probe's benchmark plans. It explains why continual benchmark
+   learning serves Coding on Autopilot, accepted outcomes, route scorecards,
+   public proof, Pylon provider work, and Psionic model training.
+
+3. `2026-06-08-probe-continual-benchmark-learning-apparatus.md`
    End-state plan for Probe's continual improvement loop. It defines how Probe,
    public OpenAgents Benchmark Cloud, Psionic, Pylon, and Omega should turn
    benchmark failures into prompt, Blueprint, tool-menu, loop-policy, and LoRA
    candidates with explicit promotion gates.
 
-3. `2026-06-08-pylon-gepa-coding-agent-benchmark-run.md`
+4. `2026-06-08-pylon-gepa-coding-agent-benchmark-run.md`
    First executable optimizer plan. It narrows the initial benchmark-climbing
    work to a GEPA-only text-candidate campaign, using Pylon as the parallel
    rollout engine across retained Terminal-Bench failures, validation splits,
@@ -37,6 +43,9 @@ architecture and execution plans. They are not public benchmark claims.
 - Probe should be the coding-agent runtime and evidence emitter. It should not
   become the benchmark product, scorer, public-claim authority, or promotion
   authority.
+- The benchmark loop exists to improve accepted coding outcomes in Coding on
+  Autopilot. Benchmark wins are useful only when they create better workrooms,
+  route scorecards, guidance decisions, artifacts, and review outcomes.
 - Terminal-Bench 2 through Harbor on the SHC box is the first live coding
   benchmark lane.
 - The first optimizer run should be GEPA-only over text artifacts: Probe
