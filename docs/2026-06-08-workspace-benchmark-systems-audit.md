@@ -1,0 +1,764 @@
+# Workspace Benchmark Systems Audit
+
+Date: 2026-06-08
+Status: audit and Probe integration roadmap
+Scope: Probe, Cloud Benchmark Cloud, Psionic legal benchmark lanes, Omega
+product/evidence contracts, OpenAgents Nexus/Pylon benchmark package surfaces,
+historical Autopilot/Backroom source material, and external reference repos.
+
+## Executive Summary
+
+Probe should not grow into a standalone benchmark product. The active workspace
+already has several benchmark systems with separate jobs:
+
+- Cloud owns the current coding benchmark execution lane: normalized
+  `BenchmarkTask` runs, Terminal-Bench 2 through Harbor, Codex-compatible
+  runner adapters, custom repo and SWE/SWT-style adapters, proof bundles, and
+  resource-usage receipts.
+- Psionic owns legal benchmark execution and training evidence: Harvey-style
+  Rust schemas, artifact receipts, deterministic public suites, synthetic
+  legal signature-routing fixtures, Qwen legal adapter training receipts,
+  distributed Pylon-worker SFT simulations, and promotion-gate inputs.
+- Omega owns product projection and review contracts: read-only Benchmark
+  Cloud evidence, Probe coding-runtime run projections, Model Lab promotion
+  decisions, public/private redaction, and false authority flags for launch,
+  payment, routing, deployment, and public-claim upgrades.
+- OpenAgents Nexus/Pylon owns compute-market registration, benchmark package
+  refs, training-run benchmark package requirements, provider capability
+  envelopes, and Pylon `benchmark_lane_available` admission facts.
+- Deprecated Autopilot4, Autopilot3, Backroom, and workspace docs contain
+  useful source material, but they are not active implementation homes.
+
+Probe's role is the runtime and evidence bridge. It should consume benchmark
+assignments and Blueprint signature selections, execute or delegate coding-agent
+sessions, emit redacted runtime evidence, preserve retained failures, and make
+Cloud/Psionic/Omega able to compare raw Codex, Probe+Codex, local Apple FM,
+swarm inference, and future backends against the same benchmark evidence
+contracts.
+
+The most important implementation gap is not "add a benchmark runner to
+Probe." The gap is to make Probe a first-class agent slug in existing benchmark
+lanes, with typed assignment intake, signature lookup, safe event/proof export,
+and replayable retained-failure receipts.
+
+## Current Probe State
+
+Probe is currently a Bun/Effect v4 workspace with a minimal runtime package.
+It has no Terminal-Bench runner, no legal benchmark runner, and no benchmark
+orchestration service.
+
+What Probe does have:
+
+- Omega account and grant contracts for ChatGPT/Codex account linking.
+- Per-run auth materialization and scrub contracts.
+- Runner identity gating for SHC/Pylon/sandbox use.
+- Apple FM backend contracts, tool callback sessions, availability/failure
+  receipts, and retained Apple FM acceptance cases.
+- Blueprint consumer contracts, static registry fixtures, typed signature
+  lookup, backend-independent tool-menu planning, Program Run evidence, action
+  submission boundaries, and contribution/release-gate models.
+
+The retained Apple FM acceptance cases in
+`packages/runtime/src/backends/apple-fm/acceptance.ts` are currently Probe's
+closest benchmark-like runtime checks:
+
+- `read_file_answer`
+- `list_then_read`
+- `search_then_read`
+- `shell_then_summarize`
+- `patch_then_verify`
+- `approval_pause_or_refusal`
+
+Those are acceptance checks for local backend/tool behavior. They are not
+external benchmark scores.
+
+The old Rust Probe implementation is deprecated. Prior workspace audits record
+useful patterns from that tree: a retained acceptance runner, richer reporting
+fields, replay and decision dataset exports, and optimizer-facing comparison
+scorecards. The new Probe should harvest those patterns into a first-party
+Bun/Effect runtime only when they support the final product surface.
+
+## Active Benchmark Inventory
+
+| Area | Active repo | Current authority | Probe implication |
+| --- | --- | --- | --- |
+| Terminal-Bench / coding tasks | `cloud` | Cloud Benchmark Cloud runner and SHC/GCP execution | Add Probe as a runtime/agent adapter and evidence emitter; do not duplicate runner contracts. |
+| Retained coding failures / signatures | `cloud`, `probe`, `autopilot-omega` | Cloud fixtures plus Probe Blueprint signature lookup plus Omega release gates | Move fixture playbooks into Probe-owned signature packages and route through typed lookup. |
+| Legal / Harvey-style benchmark execution | `psionic` | Psionic Rust legal benchmark engine | Probe should run legal-agent sessions only under Psionic task envelopes and return answer/tool/evidence refs. |
+| Legal Qwen training and Pylon SFT | `psionic`, `openagents` | Psionic training receipts; Nexus/Pylon package and worker admission | Probe should provide coding/legal-agent runtime traces; Psionic remains training/eval authority. |
+| Product benchmark projection | `autopilot-omega` | Read-only Benchmark Cloud and Probe run projections | Probe emits safe refs and closeout evidence that Omega can project. |
+| Provider/node benchmark admission | `openagents` | Nexus/Pylon compute benchmark packages and benchmark lane availability | Probe should advertise benchmark-capable runtime profiles, not mutate admission state directly. |
+| Historical Coder evals | `autopilot3` | Deprecated/older product smoke and UI replay suite | Reuse scenario ideas for Probe/Omega acceptance, not implementation. |
+| Historical legal benchmark governance | `autopilot4-deprecated` | Deprecated Rust/Maud campaign/source material | Reuse protocol/release-gate ideas; new authority is Omega plus Psionic. |
+| Historical Terminal-Bench HUD | `backroom` | Source material only | Reuse UI/user-story ideas if Probe gets a local HUD, not as active runtime code. |
+| External references | `projects/repos/benchmarks`, `projects/repos/harvey-labs` | Read-only reference repos | Study harness patterns only; do not vendor. |
+
+## Cloud Benchmark Cloud
+
+`cloud/docs/BENCHMARK_CLOUD.md` is the canonical execution plan. Benchmark
+Cloud is a general benchmark/workload execution lane with Terminal-Bench 2 as
+the first dataset adapter. It is not a leaderboard and not a public claim
+authority.
+
+The normalized runner contract is:
+
+- `BenchmarkTask`
+- `BenchmarkResult`
+- `BenchmarkEvent`
+- `BenchmarkArtifactManifest`
+- `BenchmarkProofBundle`
+- `openagents.resource_usage_receipt.v1`
+
+The local runner lives in `cloud/runners/py-bench-runner`. It writes required
+artifacts even for failed, timed-out, or errored runs:
+
+- `result.json`
+- `events.jsonl`
+- `metadata.json`
+- `artifact_manifest.json`
+- `proof_bundle.json`
+- `resource_usage_receipt.json`
+
+Dataset adapters currently cover:
+
+- fake local pass/timeout/error tasks;
+- Terminal-Bench through Harbor;
+- OpenAgents/Codex-style Terminal-Bench runs;
+- `custom-repo`;
+- `swe-bench`;
+- `swt-bench`;
+- retained Probe+Codex signature-routing fixtures.
+
+The Codex adapter supports agent slugs including:
+
+- `codex`
+- `openagents-codex`
+- `openagents-coder`
+- `probe-codex`
+- `probe-codex-signatures`
+- `openagents-probe-codex`
+
+For `probe-codex`, the adapter already injects a signature prompt addendum when
+the task metadata includes `signatureRouting`. That is the first concrete
+Probe-shaped benchmark integration, but today it is implemented in Cloud's
+Python runner rather than Probe's own runtime.
+
+### Measured Terminal-Bench Evidence
+
+The measured SHC reports are internal substrate evidence, not public
+Terminal-Bench claims.
+
+`CND-050` records a one-task SHC smoke on `oa-shc-katy-01`:
+
+- dataset: `terminal-bench@2.0`
+- task: `terminal-bench/openssl-selfsigned-cert`
+- agent: Harbor `codex`
+- Codex package: `@openai/codex@0.135.0`
+- model: `gpt-5.5`
+- reward: `1.0`
+- verifier: 6 passed, 0 failed
+- reported cost: `$0.120667`
+
+`CND-051` records a selected 8-task smoke:
+
+- dataset size reported by Harbor: 89 tasks
+- tasks run: 8
+- reward-1 tasks: 6
+- mean reward: `0.75`
+- reported cost: `$3.697649`
+- failed tasks: `filter-js-from-html`, `vulnerable-secret`
+
+`CND-052` records a preserved selected 16-task smoke:
+
+- tasks run: 16
+- reward-1 tasks: 11
+- mean reward: `0.6875`
+- reported cost: `$13.300340`
+- failed tasks: `configure-git-webserver`, `db-wal-recovery`,
+  `gcode-to-text`, `query-optimize`, `pypi-server`
+- raw Harbor traces and tarballs preserved on the SHC host, not committed
+
+This is exactly the evidence shape Probe should plug into: run the runtime,
+preserve artifacts, emit proof bundles, and keep public claims disabled until
+the proof projection can safely disclose dataset/version, task selector, agent,
+model, retry policy, costs, artifacts, verifier/scorer result, and redaction
+state.
+
+### Retained Terminal-Bench Signature Fixtures
+
+`CND-053` and `CND-054` define the retained coding-agent improvement lane.
+
+Cloud fixtures live under:
+
+```text
+cloud/runners/py-bench-runner/fixtures/signature-routing/
+```
+
+Covered failure families:
+
+| Failure family | Retained task | Expected signature |
+| --- | --- | --- |
+| service readiness | `configure-git-webserver` | `coding.service_readiness` |
+| local PyPI/simple index | `pypi-server` | `coding.python_package_index` |
+| query optimizer workflow | `query-optimize` | `coding.query_optimizer_workflow` |
+| SQLite/WAL recovery | `db-wal-recovery` | `coding.sqlite_wal_recovery` |
+| G-code parser contract | `gcode-to-text` | `coding.gcode_parser_guard` |
+| XSS sanitizer policy | `filter-js-from-html` | `coding.xss_sanitizer_policy` |
+| runner stall | `query-optimize` operational stall | `benchmark.runner_supervisor` |
+
+The Cloud evaluator reports:
+
+- retained fixtures: 7
+- improved fixtures: 7
+- raw Codex mean reward: `0.000`
+- expected Probe+signature mean reward: `0.900`
+- expected mean reward delta: `+0.900`
+
+Only `db-wal-recovery` has preserved account-backed live evidence for the full
+`0.0 -> 1.0` rerun after the learned SQLite/WAL rule was revised. The rest are
+retained-regression expected reward fixtures until rerun live.
+
+Probe should pull this signature lane into its own Blueprint lookup/runtime
+surface. The Python runner can keep the dataset harness, but Probe should own
+signature package selection, tool-menu projection, prompt/tool context, and
+closeout evidence for `probe-codex` and other Probe-backed slugs.
+
+## Psionic Legal Benchmark System
+
+Psionic is the active legal benchmark and legal training substrate.
+
+`psionic/docs/LEGAL_BENCHMARK_ENGINE.md` defines the current legal benchmark
+engine boundary:
+
+- upstream Harvey Python is reference/backfill only;
+- Psionic owns Rust legal benchmark execution/evaluation substrate;
+- Autopilot/Omega Blueprint policy owns upgradable prompts/modules, provider
+  adapter selection, judge policy, release gates, and promotion;
+- provider names such as Gemini, OpenAI-compatible local servers, and Qwen
+  fine-tunes are adapter metadata, not benchmark authority.
+
+The core schema surface in `crates/psionic-eval/src/legal_benchmark.rs`
+includes:
+
+- `BenchmarkTaskSpec`
+- `ArtifactManifest`
+- `SourceArtifact`
+- `DeliverableSpec`
+- `CriterionSpec`
+- `JudgePolicy`
+- `ToolPolicy`
+- `RunConfig`
+- `RunRecord`
+- `TranscriptEvent`
+- `ToolCallRecord`
+- `RunMetrics`
+- `CoverageSnapshot`
+- `CriterionResult`
+- `ScoreReport`
+- `ComparisonReport`
+
+The legal engine records answer integrity: required answer files must be
+created by model-authored write/edit tool calls, with pre-score and post-score
+hashes preserved. Scoring cannot mutate the final answer and still count as a
+valid run.
+
+The engine also has:
+
+- failed trajectory capture for bad-run examples;
+- public/synthetic legal signature-routing fixtures;
+- deterministic replay suites;
+- SFT/DPO/reward/GRPO data builders;
+- sharding manifests and worker receipts;
+- adapter manifests and promotion decisions;
+- Pylon worker job protocols;
+- settlement handoff evidence hooks.
+
+### Legal Signature Routing
+
+`psionic/docs/LEGAL_BENCHMARK_SIGNATURE_ROUTING.md` defines the public/synthetic
+legal signature-routing fixture lane for Probe+Codex. It tests whether typed
+legal failure families select the right Probe signatures without exposing
+hidden Harvey labels or private scoring rubrics.
+
+Fixture code:
+
+- `crates/psionic-eval/src/legal_benchmark_signature_routing.rs`
+- `crates/psionic-eval/examples/legal_benchmark_signature_routing_report.rs`
+
+Fixture files:
+
+- `fixtures/legal_benchmark/signature_routing/harvey_public_synthetic_signature_routing_suite.json`
+- `fixtures/legal_benchmark/signature_routing/harvey_public_synthetic_signature_routing_report.json`
+
+Covered failure families and Probe signatures:
+
+| Failure family | Expected signatures |
+| --- | --- |
+| `missing_deliverable` | `legal.deliverable_file_workflow`, `legal.output_path_contract`, `legal.answer_integrity_guard` |
+| `wrong_output_path` | `legal.output_path_contract`, `legal.deliverable_file_workflow`, `legal.answer_integrity_guard` |
+| `source_grounding_missing` | `legal.source_grounding_trace`, `legal.citation_provenance_check`, `legal.answer_integrity_guard` |
+| `citation_provenance_missing` | `legal.citation_provenance_check`, `legal.source_grounding_trace`, `legal.answer_integrity_guard` |
+| `answer_integrity_invalid` | `legal.answer_integrity_guard`, `legal.deliverable_file_workflow`, `legal.output_path_contract` |
+| `judge_supervisor_needed` | `benchmark.legal_judge_supervisor`, `legal.answer_integrity_guard`, `legal.source_grounding_trace` |
+
+Current retained report:
+
+- fixtures: 6
+- selector pass rate: `10000` bps
+- raw Codex deterministic fixture mean: `2222` bps
+- Probe+Codex deterministic fixture mean: `10000` bps
+- mean fixture delta: `7777` bps
+
+This is a workflow/evidence gate, not proof of live legal quality or private
+Harvey performance.
+
+Probe's missing work is clear: legal signatures need to exist in the same
+Blueprint signature lookup/tool-menu system as coding signatures, and a
+Probe-backed legal run must return required answer files, source refs, answer
+integrity receipts, score report refs, and judge sidecar refs to Psionic.
+
+### Legal Qwen Training And Pylon SFT Evidence
+
+`psionic/docs/QWEN_LEGAL_FINETUNE_LANE.md` defines a substantial legal
+fine-tuning lane. Important implemented surfaces include:
+
+- `psionic-train legal ft <command>` operator command catalog;
+- SFT, DPO, reward, and GRPO dataset builders;
+- local Qwen3.6-27B target-path smoke;
+- public Harvey three-task deterministic suite;
+- two-worker Pylon/Psionic local distributed SFT milestone;
+- signed worker receipts and payable decision records;
+- adapter merge receipts and promotion receipts;
+- Bitcoin/Lightning settlement evidence hooks, while payment execution remains
+  Treasury/Nexus-owned.
+
+Recorded public deterministic milestones:
+
+- `reports/legal-ft-milestone-001.md`
+  - champion score: `3333` bps
+  - candidate score: `10000` bps
+  - delta: `6667` bps
+  - candidate promoted: `true`
+  - private benchmark tasks used for training: `false`
+- `reports/legal-ft-distributed-run-001.md`
+  - two local Pylon workers
+  - all worker receipts signed: `true`
+  - all worker outputs hash verified: `true`
+  - all worker payments payable: `true`
+  - champion score: `3333` bps
+  - candidate score: `10000` bps
+  - decision: `Promote`
+- `reports/qwen36-27b-legal-ft-001.md`
+  - model: `Qwen/Qwen3.6-27B`
+  - model load verified: `true`
+  - base score: `3333` bps
+  - promoted candidate: `qwen36_27b_sft_grpo_round_001`
+  - promoted score: `10000` bps
+  - no Python invoked: `true`
+  - private benchmark tasks used for training: `false`
+
+All of these are bounded public/deterministic or target-path milestones. They
+do not claim private Harvey scores or production legal reasoning quality.
+
+### Harvey Reference Audit
+
+Workspace docs under `projects/` audited `projects/repos/harvey-labs` at
+commit `5aa41694`.
+
+Corpus inventory from the audit:
+
+- tasks: 1,251
+- practice areas: 24
+- rubric criteria: 74,990
+- source documents: 9,537
+- expected deliverables: 1,655
+
+The reusable pattern is:
+
+1. A task directory contains `task.json` and read-only documents.
+2. The agent runs in a closed workspace with a small tool surface.
+3. The model writes named deliverables under `output/`.
+4. Deliverables are graded against many small binary rubric criteria.
+5. Task-level scoring is all-pass, while criterion pass rate also matters.
+
+Probe should not import Harvey data or code. It should implement the runtime
+side of that pattern: bounded legal-agent sessions, tool policies, answer file
+receipts, source provenance, and redacted transcript export.
+
+## Omega Product/Evidence Contracts
+
+Omega is the active product surface for `openagents.com`. The relevant
+benchmark contracts are read-only evidence surfaces.
+
+`autopilot-omega/docs/omni/2026-06-06-benchmark-cloud-evidence-contract.md`
+and `workers/api/src/omni-model-lab-benchmark-cloud.ts` define
+`OmniBenchmarkCloudRecord` and projections for:
+
+- suites;
+- tasks;
+- eval jobs;
+- scorecards;
+- regressions;
+- flakes;
+- comparisons;
+- aggregate Benchmark Cloud packets.
+
+The contract rejects raw/private benchmark inputs, raw datasets, provider
+payloads, raw logs, model weights, payment/wallet material, private repos, raw
+timestamps, and mutable authority. It also keeps these authority booleans hard
+false:
+
+- benchmark launch;
+- eval execution;
+- payment spend;
+- payout mutation;
+- provider mutation;
+- public claim upgrade;
+- raw benchmark input copy;
+- routing mutation;
+- runtime promotion;
+- settlement mutation.
+
+`workers/api/src/probe-coding-runtime-contract.ts` defines Omega's current
+Probe run projection:
+
+- `OpenAgentsProbeRunRequest`
+- `OpenAgentsProbeTurnEvent`
+- `OpenAgentsProbeToolCallSummary`
+- `OpenAgentsProbeRunRecord`
+- `OpenAgentsProbeRunProjection`
+
+Succeeded Probe runs require closeout receipt refs plus artifact or diff refs.
+Failed and timed-out Probe runs require failure refs plus retained-failure refs.
+Unsafe raw logs, provider payloads, credentials, private repo refs, wallet or
+payment material, and raw timestamps are rejected.
+
+For benchmark work, this means Probe should emit:
+
+- safe turn refs;
+- safe tool-call summaries;
+- diff refs;
+- artifact refs;
+- test/benchmark result refs;
+- retained-failure refs;
+- closeout receipts;
+- cost/resource refs when available.
+
+Omega then decides whether those refs are enough for product review, Model Lab
+promotion, public reporting, or provider admission.
+
+## OpenAgents Nexus/Pylon Benchmark Package Surfaces
+
+`openagents` contains the compute-market and Pylon side of benchmark admission.
+
+Nexus control defines benchmark package refs used by training and validation
+runs. Important constants include:
+
+- `benchmark://a1-minimal-distributed-lm/validation-loss-v1`
+- `benchmark://harvey/legal-benchmark/smoke-eval-v1`
+- `dataset://openagents/legal-benchmark/harvey-smoke@v1`
+
+The kernel supports registering and listing `ComputeBenchmarkPackage` records.
+Training run definitions can require benchmark packages, and the scheduler
+checks whether a node has the benchmark lane available before assigning
+benchmark-required work.
+
+Pylon training capability envelopes carry:
+
+- `benchmark_lane_available`;
+- work-class eligibility for validation replay and adapter training;
+- per-work-class `benchmark_lane_required` flags;
+- backend family, memory, throughput, replay, artifact-upload, and capability
+  labels.
+
+This is not benchmark execution. It is admission and routing. Probe should
+eventually report runtime/backend facts that help a Pylon or SHC node prove it
+can run a requested benchmark-backed assignment, but Probe should not register
+benchmark packages, decide payments, or mark providers accepted.
+
+## Historical Source Material
+
+### Autopilot4 Deprecated
+
+`autopilot4-deprecated` contains a broad legal benchmark governance system:
+
+- `src/benchmark_baseline.rs`
+- `src/psionic_benchmark.rs`
+- `src/benchmark_imports.rs`
+- `src/benchmark_dashboard.rs`
+- `src/work_orders.rs`
+- `src/legal_benchmark_protocol.rs`
+- `src/benchmark_improvement_planner.rs`
+- `src/benchmark_candidates.rs`
+- `src/benchmark_release_gates.rs`
+- `src/benchmark_campaign_workflow.rs`
+- `src/benchmark_review.rs`
+- `src/benchmark_github_export.rs`
+
+Docs such as `2026-05-19-harvey-benchmark-system-audit-runbook.md` describe an
+older split where Psionic executes benchmark jobs and Autopilot4 imports,
+governs, hill-climbs, and exports failure-cluster issues.
+
+Useful source-material patterns:
+
+- legal benchmark operating protocol;
+- ordered modules for document inventory, evidence mapping, issue/fact
+  extraction, deliverable outlining, coverage planning, revision planning, and
+  final self-check;
+- hidden-rubric isolation;
+- release gates;
+- failure clusters;
+- GitHub issue export from benchmark misses;
+- pinned Harvey baseline fixture imports.
+
+Do not route new work there. New product authority belongs in Omega and new
+runtime work belongs in Probe/Psionic/Cloud.
+
+### Autopilot3
+
+`autopilot3/docs/coder-eval-and-smoke-suite.md` and
+`src/lib/coder/evalSuite.ts` define an older Coder eval suite with 12 required
+scenarios:
+
+- repo inspection with source citation;
+- approved GitHub issue creation;
+- bounded edit/test;
+- approved draft PR delivery;
+- approval denial;
+- human handoff controls;
+- missing repository;
+- failed checkout;
+- runtime limit receipt;
+- repository index cache disclosure;
+- multi-repo task planning;
+- UI replay receipt.
+
+This is useful as a product regression checklist for future Omega/Probe
+workroom acceptance. It is not the active benchmark runner.
+
+### Backroom
+
+`backroom/autopilot-benchmarks/BENCHMARKS.md` records an older generic coding
+benchmark suite with file operations, git operations, testing, code generation,
+debugging, documentation, issue workflow, error handling, optimization, and
+integration tasks.
+
+`backroom/reference/openagents-docs/hud/TERMINAL-BENCH.md` and related testing
+docs record a Terminal-Bench HUD concept with live run/task messages,
+WebSocket/RPC flow, task browsing, run history, and E2E gaps.
+
+These are good UI and user-story references if Probe later gets a local HUD or
+Omega gets a benchmark workroom. They are not active execution code.
+
+## Other Psionic Benchmark/Eval Families
+
+Psionic has additional benchmark/eval surfaces that are not directly Probe
+coding-agent benchmarks but matter for the broader "all benchmark stuff"
+inventory:
+
+- Parameter Golf contest readiness, CUDA training coverage, RunPod/H100
+  receipts, record-folder compatibility, promotion receipts, and submission
+  evidence.
+- Compiled Agent module evals that separately measure route selection,
+  tool-policy correctness, tool-argument correctness, grounded answers, and
+  verify/fallback/refusal behavior.
+- Tassadar article, Sudoku, plugin conformance, universality, and compiled
+  weight eval reports.
+- Gemma 4 26B competitive benchmark gates comparing Psionic local inference
+  against same-host Ollama and `llama.cpp`, with fail-closed sparse-execution
+  and throughput checks.
+- CSM speech benchmark fixtures and MLX example benchmark fixtures.
+
+These lanes mostly inform Psionic training/eval infrastructure and Model Lab.
+Probe should consume them only when a Probe runtime assignment is explicitly
+under evaluation or when a Blueprint signature/tool policy needs retained
+evidence from those evals.
+
+## Probe Integration Roadmap
+
+### 1. Add Probe Benchmark Assignment Intake
+
+Add Probe-side schemas for normalized benchmark assignment intake. These should
+mirror Cloud/Omega refs without copying raw benchmark inputs:
+
+- `probe.benchmark_assignment.v1`
+- `probe.benchmark_result_ref.v1`
+- `probe.benchmark_closeout.v1`
+
+The assignment should carry:
+
+- benchmark run ref;
+- task run ref;
+- dataset slug and version;
+- task ref or public-safe task checksum;
+- runtime/backend profile;
+- model/account grant refs;
+- selected Blueprint signature refs;
+- required artifact refs;
+- tool policy refs;
+- timeout/budget refs;
+- callback/proof sink refs.
+
+It should not carry raw provider credentials, raw benchmark secrets, raw
+dataset payloads, hidden verifier details, wallet material, or unbounded logs.
+
+### 2. Make Probe The Owner Of Signature Context
+
+Move the selected-signature logic out of ad hoc benchmark prompt strings and
+into Probe's Blueprint signature lookup/tool-menu path.
+
+The coding retained fixtures should become Probe signature packages or
+Blueprint Program Signatures for:
+
+- `coding.service_readiness`
+- `coding.python_package_index`
+- `coding.query_optimizer_workflow`
+- `coding.sqlite_wal_recovery`
+- `coding.gcode_parser_guard`
+- `coding.xss_sanitizer_policy`
+- `benchmark.runner_supervisor`
+
+The legal retained fixtures should become Probe legal signatures for:
+
+- `legal.deliverable_file_workflow`
+- `legal.output_path_contract`
+- `legal.source_grounding_trace`
+- `legal.citation_provenance_check`
+- `legal.answer_integrity_guard`
+- `benchmark.legal_judge_supervisor`
+
+Selection must stay typed and structured. Do not add keyword matching over
+prompts or task text. Use exact refs, structured failure-family enums,
+Blueprint registry entries, or embedding/semantic selectors once the central
+selector exists.
+
+### 3. Add Cloud Runner Adapter For Real Probe
+
+Cloud's `probe-codex` slug currently behaves like a Codex adapter with a Probe
+signature addendum. The next step is a true Probe adapter that launches the
+Probe CLI/runtime and lets Probe decide backend routing.
+
+The adapter should:
+
+- start Probe with a benchmark assignment JSON file;
+- pass auth/account refs through the existing materialization system;
+- stream Probe events to the Cloud artifact recorder;
+- write `probe-run-record.json`;
+- write `probe-closeout.json`;
+- write retained-failure refs on failure or timeout;
+- preserve the existing normalized `BenchmarkResult` and proof bundle.
+
+Cloud should keep dataset setup, Harbor wrapping, GCP/SHC scheduling, and proof
+bundle normalization.
+
+### 4. Add Legal Benchmark Bridge To Psionic
+
+Probe should accept a Psionic legal task envelope for public/synthetic legal
+runs and return:
+
+- submitted answer file refs;
+- source grounding refs;
+- citation/provenance refs;
+- answer integrity receipt refs;
+- tool-call summary refs;
+- redacted transcript refs;
+- judge sidecar refs when required;
+- retained failure refs when invalid.
+
+Psionic should remain the scorer, training data builder, adapter promoter, and
+Pylon worker receipt authority.
+
+### 5. Emit Omega-Safe Benchmark Evidence
+
+Probe closeout should map into Omega's existing contracts:
+
+- `OpenAgentsProbeRunRecord` for runtime view;
+- `OmniBenchmarkCloudRecord` refs for benchmark evidence;
+- Model Lab Training Run or Promotion Decision refs when a benchmark is tied to
+  a candidate;
+- retained-failure refs for failed or timed-out sessions;
+- resource/cost refs with explicit unavailable-token reasons when exact token
+  counts are not available.
+
+Probe should never mark product work accepted, promote runtime behavior,
+publish benchmark claims, pay providers, or settle Pylons.
+
+### 6. Add Probe Local Smoke Matrix
+
+Before live benchmark reruns, add a local smoke matrix inside Probe:
+
+- Apple FM retained acceptance cases.
+- Fake benchmark assignment decode/closeout.
+- Probe+signature prompt/tool-menu projection.
+- Retained coding fixture dry-run using one public fixture.
+- Retained legal fixture dry-run using one public/synthetic fixture.
+- Failure closeout with retained-failure refs.
+
+This should run with `bun run test` and should not require live benchmark data,
+provider credentials, or SHC access.
+
+### 7. Re-run Retained Failures Live
+
+After the Probe adapter exists:
+
+1. Run raw Codex retained fixture.
+2. Run Probe+Codex without selected signatures.
+3. Run Probe+Codex with fixed selected signatures.
+4. Run Probe with any local/swarms/API backend profile under the same task
+   envelope.
+5. Preserve proof bundles and cost/resource receipts.
+6. Import public-safe refs into Omega Benchmark Cloud evidence.
+
+Start with `configure-git-webserver` for coding and one public/synthetic legal
+fixture for legal.
+
+## Near-Term Issues To Open Later
+
+The following issue set would turn this audit into implementation work:
+
+1. Add Probe benchmark assignment and closeout schemas.
+2. Add Probe-owned coding signature package fixtures for retained
+   Terminal-Bench families.
+3. Add Probe-owned legal signature package fixtures for Psionic public/synthetic
+   legal families.
+4. Add Cloud true-Probe benchmark runner adapter.
+5. Add Probe benchmark closeout to Omega Probe run projection.
+6. Add Psionic legal task envelope to Probe runtime bridge.
+7. Add one retained coding live rerun through Probe+Codex on SHC.
+8. Add one public/synthetic legal fixture live run through Probe+Codex and
+   Psionic import.
+9. Add Pylon benchmark-capable Probe runtime advertisement fields.
+10. Add public-claim guardrails tying Probe evidence to Omega Benchmark Cloud
+    projection.
+
+## Hard Boundaries
+
+- Do not copy raw benchmark traces into Probe docs.
+- Do not copy provider auth, ChatGPT auth JSON, API keys, cookies, wallet
+  material, payment proofs, private repo refs, or benchmark-local secrets into
+  artifacts or issue comments.
+- Do not call retained expected-reward fixtures a public score.
+- Do not treat local public Harvey/Qwen deterministic milestones as private
+  Harvey performance.
+- Do not let Probe choose product acceptance, payout, settlement, provider
+  admission, or public claim state.
+- Do not preserve old Probe/Autopilot compatibility paths without real callers.
+- Do not add ad hoc keyword routing for benchmark, legal, tool, or signature
+  selection.
+
+## Bottom Line
+
+The benchmark work is already real, but it is distributed:
+
+- Cloud can execute coding benchmarks and preserve proof bundles.
+- Psionic can execute and train on legal benchmarks.
+- Omega can project benchmark evidence safely.
+- OpenAgents Nexus/Pylon can admit benchmark-capable compute.
+- Probe can become the runtime that makes those benchmark lanes comparable
+  across Codex, API-key models, Apple FM, local inference, swarm inference, and
+  future OpenAgents backends.
+
+The path to parity is therefore not to rebuild every benchmark system inside
+Probe. The path is to make Probe a first-class benchmark runtime participant:
+typed assignments in, Blueprint signatures selected, tools executed, evidence
+and retained failures out.
