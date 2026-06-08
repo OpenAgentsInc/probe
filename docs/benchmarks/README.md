@@ -16,7 +16,7 @@ architecture and execution plans. They are not public benchmark claims.
 
 2. `2026-06-08-workspace-benchmark-systems-audit.md`
    Inventory of the benchmark systems across Probe, private Cloud source
-   material, public OpenAgents Benchmark Cloud target architecture, Psionic,
+   material, public benchmark-cloud target architecture, Psionic,
    Pylon, Omega, and historical repos. Start here when deciding which repo owns
    which part of the benchmark apparatus.
 
@@ -36,7 +36,7 @@ architecture and execution plans. They are not public benchmark claims.
 
 5. `2026-06-08-probe-continual-benchmark-learning-apparatus.md`
    End-state plan for Probe's continual improvement loop. It defines how Probe,
-   public OpenAgents Benchmark Cloud, Psionic, Pylon, and Omega should turn
+   public benchmark-cloud, Psionic, Pylon, and Omega should turn
    benchmark failures into prompt, Blueprint, tool-menu, loop-policy, and LoRA
    candidates with explicit promotion gates.
 

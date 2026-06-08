@@ -2,7 +2,7 @@
 
 Date: 2026-06-08
 Status: proposal for a first GEPA-only optimization lane
-Scope: Probe, Blueprint, Pylon, Psionic, public OpenAgents Benchmark Cloud,
+Scope: Probe, Blueprint, Pylon, Psionic, public benchmark-cloud,
 Terminal-Bench, SWE/SWT-style coding tasks, and the local `gepa-ai/gepa`
 reference clone at `projects/repos/gepa`.
 
@@ -222,7 +222,7 @@ failure families.
 
 ### Lane 2: Terminal-Bench Generalization
 
-Use Terminal-Bench through the public OpenAgents Benchmark Cloud target, with a
+Use Terminal-Bench through the public benchmark-cloud target, with a
 fixed split:
 
 - train: short and medium tasks suitable for high rollout volume;
@@ -231,7 +231,7 @@ fixed split:
 
 The GEPA TerminalBench example in `projects/repos/gepa` uses train, validation,
 and test slices from `terminal-bench-core`. We should preserve that shape but
-move split authority into OpenAgents Benchmark Cloud so results are replayable
+move split authority into benchmark-cloud so results are replayable
 and not silently reshuffled.
 
 ### Lane 3: Repository-Specific Coding Tasks

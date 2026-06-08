@@ -7,7 +7,7 @@ Create a series of GitHub issues that turns the current Probe / GEPA / Pylon / B
 The issue series should create a path where:
 
 1. Probe becomes the first-class coding-agent runtime under test.
-2. Public OpenAgents Benchmark Cloud owns benchmark manifests, splits, artifact contracts, and score imports.
+2. public benchmark-cloud owns benchmark manifests, splits, artifact contracts, and score imports.
 3. GEPA optimizes Probe/Blueprint text candidates first, not model weights.
 4. Pylon workers receive bounded benchmark rollout assignments.
 5. Those assignments can become useful paid work once payout/settlement gates are enabled.
@@ -138,7 +138,7 @@ Body:
 
 Implement a closeout writer that emits normalized benchmark evidence after a Probe benchmark run.
 
-The writer should produce a bundle compatible with public OpenAgents Benchmark Cloud expectations:
+The writer should produce a bundle compatible with public benchmark-cloud expectations:
 
 * `probe-run-record.json`
 * `probe-closeout.json`
@@ -233,7 +233,7 @@ Add public contracts for:
 Target layout:
 
 * `openagents/docs/benchmarks/`
-* `openagents/crates/openagents-benchmark-cloud/`
+* `openagents/crates/benchmark-cloud/`
 * `openagents/scripts/benchmarks/`
 * `openagents/fixtures/benchmarks/`
 

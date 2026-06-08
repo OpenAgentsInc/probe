@@ -35,7 +35,7 @@ already has several benchmark systems with separate jobs:
 Probe's role is the runtime and evidence bridge. It should consume benchmark
 assignments and Blueprint signature selections, execute or delegate coding-agent
 sessions, emit redacted runtime evidence, preserve retained failures, and make
-public OpenAgents Benchmark Cloud, Psionic, and Omega able to compare raw Codex,
+public benchmark-cloud, Psionic, and Omega able to compare raw Codex,
 Probe+Codex, local Apple FM, swarm inference, and future backends against the
 same benchmark evidence contracts.
 
@@ -85,19 +85,19 @@ Bun/Effect runtime only when they support the final product surface.
 
 | Area | Active repo | Current authority | Probe implication |
 | --- | --- | --- | --- |
-| Terminal-Bench / coding tasks | `openagents` target, private `cloud` source material today | Public OpenAgents Benchmark Cloud runner and SHC/GCP execution; private Cloud runner is backfill | Rebuild or move the runner contracts into public OpenAgents, then add Probe as a runtime/agent adapter and evidence emitter. |
+| Terminal-Bench / coding tasks | `openagents` target, private `cloud` source material today | public benchmark-cloud runner and SHC/GCP execution; private Cloud runner is backfill | Rebuild or move the runner contracts into public OpenAgents, then add Probe as a runtime/agent adapter and evidence emitter. |
 | Retained coding failures / signatures | `openagents` target, private `cloud` source material, `probe`, `autopilot-omega` | Public retained fixtures plus Probe Blueprint signature lookup plus Omega release gates | Move fixture playbooks into public retained fixture packages and route through typed lookup. |
 | Legal / Harvey-style benchmark execution | `psionic` | Psionic Rust legal benchmark engine | Probe should run legal-agent sessions only under Psionic task envelopes and return answer/tool/evidence refs. |
 | Legal Qwen training and Pylon SFT | `psionic`, `openagents` | Psionic training receipts; Nexus/Pylon package and worker admission | Probe should provide coding/legal-agent runtime traces; Psionic remains training/eval authority. |
-| GEPA prompt/Blueprint optimization | `psionic`, `openagents`, `probe` | GEPA-style candidate manifests, Pylon rollout receipts, public OpenAgents Benchmark Cloud split manifests | Start with text-bundle candidates over retained Terminal-Bench failures before LoRA or broad model training. |
-| Product benchmark projection | `autopilot-omega` | Read-only public OpenAgents Benchmark Cloud and Probe run projections | Probe emits safe refs and closeout evidence that Omega can project. |
+| GEPA prompt/Blueprint optimization | `psionic`, `openagents`, `probe` | GEPA-style candidate manifests, Pylon rollout receipts, public benchmark-cloud split manifests | Start with text-bundle candidates over retained Terminal-Bench failures before LoRA or broad model training. |
+| Product benchmark projection | `autopilot-omega` | Read-only public benchmark-cloud and Probe run projections | Probe emits safe refs and closeout evidence that Omega can project. |
 | Provider/node benchmark admission | `openagents` | Nexus/Pylon compute benchmark packages and benchmark lane availability | Probe should advertise benchmark-capable runtime profiles, not mutate admission state directly. |
 | Historical Coder evals | `autopilot3` | Deprecated/older product smoke and UI replay suite | Reuse scenario ideas for Probe/Omega acceptance, not implementation. |
 | Historical legal benchmark governance | `autopilot4-deprecated` | Deprecated Rust/Maud campaign/source material | Reuse protocol/release-gate ideas; new authority is Omega plus Psionic. |
 | Historical Terminal-Bench HUD | `backroom` | Source material only | Reuse UI/user-story ideas if Probe gets a local HUD, not as active runtime code. |
 | External references | `projects/repos/benchmarks`, `projects/repos/harvey-labs` | Read-only reference repos | Study harness patterns only; do not vendor. |
 
-## Public OpenAgents Benchmark Cloud Target
+## public benchmark-cloud Target
 
 Private `cloud/docs/BENCHMARK_CLOUD.md` is the current source-material execution
 plan. It should not remain the canonical implementation home because the
@@ -108,7 +108,7 @@ The proposed public layout is:
 
 - `openagents/docs/benchmarks/` for specs, runbooks, audits, and claim
   boundaries.
-- `openagents/crates/openagents-benchmark-cloud/` for normalized benchmark
+- `openagents/crates/benchmark-cloud/` for normalized benchmark
   contracts, artifact manifests, proof bundles, and scheduler-facing Rust code.
 - `openagents/scripts/benchmarks/` for local proof, SHC, and Harbor commands.
 - `openagents/fixtures/benchmarks/` for public retained fixtures and replay
@@ -163,7 +163,7 @@ For `probe-codex`, the private adapter already injects a signature prompt
 addendum when the task metadata includes `signatureRouting`. That is the first
 concrete Probe-shaped benchmark integration, but today it is implemented in
 private Cloud's Python runner rather than Probe's own runtime or public
-OpenAgents Benchmark Cloud.
+benchmark-cloud.
 
 ### Measured Terminal-Bench Evidence
 
@@ -241,14 +241,14 @@ Only `db-wal-recovery` has preserved account-backed live evidence for the full
 retained-regression expected reward fixtures until rerun live.
 
 Probe should pull this signature lane into its own Blueprint lookup/runtime
-surface. Public OpenAgents Benchmark Cloud should own the dataset harness, and
+surface. public benchmark-cloud should own the dataset harness, and
 Probe should own signature package selection, tool-menu projection, prompt/tool
 context, and closeout evidence for Probe-backed slugs.
 
 The GEPA follow-up plan makes this the first optimizer lane. Start with a
 GEPA-only campaign over structured text bundles, not LoRA or model training.
 The first retained sprint should use Pylon as the metric-call engine, public
-OpenAgents Benchmark Cloud as the split and artifact authority, and Probe as
+benchmark-cloud as the split and artifact authority, and Probe as
 the runtime that evaluates candidate prompts, Blueprint usage instructions,
 tool-menu policy, and closeout policy.
 
@@ -720,7 +720,7 @@ The adapter should:
 - write retained-failure refs on failure or timeout;
 - preserve the existing normalized `BenchmarkResult` and proof bundle.
 
-Public OpenAgents Benchmark Cloud should keep dataset setup, Harbor wrapping,
+public benchmark-cloud should keep dataset setup, Harbor wrapping,
 GCP/SHC scheduling, and proof bundle normalization.
 
 ### 4. Add Legal Benchmark Bridge To Psionic

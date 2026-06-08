@@ -287,7 +287,7 @@ This loop proves the commercial wedge.
 
 ### 2. Benchmark Learning Loop
 
-This is the public OpenAgents Benchmark Cloud loop.
+This is the public benchmark-cloud loop.
 
 ```text
 task
@@ -425,7 +425,7 @@ The benchmark folder now has a clearer sequence, and
 `docs/benchmarks/plan.md` is the source of truth for issue creation:
 
 1. Build Probe closeout foundations first.
-2. Build the public OpenAgents Benchmark Cloud target out of private Cloud
+2. Build the public benchmark-cloud target out of private Cloud
    source material.
 3. Add Psionic GEPA candidate manifests and coordinator support.
 4. Adapt Pylon/Omega work slices for benchmark metric calls with explicit
@@ -469,7 +469,7 @@ The first proof should be small and complete:
 
 ```text
 Probe retained benchmark learning run
--> public OpenAgents Benchmark Cloud split manifest
+-> public benchmark-cloud split manifest
 -> GEPA text-bundle candidate
 -> Pylon Stage 0/1 rollout receipts
 -> verifier results

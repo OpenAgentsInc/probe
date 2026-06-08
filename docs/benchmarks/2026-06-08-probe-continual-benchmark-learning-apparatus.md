@@ -12,8 +12,8 @@ is the first live benchmark lane, but the apparatus should be general enough for
 legal, SWE, Probe retained fixtures, and future OpenAgents benchmark suites.
 
 This is not a benchmark leaderboard script. It is a closed learning loop across
-Probe, public OpenAgents Benchmark Cloud, Psionic, Pylon, and Omega: Probe
-executes and records the agent runtime truth, OpenAgents Benchmark Cloud runs
+Probe, public benchmark-cloud, Psionic, Pylon, and Omega: Probe
+executes and records the agent runtime truth, benchmark-cloud runs
 normalized benchmark jobs, Psionic optimizes prompts, Blueprint usage, and
 later LoRA adapters, Pylon supplies distributed devices for GEPA rollouts first
 and training work later, and Omega publishes the operator-facing evidence and
@@ -73,7 +73,7 @@ should optimize which signatures, playbooks, prompt fragments, and tool-menu
 constraints are used for a task family, but it should not bypass the typed
 Blueprint selection path.
 
-### Public OpenAgents Benchmark Cloud
+### public benchmark-cloud
 
 The private `cloud` repo already has the canonical Benchmark Cloud design. That
 design should become public OpenAgents infrastructure. The target is a public
@@ -84,7 +84,7 @@ A reasonable public target layout is:
 
 - `openagents/docs/benchmarks/` for specs, runbooks, audits, and claim
   boundaries.
-- `openagents/crates/openagents-benchmark-cloud/` for normalized benchmark
+- `openagents/crates/benchmark-cloud/` for normalized benchmark
   contracts, artifact manifests, proof bundles, and scheduler-facing Rust code.
 - `openagents/scripts/benchmarks/` for SHC, Harbor, and local proof commands.
 - `openagents/fixtures/benchmarks/` for public retained fixtures and safe
@@ -201,7 +201,7 @@ The Pylon GEPA run plan now narrows the first optimizer milestone. Before LoRA,
 GRPO, or broad model-training work, run a GEPA-only campaign over structured
 text bundles: Probe prompts, Blueprint usage instructions, Program Signature
 playbooks, tool-menu policy, failure-family playbooks, and closeout policy.
-Pylon supplies parallel rollouts, and public OpenAgents Benchmark Cloud supplies
+Pylon supplies parallel rollouts, and public benchmark-cloud supplies
 split authority and artifact contracts. LoRA and Qwen adapter work should follow
 only after that lane produces clean traces and split-aware evidence.
 
@@ -220,7 +220,7 @@ Probe should own:
 - admitting a candidate into shadow or active runtime only after external gates
   pass.
 
-Public OpenAgents Benchmark Cloud should own:
+public benchmark-cloud should own:
 
 - Terminal-Bench 2 through Harbor;
 - benchmark task normalization;
@@ -270,7 +270,7 @@ The continual learning loop should run as:
    and later legal/SWE/generalization suites.
 
 2. Create assignments.
-   Public OpenAgents Benchmark Cloud emits benchmark assignments with task
+   public benchmark-cloud emits benchmark assignments with task
    metadata, budget, backend constraints, required artifact names, and
    evaluation policy. When a task is routed through Pylon, that assignment
    should map to the Omega Pylon assignment lease lifecycle rather than a
@@ -288,7 +288,7 @@ The continual learning loop should run as:
    verifier-facing outputs, and closeout evidence.
 
 5. Score and classify.
-   Public OpenAgents Benchmark Cloud scores the benchmark. Probe and Psionic
+   public benchmark-cloud scores the benchmark. Probe and Psionic
    classify failures into typed families, not keyword buckets.
 
 6. Generate candidates.
@@ -341,7 +341,7 @@ with retained known failures and a few known successes:
 
 The first goal is not a new public leaderboard claim. The first goal is to
 make Probe's current champion and candidate variants reproducible under the
-public OpenAgents Benchmark Cloud artifact contract.
+public benchmark-cloud artifact contract.
 
 ## Candidate Families
 
@@ -665,7 +665,7 @@ gates, and Pylon/OpenAgents own worker envelopes and benchmark work slices.
 
 The first useful milestone is the GEPA-only Stage 0 and Stage 1 lane:
 
-- public OpenAgents Benchmark Cloud has a split manifest for retained
+- public benchmark-cloud has a split manifest for retained
   Terminal-Bench failures and local Probe acceptance fixtures;
 - Probe can run a supplied text-bundle candidate and emit normalized evaluator
   side information;
