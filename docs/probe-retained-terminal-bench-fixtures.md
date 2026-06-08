@@ -39,3 +39,9 @@ package loads, every fixture maps to typed failure-family enum values, every
 fixture has expected Blueprint signature refs, Stage 0/1 retained membership is
 present, closeout bundle requirements match the normalized writer, and hidden
 task or Harbor trace material is rejected.
+
+The retained fixtures are also the first target for the GEPA candidate
+execution adapter. `runProbeRetainedBenchmarkCandidate` uses fixture
+signature and tool-menu constraints to compare a baseline assignment closeout
+with a supplied candidate closeout without letting candidate text widen
+Blueprint authority or tool access.

@@ -65,3 +65,13 @@ where relevant.
 `packages/runtime/tests/benchmark-closeout-writer.test.ts` covers fake
 assignment bundle emission, directory writes, failure closeouts, timeout
 closeouts, policy-blocked closeouts, and unsafe writer input rejection.
+
+`packages/runtime/src/benchmark/candidate-execution.ts` adds the Probe-facing
+GEPA candidate execution adapter. It can run a retained fixture with either the
+baseline assignment or a supplied Psionic GEPA text-bundle manifest, then emit
+the same normalized closeout bundle shape with candidate hash, candidate import
+refs, candidate component refs, selected signatures, projected tool-menu
+snapshot, verifier result refs, policy findings, and failure classification.
+Candidate text is validated before it can affect the assignment projection, and
+candidate-selected signatures or tools must remain subordinate to the
+assignment and retained fixture constraints.

@@ -51,6 +51,7 @@ export interface ProbeBenchmarkCloseoutWriterInput {
   readonly assignment: ProbeBenchmarkAssignment;
   readonly artifactManifestRefs?: ReadonlyArray<string>;
   readonly backendRouteRef?: string;
+  readonly candidateComponentRefs?: ReadonlyArray<string>;
   readonly completedAt?: string;
   readonly costRef?: string;
   readonly decisionStepRefs?: ReadonlyArray<string>;
@@ -70,6 +71,7 @@ export interface ProbeBenchmarkCloseoutWriterInput {
   readonly summaryArtifactRef?: string;
   readonly toolMenuSnapshot?: JsonValue;
   readonly verifierRef: string;
+  readonly verifierResultRefs?: ReadonlyArray<string>;
 }
 
 export interface ProbeBenchmarkCloseoutBundle {
@@ -212,6 +214,7 @@ export function makeProbeBenchmarkCloseoutBundle(
         schemaRef: "probe.candidate_ref_summary.v1",
         assignmentRef: assignment.assignmentRef,
         candidateHash: assignment.candidateHash,
+        candidateComponentRefs: [...(input.candidateComponentRefs ?? [])],
         candidateRefs: assignment.candidateRefs ?? {},
         evidenceSplit: assignment.split.evidenceSplit,
       }),
@@ -222,6 +225,7 @@ export function makeProbeBenchmarkCloseoutBundle(
         partialArtifactRefs,
         proofBundleRefs,
         runStatus: input.runStatus,
+        verifierResultRefs: [...(input.verifierResultRefs ?? [])],
       }),
       "resource-usage-ref.json": toJsonValue({
         schemaRef: "probe.resource_usage_ref_summary.v1",
