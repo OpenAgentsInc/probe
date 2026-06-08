@@ -18,6 +18,7 @@ export * from "./contracts/benchmark";
 export * from "./contracts/provider-account";
 export * from "./fleet/backend-capability";
 export * from "./fleet/telemetry";
+export * from "./llm";
 export * from "./omega/account-client";
 export * from "./omega/grant-client";
 export * from "./runner/identity";
