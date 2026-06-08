@@ -58,3 +58,19 @@ thought signatures as provider metadata.
 Gemini reports `candidatesTokenCount` as visible output and
 `thoughtsTokenCount` separately. Probe usage stores inclusive output tokens, so
 the parser sums those fields when both are available.
+
+## Native Tool Loop
+
+`makeGeminiClient` exposes a `complete` method that sends Probe LLM requests to
+Gemini and handles native function-call continuation:
+
+1. lower the current Probe transcript into Gemini `contents`;
+2. send native function declarations;
+3. parse Gemini SSE events;
+4. dispatch emitted function calls through Probe's provider-neutral tool
+   runtime;
+5. append assistant tool-call history and user `functionResponse` history;
+6. repeat until Gemini returns final text or the round-trip limit is reached.
+
+The loop uses Gemini native function declarations and responses. It does not
+reuse the Apple FM callback URL bridge.
