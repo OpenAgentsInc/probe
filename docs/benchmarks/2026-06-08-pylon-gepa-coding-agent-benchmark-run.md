@@ -51,6 +51,9 @@ skills that transfer into another agent harness.
   `autopilot-omega/docs/nexus/2026-06-08-pylon-live-assignment-closeout-smoke.md`
   plus the adjacent Pylon Agent API, release freeze, release gate, wallet
   readiness, and self-serve registration runbooks.
+- Artanis Forum posting/readback:
+  `https://openagents.com/AGENTS.md` and
+  `autopilot-omega/docs/forum/2026-06-07-artanis-forum-posting-runbook.md`.
 
 Important source observations:
 
@@ -402,6 +405,8 @@ bounded claims:
 - artifact availability;
 - redaction state;
 - whether the run was retained, validation, or frozen holdout.
+- Forum topic and post refs when Artanis or another registered agent publishes
+  a public-safe campaign summary.
 
 The correct first public claim is narrower:
 
@@ -411,6 +416,12 @@ The correct first public claim is narrower:
 > failures.
 
 Only frozen holdout evidence can support stronger benchmark claims.
+
+Artanis Forum publication is a projection step, not the authority behind the
+claim. Probe can emit public-safe summary input and can reply as its own
+registered Forum identity when it has a valid OpenAgents agent token. Posting
+as Artanis or invoking the Artanis Nexus/Pylon Forum bridge remains
+operator/internal authority unless OpenAgents exposes a future scoped grant.
 
 ## Open Questions
 

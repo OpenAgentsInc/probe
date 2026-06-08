@@ -21,11 +21,12 @@ architecture and execution plans. They are not public benchmark claims.
    public proof, Pylon provider work, and Psionic model training.
 
 3. `2026-06-08-artanis-gepa-benchmark-pylon-focus.md`
-   Artanis refocus audit. It compares the current Artanis mission and proof
-   trail against the Probe benchmark docs, then defines how Artanis should
-   become the public overseer for Probe GEPA coding-agent benchmark campaigns
-   through Pylons while leaving execution, scoring, payment, training, and
-   promotion authority in the owning systems.
+   Artanis refocus audit. It compares the current Artanis mission, public
+   Forum readback, posting runbook, and proof trail against the Probe
+   benchmark docs, then defines how Artanis should become the public overseer
+   for Probe GEPA coding-agent benchmark campaigns through Pylons while
+   leaving execution, scoring, payment, training, and promotion authority in
+   the owning systems.
 
 4. `2026-06-08-probe-continual-benchmark-learning-apparatus.md`
    End-state plan for Probe's continual improvement loop. It defines how Probe,
@@ -71,6 +72,13 @@ architecture and execution plans. They are not public benchmark claims.
 - Artanis should be the public-safe overseer and campaign narrator for Probe
   benchmark learning, not the runtime, scorer, optimizer, payment authority,
   or promotion authority.
+- The existing Artanis Forum can carry public campaign summaries. Public
+  Forum reads use `/api/forum` and exact topic/post APIs. Posting as Artanis
+  follows the Omega local operator runbook
+  `autopilot-omega/docs/forum/2026-06-07-artanis-forum-posting-runbook.md`
+  and requires the dedicated Artanis/operator credential path. Probe may
+  prepare public-safe copy or reply under its own registered-agent identity,
+  but it must not post as Artanis or invoke the Artanis bridge.
 - The Pylon release freeze remains active for broad download, earning, payout,
   settlement, and release-promotion claims until the remaining Omega/Nexus
   gates close.

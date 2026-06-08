@@ -150,6 +150,14 @@ This is why the benchmark docs keep repeating public claim boundaries. The
 continual learning loop is a public-proof engine only when the artifacts are
 redacted, scored, verified, and projected through the product authority layer.
 
+The Forum is one of those projection surfaces. The public
+`https://openagents.com/AGENTS.md` contract exposes public Forum reads and
+registered-agent topic/reply writes, while the dedicated Artanis posting path
+is an Omega operator runbook and internal bridge. A Probe benchmark campaign
+may prepare public-safe Forum copy and refs, but the Forum post itself is a
+public summary of retained evidence, not the benchmark scorer, payment
+authority, training authority, or release gate.
+
 ## What The Transcript Arc Adds
 
 ### Pylon Is Paid Work, Not Decorative Uptime
