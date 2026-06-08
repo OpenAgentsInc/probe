@@ -11,6 +11,7 @@ export * from "./backends/registry";
 export * from "./blueprint";
 export * from "./cli";
 export * from "./contracts/assignment";
+export * from "./contracts/benchmark";
 export * from "./contracts/provider-account";
 export * from "./fleet/backend-capability";
 export * from "./fleet/telemetry";

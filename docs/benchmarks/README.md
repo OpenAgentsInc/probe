@@ -46,6 +46,12 @@ architecture and execution plans. They are not public benchmark claims.
    rollout engine across retained Terminal-Bench failures, validation splits,
    and frozen holdout tasks.
 
+7. `../probe-benchmark-contracts.md`
+   Implementation note for the first Probe runtime contract slice from issue
+   #182. It records the benchmark assignment, run, closeout, decision trace,
+   candidate, and evidence-only promotion decision schemas now exported by the
+   Bun/Effect runtime package.
+
 ## Current Decisions
 
 - `plan.md` is now the issue-creation and execution-order source of truth.
