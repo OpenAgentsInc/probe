@@ -1358,7 +1358,6 @@ function makeGeminiInteractiveTurnStream(colors: ProbeCliColors): {
         process.stdout.write(`${cliLine(colors, "assistant", renderMarkdown(result.text).trimEnd(), "assistant")}\n`);
       }
 
-      process.stdout.write(`${cliField(colors, "roundTrips", String(result.roundTrips), "muted")}  ${cliLine(colors, "usage", formatGeminiUsage(result.receipt.usage), "usage")}\n`);
     },
   };
 }
