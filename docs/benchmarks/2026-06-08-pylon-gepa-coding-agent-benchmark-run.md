@@ -142,6 +142,37 @@ GEPA coordinator
 This lets us climb benchmark performance before changing weights or adding a
 separate training stack.
 
+### Terminology: Distributed Optimization, Not Weight Training
+
+The honest label for this lane is `Pylon-distributed GEPA rollout
+optimization` or `distributed benchmark-driven optimization with GEPA`.
+
+It is defensible to call it distributed learning in the broad product sense:
+the system improves an agent policy by repeatedly running evaluated rollouts
+and keeping better candidate text. It is not distributed neural-network
+training. Pylons are not computing gradients, updating model weights, merging
+LoRA adapters, or advancing a checkpoint during the GEPA lane.
+
+The unit of Pylon work is:
+
+```text
+run candidate text bundle C on benchmark task T
+-> run Probe and the task verifier
+-> preserve transcript, patch, verifier output, artifacts, resource receipt,
+   and failure summary
+-> return normalized evaluator side information
+```
+
+The GEPA coordinator can then use many independent Pylon results to update the
+candidate frontier. The reflection/proposal step should stay centralized at
+first on SHC, Psionic, or a hosted model. Pylons do not need to understand or
+run the whole optimizer; they need to run bounded benchmark jobs honestly.
+
+Reserve `distributed training` for later Psionic/Qwen/LoRA/SFT/DPO/GRPO lanes
+where workers actually contribute to model-training, adapter, checkpoint,
+gradient-like, or training-data-generation work. The GEPA lane can create the
+clean traces and labels that make those later training lanes worth opening.
+
 ### 2026-06-08 Pylon Assignment Update
 
 Omega now has a live Pylon assignment lease and closeout path. A registered,

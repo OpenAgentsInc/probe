@@ -326,6 +326,12 @@ Pylon workers should advertise capability envelopes, receive bounded
 assignments, return artifacts and receipts, and get credit only when work
 survives validation.
 
+For the first GEPA campaign, that capacity is distributed rollout
+optimization. Pylons run independent Probe benchmark jobs for candidate text
+bundles and return verifier results, artifacts, receipts, and failure
+summaries. They are not doing distributed neural-network training during the
+GEPA lane.
+
 Both separate execution from authority. Probe should run coding-agent turns and
 emit evidence. Benchmark Cloud should own benchmark contracts and score
 imports. Psionic should own optimizer/model-training truth. Pylon should own
@@ -566,6 +572,9 @@ Allowed claims after evidence exists:
 
 - Artanis is coordinating a Probe benchmark campaign.
 - Pylon workers ran bounded metric-call or verification assignments.
+- Pylons performed distributed GEPA rollout optimization over Probe/Blueprint
+  text candidates, if the candidate hash, split, verifier, artifact, and
+  receipt refs exist.
 - A GEPA candidate improved retained fixtures, naming the retained suite and
   split.
 - A candidate passed validation, naming the validation split and scorer.
@@ -579,6 +588,8 @@ Blocked claims until further proof:
 - Pylon paid work is fully settled from Artanis assignment id unless the
   deployed production bridge proves it.
 - Pylon is generally ready for download or bitcoin earning from #502 alone.
+- GEPA on Pylons is distributed model training; it is distributed rollout
+  optimization unless a later Psionic/model-training lane opens.
 - A GEPA candidate is active production runtime before Omega release approval.
 - A Qwen/LoRA adapter improved Probe before model-training evidence and
   validation exist.

@@ -252,6 +252,14 @@ OpenAgents Benchmark Cloud as the split and artifact authority, and Probe as
 the runtime that evaluates candidate prompts, Blueprint usage instructions,
 tool-menu policy, and closeout policy.
 
+This is distributed benchmark-driven optimization, not distributed
+neural-network training. Pylons run independent Probe rollouts for candidate
+text bundles and return verifier results, artifacts, receipts, and failure
+summaries. The GEPA coordinator updates the text-candidate frontier. Reserve
+distributed training language for later Psionic/Qwen/LoRA/SFT/DPO/GRPO lanes
+where workers contribute to model-weight, adapter, checkpoint, or
+training-data work.
+
 ## Psionic Legal Benchmark System
 
 Psionic is the active legal benchmark and legal training substrate.

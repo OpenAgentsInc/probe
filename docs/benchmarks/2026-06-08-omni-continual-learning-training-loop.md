@@ -16,9 +16,11 @@ tool-menu policy, verifier discipline, evidence closeout, and promotion gates.
 Codex can be one strong backend route when the task needs it, but it should not
 be treated as the necessary first engine or the organizing architecture. Probe
 is the owned runtime path. Benchmark Cloud measures the loop. Psionic trains
-and evaluates model/runtime candidates. Pylon supplies distributed rollout and
-training capacity. Omega is the current release and projection authority for
-the product surface, even when older Omni docs use the Vortex name.
+and evaluates model/runtime candidates. Pylon supplies distributed rollout
+capacity for benchmark-driven optimization first and later distributed
+training capacity for admitted Psionic/Qwen/LoRA lanes. Omega is the current
+release and projection authority for the product surface, even when older Omni
+docs use the Vortex name.
 
 The continual learning plan only matters if it improves the buyer-facing loop:
 
@@ -346,6 +348,12 @@ optimizer_accepted != active
 GEPA can find better candidates. Omega/Blueprint release gates decide what can
 ship.
 
+This loop is distributed optimization, not distributed neural-network
+training. Pylons can run many independent Probe benchmark rollouts for a
+candidate bundle, return verifier results and receipts, and let the GEPA
+coordinator update the candidate frontier. The model weights do not change in
+this loop.
+
 ### 4. Psionic Model/Adapter Training Loop
 
 This is the heavier model loop.
@@ -419,7 +427,8 @@ The benchmark folder now has a clearer sequence:
    source material.
 2. Keep Probe as the runtime and evidence emitter.
 3. Run GEPA Stage 0 and Stage 1 before LoRA or broad model training.
-4. Use Pylon as rollout infrastructure and later training infrastructure.
+4. Use Pylon as distributed rollout infrastructure for GEPA and later training
+   infrastructure only after Psionic/Qwen/LoRA gates open.
 5. Use SHC as the first serious live Terminal-Bench environment.
 6. Convert successful GEPA candidates into Blueprint/Probe draft modules.
 7. Use the resulting clean traces for Psionic Qwen/LoRA work.
@@ -434,7 +443,8 @@ Allowed early claims:
 
 - OpenAgents is building the public Benchmark Cloud apparatus.
 - Probe can emit benchmark/runtime evidence.
-- Pylon can run admitted rollout or training jobs.
+- Pylon can run admitted GEPA rollout jobs, and later admitted training jobs
+  when those lanes have explicit Psionic/model-training authority.
 - GEPA candidates improved a named retained or validation split, if the split,
   candidate hash, verifier, and artifact state are shown.
 - Psionic trained or evaluated a named adapter path, if the checkpoint, split,
@@ -444,6 +454,8 @@ Blocked claims:
 
 - "Probe beats Terminal-Bench" from retained fixtures.
 - "Pylon training work is settled" without payment/reconciliation receipts.
+- "GEPA on Pylons is distributed model training" when it is only distributed
+  rollout optimization over text candidates.
 - "GEPA candidate is production" without release gates.
 - "Codex is unnecessary" or "local models replaced frontier backends" without
   route scorecards and accepted-outcome evidence.

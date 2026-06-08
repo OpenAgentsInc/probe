@@ -14,9 +14,10 @@ legal, SWE, Probe retained fixtures, and future OpenAgents benchmark suites.
 This is not a benchmark leaderboard script. It is a closed learning loop across
 Probe, public OpenAgents Benchmark Cloud, Psionic, Pylon, and Omega: Probe
 executes and records the agent runtime truth, OpenAgents Benchmark Cloud runs
-normalized benchmark jobs, Psionic optimizes prompts, Blueprint usage, and LoRA
-adapters, Pylon supplies distributed devices, and Omega publishes the
-operator-facing evidence and release gates.
+normalized benchmark jobs, Psionic optimizes prompts, Blueprint usage, and
+later LoRA adapters, Pylon supplies distributed devices for GEPA rollouts first
+and training work later, and Omega publishes the operator-facing evidence and
+release gates.
 
 The existing private `cloud` repo is source material, not the desired long-term
 home. Its Benchmark Cloud contracts, Harbor Terminal-Bench lane, runner

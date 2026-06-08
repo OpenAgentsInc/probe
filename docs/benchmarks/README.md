@@ -62,8 +62,11 @@ architecture and execution plans. They are not public benchmark claims.
 - LoRA, DPO, GRPO, and Qwen3.6 adapter work should come after the GEPA lane
   creates clean traces, candidate diffs, verifier outcomes, and split-aware
   evidence.
-- Pylon should provide distributed rollout and training capacity with explicit
-  worker capability envelopes and signed receipts.
+- Pylon should provide distributed rollout capacity for GEPA first, with
+  explicit worker capability envelopes and signed receipts. Later Pylon may
+  provide distributed training capacity for Psionic/Qwen/LoRA work, but GEPA
+  itself is distributed benchmark-driven optimization over text artifacts, not
+  distributed neural-network training.
 - The 2026-06-08 Omega #502 smoke proves a live Pylon assignment lease through
   accept, progress, artifact/proof refs, and accepted-work closeout. Future
   Probe GEPA batches should reuse that lifecycle.
