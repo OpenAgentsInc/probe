@@ -23,3 +23,27 @@ Gemini auth receipts record only the source label and `apiKeyRedacted: true`.
 They must not include the raw key or provider request headers. Runtime HTTP
 code may still construct the `x-goog-api-key` header at the final request
 boundary.
+
+## Request Lowering
+
+Gemini request lowering lives in
+`packages/runtime/src/backends/gemini/protocol.ts`.
+
+It converts the provider-neutral Probe LLM request contract into Gemini
+`streamGenerateContent` bodies:
+
+- top-level Probe system messages become Gemini `systemInstruction`;
+- chronological system messages inside the transcript become wrapped user
+  system-update text;
+- user text and media become Gemini `user` content parts;
+- assistant text, reasoning, and tool-call history become Gemini `model`
+  content parts;
+- tool results become Gemini `functionResponse` parts;
+- Probe tool definitions become Gemini native function declarations;
+- tool choice maps to Gemini function-calling modes.
+
+Tool schemas are sanitized in
+`packages/runtime/src/backends/gemini/tool-schema.ts` before they are sent to
+Gemini. This avoids request-time failures for common JSON Schema shapes that
+Gemini rejects, such as integer enums, dangling required fields, untyped arrays,
+and scalar schemas carrying object-only keys.
