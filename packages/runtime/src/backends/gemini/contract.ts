@@ -12,7 +12,12 @@ export type GeminiBackendKind = typeof GeminiBackendKind.Type;
 export const GeminiProfileId = S.Literal(GEMINI_API_PROFILE_ID);
 export type GeminiProfileId = typeof GeminiProfileId.Type;
 
-export const GeminiApiKeySource = S.Literals(["explicit", "GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"]);
+export const GeminiApiKeySource = S.Literals([
+  "explicit",
+  "GOOGLE_GENERATIVE_AI_API_KEY",
+  "GEMINI_API_KEY",
+  "PROBE_OMEGA_BEARER_TOKEN",
+]);
 export type GeminiApiKeySource = typeof GeminiApiKeySource.Type;
 
 export const GeminiAuthResolutionReceipt = S.Struct({

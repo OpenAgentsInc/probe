@@ -117,9 +117,20 @@ function resolveGeminiBaseUrl(
     return { baseUrl: options.env.PROBE_GEMINI_BASE_URL, baseUrlSource: "PROBE_GEMINI_BASE_URL" };
   }
 
+  if (isNonEmptyString(options.env?.PROBE_OMEGA_BASE_URL) && isNonEmptyString(options.env?.PROBE_OMEGA_BEARER_TOKEN)) {
+    return {
+      baseUrl: `${withoutTrailingSlash(options.env.PROBE_OMEGA_BASE_URL)}/api/provider-accounts/google-gemini`,
+      baseUrlSource: "PROBE_OMEGA_BASE_URL",
+    };
+  }
+
   return { baseUrl: defaultBaseUrl, baseUrlSource: "default" };
 }
 
 function isNonEmptyString(value: string | undefined): value is string {
   return value !== undefined && value.trim().length > 0;
+}
+
+function withoutTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value.slice(0, -1) : value;
 }

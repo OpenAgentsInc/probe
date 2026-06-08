@@ -32,6 +32,7 @@ export const ResolvedProbeBackendProfile = S.Struct({
     "PROBE_APPLE_FM_BASE_URL",
     "OPENAGENTS_APPLE_FM_BASE_URL",
     "PROBE_GEMINI_BASE_URL",
+    "PROBE_OMEGA_BASE_URL",
     "default",
   ]),
 });

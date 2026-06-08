@@ -17,12 +17,26 @@ API-key resolution follows the Opencode-compatible order:
 1. explicit API key option;
 2. `GOOGLE_GENERATIVE_AI_API_KEY`;
 3. `GEMINI_API_KEY`;
-4. typed missing-credential failure.
+4. `PROBE_OMEGA_BEARER_TOKEN` when `PROBE_OMEGA_BASE_URL` is also set;
+5. typed missing-credential failure.
 
 Gemini auth receipts record only the source label and `apiKeyRedacted: true`.
 They must not include the raw key or provider request headers. Runtime HTTP
 code may still construct the `x-goog-api-key` header at the final request
 boundary.
+
+When `PROBE_OMEGA_BASE_URL` and `PROBE_OMEGA_BEARER_TOKEN` are both set and no
+local Gemini API key exists, Probe routes Gemini `streamGenerateContent` calls
+through Omega's authenticated Gemini broker at:
+
+```txt
+<PROBE_OMEGA_BASE_URL>/api/provider-accounts/google-gemini
+```
+
+In that mode Probe sends the OpenAgents programmatic-agent bearer token to
+Omega. Omega owns the Google `GEMINI_API_KEY` Worker secret and forwards the
+request to `generativelanguage.googleapis.com`. Probe never receives the raw
+Gemini API key.
 
 For the current Probe/Omega integration, Gemini uses basic Google API keys
 restricted to `generativelanguage.googleapis.com`. ADC, service-account JSON,
@@ -63,10 +77,11 @@ is resolved from the runner environment using the same precedence as local CLI
 calls. Apple FM remains the default backend profile for existing assignments
 that do not select Gemini.
 
-The later Omega-managed provider-account path is designed in
-`docs/probe-omega-google-gemini-provider-account-design.md`. That path will add
-`google_gemini` grants and per-run env materialization without changing the
-local API-key behavior above.
+The Omega-managed provider-account path is designed in
+`docs/probe-omega-google-gemini-provider-account-design.md`. Omega now exposes
+a redacted `google_gemini` grant response for Probe-compatible assignment
+metadata, but live hosted inference uses the broker route above so the Worker
+secret never leaves Omega.
 
 ## Request Lowering
 

@@ -43,6 +43,15 @@ export function resolveGeminiApiKey(options: ResolveGeminiApiKeyOptions = {}): E
     return Effect.succeed(resolved(gemini, "GEMINI_API_KEY", options.profileId));
   }
 
+  const omegaBearer =
+    nonEmpty(options.env?.PROBE_OMEGA_BASE_URL) === undefined
+      ? undefined
+      : nonEmpty(options.env?.PROBE_OMEGA_BEARER_TOKEN);
+
+  if (omegaBearer !== undefined) {
+    return Effect.succeed(resolved(omegaBearer, "PROBE_OMEGA_BEARER_TOKEN", options.profileId));
+  }
+
   return Effect.fail(
     new GeminiAuthError({
       reason: "missing Gemini API key: set GOOGLE_GENERATIVE_AI_API_KEY or GEMINI_API_KEY",
@@ -52,6 +61,12 @@ export function resolveGeminiApiKey(options: ResolveGeminiApiKeyOptions = {}): E
 }
 
 export function makeGeminiAuthHeaders(resolvedKey: ResolvedGeminiApiKey): Readonly<Record<string, string>> {
+  if (resolvedKey.source === "PROBE_OMEGA_BEARER_TOKEN") {
+    return {
+      Authorization: `Bearer ${resolvedKey.apiKey}`,
+    };
+  }
+
   return {
     "x-goog-api-key": resolvedKey.apiKey,
   };

@@ -72,6 +72,45 @@ describe("Probe CLI Gemini backend commands", () => {
     expect(urls[0]).toContain("/v1beta/models/gemini-2.5-flash:streamGenerateContent");
   });
 
+  test("probe backend gemini smoke falls back to an authenticated Omega Gemini broker", async () => {
+    const seen = {
+      url: "",
+      authorization: "",
+      apiKey: "",
+    };
+    const result = await Effect.runPromise(
+      runProbeCli(["backend", "gemini", "smoke", "--prompt", "hello"], {
+        env: {
+          PROBE_OMEGA_BASE_URL: "https://openagents.com",
+          PROBE_OMEGA_BEARER_TOKEN: "oa_agent_test",
+        },
+        fetch: async (input, init) => {
+          const headers = new Headers(init?.headers);
+          seen.url = String(input);
+          seen.authorization = headers.get("authorization") ?? "";
+          seen.apiKey = headers.get("x-goog-api-key") ?? "";
+          return new Response(
+            sse({
+              candidates: [{ content: { role: "model", parts: [{ text: "omega ok" }] }, finishReason: "STOP" }],
+              usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 1, totalTokenCount: 3 },
+            }),
+            { status: 200 },
+          );
+        },
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("apiKeySource: PROBE_OMEGA_BEARER_TOKEN");
+    expect(result.stdout).toContain("assistant: omega ok");
+    expect(result.stdout).not.toContain("oa_agent_test");
+    expect(seen.authorization).toBe("Bearer oa_agent_test");
+    expect(seen.apiKey).toBe("");
+    expect(seen.url).toBe(
+      "https://openagents.com/api/provider-accounts/google-gemini/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+    );
+  });
+
   test("probe backend gemini smoke reports missing keys without leaking provider request details", async () => {
     const result = await Effect.runPromise(runProbeCli(["backend", "gemini", "smoke"], { env: {} }));
 
