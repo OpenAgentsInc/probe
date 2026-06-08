@@ -29,6 +29,7 @@ import {
   makeProbeLlmMessage,
   makeProbeLlmRequest,
   probeLlmToolDefinitions,
+  type ProbeLlmEvent,
   type ProbeLlmMessage,
   type ProbeLlmRequest,
   type ProbeLlmTools,
@@ -1047,10 +1048,16 @@ function readAnyWorkspaceFile(
 function listWorkspaceFiles(
   input: Readonly<Record<string, unknown>>,
   env: Readonly<Record<string, string | undefined>> = {},
-): Effect.Effect<{ readonly path: string; readonly files?: ReadonlyArray<string>; readonly truncated?: boolean; readonly error?: string }, never> {
+): Effect.Effect<{
+  readonly path: string;
+  readonly directories?: ReadonlyArray<string>;
+  readonly files?: ReadonlyArray<string>;
+  readonly truncated?: boolean;
+  readonly error?: string;
+}, never> {
   return Effect.gen(function* () {
     const path = typeof input.path === "string" ? input.path : ".";
-    const limit = boundedToolLimit(input.limit, 200);
+    const limit = boundedToolLimit(input.limit, 80);
     const workspace = resolveProbeChatWorkspaceRoot(env);
     const resolved = resolveWorkspacePath(workspace, path);
 
@@ -1058,14 +1065,13 @@ function listWorkspaceFiles(
       return { path, error: "path is outside the OpenAgents workspace file scope" };
     }
 
-    const files = yield* collectWorkspaceFiles(resolved.absolutePath, resolved.relativePath, limit).pipe(
-      Effect.catch((error) => Effect.succeed([`failed to list ${path}: ${String(error)}`])),
+    const listing = yield* collectWorkspaceEntries(resolved.absolutePath, resolved.relativePath, limit).pipe(
+      Effect.catch((error) => Effect.succeed({ directories: [], files: [`failed to list ${path}: ${String(error)}`], truncated: false })),
     );
 
     return {
       path,
-      files,
-      truncated: files.length >= limit,
+      ...listing,
     };
   });
 }
@@ -1120,54 +1126,54 @@ function searchWorkspaceCode(
   });
 }
 
-function collectWorkspaceFiles(
+function collectWorkspaceEntries(
   absolutePath: string,
   relativePath: string,
   limit: number,
-): Effect.Effect<ReadonlyArray<string>, unknown> {
+): Effect.Effect<{
+  readonly directories: ReadonlyArray<string>;
+  readonly files: ReadonlyArray<string>;
+  readonly truncated: boolean;
+}, unknown> {
   return Effect.tryPromise(async () => {
     const rootStat = await stat(absolutePath);
 
     if (rootStat.isFile()) {
-      return [relativePath];
+      return { directories: [], files: [relativePath], truncated: false };
     }
 
     const files: string[] = [];
-    const queue = [{ absolutePath, relativePath }];
+    const directories: string[] = [];
+    const entries = await readdir(absolutePath, { withFileTypes: true });
+    const visibleEntries = entries.filter((entry) => !shouldSkipWorkspaceEntry(entry.name));
 
-    while (queue.length > 0 && files.length < limit) {
-      const current = queue.shift()!;
-      const entries = await readdir(current.absolutePath, { withFileTypes: true });
+    for (const entry of visibleEntries) {
+      if (directories.length + files.length >= limit) {
+        break;
+      }
 
-      for (const entry of entries) {
-        if (files.length >= limit) {
-          break;
-        }
+      const entryRelativePath = relativePath === "." ? entry.name : `${relativePath}/${entry.name}`;
 
-        if (shouldSkipWorkspaceEntry(entry.name)) {
-          continue;
-        }
+      if (entry.isDirectory()) {
+        directories.push(entryRelativePath);
+        continue;
+      }
 
-        const entryRelativePath = current.relativePath === "." ? entry.name : `${current.relativePath}/${entry.name}`;
-        const entryAbsolutePath = resolve(current.absolutePath, entry.name);
-
-        if (entry.isDirectory()) {
-          queue.push({ absolutePath: entryAbsolutePath, relativePath: entryRelativePath });
-          continue;
-        }
-
-        if (entry.isFile()) {
-          files.push(entryRelativePath);
-        }
+      if (entry.isFile()) {
+        files.push(entryRelativePath);
       }
     }
 
-    return files;
+    return {
+      directories,
+      files,
+      truncated: visibleEntries.length > directories.length + files.length,
+    };
   });
 }
 
 function resolveProbeChatWorkspaceRoot(env: Readonly<Record<string, string | undefined>> = {}): string {
-  return resolve(env.PROBE_WORKSPACE_ROOT ?? env.OPENAGENTS_WORKSPACE_ROOT ?? resolveProbeWorkspaceRoot());
+  return resolve(env.PROBE_WORKSPACE_ROOT ?? env.OPENAGENTS_WORKSPACE_ROOT ?? dirname(resolveProbeWorkspaceRoot()));
 }
 
 function resolveWorkspacePath(
@@ -1198,6 +1204,67 @@ function boundedToolLimit(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(Math.floor(value), 500) : fallback;
 }
 
+function makeGeminiInteractiveTurnStream(colors: ProbeCliColors): {
+  readonly onEvent: (event: ProbeLlmEvent) => void;
+  readonly finish: (result?: GeminiCompleteResult) => void;
+} {
+  let textOpen = false;
+  let sawText = false;
+
+  const closeText = () => {
+    if (textOpen) {
+      process.stdout.write("\n");
+      textOpen = false;
+    }
+  };
+
+  return {
+    onEvent: (event) => {
+      if (event.type === "text-delta") {
+        if (!textOpen) {
+          process.stdout.write(`${cliLabel(colors, "assistant", "assistant")} `);
+          textOpen = true;
+        }
+
+        sawText = true;
+        process.stdout.write(event.text);
+        return;
+      }
+
+      if (event.type === "tool-call") {
+        closeText();
+        process.stdout.write(`${cliToolLine(colors, "tool_call", event.name, safeJson(event.input), "call")}\n`);
+        return;
+      }
+
+      if (event.type === "tool-result") {
+        closeText();
+        process.stdout.write(`${cliToolLine(colors, "tool_result", event.name, formatToolResultValue(event.result), "result")}\n`);
+        return;
+      }
+
+      if (event.type === "tool-error") {
+        closeText();
+        process.stdout.write(`${cliToolLine(colors, "tool_error", event.name, event.message, "error")}\n`);
+      }
+    },
+    finish: (result) => {
+      closeText();
+
+      if (result === undefined) {
+        return;
+      }
+
+      if (!sawText && result.text.length > 0) {
+        process.stdout.write(`${cliLine(colors, "assistant", result.text, "assistant")}\n`);
+      }
+
+      process.stdout.write(`${cliField(colors, "roundTrips", String(result.roundTrips), "muted")}\n`);
+      process.stdout.write(`${cliLine(colors, "usage", formatGeminiUsage(result.receipt.usage), "usage")}\n`);
+    },
+  };
+}
+
 function formatToolResultValue(value: { readonly type: string; readonly value: unknown }): string {
   if (value.type === "text" || value.type === "error") {
     return String(value.value);
@@ -1208,6 +1275,24 @@ function formatToolResultValue(value: { readonly type: string; readonly value: u
       path: value.value.path,
       contentChars: value.value.content.length,
       preview: value.value.content.slice(0, 500),
+    });
+  }
+
+  if (isListFilesToolResult(value.value)) {
+    return safeJson({
+      path: value.value.path,
+      directories: value.value.directories.slice(0, 30),
+      files: value.value.files.slice(0, 30),
+      truncated: value.value.truncated,
+    });
+  }
+
+  if (isSearchCodeToolResult(value.value)) {
+    return safeJson({
+      query: value.value.query,
+      path: value.value.path,
+      matches: value.value.matches.slice(0, 20),
+      truncated: value.value.truncated,
     });
   }
 
@@ -1222,6 +1307,42 @@ function isReadFileToolResult(value: unknown): value is { readonly path: string;
     typeof value.path === "string" &&
     "content" in value &&
     typeof value.content === "string"
+  );
+}
+
+function isListFilesToolResult(value: unknown): value is {
+  readonly path: string;
+  readonly directories: ReadonlyArray<string>;
+  readonly files: ReadonlyArray<string>;
+  readonly truncated?: boolean;
+} {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "path" in value &&
+    typeof value.path === "string" &&
+    "directories" in value &&
+    Array.isArray(value.directories) &&
+    "files" in value &&
+    Array.isArray(value.files)
+  );
+}
+
+function isSearchCodeToolResult(value: unknown): value is {
+  readonly query: string;
+  readonly path: string;
+  readonly matches: ReadonlyArray<string>;
+  readonly truncated?: boolean;
+} {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "query" in value &&
+    typeof value.query === "string" &&
+    "path" in value &&
+    typeof value.path === "string" &&
+    "matches" in value &&
+    Array.isArray(value.matches)
   );
 }
 
@@ -1321,18 +1442,20 @@ async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: Probe
       }
 
       const request = makeGeminiChatRequest({ messages, model, prompt, maxTokens, tools });
+      const stream = makeGeminiInteractiveTurnStream(colors);
       const result = await Effect.runPromise(
-        clientResult.complete({ request, tools, maxModelRoundTrips: 8 }).pipe(
+        clientResult.complete({ request, tools, maxModelRoundTrips: 8, onEvent: stream.onEvent }).pipe(
           Effect.catch((error: GeminiClientError) => Effect.succeed(error)),
         ),
       );
 
       if (result instanceof GeminiClientError) {
+        stream.finish();
         process.stdout.write(formatGeminiFailure("Probe Gemini chat", result, colors));
         continue;
       }
 
-      process.stdout.write(formatGeminiChatTurn({ apiKeySource: clientResult.apiKey.source, colors, result }));
+      stream.finish(result);
       messages = [...result.finalRequest.messages, makeProbeLlmMessage("assistant", result.text)];
     }
   } finally {

@@ -190,9 +190,10 @@ describe("Probe CLI Gemini backend commands", () => {
         candidates: [{ content: { role: "model", parts: [{ text: "Read it." }] }, finishReason: "STOP" }],
       }),
     ];
+    const workspaceRoot = process.cwd().endsWith("packages/runtime") ? "../.." : ".";
     const result = await Effect.runPromise(
       runProbeCli(["chat", "--prompt", "read README"], {
-        env: { GEMINI_API_KEY: "test-gemini-key" },
+        env: { GEMINI_API_KEY: "test-gemini-key", PROBE_WORKSPACE_ROOT: workspaceRoot },
         fetch: async () => new Response(responses.shift() ?? "", { status: 200 }),
       }),
     );

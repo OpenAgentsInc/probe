@@ -66,10 +66,10 @@ not passed. CLI output reports the API-key source label and
 auth precedence. It defaults to `gemini-2.5-flash`, uses local Gemini API keys
 when present, and otherwise uses the Omega broker when `PROBE_OMEGA_BASE_URL`
 and `PROBE_OMEGA_BEARER_TOKEN` are set. Each turn prints native tool calls,
-tool results, the assistant response, round trips, and token usage. The chat
-tool root defaults to the Probe repo and can be widened with
-`PROBE_WORKSPACE_ROOT=/Users/christopherdavid/work`. The initial starter tool
-menu includes:
+tool results, streamed assistant text, round trips, and token usage. The chat
+tool root defaults to the umbrella workspace above the Probe repo and can be
+overridden with `PROBE_WORKSPACE_ROOT=/Users/christopherdavid/work`. The
+initial starter tool menu includes:
 
 - `read_file`: reads a UTF-8 file under the configured tool root, capped to a
   small text slice;

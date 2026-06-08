@@ -105,56 +105,99 @@ export function lowerProbeLlmRequestToGeminiBody(request: ProbeLlmRequest): Gemi
 export function parseGeminiSseStream(raw: string): Effect.Effect<ReadonlyArray<ProbeLlmEvent>, GeminiProtocolError> {
   return Effect.gen(function* () {
     const events: ProbeLlmEvent[] = [ProbeLlmEvents.stepStart(0)];
-    let usage: ProbeLlmUsage | undefined;
-    let finishReason: string | undefined;
-    let hasToolCalls = false;
-    let nextToolCallId = 0;
+    let state = makeGeminiSseParseState();
 
     for (const payload of parseSseDataPayloads(raw)) {
-      const event = yield* parseGeminiJsonPayload(payload);
-      usage = event.usageMetadata === undefined ? usage : mapGeminiUsage(event.usageMetadata);
-
-      const candidate = event.candidates?.[0];
-      finishReason = candidate?.finishReason ?? finishReason;
-
-      for (const part of candidate?.content?.parts ?? []) {
-        if (isGeminiTextPart(part) && part.text.length > 0) {
-          if (part.thought === true) {
-            events.push(
-              ProbeLlmEvents.reasoningDelta({
-                id: "reasoning-0",
-                text: part.text,
-                providerMetadata: part.thoughtSignature ? googleMetadata({ thoughtSignature: part.thoughtSignature }) : undefined,
-              }),
-            );
-          } else {
-            events.push(ProbeLlmEvents.textDelta({ id: "text-0", text: part.text }));
-          }
-          continue;
-        }
-
-        if (isGeminiFunctionCallPart(part)) {
-          events.push(
-            ProbeLlmEvents.toolCall({
-              id: `tool_${nextToolCallId++}`,
-              name: part.functionCall.name,
-              input: part.functionCall.args,
-              providerMetadata: part.thoughtSignature ? googleMetadata({ thoughtSignature: part.thoughtSignature }) : undefined,
-            }),
-          );
-          hasToolCalls = true;
-        }
-      }
+      const parsed = yield* parseGeminiSsePayload(payload, state);
+      state = parsed.state;
+      events.push(...parsed.events);
     }
 
-    if (finishReason !== undefined || usage !== undefined) {
-      const reason = mapGeminiFinishReason(finishReason, hasToolCalls);
-      events.push(ProbeLlmEvents.stepFinish({ index: 0, reason, usage }));
-      events.push(ProbeLlmEvents.finish({ reason, usage }));
-    }
+    events.push(...finishGeminiSseParseState(state));
 
     return events;
   });
+}
+
+export interface GeminiSseParseState {
+  readonly finishReason?: string;
+  readonly hasToolCalls: boolean;
+  readonly nextToolCallId: number;
+  readonly usage?: ProbeLlmUsage;
+}
+
+export function makeGeminiSseParseState(): GeminiSseParseState {
+  return {
+    hasToolCalls: false,
+    nextToolCallId: 0,
+  };
+}
+
+export function parseGeminiSsePayload(
+  payload: string,
+  state: GeminiSseParseState,
+): Effect.Effect<{ readonly state: GeminiSseParseState; readonly events: ReadonlyArray<ProbeLlmEvent> }, GeminiProtocolError> {
+  return Effect.gen(function* () {
+    const events: ProbeLlmEvent[] = [];
+    const event = yield* parseGeminiJsonPayload(payload);
+    const usage = event.usageMetadata === undefined ? state.usage : mapGeminiUsage(event.usageMetadata);
+    const candidate = event.candidates?.[0];
+    const finishReason = candidate?.finishReason ?? state.finishReason;
+    let hasToolCalls = state.hasToolCalls;
+    let nextToolCallId = state.nextToolCallId;
+
+    for (const part of candidate?.content?.parts ?? []) {
+      if (isGeminiTextPart(part) && part.text.length > 0) {
+        if (part.thought === true) {
+          events.push(
+            ProbeLlmEvents.reasoningDelta({
+              id: "reasoning-0",
+              text: part.text,
+              providerMetadata: part.thoughtSignature ? googleMetadata({ thoughtSignature: part.thoughtSignature }) : undefined,
+            }),
+          );
+        } else {
+          events.push(ProbeLlmEvents.textDelta({ id: "text-0", text: part.text }));
+        }
+        continue;
+      }
+
+      if (isGeminiFunctionCallPart(part)) {
+        events.push(
+          ProbeLlmEvents.toolCall({
+            id: `tool_${nextToolCallId++}`,
+            name: part.functionCall.name,
+            input: part.functionCall.args,
+            providerMetadata: part.thoughtSignature ? googleMetadata({ thoughtSignature: part.thoughtSignature }) : undefined,
+          }),
+        );
+        hasToolCalls = true;
+      }
+    }
+
+    return {
+      state: {
+        finishReason,
+        hasToolCalls,
+        nextToolCallId,
+        usage,
+      },
+      events,
+    };
+  });
+}
+
+export function finishGeminiSseParseState(state: GeminiSseParseState): ReadonlyArray<ProbeLlmEvent> {
+  if (state.finishReason === undefined && state.usage === undefined) {
+    return [];
+  }
+
+  const reason = mapGeminiFinishReason(state.finishReason, state.hasToolCalls);
+
+  return [
+    ProbeLlmEvents.stepFinish({ index: 0, reason, usage: state.usage }),
+    ProbeLlmEvents.finish({ reason, usage: state.usage }),
+  ];
 }
 
 function lowerMessages(messages: ReadonlyArray<ProbeLlmMessage>): ReadonlyArray<GeminiContent> {

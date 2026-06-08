@@ -2,7 +2,13 @@ import { Effect, Schema as S } from "effect";
 import { type ResolveProbeBackendProfileOptions, type ResolvedProbeBackendProfile } from "../backend-profile";
 import { resolveGeminiBackendProfile, type ProbeBackendRegistryError } from "../registry";
 import { makeGeminiAuthHeaders, resolveGeminiApiKey, type ResolvedGeminiApiKey } from "./auth";
-import { geminiEndpointPath, lowerProbeLlmRequestToGeminiBody, parseGeminiSseStream } from "./protocol";
+import {
+  finishGeminiSseParseState,
+  geminiEndpointPath,
+  lowerProbeLlmRequestToGeminiBody,
+  makeGeminiSseParseState,
+  parseGeminiSsePayload,
+} from "./protocol";
 import {
   ProbeLlmEvents,
   makeProbeLlmMessage,
@@ -42,6 +48,7 @@ export interface GeminiCompleteInput {
   readonly request: ProbeLlmRequest;
   readonly tools?: ProbeLlmTools;
   readonly maxModelRoundTrips?: number;
+  readonly onEvent?: (event: ProbeLlmEvent) => void;
 }
 
 export interface GeminiCompleteResult {
@@ -105,7 +112,7 @@ function completeGemini(input: {
 
     while (roundTrips < maxModelRoundTrips) {
       roundTrips += 1;
-      const modelEvents = yield* callGemini(input.profile, input.apiKey, input.fetchImpl, request);
+      const modelEvents = yield* callGemini(input.profile, input.apiKey, input.fetchImpl, request, input.input.onEvent);
       events = [...events, ...modelEvents];
       const toolCalls = modelEvents.filter(ProbeLlmEvents.isToolCall);
 
@@ -132,6 +139,7 @@ function completeGemini(input: {
       for (const call of toolCalls) {
         const dispatched = yield* dispatchProbeLlmTool(input.input.tools ?? {}, call);
         events = [...events, ...dispatched.events];
+        emitGeminiEvents(dispatched.events, input.input.onEvent);
         toolReceipts = [
           ...toolReceipts,
           makeGeminiToolCallReceipt({
@@ -188,6 +196,7 @@ function callGemini(
   apiKey: ResolvedGeminiApiKey,
   fetchImpl: typeof fetch,
   request: ProbeLlmRequest,
+  onEvent?: (event: ProbeLlmEvent) => void,
 ): Effect.Effect<ReadonlyArray<ProbeLlmEvent>, GeminiClientError> {
   return Effect.gen(function* () {
     const endpoint = new URL(`${withoutTrailingSlash(profile.baseUrl)}${geminiEndpointPath(request.model.model)}`);
@@ -214,26 +223,13 @@ function callGemini(
           }),
         }),
     });
-    const rawText = yield* Effect.tryPromise({
-      try: () => response.text(),
-      catch: (error) =>
-        new GeminiClientError({
-          reason: `Gemini response could not be read: ${String(error)}`,
-          failureClass: "malformed_response",
-          receipt: makeGeminiFailureReceipt({
-            profileId: profile.id,
-            model: request.model.model,
-            baseUrl: profile.baseUrl,
-            failureClass: "malformed_response",
-            message: `Gemini response could not be read: ${String(error)}`,
-          }),
-        }),
-    });
 
     if (!response.ok) {
+      const rawText = yield* readGeminiResponseText(response, profile, request);
+
       return yield* Effect.fail(
         new GeminiClientError({
-          reason: `Gemini returned HTTP ${response.status}`,
+          reason: `Gemini returned HTTP ${response.status}${rawText.length === 0 ? "" : `: ${rawText.slice(0, 500)}`}`,
           failureClass: `http_${response.status}`,
           statusCode: response.status,
           receipt: makeGeminiFailureReceipt({
@@ -247,23 +243,194 @@ function callGemini(
       );
     }
 
-    return yield* parseGeminiSseStream(rawText).pipe(
-      Effect.mapError(
-        (error) =>
-          new GeminiClientError({
-            reason: error.reason,
-            failureClass: error.failureClass,
-            receipt: makeGeminiFailureReceipt({
-              profileId: profile.id,
-              model: request.model.model,
-              baseUrl: profile.baseUrl,
-              failureClass: error.failureClass,
-              message: error.reason,
-            }),
-          }),
-      ),
-    );
+    const events = yield* parseGeminiResponseStream(response, profile, request, onEvent);
+
+    return events;
   });
+}
+
+function parseGeminiResponseStream(
+  response: Response,
+  profile: ResolvedProbeBackendProfile,
+  request: ProbeLlmRequest,
+  onEvent?: (event: ProbeLlmEvent) => void,
+): Effect.Effect<ReadonlyArray<ProbeLlmEvent>, GeminiClientError> {
+  return Effect.gen(function* () {
+    if (response.body === null) {
+      return yield* Effect.fail(
+        new GeminiClientError({
+          reason: "Gemini response body was empty",
+          failureClass: "malformed_response",
+          receipt: makeGeminiFailureReceipt({
+            profileId: profile.id,
+            model: request.model.model,
+            baseUrl: profile.baseUrl,
+            failureClass: "malformed_response",
+            message: "Gemini response body was empty",
+          }),
+        }),
+      );
+    }
+
+    const events: ProbeLlmEvent[] = [ProbeLlmEvents.stepStart(0)];
+    emitGeminiEvents(events, onEvent);
+    const decoder = new TextDecoder();
+    const reader = response.body.getReader();
+    let state = makeGeminiSseParseState();
+    let buffer = "";
+
+    try {
+      for (;;) {
+        const chunk = yield* Effect.tryPromise({
+          try: () => reader.read(),
+          catch: (error) => makeMalformedGeminiResponseError(profile, request, `Gemini response could not be read: ${String(error)}`),
+        });
+
+        if (chunk.done) {
+          break;
+        }
+
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const parsed = yield* drainGeminiSseBuffer(buffer, state).pipe(
+          Effect.mapError((error) => makeMalformedGeminiResponseError(profile, request, error.reason)),
+        );
+        buffer = parsed.remaining;
+        state = parsed.state;
+        events.push(...parsed.events);
+        emitGeminiEvents(parsed.events, onEvent);
+      }
+
+      buffer += decoder.decode();
+      const parsed = yield* drainGeminiSseBuffer(buffer, state, true).pipe(
+        Effect.mapError((error) => makeMalformedGeminiResponseError(profile, request, error.reason)),
+      );
+      state = parsed.state;
+      events.push(...parsed.events);
+      emitGeminiEvents(parsed.events, onEvent);
+      const finishEvents = finishGeminiSseParseState(state);
+      events.push(...finishEvents);
+      emitGeminiEvents(finishEvents, onEvent);
+
+      return events;
+    } finally {
+      reader.releaseLock();
+    }
+  });
+}
+
+function drainGeminiSseBuffer(
+  input: string,
+  state: ReturnType<typeof makeGeminiSseParseState>,
+  flush = false,
+) {
+  return Effect.gen(function* () {
+    let buffer = input;
+    let nextState = state;
+    const events: ProbeLlmEvent[] = [];
+
+    for (;;) {
+      const boundary = findSseEventBoundary(buffer);
+
+      if (boundary === undefined) {
+        break;
+      }
+
+      const rawEvent = buffer.slice(0, boundary.length);
+      buffer = buffer.slice(boundary.nextIndex);
+      const payload = readSsePayload(rawEvent);
+
+      if (payload === undefined) {
+        continue;
+      }
+
+      const parsed = yield* parseGeminiSsePayload(payload, nextState);
+      nextState = parsed.state;
+      events.push(...parsed.events);
+    }
+
+    if (flush && buffer.trim().length > 0) {
+      const payload = readSsePayload(buffer);
+
+      if (payload !== undefined) {
+        const parsed = yield* parseGeminiSsePayload(payload, nextState);
+        nextState = parsed.state;
+        events.push(...parsed.events);
+        buffer = "";
+      }
+    }
+
+    return {
+      events,
+      remaining: buffer,
+      state: nextState,
+    };
+  });
+}
+
+function findSseEventBoundary(input: string): { readonly length: number; readonly nextIndex: number } | undefined {
+  const lf = input.indexOf("\n\n");
+  const crlf = input.indexOf("\r\n\r\n");
+
+  if (lf === -1 && crlf === -1) {
+    return undefined;
+  }
+
+  if (crlf !== -1 && (lf === -1 || crlf < lf)) {
+    return { length: crlf, nextIndex: crlf + 4 };
+  }
+
+  return { length: lf, nextIndex: lf + 2 };
+}
+
+function readSsePayload(rawEvent: string): string | undefined {
+  const lines = rawEvent.split(/\r?\n/);
+  const payload = lines
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice("data:".length).trimStart())
+    .filter((line) => line !== "[DONE]")
+    .join("\n");
+
+  return payload.length === 0 ? undefined : payload;
+}
+
+function readGeminiResponseText(
+  response: Response,
+  profile: ResolvedProbeBackendProfile,
+  request: ProbeLlmRequest,
+): Effect.Effect<string, GeminiClientError> {
+  return Effect.tryPromise({
+    try: () => response.text(),
+    catch: (error) =>
+      makeMalformedGeminiResponseError(profile, request, `Gemini response could not be read: ${String(error)}`),
+  });
+}
+
+function makeMalformedGeminiResponseError(
+  profile: ResolvedProbeBackendProfile,
+  request: ProbeLlmRequest,
+  message: string,
+): GeminiClientError {
+  return new GeminiClientError({
+    reason: message,
+    failureClass: "malformed_response",
+    receipt: makeGeminiFailureReceipt({
+      profileId: profile.id,
+      model: request.model.model,
+      baseUrl: profile.baseUrl,
+      failureClass: "malformed_response",
+      message,
+    }),
+  });
+}
+
+function emitGeminiEvents(events: ReadonlyArray<ProbeLlmEvent>, onEvent: GeminiCompleteInput["onEvent"]): void {
+  if (onEvent === undefined) {
+    return;
+  }
+
+  for (const event of events) {
+    onEvent(event);
+  }
 }
 
 function collectText(events: ReadonlyArray<ProbeLlmEvent>): string {

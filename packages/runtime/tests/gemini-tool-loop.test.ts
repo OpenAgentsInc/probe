@@ -235,4 +235,48 @@ describe("Gemini native tool loop", () => {
       failureClass: "round_trip_limit",
     });
   });
+
+  test("emits streamed events through onEvent while parsing SSE chunks", async () => {
+    const body = sse(
+      { candidates: [{ content: { role: "model", parts: [{ text: "Hello " }] } }] },
+      {
+        candidates: [{ content: { role: "model", parts: [{ text: "stream" }] }, finishReason: "STOP" }],
+        usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 2, totalTokenCount: 4 },
+      },
+    );
+    const midpoint = Math.floor(body.length / 2);
+    const client = await Effect.runPromise(
+      makeGeminiClient({
+        apiKey: "test-key",
+        fetch: async () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode(body.slice(0, midpoint)));
+                controller.enqueue(new TextEncoder().encode(body.slice(midpoint)));
+                controller.close();
+              },
+            }),
+            { status: 200 },
+          ),
+      }),
+    );
+    const streamed: string[] = [];
+    const result = await Effect.runPromise(
+      client.complete({
+        request: makeProbeLlmRequest({
+          model: { provider: "google", model: "gemini-2.5-flash" },
+          prompt: "Stream.",
+        }),
+        onEvent: (event) => {
+          if (event.type === "text-delta") {
+            streamed.push(event.text);
+          }
+        },
+      }),
+    );
+
+    expect(streamed).toEqual(["Hello ", "stream"]);
+    expect(result.text).toBe("Hello stream");
+  });
 });
