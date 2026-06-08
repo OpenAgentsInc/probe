@@ -20,13 +20,19 @@ architecture and execution plans. They are not public benchmark claims.
    Pylon, Omega, and historical repos. Start here when deciding which repo owns
    which part of the benchmark apparatus.
 
-3. `2026-06-08-omni-continual-learning-training-loop.md`
+3. `2026-06-08-probe-gepa-benchmark-system-closeout-audit.md`
+   Closeout audit for the implemented `plan.md` issue series. It summarizes
+   how Probe, public benchmark-cloud, Psionic, Omega/Pylon, and Artanis now fit
+   together, what is done, what remains live-gated, what was tested, and the
+   next milestone for real SHC/Harbor and Pylon-distributed runs.
+
+4. `2026-06-08-omni-continual-learning-training-loop.md`
    Big-picture bridge from the root-level Omni docs and OpenAgents transcript
    arc into Probe's benchmark plans. It explains why continual benchmark
    learning serves Coding on Autopilot, accepted outcomes, route scorecards,
    public proof, Pylon provider work, and Psionic model training.
 
-4. `2026-06-08-artanis-gepa-benchmark-pylon-focus.md`
+5. `2026-06-08-artanis-gepa-benchmark-pylon-focus.md`
    Artanis refocus audit. It compares the current Artanis mission, public
    Forum readback, posting runbook, and proof trail against the Probe
    benchmark docs, then defines how Artanis should become the public overseer
@@ -34,25 +40,25 @@ architecture and execution plans. They are not public benchmark claims.
    leaving execution, scoring, payment, training, and promotion authority in
    the owning systems.
 
-5. `2026-06-08-probe-continual-benchmark-learning-apparatus.md`
+6. `2026-06-08-probe-continual-benchmark-learning-apparatus.md`
    End-state plan for Probe's continual improvement loop. It defines how Probe,
    public benchmark-cloud, Psionic, Pylon, and Omega should turn
    benchmark failures into prompt, Blueprint, tool-menu, loop-policy, and LoRA
    candidates with explicit promotion gates.
 
-6. `2026-06-08-pylon-gepa-coding-agent-benchmark-run.md`
+7. `2026-06-08-pylon-gepa-coding-agent-benchmark-run.md`
    First executable optimizer plan. It narrows the initial benchmark-climbing
    work to a GEPA-only text-candidate campaign, using Pylon as the parallel
    rollout engine across retained Terminal-Bench failures, validation splits,
    and frozen holdout tasks.
 
-7. `../probe-benchmark-contracts.md`
+8. `../probe-benchmark-contracts.md`
    Implementation note for the first Probe runtime contract slice from issue
    #182. It records the benchmark assignment, run, closeout, decision trace,
    candidate, evidence-only promotion decision schemas, and normalized
    closeout bundle writer now exported by the Bun/Effect runtime package.
 
-8. `../probe-retained-terminal-bench-fixtures.md`
+9. `../probe-retained-terminal-bench-fixtures.md`
    Implementation note for the retained Terminal-Bench fixture package from
    issue #184. It records the public-ref-only failure-family fixtures that
    Probe and GEPA Stage 0/1 can load without hidden task material or private
