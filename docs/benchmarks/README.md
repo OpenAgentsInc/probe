@@ -52,6 +52,12 @@ architecture and execution plans. They are not public benchmark claims.
    candidate, evidence-only promotion decision schemas, and normalized
    closeout bundle writer now exported by the Bun/Effect runtime package.
 
+8. `../probe-retained-terminal-bench-fixtures.md`
+   Implementation note for the retained Terminal-Bench fixture package from
+   issue #184. It records the public-ref-only failure-family fixtures that
+   Probe and GEPA Stage 0/1 can load without hidden task material or private
+   Harbor traces.
+
 ## Current Decisions
 
 - `plan.md` is now the issue-creation and execution-order source of truth.

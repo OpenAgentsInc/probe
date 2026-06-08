@@ -75,6 +75,9 @@ Tracked files should stay minimal until the new architecture lands:
   Apple FM tool-callback session runtime.
 - `packages/runtime/src/backends/apple-fm/acceptance.ts` defines retained
   Apple FM acceptance cases and comparison receipts.
+- `packages/runtime/src/benchmark/` defines the public-safe benchmark closeout
+  bundle writer and retained Terminal-Bench fixture package for GEPA Stage 0/1
+  optimization handles.
 - `packages/runtime/src/blueprint/` defines the narrowed Blueprint consumer
   contracts, static registry fixtures, and registry source client Probe needs
   before live Omega Blueprint routes exist, plus the typed signature lookup
@@ -116,6 +119,10 @@ Tracked files should stay minimal until the new architecture lands:
   write boundary for external effects.
 - `docs/probe-blueprint-contribution-release-gates.md` records the Probe-side
   contribution draft and release-gate model.
+- `docs/probe-benchmark-contracts.md` records the Probe benchmark assignment,
+  closeout, candidate, promotion, and closeout bundle writer contracts.
+- `docs/probe-retained-terminal-bench-fixtures.md` records the public-ref-only
+  retained Terminal-Bench fixture package for GEPA Stage 0/1.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 
