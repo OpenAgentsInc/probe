@@ -36,6 +36,7 @@ audited, extended, and run by the wider OpenAgents ecosystem.
 - private `cloud/docs/bootstrap/CND-054-coding-agent-benchmark-improvement.md`
   source material
 - `openagents/AGENTS.md`
+- `probe/docs/benchmarks/2026-06-08-pylon-gepa-coding-agent-benchmark-run.md`
 - `work/docs/probe/17-gepa-optimize-anything-code-audit-and-psionic-probe-integration.md`
 - `psionic/docs/QWEN_LEGAL_FINETUNE_LANE.md`
 - `psionic/reports/qwen36-27b-real-pylon-rehearsal-001.md`
@@ -191,6 +192,14 @@ The parts to avoid are also clear:
 - hidden synthetic params;
 - stdout capture as feedback;
 - conflating optimizer acceptance with runtime promotion.
+
+The Pylon GEPA run plan now narrows the first optimizer milestone. Before LoRA,
+GRPO, or broad model-training work, run a GEPA-only campaign over structured
+text bundles: Probe prompts, Blueprint usage instructions, Program Signature
+playbooks, tool-menu policy, failure-family playbooks, and closeout policy.
+Pylon supplies parallel rollouts, and public OpenAgents Benchmark Cloud supplies
+split authority and artifact contracts. LoRA and Qwen adapter work should follow
+only after that lane produces clean traces and split-aware evidence.
 
 ## Proposed System Shape
 
@@ -581,10 +590,12 @@ The first around-the-clock schedule should be simple:
 
 - Every commit: Probe Bun/Effect tests and retained local fixtures.
 - Hourly: retained Terminal-Bench failure replay where local resources permit.
+- Daily until Stage 1 passes: GEPA-only retained failure sprint over text-bundle
+  candidates.
 - Nightly: SHC selected Harbor sweep.
 - Daily: Psionic candidate generation over fresh failures.
-- Daily: Qwen adapter training or DPO/GRPO job if enough new clean traces
-  exist.
+- Daily after GEPA Stage 1 is stable: Qwen adapter training or DPO/GRPO job if
+  enough new clean traces exist.
 - Weekly: broader SHC Terminal-Bench sweep and candidate frontier review.
 
 The scheduler should prioritize cheap information first. Do not spend SHC or
@@ -624,26 +635,43 @@ retained fixture set.
    Probe should run candidate variants against retained fixtures and report
    structured deltas.
 
-8. Add SHC selected sweep orchestration.
+8. Run Pylon GEPA Stage 0 and Stage 1.
+   Use text-bundle candidates only, retained Terminal-Bench failures, local
+   Probe acceptance fixtures, Pylon rollout receipts, and no model fine-tuning.
+
+9. Add SHC selected sweep orchestration.
    Public OpenAgents Benchmark Cloud should run selected Terminal-Bench tasks
    through Harbor on the SHC box using the current champion and candidate
    variants.
 
-9. Add Psionic Qwen3.6 coding-agent adapter lane.
+10. Add Psionic Qwen3.6 coding-agent adapter lane.
    Build SFT/DPO training data from clean Probe traces, train LoRA candidates,
    merge/register adapters, and evaluate through the same benchmark harness.
 
-10. Add Pylon distributed jobs.
+11. Add Pylon distributed jobs.
    Pylons should run admitted benchmark, evaluation, and training shards with
    signed receipts and explicit capability declarations.
 
-11. Add Omega promotion projection.
+12. Add Omega promotion projection.
    Omega should show candidate lineage, benchmark deltas, evidence bundles,
    claim boundaries, and operator approval controls.
 
 ## Immediate Milestone
 
-The first useful milestone is:
+The first useful milestone is the GEPA-only Stage 0 and Stage 1 lane:
+
+- public OpenAgents Benchmark Cloud has a split manifest for retained
+  Terminal-Bench failures and local Probe acceptance fixtures;
+- Probe can run a supplied text-bundle candidate and emit normalized evaluator
+  side information;
+- Pylon can run 20 to 40 smoke metric calls, then 200 to 400 retained-failure
+  metric calls;
+- candidate hashes, rollout receipts, policy findings, artifact manifests, and
+  resource receipts are preserved;
+- no candidate is promoted automatically;
+- no LoRA or model-training work is part of this first milestone.
+
+The first live SHC milestone after that is:
 
 - Probe runs `db-wal-recovery`, `configure-git-webserver`, and
   `pypi-server` through Harbor on SHC.

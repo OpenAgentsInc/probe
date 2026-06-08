@@ -89,6 +89,7 @@ Bun/Effect runtime only when they support the final product surface.
 | Retained coding failures / signatures | `openagents` target, private `cloud` source material, `probe`, `autopilot-omega` | Public retained fixtures plus Probe Blueprint signature lookup plus Omega release gates | Move fixture playbooks into public retained fixture packages and route through typed lookup. |
 | Legal / Harvey-style benchmark execution | `psionic` | Psionic Rust legal benchmark engine | Probe should run legal-agent sessions only under Psionic task envelopes and return answer/tool/evidence refs. |
 | Legal Qwen training and Pylon SFT | `psionic`, `openagents` | Psionic training receipts; Nexus/Pylon package and worker admission | Probe should provide coding/legal-agent runtime traces; Psionic remains training/eval authority. |
+| GEPA prompt/Blueprint optimization | `psionic`, `openagents`, `probe` | GEPA-style candidate manifests, Pylon rollout receipts, public OpenAgents Benchmark Cloud split manifests | Start with text-bundle candidates over retained Terminal-Bench failures before LoRA or broad model training. |
 | Product benchmark projection | `autopilot-omega` | Read-only public OpenAgents Benchmark Cloud and Probe run projections | Probe emits safe refs and closeout evidence that Omega can project. |
 | Provider/node benchmark admission | `openagents` | Nexus/Pylon compute benchmark packages and benchmark lane availability | Probe should advertise benchmark-capable runtime profiles, not mutate admission state directly. |
 | Historical Coder evals | `autopilot3` | Deprecated/older product smoke and UI replay suite | Reuse scenario ideas for Probe/Omega acceptance, not implementation. |
@@ -243,6 +244,13 @@ Probe should pull this signature lane into its own Blueprint lookup/runtime
 surface. Public OpenAgents Benchmark Cloud should own the dataset harness, and
 Probe should own signature package selection, tool-menu projection, prompt/tool
 context, and closeout evidence for Probe-backed slugs.
+
+The GEPA follow-up plan makes this the first optimizer lane. Start with a
+GEPA-only campaign over structured text bundles, not LoRA or model training.
+The first retained sprint should use Pylon as the metric-call engine, public
+OpenAgents Benchmark Cloud as the split and artifact authority, and Probe as
+the runtime that evaluates candidate prompts, Blueprint usage instructions,
+tool-menu policy, and closeout policy.
 
 ## Psionic Legal Benchmark System
 
@@ -743,15 +751,17 @@ The following issue set would turn this audit into implementation work:
    Terminal-Bench families.
 3. Add Probe-owned legal signature package fixtures for Psionic public/synthetic
    legal families.
-4. Rebuild/move the private Cloud true-Probe benchmark runner lane into public
+4. Add Pylon GEPA Stage 0 and Stage 1 candidate manifests, split manifests,
+   rollout receipts, and retained-failure evaluator contracts.
+5. Rebuild/move the private Cloud true-Probe benchmark runner lane into public
    OpenAgents.
-5. Add Probe benchmark closeout to Omega Probe run projection.
-6. Add Psionic legal task envelope to Probe runtime bridge.
-7. Add one retained coding live rerun through Probe+Codex on SHC.
-8. Add one public/synthetic legal fixture live run through Probe+Codex and
+6. Add Probe benchmark closeout to Omega Probe run projection.
+7. Add Psionic legal task envelope to Probe runtime bridge.
+8. Add one retained coding live rerun through Probe+Codex on SHC.
+9. Add one public/synthetic legal fixture live run through Probe+Codex and
    Psionic import.
-9. Add Pylon benchmark-capable Probe runtime advertisement fields.
-10. Add public-claim guardrails tying Probe evidence to Omega/public Benchmark
+10. Add Pylon benchmark-capable Probe runtime advertisement fields.
+11. Add public-claim guardrails tying Probe evidence to Omega/public Benchmark
     Cloud projection.
 
 ## Hard Boundaries
