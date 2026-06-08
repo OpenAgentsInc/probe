@@ -633,57 +633,33 @@ retained fixture set.
 
 ## First Implementation Sequence
 
-1. Add Probe benchmark run and candidate schemas.
-   Define Effect schemas for benchmark assignments, run records, decision
-   traces, candidate manifests, and promotion decisions.
+`docs/benchmarks/plan.md` is the source of truth for the first implementation
+sequence and GitHub issue creation. This apparatus document describes the
+target learning loop; `plan.md` decides how to break it into executable work.
 
-2. Add a Probe benchmark closeout writer.
-   Every Probe benchmark run should write a closeout bundle compatible with
-   the public OpenAgents Benchmark Cloud artifact manifest and proof bundle
-   expectations.
+The current issue sequence is:
 
-3. Import retained Terminal-Bench failure fixtures.
-   Keep task ids, failure family, expected signature refs, score expectations,
-   and artifact digests in Probe fixtures.
+1. Probe benchmark closeout foundation.
+2. Public Benchmark Cloud contracts.
+3. GEPA candidate optimization.
+4. Pylon work slices and paid-work path.
+5. Stage 0 and Stage 1 campaign.
+6. Artanis and public projection.
+7. Route scorecards and product impact.
 
-4. Rebuild the private Cloud runner lane in public OpenAgents.
-   Move or reimplement the normalized Benchmark Cloud contracts, Harbor wrapper,
-   artifact writer, proof bundle writer, and retained fixture evaluator into
-   `openagents`. The public runner should invoke current Probe as the agent
-   under test, not a deprecated implementation.
+The current priority unlocks are:
 
-5. Add `probe benchmark run`.
-   The command should accept a normalized assignment and emit normalized
-   artifacts.
+1. Probe closeout bundle.
+2. Public Benchmark Cloud split manifest.
+3. GEPA candidate manifest.
+4. Pylon metric-call assignment type.
+5. Stage 0 smoke.
+6. Stage 1 retained-failure sprint.
 
-6. Add GEPA-style candidate manifests in Psionic.
-   Psionic should generate prompt, Blueprint, and loop-policy candidates from
-   Probe trace exports and retained benchmark scores.
-
-7. Add a candidate evaluator.
-   Probe should run candidate variants against retained fixtures and report
-   structured deltas.
-
-8. Run Pylon GEPA Stage 0 and Stage 1.
-   Use text-bundle candidates only, retained Terminal-Bench failures, local
-   Probe acceptance fixtures, Pylon rollout receipts, and no model fine-tuning.
-
-9. Add SHC selected sweep orchestration.
-   Public OpenAgents Benchmark Cloud should run selected Terminal-Bench tasks
-   through Harbor on the SHC box using the current champion and candidate
-   variants.
-
-10. Add Psionic Qwen3.6 coding-agent adapter lane.
-   Build SFT/DPO training data from clean Probe traces, train LoRA candidates,
-   merge/register adapters, and evaluate through the same benchmark harness.
-
-11. Add Pylon distributed jobs.
-   Pylons should run admitted benchmark, evaluation, and training shards with
-   signed receipts and explicit capability declarations.
-
-12. Add Omega promotion projection.
-   Omega should show candidate lineage, benchmark deltas, evidence bundles,
-   claim boundaries, and operator approval controls.
+Do not open every issue in Probe. Follow the ownership model in `plan.md`:
+Probe owns runtime and closeout work, OpenAgents owns public Benchmark Cloud,
+Psionic owns GEPA frontier/coordinator work, Omega owns projection/release
+gates, and Pylon/OpenAgents own worker envelopes and benchmark work slices.
 
 ## Immediate Milestone
 

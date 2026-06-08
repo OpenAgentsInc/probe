@@ -384,21 +384,31 @@ policy gates. `active` requires the normal Blueprint/Omega release path.
 
 ## Implementation Path
 
-1. Create a small GEPA coordinator in Psionic or a benchmark-tools package that
-   imports `gepa.optimize_anything` and treats Pylon as the evaluator backend.
-2. Add a Probe benchmark adapter that can run a task with a supplied candidate
-   text bundle and return normalized evaluator side information.
-3. Adapt the Omega Pylon assignment lease and closeout path for benchmark
-   metric-call rollouts, including GEPA candidate hash, split refs, evaluator
-   refs, artifact/proof refs, and accepted/rejected closeout refs.
-4. Add a public OpenAgents Benchmark Cloud split manifest for retained,
-   validation, and holdout tasks.
-5. Store GEPA candidates as content-addressed text bundles.
-6. Store each rollout's proof bundle and resource receipt.
-7. Run the Stage 0 smoke locally or on a tiny Pylon pool.
-8. Run the Stage 1 retained failure sprint.
-9. Run Stage 2 and Stage 3 only after the retained lane proves the harness and
-   policy gates are working.
+`docs/benchmarks/plan.md` is the source of truth for issue creation and
+execution order. This GEPA run plan remains the rationale for the optimization
+lane, but the work should be opened and sequenced through the issue series in
+`plan.md`.
+
+The issue order is:
+
+1. Probe closeout foundation: assignment/closeout schemas, normalized closeout
+   writer, and retained coding fixtures.
+2. Public Benchmark Cloud contracts: public contract package, Terminal-Bench
+   split manifests, and true-Probe runner lane.
+3. GEPA candidate optimization: Psionic candidate manifests, GEPA coordinator,
+   and Probe candidate execution adapter.
+4. Pylon work slices and paid-work path: Omega/Pylon metric-call assignments,
+   worker capability envelopes, and explicit paid/unpaid/credit/no-spend
+   modes.
+5. Stage 0 and Stage 1 campaign: retained-fixture smoke and retained-failure
+   sprint through Pylon metric-call batches.
+6. SHC validation: selected Terminal-Bench validation sweep after Stage 1.
+7. Artanis/public projection and route scorecards: public campaign projection,
+   Forum summaries, route scorecards, and product accepted-outcome metrics.
+
+The priority unlock sequence is Probe closeout bundle, public Benchmark Cloud
+split manifest, GEPA candidate manifest, Pylon metric-call assignment type,
+Stage 0 smoke, and Stage 1 retained-failure sprint.
 
 ## Why GEPA Only First
 

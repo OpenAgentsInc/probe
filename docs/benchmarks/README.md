@@ -8,19 +8,25 @@ architecture and execution plans. They are not public benchmark claims.
 
 ## Current Reading Order
 
-1. `2026-06-08-workspace-benchmark-systems-audit.md`
+1. `plan.md`
+   Execution source of truth for converting the benchmark architecture into
+   GitHub issues. It defines the cross-repo ownership model, the 19-issue
+   series, labels, milestones, public claim rules, final tracking deliverable,
+   and the priority order for opening work.
+
+2. `2026-06-08-workspace-benchmark-systems-audit.md`
    Inventory of the benchmark systems across Probe, private Cloud source
    material, public OpenAgents Benchmark Cloud target architecture, Psionic,
    Pylon, Omega, and historical repos. Start here when deciding which repo owns
    which part of the benchmark apparatus.
 
-2. `2026-06-08-omni-continual-learning-training-loop.md`
+3. `2026-06-08-omni-continual-learning-training-loop.md`
    Big-picture bridge from the root-level Omni docs and OpenAgents transcript
    arc into Probe's benchmark plans. It explains why continual benchmark
    learning serves Coding on Autopilot, accepted outcomes, route scorecards,
    public proof, Pylon provider work, and Psionic model training.
 
-3. `2026-06-08-artanis-gepa-benchmark-pylon-focus.md`
+4. `2026-06-08-artanis-gepa-benchmark-pylon-focus.md`
    Artanis refocus audit. It compares the current Artanis mission, public
    Forum readback, posting runbook, and proof trail against the Probe
    benchmark docs, then defines how Artanis should become the public overseer
@@ -28,13 +34,13 @@ architecture and execution plans. They are not public benchmark claims.
    leaving execution, scoring, payment, training, and promotion authority in
    the owning systems.
 
-4. `2026-06-08-probe-continual-benchmark-learning-apparatus.md`
+5. `2026-06-08-probe-continual-benchmark-learning-apparatus.md`
    End-state plan for Probe's continual improvement loop. It defines how Probe,
    public OpenAgents Benchmark Cloud, Psionic, Pylon, and Omega should turn
    benchmark failures into prompt, Blueprint, tool-menu, loop-policy, and LoRA
    candidates with explicit promotion gates.
 
-5. `2026-06-08-pylon-gepa-coding-agent-benchmark-run.md`
+6. `2026-06-08-pylon-gepa-coding-agent-benchmark-run.md`
    First executable optimizer plan. It narrows the initial benchmark-climbing
    work to a GEPA-only text-candidate campaign, using Pylon as the parallel
    rollout engine across retained Terminal-Bench failures, validation splits,
@@ -42,6 +48,9 @@ architecture and execution plans. They are not public benchmark claims.
 
 ## Current Decisions
 
+- `plan.md` is now the issue-creation and execution-order source of truth.
+  The older audits explain rationale and boundaries; they do not supersede
+  the ordered cross-repo issue series in `plan.md`.
 - The benchmark apparatus should be public OpenAgents infrastructure.
 - The private `cloud` repo is source material and backfill, not the desired
   long-term benchmark authority.
@@ -86,6 +95,49 @@ architecture and execution plans. They are not public benchmark claims.
   settlement, and release-promotion claims until the remaining Omega/Nexus
   gates close.
 
+## Issue Series Source Of Truth
+
+`plan.md` defines the executable work as 19 GitHub issues across the owning
+repos. Do not put every issue in Probe.
+
+Ownership:
+
+- `probe`: runtime, benchmark assignment intake, candidate execution, closeout
+  evidence, local fixtures, selected signatures, and tool menus.
+- `openagents`: public Benchmark Cloud contracts, split manifests,
+  artifact/proof contracts, Terminal-Bench runner lane, and Pylon benchmark
+  package surfaces where applicable.
+- `autopilot-omega`: Artanis projection, Omega/Pylon assignment lease
+  adaptation, release gates, and public claim boundaries.
+- `psionic`: GEPA coordinator, candidate frontier, candidate manifests,
+  reflection/proposal jobs, and later LoRA/Qwen training path.
+- `pylon` or `openagents`: worker capability envelopes, assignment receipt
+  schema, benchmark-capable worker admission, and artifact/proof submission.
+
+Open issues in the order specified by `plan.md`:
+
+1. Probe closeout foundation.
+2. Public Benchmark Cloud contracts.
+3. GEPA candidate optimization.
+4. Pylon work slices and paid-work path.
+5. Stage 0 and Stage 1 campaign execution.
+6. Artanis and public projection.
+7. Route scorecards and product impact.
+
+The priority unlock sequence is:
+
+1. Probe closeout bundle.
+2. Public Benchmark Cloud split manifest.
+3. GEPA candidate manifest.
+4. Pylon metric-call assignment type.
+5. Stage 0 smoke.
+6. Stage 1 retained-failure sprint.
+
+The required tracking deliverable after issue creation is a grouped summary of
+issue links by epic, owner repo, dependencies, Pylon work-slice issues, paid
+work prerequisites, direct Probe-performance issues, and claim-boundary or
+projection-only issues.
+
 ## Public Claim Boundaries
 
 Do not call retained fixture improvements public benchmark scores. Do not call
@@ -116,4 +168,5 @@ When adding a benchmark doc to this folder, update this README with its purpose,
 status, and reading-order position. If the new doc changes ownership,
 promotion gates, public claim boundaries, or the immediate implementation
 sequence, update the older docs instead of leaving contradictory plans in the
-folder.
+folder. If an execution sequence conflicts with `plan.md`, treat `plan.md` as
+the source of truth and update the older doc.

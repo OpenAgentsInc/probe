@@ -784,28 +784,33 @@ After the Probe adapter exists:
 Start with `configure-git-webserver` for coding and one public/synthetic legal
 fixture for legal.
 
-## Near-Term Issues To Open Later
+## Execution Issue Series
 
-The following issue set would turn this audit into implementation work:
+`docs/benchmarks/plan.md` supersedes this audit's older near-term issue list.
+Use it as the source of truth when opening implementation issues.
 
-1. Add Probe benchmark assignment and closeout schemas.
-2. Add Probe-owned coding signature package fixtures for retained
-   Terminal-Bench families.
-3. Add Probe-owned legal signature package fixtures for Psionic public/synthetic
-   legal families.
-4. Add Pylon GEPA Stage 0 and Stage 1 candidate manifests, split manifests,
-   Omega/Pylon assignment lease refs, artifact/proof refs, accepted/rejected
-   closeout refs, rollout receipts, and retained-failure evaluator contracts.
-5. Rebuild/move the private Cloud true-Probe benchmark runner lane into public
-   OpenAgents.
-6. Add Probe benchmark closeout to Omega Probe run projection.
-7. Add Psionic legal task envelope to Probe runtime bridge.
-8. Add one retained coding live rerun through Probe+Codex on SHC.
-9. Add one public/synthetic legal fixture live run through Probe+Codex and
-   Psionic import.
-10. Add Pylon benchmark-capable Probe runtime advertisement fields.
-11. Add public-claim guardrails tying Probe evidence to Omega/public Benchmark
-    Cloud projection.
+The ordered issue series is broader than Probe:
+
+- Probe closeout foundation: benchmark assignment/closeout schemas, normalized
+  closeout writer, and retained coding fixture package.
+- Public Benchmark Cloud contracts: public contract package, retained and
+  validation split manifests, and true-Probe Terminal-Bench runner lane.
+- GEPA candidate optimization: text-bundle candidate manifests, the Psionic
+  GEPA coordinator, and Probe candidate execution adapter.
+- Pylon work slices and paid-work path: Omega/Pylon metric-call assignments,
+  benchmark-capable worker envelopes, and explicit paid/unpaid/credit/no-spend
+  payment modes.
+- Stage 0/1 execution: retained-fixture smoke, Pylon-distributed retained
+  sprint, and selected SHC Terminal-Bench validation.
+- Artanis/public projection: campaign report fields and Forum summary
+  generator.
+- Route scorecards/product impact: benchmark route scorecards and connection
+  to Coding on Autopilot accepted-outcome metrics.
+
+Open issues in the order specified by `plan.md`. The first practical unlocks
+are Probe closeout bundles, public Benchmark Cloud split manifests, GEPA
+candidate manifests, Pylon metric-call assignments, Stage 0 smoke, and Stage 1
+retained-failure sprint.
 
 ## Hard Boundaries
 

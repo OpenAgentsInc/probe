@@ -421,17 +421,18 @@ benchmark evidence, quota, latency, cost, or policy.
 
 ## How This Changes The Benchmark Roadmap
 
-The benchmark folder now has a clearer sequence:
+The benchmark folder now has a clearer sequence, and
+`docs/benchmarks/plan.md` is the source of truth for issue creation:
 
-1. Build the public OpenAgents Benchmark Cloud target out of private Cloud
+1. Build Probe closeout foundations first.
+2. Build the public OpenAgents Benchmark Cloud target out of private Cloud
    source material.
-2. Keep Probe as the runtime and evidence emitter.
-3. Run GEPA Stage 0 and Stage 1 before LoRA or broad model training.
-4. Use Pylon as distributed rollout infrastructure for GEPA and later training
-   infrastructure only after Psionic/Qwen/LoRA gates open.
-5. Use SHC as the first serious live Terminal-Bench environment.
-6. Convert successful GEPA candidates into Blueprint/Probe draft modules.
-7. Use the resulting clean traces for Psionic Qwen/LoRA work.
+3. Add Psionic GEPA candidate manifests and coordinator support.
+4. Adapt Pylon/Omega work slices for benchmark metric calls with explicit
+   paid/unpaid state.
+5. Run GEPA Stage 0 and Stage 1 before LoRA or broad model training.
+6. Use SHC as the first serious live Terminal-Bench validation environment.
+7. Project Artanis campaign state and route scorecards through Omega.
 8. Promote only through Omega/Blueprint gates and public-proof-safe projection.
 
 This is narrower than "train models around the clock" and stronger than

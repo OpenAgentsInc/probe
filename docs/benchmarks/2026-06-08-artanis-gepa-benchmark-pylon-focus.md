@@ -652,30 +652,31 @@ Blocked claims until further proof:
     candidates through Psionic and Pylon trainer lanes. Keep AdapterTraining
     blocked until explicit operator, budget, and model-artifact gates pass.
 
-## Immediate Issues To Open
+## Issue Series Source Of Truth
 
-Equivalent implementation issues should exist outside Probe because Probe is
-not the owner of every surface:
+`docs/benchmarks/plan.md` is now the source of truth for turning this Artanis
+refocus into GitHub issues. Equivalent implementation issues must still exist
+outside Probe because Probe is not the owner of every surface.
 
-- In `openagents`: create public Benchmark Cloud contracts for Probe GEPA
-  campaigns and Pylon metric-call receipts.
-- In `autopilot-omega`: add Artanis Probe GEPA campaign projection, work
-  routing, public report fields, and a Forum publication bridge for benchmark
-  campaign status that reuses the existing Artanis posting authority and
-  stable idempotency-key discipline.
-- In `probe`: emit benchmark closeout exports suitable for Benchmark Cloud and
-  Artanis import.
-- In `openagents` or `pylon`: add the Pylon assignment/receipt bridge for GEPA
-  metric-call batches with Artanis campaign ids, using the Omega assignment
-  lease lifecycle rather than inventing a separate work-state protocol.
-- In `psionic`: register the GEPA candidate frontier and later Qwen/LoRA trace
-  corpus path, with promotion evidence separated from model-training launch
-  authority.
+Artanis-relevant items in the ordered series are:
 
-The first Probe-only task is narrower: define and emit the closeout artifact
+- Issue 1 through Issue 3 in `probe`: define assignment/closeout schemas,
+  closeout bundles, and retained fixture packages so Artanis can import Probe
+  evidence by ref.
+- Issue 4 through Issue 6 in `openagents`: create public Benchmark Cloud
+  contracts, split manifests, and the true-Probe Terminal-Bench runner lane.
+- Issue 7 through Issue 9 in `psionic` and `probe`: register GEPA candidate
+  manifests, coordinator state, and candidate execution adapters.
+- Issue 10 through Issue 12 in `autopilot-omega`, `pylon`, or `openagents`:
+  adapt the Omega/Pylon assignment lease lifecycle, capability envelopes, and
+  explicit payment modes for benchmark metric-call work.
+- Issue 16 and Issue 17 in `autopilot-omega`: add Artanis Probe GEPA campaign
+  projection fields and the public-safe Forum summary generator.
+
+The first Probe-only task remains narrow: define and emit the closeout artifact
 shape Artanis needs. Anything involving public projection, release gates,
 Pylon dispatch, payment/settlement, or Benchmark Cloud authority belongs in
-the owning repo.
+the owning repo named by `plan.md`.
 
 ## End State
 
