@@ -51,3 +51,17 @@ run, decision-trace, candidate, and promotion-decision schema refs; invalid
 closeouts missing artifact or proof refs; unsafe projection rejection and
 scrubbing; failed and timed-out retained closeouts; and separate retained,
 validation, holdout, and live evidence representations.
+
+`packages/runtime/src/benchmark/closeout-writer.ts` builds and writes the first
+normalized closeout bundle. A bundle contains `probe-run-record.json`,
+`probe-closeout.json`, `decision-trace-summary.json`,
+`selected-signatures.json`, `tool-menu.json`, `candidate-ref.json`,
+`artifact-refs.json`, `resource-usage-ref.json`, `policy-findings.json`, and
+`failure-classification.json`. Successful, failed, timed-out, and
+policy-blocked runs all write the same public-safe file set, with explicit
+retained-failure refs, timeout state, partial artifact refs, or policy findings
+where relevant.
+
+`packages/runtime/tests/benchmark-closeout-writer.test.ts` covers fake
+assignment bundle emission, directory writes, failure closeouts, timeout
+closeouts, policy-blocked closeouts, and unsafe writer input rejection.

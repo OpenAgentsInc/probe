@@ -49,8 +49,8 @@ architecture and execution plans. They are not public benchmark claims.
 7. `../probe-benchmark-contracts.md`
    Implementation note for the first Probe runtime contract slice from issue
    #182. It records the benchmark assignment, run, closeout, decision trace,
-   candidate, and evidence-only promotion decision schemas now exported by the
-   Bun/Effect runtime package.
+   candidate, evidence-only promotion decision schemas, and normalized
+   closeout bundle writer now exported by the Bun/Effect runtime package.
 
 ## Current Decisions
 

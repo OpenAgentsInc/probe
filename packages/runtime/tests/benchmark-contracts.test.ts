@@ -40,7 +40,7 @@ const assignment = (split: "retained" | "validation" | "holdout" | "live" = "ret
   },
   probeCommit: "abc1234",
   runtime: {
-    runtimeRef: "runtime.probe.bun_effect.v1",
+    runtimeRef: "runtime.probe.v1",
     backendProfileRef: "backend_profile.apple_fm.local.v1",
   },
   backend: {

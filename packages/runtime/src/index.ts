@@ -8,6 +8,7 @@ export * from "./backends/apple-fm/receipts";
 export * from "./backends/apple-fm/tools";
 export * from "./backends/backend-profile";
 export * from "./backends/registry";
+export * from "./benchmark/closeout-writer";
 export * from "./blueprint";
 export * from "./cli";
 export * from "./contracts/assignment";
