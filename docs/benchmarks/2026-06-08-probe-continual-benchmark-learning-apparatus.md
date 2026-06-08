@@ -6,16 +6,23 @@ Date: 2026-06-08
 
 Probe should continuously improve as a coding agent by running real benchmark
 workloads, turning failures into typed improvement candidates, and promoting
-only candidates that pass measured gates. Terminal-Bench 2 through Harbor on
-the SHC box is the first live benchmark lane, but the apparatus should be
-general enough for legal, SWE, Probe retained fixtures, and future OpenAgents
-benchmark suites.
+only candidates that pass measured gates. The benchmarking apparatus should be
+public OpenAgents infrastructure. Terminal-Bench 2 through Harbor on the SHC box
+is the first live benchmark lane, but the apparatus should be general enough for
+legal, SWE, Probe retained fixtures, and future OpenAgents benchmark suites.
 
 This is not a benchmark leaderboard script. It is a closed learning loop across
-Probe, Cloud, Psionic, Pylon, and Omega: Probe executes and records the agent
-runtime truth, Cloud runs normalized benchmark jobs, Psionic optimizes prompts,
-Blueprint usage, and LoRA adapters, Pylon supplies distributed devices, and
-Omega publishes the operator-facing evidence and release gates.
+Probe, public OpenAgents Benchmark Cloud, Psionic, Pylon, and Omega: Probe
+executes and records the agent runtime truth, OpenAgents Benchmark Cloud runs
+normalized benchmark jobs, Psionic optimizes prompts, Blueprint usage, and LoRA
+adapters, Pylon supplies distributed devices, and Omega publishes the
+operator-facing evidence and release gates.
+
+The existing private `cloud` repo is source material, not the desired long-term
+home. Its Benchmark Cloud contracts, Harbor Terminal-Bench lane, runner
+artifacts, proof bundles, and retained coding-agent fixtures should be moved or
+rebuilt into the public `openagents` repo so the benchmark apparatus can be
+audited, extended, and run by the wider OpenAgents ecosystem.
 
 ## Source Material Reviewed
 
@@ -25,8 +32,10 @@ Omega publishes the operator-facing evidence and release gates.
 - `probe/docs/probe-blueprint-tool-menu-planner.md`
 - `probe/packages/runtime/src/blueprint/signature-lookup.ts`
 - `probe/packages/runtime/src/blueprint/tool-menu.ts`
-- `cloud/docs/BENCHMARK_CLOUD.md`
-- `cloud/docs/bootstrap/CND-054-coding-agent-benchmark-improvement.md`
+- private `cloud/docs/BENCHMARK_CLOUD.md` source material
+- private `cloud/docs/bootstrap/CND-054-coding-agent-benchmark-improvement.md`
+  source material
+- `openagents/AGENTS.md`
 - `work/docs/probe/17-gepa-optimize-anything-code-audit-and-psionic-probe-integration.md`
 - `psionic/docs/QWEN_LEGAL_FINETUNE_LANE.md`
 - `psionic/reports/qwen36-27b-real-pylon-rehearsal-001.md`
@@ -59,10 +68,27 @@ should optimize which signatures, playbooks, prompt fragments, and tool-menu
 constraints are used for a task family, but it should not bypass the typed
 Blueprint selection path.
 
-### Cloud Benchmark Cloud
+### Public OpenAgents Benchmark Cloud
 
-Cloud already has the canonical Benchmark Cloud design. It treats benchmark
-execution as a managed workload lane with normalized contracts:
+The private `cloud` repo already has the canonical Benchmark Cloud design. That
+design should become public OpenAgents infrastructure. The target is a public
+Benchmark Cloud area in `openagents`, with private `cloud` used only as
+backfill until the public contracts, runners, fixtures, and runbooks exist.
+
+A reasonable public target layout is:
+
+- `openagents/docs/benchmarks/` for specs, runbooks, audits, and claim
+  boundaries.
+- `openagents/crates/openagents-benchmark-cloud/` for normalized benchmark
+  contracts, artifact manifests, proof bundles, and scheduler-facing Rust code.
+- `openagents/scripts/benchmarks/` for SHC, Harbor, and local proof commands.
+- `openagents/fixtures/benchmarks/` for public retained fixtures and safe
+  replay inputs.
+- `openagents/proto/openagents/benchmark/` only if cross-language protocol
+  stability becomes necessary.
+
+The public system should keep the private Cloud design's useful normalized
+contracts:
 
 - `BenchmarkTask`
 - `BenchmarkResult`
@@ -71,7 +97,7 @@ execution as a managed workload lane with normalized contracts:
 - `BenchmarkProofBundle`
 - `openagents.resource_usage_receipt.v1`
 
-The current Python runner lane writes:
+The current private Python runner lane writes:
 
 - `result.json`
 - `events.jsonl`
@@ -98,12 +124,12 @@ Terminal-Bench failures include:
 - `pypi-server`
 - `query-optimize`
 
-Cloud's CND-054 work also contains a retained signature-improvement evaluator.
-It reports an expected retained-fixture improvement from raw mean `0.000` to
-Probe plus selected signatures mean `0.900`, with the caveat that this is a
-retained fixture signal, not a fresh live Terminal-Bench run. The live,
-account-backed evidence is narrower: `db-wal-recovery` has a preserved 0.0 to
-1.0 improvement after playbook revision.
+The private CND-054 work also contains a retained signature-improvement
+evaluator. It reports an expected retained-fixture improvement from raw mean
+`0.000` to Probe plus selected signatures mean `0.900`, with the caveat that
+this is a retained fixture signal, not a fresh live Terminal-Bench run. The
+live, account-backed evidence is narrower: `db-wal-recovery` has a preserved
+0.0 to 1.0 improvement after playbook revision.
 
 That distinction should be preserved in every future report.
 
@@ -181,14 +207,17 @@ Probe should own:
 - admitting a candidate into shadow or active runtime only after external gates
   pass.
 
-Cloud should own:
+Public OpenAgents Benchmark Cloud should own:
 
 - Terminal-Bench 2 through Harbor;
 - benchmark task normalization;
-- SHC and cloud runner scheduling;
+- SHC and remote runner scheduling;
 - artifact and proof bundle collection;
 - resource usage receipts;
 - live benchmark run custody.
+
+Private `cloud` should own nothing long term. It can provide source material
+while we rebuild the apparatus in public.
 
 Psionic should own:
 
@@ -225,8 +254,9 @@ The continual learning loop should run as:
    and later legal/SWE/generalization suites.
 
 2. Create assignments.
-   Cloud emits benchmark assignments with task metadata, budget, backend
-   constraints, required artifact names, and evaluation policy.
+   Public OpenAgents Benchmark Cloud emits benchmark assignments with task
+   metadata, budget, backend constraints, required artifact names, and
+   evaluation policy.
 
 3. Run Probe variants.
    Probe executes raw baseline, current champion, and candidate variants under
@@ -240,8 +270,8 @@ The continual learning loop should run as:
    verifier-facing outputs, and closeout evidence.
 
 5. Score and classify.
-   Cloud scores the benchmark. Probe and Psionic classify failures into typed
-   families, not keyword buckets.
+   Public OpenAgents Benchmark Cloud scores the benchmark. Probe and Psionic
+   classify failures into typed families, not keyword buckets.
 
 6. Generate candidates.
    Psionic proposes prompt, Blueprint, tool-menu, retry-policy, and LoRA
@@ -276,7 +306,9 @@ the behaviors Probe needs to get right:
 The SHC box should be the primary testing environment for live Terminal-Bench
 2 runs. Local developer machines can run smoke tests and retained fixture
 checks, but SHC should be where candidate claims become meaningful live
-benchmark evidence.
+benchmark evidence. The SHC commands, Harbor wrapper, normalized artifacts, and
+safe retained fixtures should be public OpenAgents assets, even if some raw
+machine credentials and live account material remain private.
 
 The first SHC lane should not start as a full benchmark sweep. It should start
 with retained known failures and a few known successes:
@@ -291,7 +323,7 @@ with retained known failures and a few known successes:
 
 The first goal is not a new public leaderboard claim. The first goal is to
 make Probe's current champion and candidate variants reproducible under the
-Benchmark Cloud artifact contract.
+public OpenAgents Benchmark Cloud artifact contract.
 
 ## Candidate Families
 
@@ -567,15 +599,18 @@ retained fixture set.
 
 2. Add a Probe benchmark closeout writer.
    Every Probe benchmark run should write a closeout bundle compatible with
-   Cloud's artifact manifest and proof bundle expectations.
+   the public OpenAgents Benchmark Cloud artifact manifest and proof bundle
+   expectations.
 
 3. Import retained Terminal-Bench failure fixtures.
    Keep task ids, failure family, expected signature refs, score expectations,
    and artifact digests in Probe fixtures.
 
-4. Add a Cloud runner adapter for current Probe.
-   Benchmark Cloud should invoke Probe as the agent under test, not a deprecated
-   implementation.
+4. Rebuild the private Cloud runner lane in public OpenAgents.
+   Move or reimplement the normalized Benchmark Cloud contracts, Harbor wrapper,
+   artifact writer, proof bundle writer, and retained fixture evaluator into
+   `openagents`. The public runner should invoke current Probe as the agent
+   under test, not a deprecated implementation.
 
 5. Add `probe benchmark run`.
    The command should accept a normalized assignment and emit normalized
@@ -590,8 +625,9 @@ retained fixture set.
    structured deltas.
 
 8. Add SHC selected sweep orchestration.
-   Cloud should run selected Terminal-Bench tasks through Harbor on the SHC box
-   using the current champion and candidate variants.
+   Public OpenAgents Benchmark Cloud should run selected Terminal-Bench tasks
+   through Harbor on the SHC box using the current champion and candidate
+   variants.
 
 9. Add Psionic Qwen3.6 coding-agent adapter lane.
    Build SFT/DPO training data from clean Probe traces, train LoRA candidates,
