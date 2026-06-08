@@ -940,6 +940,25 @@ function makeGeminiChatTools(env: Readonly<Record<string, string | undefined>> =
       },
       execute: (input) => readAnyWorkspaceFile(input, env),
     }),
+    write_file: defineProbeLlmTool({
+      name: "write_file",
+      description: "Write a UTF-8 text file under the OpenAgents workspace. Creates parent directories if needed. Use this to create new files or overwrite existing ones.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "A relative file path under the workspace.",
+          },
+          content: {
+            type: "string",
+            description: "The full file content to write.",
+          },
+        },
+        required: ["path", "content"],
+      },
+      execute: (input) => writeAnyWorkspaceFile(input, env),
+    }),
     list_files: defineProbeLlmTool({
       name: "list_files",
       description: "List files under a directory in the OpenAgents workspace.",
@@ -1042,6 +1061,50 @@ function readAnyWorkspaceFile(
       path,
       content: typeof content === "string" ? content.slice(0, 6000) : String(content),
     };
+  });
+}
+
+function writeAnyWorkspaceFile(
+  input: Readonly<Record<string, unknown>>,
+  env: Readonly<Record<string, string | undefined>> = {},
+): Effect.Effect<{ readonly path: string; readonly content?: string; readonly error?: string }, never> {
+  return Effect.gen(function* () {
+    const path = typeof input.path === "string" ? input.path : "";
+    const content = typeof input.content === "string" ? input.content : "";
+    const workspace = resolveProbeChatWorkspaceRoot(env);
+    const resolved = resolveWorkspacePath(workspace, path);
+
+    if (resolved === undefined) {
+      return { path, error: "path is outside the workspace file scope" };
+    }
+
+    if (!content) {
+      return { path, error: "content is required" };
+    }
+
+    yield* Effect.tryPromise({
+      try: () => mkdir(dirname(resolved.absolutePath), { recursive: true }),
+      catch: (error) => error,
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.succeed(void 0),
+      ),
+    );
+
+    const written = yield* Effect.tryPromise({
+      try: () => writeFile(resolved.absolutePath, content, "utf8").then(() => true),
+      catch: (error) => error,
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.succeed(`failed to write ${path}: ${String(error)}`),
+      ),
+    );
+
+    if (written === true) {
+      return { path, content: `written to ${resolved.relativePath}` };
+    }
+
+    return { path, error: written };
   });
 }
 
@@ -1259,8 +1322,7 @@ function makeGeminiInteractiveTurnStream(colors: ProbeCliColors): {
         process.stdout.write(`${cliLine(colors, "assistant", result.text, "assistant")}\n`);
       }
 
-      process.stdout.write(`${cliField(colors, "roundTrips", String(result.roundTrips), "muted")}\n`);
-      process.stdout.write(`${cliLine(colors, "usage", formatGeminiUsage(result.receipt.usage), "usage")}\n`);
+      process.stdout.write(`${cliField(colors, "roundTrips", String(result.roundTrips), "muted")}  ${cliLine(colors, "usage", formatGeminiUsage(result.receipt.usage), "usage")}\n`);
     },
   };
 }
@@ -1414,17 +1476,9 @@ async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: Probe
     return 1;
   }
 
-  process.stdout.write([
-    cliHeader(colors, "Probe Gemini chat"),
-    cliField(colors, "profile", clientResult.profile.id),
-    cliField(colors, "kind", clientResult.profile.kind),
-    cliField(colors, "model", model),
-    cliField(colors, "apiKeySource", clientResult.apiKey.source),
-    cliField(colors, "apiKeyRedacted", "true"),
-    cliField(colors, "tools", "read_file,list_files,search_code,current_time", "tool"),
-    cliColor(colors, "muted", "Type /exit to quit."),
-    "",
-  ].join("\n"));
+  process.stdout.write(
+    `${cliField(colors, "profile", clientResult.profile.id)}  ${cliField(colors, "kind", clientResult.profile.kind)}  ${cliField(colors, "model", model)}  ${cliField(colors, "tools", "read_file,write_file,list_files,search_code,current_time", "tool")}\n`,
+  );
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   let messages: ReadonlyArray<ProbeLlmMessage> = [];
