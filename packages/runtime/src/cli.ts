@@ -1328,34 +1328,28 @@ function makeGeminiInteractiveTurnStream(colors: ProbeCliColors): {
 }
 
 function formatToolResultValue(value: { readonly type: string; readonly value: unknown }): string {
-  if (value.type === "text" || value.type === "error") {
+  if (value.type === "error") {
     return String(value.value);
   }
 
   if (isReadFileToolResult(value.value)) {
-    return safeJson({
-      path: value.value.path,
-      contentChars: value.value.content.length,
-      preview: value.value.content.slice(0, 500),
-    });
+    const r = value.value;
+    return `${r.path}  (${r.content.length} chars)`;
   }
 
   if (isListFilesToolResult(value.value)) {
-    return safeJson({
-      path: value.value.path,
-      directories: value.value.directories.slice(0, 30),
-      files: value.value.files.slice(0, 30),
-      truncated: value.value.truncated,
-    });
+    const r = value.value;
+    const parts: Array<string> = [];
+    if (r.directories.length > 0) parts.push(`${r.directories.length} dirs`);
+    if (r.files.length > 0) parts.push(`${r.files.length} files`);
+    if (r.truncated) parts.push("truncated");
+    return `${r.path}  ${parts.length > 0 ? parts.join(", ") : "empty"}`;
   }
 
   if (isSearchCodeToolResult(value.value)) {
-    return safeJson({
-      query: value.value.query,
-      path: value.value.path,
-      matches: value.value.matches.slice(0, 20),
-      truncated: value.value.truncated,
-    });
+    const r = value.value;
+    const label = `${r.matches.length} match${r.matches.length === 1 ? "" : "es"}`;
+    return `${r.query}  in  ${r.path}  (${label}${r.truncated ? ", truncated" : ""})`;
   }
 
   return safeJson(value.value);
