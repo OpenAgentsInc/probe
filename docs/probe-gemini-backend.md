@@ -24,6 +24,15 @@ They must not include the raw key or provider request headers. Runtime HTTP
 code may still construct the `x-goog-api-key` header at the final request
 boundary.
 
+For the current Probe/Omega integration, Gemini uses basic Google API keys
+restricted to `generativelanguage.googleapis.com`. ADC, service-account JSON,
+OAuth refresh tokens, and service-account-bound authorization keys are out of
+scope for this backend path.
+
+Omega's Cloudflare Worker consumes the same basic-key shape through its
+`GEMINI_API_KEY` Worker secret. Do not place Gemini keys in `vars`, D1, issue
+comments, docs, browser-visible responses, or public receipts.
+
 ## Request Lowering
 
 Gemini request lowering lives in
@@ -110,3 +119,8 @@ PROBE_GEMINI_LIVE_SMOKE=1 GOOGLE_GENERATIVE_AI_API_KEY=... bun test packages/run
 `GEMINI_API_KEY` can be used instead of `GOOGLE_GENERATIVE_AI_API_KEY`. The
 live smoke path checks one plain `gemini-2.5-flash` prompt and one forced tiny
 native tool call, and assertions only inspect redacted receipt surfaces.
+
+If a newly-created Google API key returns `API_KEY_INVALID`, test an existing
+restricted Generative Language API key or wait for the key to become usable
+before updating the Cloudflare secret. Rotate failed temporary keys rather than
+leaving them in the project inventory.

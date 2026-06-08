@@ -148,6 +148,7 @@ function completeGemini(input: {
 
       request = makeProbeLlmRequest({
         ...request,
+        toolChoice: request.toolChoice?.type === "tool" ? { type: "auto" as const } : request.toolChoice,
         messages: [
           ...request.messages,
           makeProbeLlmMessage(
@@ -189,7 +190,7 @@ function callGemini(
   request: ProbeLlmRequest,
 ): Effect.Effect<ReadonlyArray<ProbeLlmEvent>, GeminiClientError> {
   return Effect.gen(function* () {
-    const endpoint = new URL(geminiEndpointPath(request.model.model), withTrailingSlash(profile.baseUrl));
+    const endpoint = new URL(`${withoutTrailingSlash(profile.baseUrl)}${geminiEndpointPath(request.model.model)}`);
     const response = yield* Effect.tryPromise({
       try: () =>
         fetchImpl(endpoint, {
@@ -269,6 +270,6 @@ function collectText(events: ReadonlyArray<ProbeLlmEvent>): string {
   return events.flatMap((event) => (event.type === "text-delta" ? [event.text] : [])).join("");
 }
 
-function withTrailingSlash(value: string): string {
-  return value.endsWith("/") ? value : `${value}/`;
+function withoutTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value.slice(0, -1) : value;
 }
