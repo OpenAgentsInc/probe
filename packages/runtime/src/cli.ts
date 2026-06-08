@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Effect, Schema as S } from "effect";
@@ -46,6 +46,7 @@ export interface ProbeCliResult {
 
 export interface ProbeCliDeps {
   readonly accountClient?: OmegaAccountClient;
+  readonly colors?: boolean;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly fetch?: typeof fetch;
   readonly now?: Date;
@@ -169,7 +170,7 @@ function geminiChatOnce(
       fetch: deps.fetch,
       now: deps.now,
     }).pipe(Effect.mapError((error) => new ProbeCliError({ message: "reason" in error ? error.reason : String(error) })));
-    const tools = makeGeminiChatTools();
+    const tools = makeGeminiChatTools(deps.env);
     const request = makeGeminiChatRequest({
       messages: [],
       model,
@@ -184,7 +185,7 @@ function geminiChatOnce(
     if (result instanceof GeminiClientError) {
       return {
         exitCode: 1,
-        stdout: formatGeminiFailure("Probe Gemini chat", result),
+        stdout: formatGeminiFailure("Probe Gemini chat", result, makeCliColors(options, deps)),
         stderr: "",
       };
     }
@@ -193,6 +194,7 @@ function geminiChatOnce(
       exitCode: 0,
       stdout: formatGeminiChatTurn({
         apiKeySource: client.apiKey.source,
+        colors: makeCliColors(options, deps),
         includeHeader: true,
         result,
       }),
@@ -228,14 +230,14 @@ function geminiCompletionCommand(input: {
     if (result instanceof GeminiClientError) {
       return {
         exitCode: 1,
-        stdout: formatGeminiFailure(input.title, result),
+        stdout: formatGeminiFailure(input.title, result, makeCliColors(input.options, input.deps)),
         stderr: "",
       };
     }
 
     return {
       exitCode: 0,
-      stdout: formatGeminiCompletion(input.title, client.apiKey.source, result),
+      stdout: formatGeminiCompletion(input.title, client.apiKey.source, result, makeCliColors(input.options, input.deps)),
       stderr: "",
     };
   });
@@ -542,7 +544,7 @@ function usage(): string {
     "  probe omega link [--base-url URL] [--runner-id ID] [--subject USER_OR_TEAM] [--kind local|shc|pylon|sandbox]",
     "  probe auth accounts [--base-url URL]",
     "  probe auth add chatgpt [--base-url URL]",
-    "  probe chat [--profile gemini-api] [--model gemini-2.5-flash] [--prompt TEXT]",
+    "  probe chat [--profile gemini-api] [--model gemini-2.5-flash] [--prompt TEXT] [--color always|never] [--no-color]",
     "  probe backend gemini smoke [--profile gemini-api] [--model gemini-2.5-flash] [--prompt TEXT]",
     "  probe backend gemini complete [--profile gemini-api] [--model gemini-2.5-flash] [--prompt TEXT]",
     "  probe apple-fm status [--base-url URL] [--profile apple-fm-local]",
@@ -609,67 +611,74 @@ function formatAppleFmSmokeFailure(error: AppleFmBackendError): string {
   return `${lines.join("\n")}\n`;
 }
 
-function formatGeminiCompletion(title: string, apiKeySource: string, completion: GeminiCompleteResult): string {
+function formatGeminiCompletion(
+  title: string,
+  apiKeySource: string,
+  completion: GeminiCompleteResult,
+  colors: ProbeCliColors = noCliColors,
+): string {
   return [
-    title,
-    `profile: ${completion.profile.id}`,
-    `kind: ${completion.profile.kind}`,
-    `model: ${completion.finalRequest.model.model}`,
-    `apiKeySource: ${apiKeySource}`,
-    "apiKeyRedacted: true",
-    `assistant: ${completion.text}`,
-    `roundTrips: ${completion.roundTrips}`,
-    `usage: ${formatGeminiUsage(completion.receipt.usage)}`,
-    `receipt: ${JSON.stringify(completion.receipt)}`,
+    cliHeader(colors, title),
+    cliField(colors, "profile", completion.profile.id),
+    cliField(colors, "kind", completion.profile.kind),
+    cliField(colors, "model", completion.finalRequest.model.model),
+    cliField(colors, "apiKeySource", apiKeySource),
+    cliField(colors, "apiKeyRedacted", "true"),
+    cliLine(colors, "assistant", completion.text, "assistant"),
+    cliField(colors, "roundTrips", String(completion.roundTrips), "muted"),
+    cliLine(colors, "usage", formatGeminiUsage(completion.receipt.usage), "usage"),
+    cliField(colors, "receipt", JSON.stringify(completion.receipt), "muted"),
   ].join("\n") + "\n";
 }
 
 function formatGeminiChatTurn(input: {
   readonly apiKeySource: string;
+  readonly colors?: ProbeCliColors;
   readonly includeHeader?: boolean;
   readonly result: GeminiCompleteResult;
 }): string {
   const lines: string[] = [];
+  const colors = input.colors ?? noCliColors;
 
   if (input.includeHeader === true) {
-    lines.push("Probe Gemini chat");
-    lines.push(`profile: ${input.result.profile.id}`);
-    lines.push(`kind: ${input.result.profile.kind}`);
-    lines.push(`model: ${input.result.finalRequest.model.model}`);
-    lines.push(`apiKeySource: ${input.apiKeySource}`);
-    lines.push("apiKeyRedacted: true");
+    lines.push(cliHeader(colors, "Probe Gemini chat"));
+    lines.push(cliField(colors, "profile", input.result.profile.id));
+    lines.push(cliField(colors, "kind", input.result.profile.kind));
+    lines.push(cliField(colors, "model", input.result.finalRequest.model.model));
+    lines.push(cliField(colors, "apiKeySource", input.apiKeySource));
+    lines.push(cliField(colors, "apiKeyRedacted", "true"));
   }
 
   for (const event of input.result.events) {
     if (event.type === "tool-call") {
-      lines.push(`tool_call: ${event.name} ${safeJson(event.input)}`);
+      lines.push(cliToolLine(colors, "tool_call", event.name, safeJson(event.input), "call"));
     }
 
     if (event.type === "tool-result") {
-      lines.push(`tool_result: ${event.name} ${formatToolResultValue(event.result)}`);
+      lines.push(cliToolLine(colors, "tool_result", event.name, formatToolResultValue(event.result), "result"));
     }
 
     if (event.type === "tool-error") {
-      lines.push(`tool_error: ${event.name} ${event.message}`);
+      lines.push(cliToolLine(colors, "tool_error", event.name, event.message, "error"));
     }
   }
 
-  lines.push(`assistant: ${input.result.text}`);
-  lines.push(`roundTrips: ${input.result.roundTrips}`);
-  lines.push(`usage: ${formatGeminiUsage(input.result.receipt.usage)}`);
+  lines.push(cliLine(colors, "assistant", input.result.text, "assistant"));
+  lines.push(cliField(colors, "roundTrips", String(input.result.roundTrips), "muted"));
+  lines.push(cliLine(colors, "usage", formatGeminiUsage(input.result.receipt.usage), "usage"));
 
   return `${lines.join("\n")}\n`;
 }
 
-function formatGeminiFailure(title: string, error: GeminiClientError): string {
+function formatGeminiFailure(title: string, error: GeminiClientError, colors: ProbeCliColors = noCliColors): string {
   const lines = [
-    `${title} failed`,
-    `failureClass: ${error.failureClass}`,
-    `message: ${error.reason}`,
+    cliHeader(colors, `${title} failed`, "error"),
+    cliField(colors, "failureClass", error.failureClass, "error"),
+    cliField(colors, "message", error.reason, "error"),
   ];
 
   if (error.receipt !== undefined) {
-    lines.push(`receipt: ${JSON.stringify(error.receipt)}`);
+    lines.push(cliField(colors, "receipt", JSON.stringify(error.receipt), "muted"));
   }
 
   return `${lines.join("\n")}\n`;
@@ -713,6 +722,125 @@ function formatUsage(usage: AppleFmPlainTextCompletion["usage"]): string {
   }
 
   return parts.join(" ");
+}
+
+type ProbeCliColorRole = "assistant" | "default" | "error" | "header" | "muted" | "prompt" | "tool" | "usage";
+
+interface ProbeCliColors {
+  readonly enabled: boolean;
+}
+
+const noCliColors: ProbeCliColors = { enabled: false };
+
+const ansi = {
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  cyan: "\x1b[36m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  magenta: "\x1b[35m",
+  blue: "\x1b[34m",
+  red: "\x1b[31m",
+  gray: "\x1b[90m",
+} as const;
+
+function makeCliColors(
+  options: Record<string, string | true>,
+  deps: ProbeCliDeps,
+  defaultEnabled = false,
+): ProbeCliColors {
+  return {
+    enabled: shouldUseCliColors(options, deps.env, deps.colors ?? defaultEnabled),
+  };
+}
+
+function shouldUseCliColors(
+  options: Record<string, string | true>,
+  env: Readonly<Record<string, string | undefined>> = {},
+  defaultEnabled = false,
+): boolean {
+  const option = stringOption(options, "color");
+
+  if (option === "always") {
+    return true;
+  }
+
+  if (option === "never" || options["no-color"] === true || env.PROBE_NO_COLOR !== undefined || env.NO_COLOR !== undefined) {
+    return false;
+  }
+
+  if (env.PROBE_COLOR === "always" || (env.FORCE_COLOR !== undefined && env.FORCE_COLOR !== "0")) {
+    return true;
+  }
+
+  if (env.PROBE_COLOR === "never" || env.TERM === "dumb") {
+    return false;
+  }
+
+  return defaultEnabled;
+}
+
+function cliHeader(colors: ProbeCliColors, value: string, role: ProbeCliColorRole = "header"): string {
+  return cliColor(colors, role, value);
+}
+
+function cliField(
+  colors: ProbeCliColors,
+  label: string,
+  value: string,
+  role: ProbeCliColorRole = "default",
+): string {
+  return `${cliLabel(colors, label, role)} ${cliColor(colors, role === "error" ? "error" : "muted", value)}`;
+}
+
+function cliLine(
+  colors: ProbeCliColors,
+  label: string,
+  value: string,
+  role: ProbeCliColorRole = "default",
+): string {
+  return `${cliLabel(colors, label, role)} ${value}`;
+}
+
+function cliToolLine(
+  colors: ProbeCliColors,
+  label: string,
+  name: string,
+  value: string,
+  kind: "call" | "error" | "result",
+): string {
+  const role = kind === "error" ? "error" : "tool";
+
+  return `${cliLabel(colors, label, role)} ${cliColor(colors, "tool", name)} ${cliColor(colors, kind === "call" ? "muted" : role, value)}`;
+}
+
+function cliLabel(colors: ProbeCliColors, label: string, role: ProbeCliColorRole): string {
+  return cliColor(colors, role, `${label}:`);
+}
+
+function cliColor(colors: ProbeCliColors, role: ProbeCliColorRole, value: string): string {
+  if (!colors.enabled) {
+    return value;
+  }
+
+  const code = role === "assistant"
+    ? `${ansi.bold}${ansi.green}`
+    : role === "error"
+      ? `${ansi.bold}${ansi.red}`
+      : role === "header"
+        ? `${ansi.bold}${ansi.cyan}`
+        : role === "muted"
+          ? ansi.gray
+          : role === "prompt"
+            ? `${ansi.bold}${ansi.cyan}`
+            : role === "tool"
+              ? ansi.magenta
+              : role === "usage"
+                ? ansi.yellow
+                : ansi.cyan;
+
+  return `${code}${value}${ansi.reset}`;
 }
 
 function formatAppleFmToolStreamDemo(
@@ -794,11 +922,11 @@ function readWorkspaceFile(
   });
 }
 
-function makeGeminiChatTools(): ProbeLlmTools {
+function makeGeminiChatTools(env: Readonly<Record<string, string | undefined>> = {}): ProbeLlmTools {
   return {
     read_file: defineProbeLlmTool({
       name: "read_file",
-      description: "Read a UTF-8 text file under the current Probe workspace. Use this when the user asks about local code.",
+      description: "Read a UTF-8 text file under the OpenAgents workspace. Use this when the user asks about local code or reference repos.",
       inputSchema: {
         type: "object",
         properties: {
@@ -809,7 +937,48 @@ function makeGeminiChatTools(): ProbeLlmTools {
         },
         required: ["path"],
       },
-      execute: readAnyWorkspaceFile,
+      execute: (input) => readAnyWorkspaceFile(input, env),
+    }),
+    list_files: defineProbeLlmTool({
+      name: "list_files",
+      description: "List files under a directory in the OpenAgents workspace.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "A relative directory path under the workspace.",
+          },
+          limit: {
+            type: "number",
+            description: "Maximum files to return.",
+          },
+        },
+      },
+      execute: (input) => listWorkspaceFiles(input, env),
+    }),
+    search_code: defineProbeLlmTool({
+      name: "search_code",
+      description: "Search text in files under the OpenAgents workspace using ripgrep.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "The literal text or regex pattern to search for.",
+          },
+          path: {
+            type: "string",
+            description: "Optional relative directory or file path to search under.",
+          },
+          limit: {
+            type: "number",
+            description: "Maximum matching lines to return.",
+          },
+        },
+        required: ["query"],
+      },
+      execute: (input) => searchWorkspaceCode(input, env),
     }),
     current_time: defineProbeLlmTool({
       name: "current_time",
@@ -833,7 +1002,8 @@ function makeGeminiChatRequest(input: {
   return makeProbeLlmRequest({
     model: { provider: "google", model: input.model },
     system:
-      "You are Probe, a concise coding agent. Use tools when they help inspect local code. " +
+      "You are Probe, a concise coding agent. You can inspect the local OpenAgents workspace, including sibling repos and reference repos such as projects/repos/opencode, through tools. " +
+      "Use list_files, search_code, and read_file when the user asks about local code. Do not refuse local workspace inspection just because the path is outside the Probe package. " +
       "When you use a tool, continue to a direct final answer after the tool result.",
     messages: [...input.messages, makeProbeLlmMessage("user", input.prompt)],
     tools: probeLlmToolDefinitions(input.tools),
@@ -844,29 +1014,22 @@ function makeGeminiChatRequest(input: {
 
 function readAnyWorkspaceFile(
   input: Readonly<Record<string, unknown>>,
+  env: Readonly<Record<string, string | undefined>> = {},
 ): Effect.Effect<{ readonly path: string; readonly content?: string; readonly error?: string }, never> {
   return Effect.gen(function* () {
     const path = typeof input.path === "string" ? input.path : "";
-    const workspace = resolveProbeWorkspaceRoot();
-    const absolutePath = resolve(workspace, path);
-    const relativePath = relative(workspace, absolutePath);
+    const workspace = resolveProbeChatWorkspaceRoot(env);
+    const resolved = resolveWorkspacePath(workspace, path);
 
-    if (
-      path.length === 0 ||
-      path.includes("\0") ||
-      relativePath.startsWith("..") ||
-      relativePath === "" ||
-      relativePath.split(sep).includes("..") ||
-      relativePath.split(sep).includes(".git")
-    ) {
+    if (resolved === undefined) {
       return {
         path,
-        error: "path is outside the Probe workspace file scope",
+        error: "path is outside the OpenAgents workspace file scope",
       };
     }
 
     const content = yield* Effect.tryPromise({
-      try: () => readFile(absolutePath, "utf8"),
+      try: () => readFile(resolved.absolutePath, "utf8"),
       catch: (error) => error,
     }).pipe(
       Effect.catch((error) =>
@@ -879,6 +1042,160 @@ function readAnyWorkspaceFile(
       content: typeof content === "string" ? content.slice(0, 6000) : String(content),
     };
   });
+}
+
+function listWorkspaceFiles(
+  input: Readonly<Record<string, unknown>>,
+  env: Readonly<Record<string, string | undefined>> = {},
+): Effect.Effect<{ readonly path: string; readonly files?: ReadonlyArray<string>; readonly truncated?: boolean; readonly error?: string }, never> {
+  return Effect.gen(function* () {
+    const path = typeof input.path === "string" ? input.path : ".";
+    const limit = boundedToolLimit(input.limit, 200);
+    const workspace = resolveProbeChatWorkspaceRoot(env);
+    const resolved = resolveWorkspacePath(workspace, path);
+
+    if (resolved === undefined) {
+      return { path, error: "path is outside the OpenAgents workspace file scope" };
+    }
+
+    const files = yield* collectWorkspaceFiles(resolved.absolutePath, resolved.relativePath, limit).pipe(
+      Effect.catch((error) => Effect.succeed([`failed to list ${path}: ${String(error)}`])),
+    );
+
+    return {
+      path,
+      files,
+      truncated: files.length >= limit,
+    };
+  });
+}
+
+function searchWorkspaceCode(
+  input: Readonly<Record<string, unknown>>,
+  env: Readonly<Record<string, string | undefined>> = {},
+): Effect.Effect<{ readonly query: string; readonly path: string; readonly matches?: ReadonlyArray<string>; readonly truncated?: boolean; readonly error?: string }, never> {
+  return Effect.gen(function* () {
+    const query = typeof input.query === "string" ? input.query : "";
+    const path = typeof input.path === "string" ? input.path : ".";
+    const limit = boundedToolLimit(input.limit, 80);
+    const workspace = resolveProbeChatWorkspaceRoot(env);
+    const resolved = resolveWorkspacePath(workspace, path);
+
+    if (query.length === 0) {
+      return { query, path, error: "query is required" };
+    }
+
+    if (resolved === undefined) {
+      return { query, path, error: "path is outside the OpenAgents workspace file scope" };
+    }
+
+    const output = yield* Effect.tryPromise({
+      try: async () => {
+        const child = Bun.spawn(["rg", "--line-number", "--no-heading", "--color", "never", query, resolved.relativePath], {
+          cwd: workspace,
+          stderr: "pipe",
+          stdout: "pipe",
+        });
+        const text = await new Response(child.stdout).text();
+        const errorText = await new Response(child.stderr).text();
+        const exitCode = await child.exited;
+
+        if (exitCode > 1) {
+          return `ripgrep failed: ${errorText.trim()}`;
+        }
+
+        return text;
+      },
+      catch: (error) => `failed to search ${path}: ${String(error)}`,
+    });
+    const allMatches = output.split("\n").filter((line) => line.length > 0);
+    const matches = allMatches.slice(0, limit);
+
+    return {
+      query,
+      path,
+      matches,
+      truncated: allMatches.length > matches.length,
+    };
+  });
+}
+
+function collectWorkspaceFiles(
+  absolutePath: string,
+  relativePath: string,
+  limit: number,
+): Effect.Effect<ReadonlyArray<string>, unknown> {
+  return Effect.tryPromise(async () => {
+    const rootStat = await stat(absolutePath);
+
+    if (rootStat.isFile()) {
+      return [relativePath];
+    }
+
+    const files: string[] = [];
+    const queue = [{ absolutePath, relativePath }];
+
+    while (queue.length > 0 && files.length < limit) {
+      const current = queue.shift()!;
+      const entries = await readdir(current.absolutePath, { withFileTypes: true });
+
+      for (const entry of entries) {
+        if (files.length >= limit) {
+          break;
+        }
+
+        if (shouldSkipWorkspaceEntry(entry.name)) {
+          continue;
+        }
+
+        const entryRelativePath = current.relativePath === "." ? entry.name : `${current.relativePath}/${entry.name}`;
+        const entryAbsolutePath = resolve(current.absolutePath, entry.name);
+
+        if (entry.isDirectory()) {
+          queue.push({ absolutePath: entryAbsolutePath, relativePath: entryRelativePath });
+          continue;
+        }
+
+        if (entry.isFile()) {
+          files.push(entryRelativePath);
+        }
+      }
+    }
+
+    return files;
+  });
+}
+
+function resolveProbeChatWorkspaceRoot(env: Readonly<Record<string, string | undefined>> = {}): string {
+  return resolve(env.PROBE_WORKSPACE_ROOT ?? env.OPENAGENTS_WORKSPACE_ROOT ?? resolveProbeWorkspaceRoot());
+}
+
+function resolveWorkspacePath(
+  workspace: string,
+  path: string,
+): { readonly absolutePath: string; readonly relativePath: string } | undefined {
+  const absolutePath = resolve(workspace, path);
+  const relativePath = relative(workspace, absolutePath) || ".";
+
+  if (
+    path.length === 0 ||
+    path.includes("\0") ||
+    relativePath.startsWith("..") ||
+    relativePath.split(sep).includes("..") ||
+    relativePath.split(sep).includes(".git")
+  ) {
+    return undefined;
+  }
+
+  return { absolutePath, relativePath };
+}
+
+function shouldSkipWorkspaceEntry(name: string): boolean {
+  return name === ".git" || name === "node_modules" || name === ".next" || name === "dist" || name === "build";
+}
+
+function boundedToolLimit(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(Math.floor(value), 500) : fallback;
 }
 
 function formatToolResultValue(value: { readonly type: string; readonly value: unknown }): string {
@@ -938,10 +1255,10 @@ if (import.meta.main) {
   const argv = Bun.argv.slice(2);
 
   if (argv[0] === "chat" && stringOption(parseOptions(argv.slice(1)), "prompt") === undefined) {
-    process.exit(await runGeminiInteractiveChat(argv.slice(1), { env: Bun.env }));
+    process.exit(await runGeminiInteractiveChat(argv.slice(1), { colors: process.stdout.isTTY, env: Bun.env }));
   }
 
-  const result = await Effect.runPromise(runProbeCli(argv, { env: Bun.env }));
+  const result = await Effect.runPromise(runProbeCli(argv, { colors: process.stdout.isTTY, env: Bun.env }));
 
   if (result.stdout.length > 0) {
     process.stdout.write(result.stdout);
@@ -958,7 +1275,8 @@ async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: Probe
   const options = parseOptions(args);
   const model = stringOption(options, "model") ?? GEMINI_DEFAULT_MODEL_ID;
   const maxTokens = numberOption(options, "max-tokens") ?? 1024;
-  const tools = makeGeminiChatTools();
+  const tools = makeGeminiChatTools(deps.env);
+  const colors = makeCliColors(options, deps);
   const clientResult = await Effect.runPromise(
     makeGeminiClient({
       profileId: stringOption(options, "profile") ?? deps.env?.PROBE_BACKEND_PROFILE ?? GEMINI_API_PROFILE_ID,
@@ -971,19 +1289,19 @@ async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: Probe
 
   if (clientResult instanceof GeminiClientError || "_tag" in clientResult) {
     const message = "reason" in clientResult ? clientResult.reason : String(clientResult);
-    process.stderr.write(`${message}\n`);
+    process.stderr.write(`${cliColor(colors, "error", message)}\n`);
     return 1;
   }
 
   process.stdout.write([
-    "Probe Gemini chat",
-    `profile: ${clientResult.profile.id}`,
-    `kind: ${clientResult.profile.kind}`,
-    `model: ${model}`,
-    `apiKeySource: ${clientResult.apiKey.source}`,
-    "apiKeyRedacted: true",
-    "tools: read_file,current_time",
-    "Type /exit to quit.",
+    cliHeader(colors, "Probe Gemini chat"),
+    cliField(colors, "profile", clientResult.profile.id),
+    cliField(colors, "kind", clientResult.profile.kind),
+    cliField(colors, "model", model),
+    cliField(colors, "apiKeySource", clientResult.apiKey.source),
+    cliField(colors, "apiKeyRedacted", "true"),
+    cliField(colors, "tools", "read_file,list_files,search_code,current_time", "tool"),
+    cliColor(colors, "muted", "Type /exit to quit."),
     "",
   ].join("\n"));
 
@@ -992,7 +1310,7 @@ async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: Probe
 
   try {
     for (;;) {
-      const prompt = (await rl.question("probe> ")).trim();
+      const prompt = (await rl.question(cliColor(colors, "prompt", "probe> "))).trim();
 
       if (prompt.length === 0) {
         continue;
@@ -1010,11 +1328,11 @@ async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: Probe
       );
 
       if (result instanceof GeminiClientError) {
-        process.stdout.write(formatGeminiFailure("Probe Gemini chat", result));
+        process.stdout.write(formatGeminiFailure("Probe Gemini chat", result, colors));
         continue;
       }
 
-      process.stdout.write(formatGeminiChatTurn({ apiKeySource: clientResult.apiKey.source, result }));
+      process.stdout.write(formatGeminiChatTurn({ apiKeySource: clientResult.apiKey.source, colors, result }));
       messages = [...result.finalRequest.messages, makeProbeLlmMessage("assistant", result.text)];
     }
   } finally {

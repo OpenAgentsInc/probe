@@ -203,4 +203,57 @@ describe("Probe CLI Gemini backend commands", () => {
     expect(result.stdout).toContain("\"preview\":\"# Probe");
     expect(result.stdout.length).toBeLessThan(1600);
   });
+
+  test("probe chat can force colored terminal output", async () => {
+    const result = await Effect.runPromise(
+      runProbeCli(["chat", "--prompt", "hello", "--color", "always"], {
+        env: { GEMINI_API_KEY: "test-gemini-key" },
+        fetch: async () =>
+          new Response(
+            sse({
+              candidates: [{ content: { role: "model", parts: [{ text: "colored" }] }, finishReason: "STOP" }],
+            }),
+            { status: 200 },
+          ),
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("\x1b[1m\x1b[36mProbe Gemini chat\x1b[0m");
+    expect(result.stdout).toContain("\x1b[1m\x1b[32massistant:\x1b[0m colored");
+    expect(result.stdout).toContain("\x1b[33musage:\x1b[0m");
+    expect(result.stdout).not.toContain("test-gemini-key");
+  });
+
+  test("probe chat exposes workspace search tools", async () => {
+    const responses = [
+      sse({
+        candidates: [
+          {
+            content: {
+              role: "model",
+              parts: [{ functionCall: { name: "search_code", args: { query: "Probe is being reset", path: "README.md", limit: 5 } } }],
+            },
+            finishReason: "STOP",
+          },
+        ],
+      }),
+      sse({
+        candidates: [{ content: { role: "model", parts: [{ text: "Found it." }] }, finishReason: "STOP" }],
+      }),
+    ];
+    const workspaceRoot = process.cwd().endsWith("packages/runtime") ? "../.." : ".";
+    const result = await Effect.runPromise(
+      runProbeCli(["chat", "--prompt", "find the reset sentence"], {
+        env: { GEMINI_API_KEY: "test-gemini-key", PROBE_WORKSPACE_ROOT: workspaceRoot },
+        fetch: async () => new Response(responses.shift() ?? "", { status: 200 }),
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("tool_call: search_code");
+    expect(result.stdout).toContain("tool_result: search_code");
+    expect(result.stdout).toContain("3:Probe is being reset.");
+    expect(result.stdout).toContain("assistant: Found it.");
+  });
 });

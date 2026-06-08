@@ -66,12 +66,20 @@ not passed. CLI output reports the API-key source label and
 auth precedence. It defaults to `gemini-2.5-flash`, uses local Gemini API keys
 when present, and otherwise uses the Omega broker when `PROBE_OMEGA_BASE_URL`
 and `PROBE_OMEGA_BEARER_TOKEN` are set. Each turn prints native tool calls,
-tool results, the assistant response, round trips, and token usage. The initial
-starter tool menu includes:
+tool results, the assistant response, round trips, and token usage. The chat
+tool root defaults to the Probe repo and can be widened with
+`PROBE_WORKSPACE_ROOT=/Users/christopherdavid/work`. The initial starter tool
+menu includes:
 
-- `read_file`: reads a UTF-8 file under the current Probe workspace, capped to
-  a small text slice;
+- `read_file`: reads a UTF-8 file under the configured tool root, capped to a
+  small text slice;
+- `list_files`: lists files below a workspace-relative directory;
+- `search_code`: searches workspace files with ripgrep;
 - `current_time`: returns the current local timestamp.
+
+Chat output uses ANSI colors when stdout is a terminal. For scripts and logs,
+disable colors with `--no-color`, `PROBE_NO_COLOR=1`, or `NO_COLOR=1`. Force
+colors with `--color always` or `PROBE_COLOR=always`.
 
 Runner assignments can select Gemini with:
 
