@@ -50,6 +50,7 @@ const proof = (): ProbeRunnerAssignmentProof => ({
 describe("Probe backend assignment routing", () => {
   test("runs an Apple FM assignment without provider auth materialization", async () => {
     const seenPaths: string[] = [];
+    let tokenUsageEvent: unknown;
     const result = await Effect.runPromise(
       runProbeBackendAssignment({
         runner: runner(),
@@ -59,6 +60,11 @@ describe("Probe backend assignment routing", () => {
         fetch: async (input, init) => {
           const url = new URL(String(input));
           seenPaths.push(`${init?.method ?? "GET"} ${url.pathname}`);
+
+          if (url.pathname === "/api/stats/token-usage/events") {
+            tokenUsageEvent = JSON.parse(String(init?.body));
+            return Response.json({ ok: true });
+          }
 
           if (url.pathname === "/health") {
             return Response.json({
@@ -100,7 +106,22 @@ describe("Probe backend assignment routing", () => {
       "probe_backend_run_started",
       "probe_backend_run_finished",
     ]);
-    expect(seenPaths).toEqual(["GET /health", "POST /v1/chat/completions"]);
+    expect(seenPaths).toEqual(["GET /health", "POST /v1/chat/completions", "POST /api/stats/token-usage/events"]);
+    expect(tokenUsageEvent).toMatchObject({
+      producerSystem: "probe",
+      provider: "apple_fm",
+      sourceRefs: {
+        runRef: "probe.assignment.assignment_apple_fm_1",
+        sessionRef: "probe.runner_session.runner_session_1",
+      },
+      sourceRoute: "probe_local_model",
+      tokenCounts: {
+        inputTokens: 4,
+        outputTokens: 2,
+        totalTokens: 6,
+      },
+      usageTruth: "exact",
+    });
   });
 
   test("rejects Apple FM assignment when runner lacks backend capability", async () => {

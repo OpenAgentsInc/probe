@@ -20,6 +20,15 @@ import {
 import { type ProbePublicProjectionUnsafe } from "../contracts/provider-account";
 import { type ProbeBackendRegistryError } from "../backends/registry";
 import { makeProbeLlmRequest } from "../llm";
+import {
+  bestEffortRecordProbeTokenUsageEvent,
+  makeAppleFmProbeTokenUsageEvent,
+  makeGeminiProbeTokenUsageEvent,
+  makeProbeAssignmentTokenUsageSourceRefs,
+  makeProbeTokenUsageTelemetryClientFromEnv,
+  probeTokenUsageActorFromEnv,
+  probeTokenUsagePrivacyFromEnv,
+} from "../fleet/token-usage";
 
 export const ProbeBackendRunEvent = S.Struct({
   kind: S.Literals(["probe_backend_run_started", "probe_backend_run_finished", "probe_backend_run_failed"]),
@@ -155,6 +164,7 @@ function runAppleFmBackendAssignment(
       observedAt,
       receipt: completion.receipt,
     });
+    yield* recordAssignmentAppleFmTokenUsage(input, completion);
 
     return {
       assignmentId: input.assignment.assignmentId,
@@ -242,6 +252,7 @@ function runGeminiBackendAssignment(
       observedAt,
       receipt: completion.receipt,
     });
+    yield* recordAssignmentGeminiTokenUsage(input, completion);
 
     return {
       assignmentId: input.assignment.assignmentId,
@@ -253,6 +264,55 @@ function runGeminiBackendAssignment(
       events: [started, finished],
     };
   });
+}
+
+function recordAssignmentAppleFmTokenUsage(
+  input: ProbeBackendAssignmentRunInput,
+  completion: AppleFmPlainTextCompletion,
+): Effect.Effect<void, never> {
+  const env = input.env ?? {};
+  const client = makeProbeTokenUsageTelemetryClientFromEnv({
+    env,
+    fetch: input.fetch,
+    managedAssignment: true,
+  });
+
+  return bestEffortRecordProbeTokenUsageEvent(
+    client,
+    makeAppleFmProbeTokenUsageEvent({
+      actor: probeTokenUsageActorFromEnv(env),
+      agentSurface: "managed_assignment",
+      model: completion.response.model ?? completion.profile.model,
+      observedAt: completion.receipt.observedAt,
+      privacy: probeTokenUsagePrivacyFromEnv(env),
+      profile: completion.profile,
+      sourceRefs: makeProbeAssignmentTokenUsageSourceRefs(input.assignment),
+      usage: completion.usage,
+    }),
+  );
+}
+
+function recordAssignmentGeminiTokenUsage(
+  input: ProbeBackendAssignmentRunInput,
+  completion: GeminiCompleteResult,
+): Effect.Effect<void, never> {
+  const env = input.env ?? {};
+  const client = makeProbeTokenUsageTelemetryClientFromEnv({
+    env,
+    fetch: input.fetch,
+    managedAssignment: true,
+  });
+
+  return bestEffortRecordProbeTokenUsageEvent(
+    client,
+    makeGeminiProbeTokenUsageEvent({
+      actor: probeTokenUsageActorFromEnv(env),
+      agentSurface: "managed_assignment",
+      privacy: probeTokenUsagePrivacyFromEnv(env),
+      result: completion,
+      sourceRefs: makeProbeAssignmentTokenUsageSourceRefs(input.assignment),
+    }),
+  );
 }
 
 function backendEvent(input: {

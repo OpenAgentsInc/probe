@@ -62,6 +62,9 @@ Tracked files should stay minimal until the new architecture lands:
   broker fallback.
 - `packages/runtime/src/fleet/telemetry.ts` reports auth/account health signals
   and requests Omega failover without locally iterating raw account tokens.
+- `packages/runtime/src/fleet/token-usage.ts` emits redacted Probe inference
+  token-usage events to Omega for global Stats totals and opt-out-aware
+  leaderboards.
 - `packages/runtime/src/fleet/backend-capability.ts` reports Apple FM backend
   capability for Pylon/SHC/sandbox routing from live health.
 - `packages/runtime/src/backends/registry.ts` registers the first Apple FM
@@ -96,6 +99,8 @@ Tracked files should stay minimal until the new architecture lands:
 - `docs/probe-cli-omega-auth.md` records the CLI account-management slice.
 - `docs/probe-fleet-telemetry.md` records the fleet telemetry and failover
   slice.
+- `docs/probe-token-usage-telemetry.md` records the Probe-to-Omega token usage
+  producer, privacy boundaries, opt-out controls, and fake-endpoint test path.
 - `docs/2026-06-07-apple-fm-first-backend-audit.md` audits the previous Apple
   FM implementations and records the plan for making Apple FM the first
   supported backend in the new Probe runtime.

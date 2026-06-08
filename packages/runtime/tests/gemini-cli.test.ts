@@ -47,6 +47,56 @@ describe("Probe CLI Gemini backend commands", () => {
     });
   });
 
+  test("probe backend gemini smoke emits token telemetry when configured", async () => {
+    const seen: Array<{ readonly body: unknown; readonly url: string }> = [];
+    const result = await Effect.runPromise(
+      runProbeCli(["backend", "gemini", "smoke", "--prompt", "hello"], {
+        env: {
+          GOOGLE_GENERATIVE_AI_API_KEY: "test-gemini-key",
+          PROBE_TOKEN_USAGE_OMEGA_BASE_URL: "https://omega.example",
+          PROBE_TOKEN_USAGE_PRIVACY_OPT_OUT: "true",
+        },
+        fetch: async (input, init) => {
+          const url = String(input);
+          seen.push({ url, body: JSON.parse(String(init?.body)) });
+
+          if (new URL(url).pathname === "/api/stats/token-usage/events") {
+            return Response.json({ ok: true });
+          }
+
+          return new Response(
+            sse({
+              candidates: [{ content: { role: "model", parts: [{ text: "probe gemini smoke ok" }] }, finishReason: "STOP" }],
+              usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 6, thoughtsTokenCount: 2, totalTokenCount: 12 },
+            }),
+            { status: 200 },
+          );
+        },
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(seen[0]?.url).toBe(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+    );
+    expect(seen[1]?.url).toBe("https://omega.example/api/stats/token-usage/events");
+    expect(seen[1]?.body).toMatchObject({
+      privacy: { leaderboardEligible: false, privacyOptOut: true },
+      producerSystem: "probe",
+      provider: "google_gemini",
+      sourceRoute: "probe_direct_provider",
+      tokenCounts: {
+        inputTokens: 4,
+        outputTokens: 8,
+        reasoningTokens: 2,
+        totalTokens: 12,
+      },
+      usageTruth: "exact",
+    });
+    expect(JSON.stringify(seen[1]?.body)).not.toContain("hello");
+    expect(JSON.stringify(seen[1]?.body)).not.toContain("test-gemini-key");
+  });
+
   test("probe backend gemini complete honors model option and PROBE_BACKEND_PROFILE", async () => {
     const urls: string[] = [];
     const result = await Effect.runPromise(
@@ -73,11 +123,7 @@ describe("Probe CLI Gemini backend commands", () => {
   });
 
   test("probe backend gemini smoke falls back to an authenticated Omega Gemini broker", async () => {
-    const seen = {
-      url: "",
-      authorization: "",
-      apiKey: "",
-    };
+    const seen: Array<{ readonly apiKey: string; readonly authorization: string; readonly body: unknown; readonly url: string }> = [];
     const result = await Effect.runPromise(
       runProbeCli(["backend", "gemini", "smoke", "--prompt", "hello"], {
         env: {
@@ -86,9 +132,18 @@ describe("Probe CLI Gemini backend commands", () => {
         },
         fetch: async (input, init) => {
           const headers = new Headers(init?.headers);
-          seen.url = String(input);
-          seen.authorization = headers.get("authorization") ?? "";
-          seen.apiKey = headers.get("x-goog-api-key") ?? "";
+          const request = {
+            url: String(input),
+            authorization: headers.get("authorization") ?? "",
+            apiKey: headers.get("x-goog-api-key") ?? "",
+            body: JSON.parse(String(init?.body)),
+          };
+          seen.push(request);
+
+          if (new URL(request.url).pathname === "/api/stats/token-usage/events") {
+            return Response.json({ ok: true });
+          }
+
           return new Response(
             sse({
               candidates: [{ content: { role: "model", parts: [{ text: "omega ok" }] }, finishReason: "STOP" }],
@@ -104,11 +159,26 @@ describe("Probe CLI Gemini backend commands", () => {
     expect(result.stdout).toContain("apiKeySource: PROBE_OMEGA_BEARER_TOKEN");
     expect(result.stdout).toContain("assistant: omega ok");
     expect(result.stdout).not.toContain("oa_agent_test");
-    expect(seen.authorization).toBe("Bearer oa_agent_test");
-    expect(seen.apiKey).toBe("");
-    expect(seen.url).toBe(
+    expect(seen[0]?.authorization).toBe("Bearer oa_agent_test");
+    expect(seen[0]?.apiKey).toBe("");
+    expect(seen[0]?.url).toBe(
       "https://openagents.com/api/provider-accounts/google-gemini/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
     );
+    expect(seen[1]?.authorization).toBe("Bearer oa_agent_test");
+    expect(seen[1]?.url).toBe("https://openagents.com/api/stats/token-usage/events");
+    expect(seen[1]?.body).toMatchObject({
+      producerSystem: "probe",
+      provider: "google_gemini",
+      sourceRoute: "omega_hosted_gemini",
+      tokenCounts: {
+        inputTokens: 2,
+        outputTokens: 1,
+        totalTokens: 3,
+      },
+      usageTruth: "exact",
+    });
+    expect(JSON.stringify(seen[1]?.body)).not.toContain("hello");
+    expect(JSON.stringify(seen[1]?.body)).not.toContain("oa_agent_test");
   });
 
   test("probe backend gemini smoke reports missing keys without leaking provider request details", async () => {
@@ -200,8 +270,8 @@ describe("Probe CLI Gemini backend commands", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("tool_call: read_file {\"path\":\"README.md\"}");
-    expect(result.stdout).toContain("tool_result: read_file {\"path\":\"README.md\",\"contentChars\":");
-    expect(result.stdout).toContain("\"preview\":\"# Probe");
+    expect(result.stdout).toContain("tool_result: read_file README.md");
+    expect(result.stdout).toContain("chars)");
     expect(result.stdout.length).toBeLessThan(1600);
   });
 
@@ -253,8 +323,7 @@ describe("Probe CLI Gemini backend commands", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("tool_call: search_code");
-    expect(result.stdout).toContain("tool_result: search_code");
-    expect(result.stdout).toContain("3:Probe is being reset.");
+    expect(result.stdout).toContain("tool_result: search_code Probe is being reset  in  README.md  (1 match)");
     expect(result.stdout).toContain("assistant: Found it.");
   });
 });

@@ -39,6 +39,14 @@ import { PROBE_APPLE_FM_BACKEND_CAPABILITY } from "./runner/identity";
 import { makeOmegaAccountClient, type OmegaAccountClient } from "./omega/account-client";
 import { sanitizeProbePublicProjection } from "./contracts/provider-account";
 import { type ProbeRunnerIdentity } from "./runner/identity";
+import {
+  bestEffortRecordProbeTokenUsageEvent,
+  makeAppleFmProbeTokenUsageEvent,
+  makeGeminiProbeTokenUsageEvent,
+  makeProbeTokenUsageTelemetryClientFromEnv,
+  probeTokenUsageActorFromEnv,
+  probeTokenUsagePrivacyFromEnv,
+} from "./fleet/token-usage";
 
 export interface ProbeCliResult {
   readonly exitCode: number;
@@ -192,6 +200,12 @@ function geminiChatOnce(
       };
     }
 
+    yield* recordCliGeminiTokenUsage({
+      command: "chat",
+      deps,
+      result,
+    });
+
     return {
       exitCode: 0,
       stdout: formatGeminiChatTurn({
@@ -236,6 +250,12 @@ function geminiCompletionCommand(input: {
         stderr: "",
       };
     }
+
+    yield* recordCliGeminiTokenUsage({
+      command: input.title === "Gemini smoke" ? "backend.gemini.smoke" : "backend.gemini.complete",
+      deps: input.deps,
+      result,
+    });
 
     return {
       exitCode: 0,
@@ -351,6 +371,12 @@ function appleFmSmoke(
         stderr: "",
       };
     }
+
+    yield* recordCliAppleFmTokenUsage({
+      command: "apple-fm.smoke",
+      deps,
+      result,
+    });
 
     return {
       exitCode: 0,
@@ -705,6 +731,61 @@ function formatGeminiUsage(usage: GeminiCompleteResult["receipt"]["usage"]): str
   }
 
   return parts.length === 0 ? "unreported" : parts.join(" ");
+}
+
+function recordCliGeminiTokenUsage(input: {
+  readonly command: string;
+  readonly deps: ProbeCliDeps;
+  readonly result: GeminiCompleteResult;
+}): Effect.Effect<void, never> {
+  const env = input.deps.env ?? {};
+  const client = makeProbeTokenUsageTelemetryClientFromEnv({
+    env,
+    fetch: input.deps.fetch,
+  });
+
+  return bestEffortRecordProbeTokenUsageEvent(
+    client,
+    makeGeminiProbeTokenUsageEvent({
+      actor: probeTokenUsageActorFromEnv(env),
+      agentSurface: "cli",
+      command: input.command,
+      privacy: probeTokenUsagePrivacyFromEnv(env),
+      result: input.result,
+      sourceRefs: {
+        anonymizedSourceRef: `probe.cli.${input.command}.${input.result.profile.id}.${input.result.finalRequest.model.model}`,
+      },
+    }),
+  );
+}
+
+function recordCliAppleFmTokenUsage(input: {
+  readonly command: string;
+  readonly deps: ProbeCliDeps;
+  readonly result: AppleFmPlainTextCompletion;
+}): Effect.Effect<void, never> {
+  const env = input.deps.env ?? {};
+  const client = makeProbeTokenUsageTelemetryClientFromEnv({
+    env,
+    fetch: input.deps.fetch,
+  });
+
+  return bestEffortRecordProbeTokenUsageEvent(
+    client,
+    makeAppleFmProbeTokenUsageEvent({
+      actor: probeTokenUsageActorFromEnv(env),
+      agentSurface: "cli",
+      command: input.command,
+      model: input.result.response.model ?? input.result.profile.model,
+      observedAt: input.result.receipt.observedAt,
+      privacy: probeTokenUsagePrivacyFromEnv(env),
+      profile: input.result.profile,
+      sourceRefs: {
+        anonymizedSourceRef: `probe.cli.${input.command}.${input.result.profile.id}.${input.result.profile.model}`,
+      },
+      usage: input.result.usage,
+    }),
+  );
 }
 
 function formatUsage(usage: AppleFmPlainTextCompletion["usage"]): string {
