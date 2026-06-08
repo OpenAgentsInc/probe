@@ -1059,7 +1059,7 @@ function readAnyWorkspaceFile(
 
     return {
       path,
-      content: typeof content === "string" ? content.slice(0, 6000) : String(content),
+      content: typeof content === "string" ? content.slice(0, 100000) : String(content),
     };
   });
 }
