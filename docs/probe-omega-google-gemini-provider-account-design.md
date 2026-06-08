@@ -208,6 +208,7 @@ Implementation should be split:
    Gemini basic API keys: OpenAgentsInc/autopilot-omega#526.
 3. End-to-end managed Gemini assignment smoke from Omega grant resolution to
    Probe env materialization to Gemini backend completion:
-   OpenAgentsInc/probe#200.
+   OpenAgentsInc/probe#200 (Probe fake E2E and opt-in live smoke implemented;
+   production Omega route still depends on OpenAgentsInc/autopilot-omega#526).
 
 These issues can proceed after local Gemini API-key support remains stable.
