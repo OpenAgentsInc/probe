@@ -47,6 +47,10 @@ skills that transfer into another agent harness.
   `probe/docs/benchmarks/2026-06-08-probe-continual-benchmark-learning-apparatus.md`
   and
   `probe/docs/benchmarks/2026-06-08-workspace-benchmark-systems-audit.md`
+- Omega Nexus/Pylon update:
+  `autopilot-omega/docs/nexus/2026-06-08-pylon-live-assignment-closeout-smoke.md`
+  plus the adjacent Pylon Agent API, release freeze, release gate, wallet
+  readiness, and self-serve registration runbooks.
 
 Important source observations:
 
@@ -134,6 +138,34 @@ GEPA coordinator
 
 This lets us climb benchmark performance before changing weights or adding a
 separate training stack.
+
+### 2026-06-08 Pylon Assignment Update
+
+Omega now has a live Pylon assignment lease and closeout path. A registered,
+wallet-ready Pylon can list owned assignments, accept an assignment, report
+progress, submit public-safe artifact/proof refs, and have an operator close
+the assignment as accepted or rejected work. The #502 production smoke
+`assignment.public.issue502.20260608024927` reached `accepted_work`.
+
+That changes the GEPA implementation plan. The first Pylon-backed metric-call
+batches should reuse the Omega assignment lease lifecycle:
+
+```text
+GEPA coordinator
+  -> Omega/Pylon assignment lease
+  -> worker accept
+  -> progress events
+  -> artifact/proof refs
+  -> evaluator/operator accepted-or-rejected closeout
+  -> GEPA result import
+```
+
+Do not create a parallel Pylon work-state protocol for benchmark batches unless
+the existing lease path proves inadequate. The lease path still does not prove
+real bitcoin payout, payout-target approval, repeated multi-host jobs, or
+general earning readiness. The current Pylon release freeze remains active
+until the payout, repeated-smoke, failure-drill, and release-promotion gates
+close.
 
 ## Evaluation Dataset
 
@@ -322,7 +354,9 @@ policy gates. `active` requires the normal Blueprint/Omega release path.
    imports `gepa.optimize_anything` and treats Pylon as the evaluator backend.
 2. Add a Probe benchmark adapter that can run a task with a supplied candidate
    text bundle and return normalized evaluator side information.
-3. Add a Pylon batch metric-call API for benchmark rollouts.
+3. Adapt the Omega Pylon assignment lease and closeout path for benchmark
+   metric-call rollouts, including GEPA candidate hash, split refs, evaluator
+   refs, artifact/proof refs, and accepted/rejected closeout refs.
 4. Add a public OpenAgents Benchmark Cloud split manifest for retained,
    validation, and holdout tasks.
 5. Store GEPA candidates as content-addressed text bundles.
@@ -398,6 +432,8 @@ Start immediately with Stage 0 and Stage 1:
 - text-bundle candidate only.
 - retained Terminal-Bench failures and Probe acceptance fixtures only.
 - Pylon used as parallel rollout infrastructure.
+- Pylon batches should use the Omega assignment lease lifecycle and closeout
+  semantics.
 - no model fine-tuning.
 - no public leaderboard claim.
 

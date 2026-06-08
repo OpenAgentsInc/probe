@@ -43,6 +43,16 @@ Active Omega source and docs:
 - `autopilot-omega/docs/artanis/2026-06-07-artanis-deploy-readiness-full-audit.md`
 - `autopilot-omega/docs/pylon/2026-06-06-r10-artanis-pylon-campaign-ledger.md`
 - `autopilot-omega/docs/nexus/2026-06-07-artanis-payment-backed-dispatch-gates.md`
+- `autopilot-omega/docs/nexus/2026-06-07-artanis-pylon-operator-proof-run.md`
+- `autopilot-omega/docs/nexus/2026-06-07-artanis-pylon-proof-trace-checker.md`
+- `autopilot-omega/docs/nexus/2026-06-07-artanis-real-small-bitcoin-assignment-smoke-evidence.md`
+- `autopilot-omega/docs/nexus/2026-06-07-pylon-agent-api-runbook.md`
+- `autopilot-omega/docs/nexus/2026-06-07-pylon-mdk-wallet-readiness-smoke.md`
+- `autopilot-omega/docs/nexus/2026-06-07-pylon-network-readiness-release-freeze.md`
+- `autopilot-omega/docs/nexus/2026-06-07-pylon-self-serve-registration-smoke.md`
+- `autopilot-omega/docs/nexus/2026-06-07-pylon-v02-omega-release-gate-runbook.md`
+- `autopilot-omega/docs/nexus/2026-06-07-pylon-v02-release-review-record.md`
+- `autopilot-omega/docs/nexus/2026-06-08-pylon-live-assignment-closeout-smoke.md`
 - `autopilot-omega/workers/api/src/artanis-runtime.ts`
 - `autopilot-omega/workers/api/src/artanis-loop.ts`
 - `autopilot-omega/workers/api/src/artanis-public-report.ts`
@@ -172,6 +182,17 @@ What is proven:
   payment movement.
 - The later Artanis to MDK settlement bridge smoke proves the id-chain shape
   and real payment movement for a generated settlement assignment id.
+- The Omega Pylon Agent API now supports Pylon registration, heartbeat,
+  redacted MDK wallet readiness, payout-target admission, owned assignment
+  lists, assignment accept/progress/artifact events, and operator closeout.
+- The #502 production smoke
+  `assignment.public.issue502.20260608024927` proved a live assignment lease
+  through accept, progress, public-safe artifact/proof refs, operator
+  `accepted_work` closeout, and post-closeout no-spend payment-evidence refs.
+- The #499 network-readiness release freeze records #500 registration, #501
+  wallet readiness, and #502 assignment closeout as progress, while still
+  blocking broad Pylon release/download/earning claims until payout,
+  multi-host repetition, failure drills, and release promotion gates close.
 
 What is not proven:
 
@@ -185,6 +206,10 @@ What is not proven:
 - The integrated paid-work proof still does not prove the fully deployed
   production chain from Artanis assignment id to Pylon accepted work to MDK
   settlement receipt to public receipt.
+- The #502 live assignment closeout smoke does not prove real bitcoin payout,
+  payout-target approval, repeated multi-host jobs, or general Pylon earning
+  readiness. Those remain #503, #504, and #505 work in the Omega/Nexus release
+  freeze sequence.
 - No current proof shows Artanis supervising a GEPA campaign over
   Terminal-Bench 2 or Probe retained coding-agent fixtures through Pylons.
 
@@ -295,8 +320,11 @@ Omega Artanis goal
 -> public Benchmark Cloud split manifest
 -> Psionic/GEPA candidate frontier
 -> Pylon batch assignment plan
+-> Omega Pylon assignment lease
+-> Pylon accept/progress/artifact-proof events
 -> Probe benchmark runs
 -> Benchmark Cloud score import
+-> operator/evaluator closeout as accepted or rejected benchmark work
 -> artifact, receipt, and resource manifests
 -> Artanis campaign import
 -> Artanis public report and Forum summary
@@ -385,7 +413,9 @@ Each Work Order should include:
 - benchmark suite and split refs;
 - Probe commit;
 - candidate hash when applicable;
+- Omega Pylon assignment lease ref when routed through Pylon;
 - Pylon assignment refs when applicable;
+- accepted or rejected closeout refs;
 - expected artifacts;
 - verifier/scorer refs;
 - closeout requirements;
@@ -447,6 +477,7 @@ Blocked claims until further proof:
 - A retained-fixture win is public holdout performance.
 - Pylon paid work is fully settled from Artanis assignment id unless the
   deployed production bridge proves it.
+- Pylon is generally ready for download or bitcoin earning from #502 alone.
 - A GEPA candidate is active production runtime before Omega release approval.
 - A Qwen/LoRA adapter improved Probe before model-training evidence and
   validation exist.
@@ -474,9 +505,11 @@ Blocked claims until further proof:
    identity, scorer version, no-cheat metadata, and artifact digests.
 
 5. Pylon GEPA assignment bridge
-   Add a Pylon assignment path for `gepa_dspy_optimization` and
-   `benchmark_evaluation` work that records Artanis campaign id, assignment
-   id, candidate hash, metric batch id, split refs, and receipt refs.
+   Adapt the new Omega Pylon assignment lease and closeout path for
+   `gepa_dspy_optimization` and `benchmark_evaluation` work. It should record
+   Artanis campaign id, assignment id, candidate hash, metric batch id, split
+   refs, artifact/proof refs, accepted or rejected closeout refs, and no-spend
+   payment-evidence refs when a batch is unpaid.
 
 6. Artanis importer
    Add an Artanis importer that reads public Benchmark Cloud and Pylon receipt
@@ -512,7 +545,8 @@ not the owner of every surface:
 - In `probe`: emit benchmark closeout exports suitable for Benchmark Cloud and
   Artanis import.
 - In `openagents` or `pylon`: add the Pylon assignment/receipt bridge for GEPA
-  metric-call batches with Artanis campaign ids.
+  metric-call batches with Artanis campaign ids, using the Omega assignment
+  lease lifecycle rather than inventing a separate work-state protocol.
 - In `psionic`: register the GEPA candidate frontier and later Qwen/LoRA trace
   corpus path, with promotion evidence separated from model-training launch
   authority.

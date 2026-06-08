@@ -505,6 +505,40 @@ eventually report runtime/backend facts that help a Pylon or SHC node prove it
 can run a requested benchmark-backed assignment, but Probe should not register
 benchmark packages, decide payments, or mark providers accepted.
 
+### 2026-06-08 Omega Pylon Assignment Update
+
+The active Omega Nexus/Pylon docs add a concrete assignment lifecycle that the
+Probe benchmark apparatus should reuse:
+
+- `autopilot-omega/docs/nexus/2026-06-07-pylon-agent-api-runbook.md`
+- `autopilot-omega/docs/nexus/2026-06-07-pylon-network-readiness-release-freeze.md`
+- `autopilot-omega/docs/nexus/2026-06-08-pylon-live-assignment-closeout-smoke.md`
+
+The Omega Worker now exposes Pylon registration, heartbeat, wallet-readiness,
+payout-target admission, owned assignment listing, assignment accept/progress,
+artifact/proof submission, public-safe payment/settlement evidence refs, and
+operator assignment closeout. The #502 production smoke proved:
+
+```text
+pylon.issue502.local.20260608024927
+-> assignment.public.issue502.20260608024927
+-> accept/progress/artifact-proof events
+-> operator closeout
+-> state accepted_work
+```
+
+For Probe, this means future GEPA and benchmark batches should map benchmark
+work into Omega/Pylon assignment leases with accepted or rejected closeout refs.
+Do not create a separate Pylon benchmark state machine unless the live lease
+path cannot carry a benchmark field after focused review.
+
+The same docs also keep the boundary sharp. #502 is not a release-unfreeze
+event and not a paid-work proof. Real bitcoin payout, payout-target approval,
+repeated multi-host jobs, failure drills, and the next package release remain
+separate #503 through #505 gates. Probe benchmark docs must therefore treat
+the assignment lease path as an execution/closeout substrate, not as payment,
+settlement, or broad Pylon earning authority.
+
 ## Historical Source Material
 
 ### Autopilot4 Deprecated
@@ -752,7 +786,8 @@ The following issue set would turn this audit into implementation work:
 3. Add Probe-owned legal signature package fixtures for Psionic public/synthetic
    legal families.
 4. Add Pylon GEPA Stage 0 and Stage 1 candidate manifests, split manifests,
-   rollout receipts, and retained-failure evaluator contracts.
+   Omega/Pylon assignment lease refs, artifact/proof refs, accepted/rejected
+   closeout refs, rollout receipts, and retained-failure evaluator contracts.
 5. Rebuild/move the private Cloud true-Probe benchmark runner lane into public
    OpenAgents.
 6. Add Probe benchmark closeout to Omega Probe run projection.

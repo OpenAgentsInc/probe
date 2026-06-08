@@ -63,11 +63,17 @@ architecture and execution plans. They are not public benchmark claims.
   evidence.
 - Pylon should provide distributed rollout and training capacity with explicit
   worker capability envelopes and signed receipts.
+- The 2026-06-08 Omega #502 smoke proves a live Pylon assignment lease through
+  accept, progress, artifact/proof refs, and accepted-work closeout. Future
+  Probe GEPA batches should reuse that lifecycle.
 - Omega should remain the release gate and projection surface for public and
   private benchmark evidence.
 - Artanis should be the public-safe overseer and campaign narrator for Probe
   benchmark learning, not the runtime, scorer, optimizer, payment authority,
   or promotion authority.
+- The Pylon release freeze remains active for broad download, earning, payout,
+  settlement, and release-promotion claims until the remaining Omega/Nexus
+  gates close.
 
 ## Public Claim Boundaries
 

@@ -41,6 +41,9 @@ audited, extended, and run by the wider OpenAgents ecosystem.
 - `psionic/docs/QWEN_LEGAL_FINETUNE_LANE.md`
 - `psionic/reports/qwen36-27b-real-pylon-rehearsal-001.md`
 - `psionic/reports/qwen36-27b-real-lora-sft-actual-20260522T043404Z/README.md`
+- `autopilot-omega/docs/nexus/2026-06-07-pylon-agent-api-runbook.md`
+- `autopilot-omega/docs/nexus/2026-06-07-pylon-network-readiness-release-freeze.md`
+- `autopilot-omega/docs/nexus/2026-06-08-pylon-live-assignment-closeout-smoke.md`
 
 ## Current Assets We Can Build On
 
@@ -242,6 +245,9 @@ Pylon should own:
 
 - device enrollment;
 - worker capability advertisement;
+- owned assignment lease acceptance and progress events;
+- public-safe artifact/proof refs;
+- accepted or rejected closeout receipts;
 - signed job acceptance and completion receipts;
 - local/swarm compute availability;
 - payment and settlement evidence when jobs are compensated.
@@ -265,7 +271,9 @@ The continual learning loop should run as:
 2. Create assignments.
    Public OpenAgents Benchmark Cloud emits benchmark assignments with task
    metadata, budget, backend constraints, required artifact names, and
-   evaluation policy.
+   evaluation policy. When a task is routed through Pylon, that assignment
+   should map to the Omega Pylon assignment lease lifecycle rather than a
+   separate benchmark-only state machine.
 
 3. Run Probe variants.
    Probe executes raw baseline, current champion, and candidate variants under
@@ -473,6 +481,25 @@ benchmark and training work around the clock. The device pool should include
 SHC boxes, Apple Silicon Macs, local developer machines, and eventually other
 admitted worker classes.
 
+Omega's #502 live assignment closeout smoke is now the concrete lifecycle to
+reuse for Probe benchmark batches. The proved flow is:
+
+```text
+registered wallet-ready Pylon
+-> owned assignment lease
+-> accept
+-> progress
+-> public-safe artifact/proof refs
+-> operator/evaluator closeout as accepted or rejected work
+-> post-closeout no-spend payment-evidence refs when unpaid
+```
+
+That is strong enough to design GEPA metric-call batches around. It is not
+strong enough to claim Pylon earning readiness or autonomous paid benchmark
+work. The #499 release freeze still blocks broad Pylon release/download/earning
+claims until real payout, repeated multi-host jobs, failure drills, and release
+promotion are proven.
+
 A Pylon worker should advertise capabilities, not vague availability:
 
 - benchmark runner support;
@@ -484,6 +511,7 @@ A Pylon worker should advertise capabilities, not vague availability:
 - disk, memory, and accelerator constraints;
 - maximum cost/time budget;
 - proof and receipt support.
+- assignment lease and closeout support.
 
 Psionic should dispatch training and evaluation shards through Pylon, collect
 signed receipts, merge adapters, and submit promotion candidates. Probe should
