@@ -114,6 +114,8 @@ Tracked files should stay minimal until the new architecture lands:
   Blueprint-aware backend capability facts used by Pylon/SHC routing.
 - `docs/probe-blueprint-action-submission-boundary.md` records the proposal-only
   write boundary for external effects.
+- `docs/probe-blueprint-contribution-release-gates.md` records the Probe-side
+  contribution draft and release-gate model.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 

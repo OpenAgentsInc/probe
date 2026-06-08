@@ -463,13 +463,13 @@ export class BlueprintProjectionUnsafe extends S.TaggedErrorClass<BlueprintProje
 }) {}
 
 const PRIVATE_FIELD_PATTERN =
-  /(^|[._-])(access_token|authorization|bearer|callback_url|callback_token|client_secret|customer_email|id_token|mnemonic|oauth|password|payment_preimage|private_key|private_repo|provider_payload|raw_email|raw_prompt|refresh_token|secret|token|wallet|xprv)([._-]|$)/i;
+  /(^|[._-])(access_token|authorization|bearer|callback_url|callback_token|client_secret|customer_email|customer_name|id_token|invoice|mnemonic|oauth|password|payment_hash|payment_id|payment_preimage|payout_address|payout_destination|payout_target|preimage|private_key|private_repo|provider_grant|provider_payload|provider_token|raw_email|raw_payload|raw_prompt|raw_run_log|raw_runner|raw_source_archive|raw_webhook|refresh_token|runner_log|secret|source_archive|token|wallet|xprv)([._-]|$)/i;
 
 const PRIVATE_CAMEL_FIELD_PATTERN =
-  /^(accessToken|authorization|bearer|callbackUrl|callbackToken|clientSecret|customerEmail|idToken|mnemonic|oauth|password|paymentPreimage|privateKey|privateRepo|providerPayload|rawEmail|rawPrompt|refreshToken|secret|token|wallet|xprv)$/i;
+  /^(accessToken|authorization|bearer|callbackUrl|callbackToken|clientSecret|customerEmail|customerName|idToken|invoice|mnemonic|oauth|password|paymentHash|paymentId|paymentPreimage|payoutAddress|payoutDestination|payoutTarget|preimage|privateKey|privateRepo|providerGrant|providerPayload|providerToken|rawEmail|rawPayload|rawPrompt|rawRunLog|rawRunner|rawSourceArchive|rawWebhook|refreshToken|runnerLog|secret|sourceArchive|token|wallet|xprv)$/i;
 
 const PRIVATE_VALUE_PATTERN =
-  /\b(access_token|authorization|bearer|callback_url|callback_token|client_secret|customer_email|id_token|mnemonic|oauth|payment_preimage|private_key|private_repo|provider_payload|raw_email|raw_prompt|refresh_token|wallet|xprv)\b/i;
+  /\b(access_token|authorization|bearer|callback_url|callback_token|client_secret|customer_email|customer_name|id_token|invoice|mnemonic|oauth|payment_hash|payment_id|payment_preimage|payout_address|payout_destination|payout_target|preimage|private_key|private_repo|provider_grant|provider_payload|provider_token|raw_email|raw_payload|raw_prompt|raw_run_log|raw_runner|raw_source_archive|raw_webhook|refresh_token|runner_log|source_archive|wallet|xprv)\b/i;
 
 type BlueprintJsonPrimitive = string | number | boolean | null;
 type BlueprintJsonValue =
