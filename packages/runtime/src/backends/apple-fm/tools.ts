@@ -141,7 +141,7 @@ export function makeAppleFmToolCallbackSession(
   const redactedCallbackUrl = redactCallbackUrl(callbackUrl);
   const projectedTools = input.tools.map(projectToolDefinition);
   const toolMap = new Map(input.tools.map((tool) => [tool.name, tool]));
-  const maxModelRoundTrips = input.maxModelRoundTrips ?? 8;
+  const maxModelRoundTrips = input.maxModelRoundTrips ?? Infinity;
   const transcript: AppleFmToolTranscriptEntry[] = [...(input.transcript ?? [])];
   const receipts: AppleFmToolCallbackReceipt[] = [];
   const now = () => (input.now ?? new Date()).toISOString();

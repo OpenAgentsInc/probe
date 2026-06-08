@@ -180,7 +180,7 @@ function geminiChatOnce(
       maxTokens: numberOption(options, "max-tokens") ?? 1024,
       tools,
     });
-    const result = yield* client.complete({ request, tools, maxModelRoundTrips: 8 }).pipe(
+    const result = yield* client.complete({ request, tools }).pipe(
       Effect.catch((error: GeminiClientError) => Effect.succeed(error)),
     );
 
@@ -303,7 +303,6 @@ function appleFmToolStreamDemo(
     }).pipe(Effect.mapError((error) => new ProbeCliError({ message: error.reason })));
     const toolSession = makeAppleFmToolCallbackSession({
       tools: projectedMenu.toolDefinitions,
-      maxModelRoundTrips: 4,
       now: deps.now,
     });
     const result = yield* client.streamSessionWithTools({
@@ -1527,7 +1526,7 @@ async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: Probe
       const request = makeGeminiChatRequest({ messages, model, prompt, maxTokens, tools });
       const stream = makeGeminiInteractiveTurnStream(colors);
       const result = await Effect.runPromise(
-        clientResult.complete({ request, tools, maxModelRoundTrips: 8, onEvent: stream.onEvent }).pipe(
+        clientResult.complete({ request, tools, onEvent: stream.onEvent }).pipe(
           Effect.catch((error: GeminiClientError) => Effect.succeed(error)),
         ),
       );

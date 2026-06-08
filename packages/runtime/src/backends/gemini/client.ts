@@ -104,7 +104,7 @@ function completeGemini(input: {
   readonly now: () => string;
 }): Effect.Effect<GeminiCompleteResult, GeminiClientError> {
   return Effect.gen(function* () {
-    const maxModelRoundTrips = input.input.maxModelRoundTrips ?? 8;
+    const maxModelRoundTrips = input.input.maxModelRoundTrips ?? Infinity;
     let request = input.input.request;
     let events: ProbeLlmEvent[] = [];
     let toolReceipts: GeminiBackendToolCallReceipt[] = [];
