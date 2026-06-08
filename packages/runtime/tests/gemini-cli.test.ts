@@ -118,4 +118,89 @@ describe("Probe CLI Gemini backend commands", () => {
     expect(result.stderr).toContain("missing Gemini API key");
     expect(result.stderr).not.toContain("x-goog-api-key");
   });
+
+  test("probe chat --prompt runs one Gemini turn and shows tool calls", async () => {
+    const bodies: unknown[] = [];
+    const responses = [
+      sse({
+        candidates: [
+          {
+            content: { role: "model", parts: [{ functionCall: { name: "current_time", args: {} } }] },
+            finishReason: "STOP",
+          },
+        ],
+      }),
+      sse({
+        candidates: [{ content: { role: "model", parts: [{ text: "It is test time." }] }, finishReason: "STOP" }],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
+      }),
+    ];
+    const result = await Effect.runPromise(
+      runProbeCli(["chat", "--prompt", "what time is it?"], {
+        env: { GEMINI_API_KEY: "test-gemini-key" },
+        now: new Date("2026-06-08T12:00:00.000Z"),
+        fetch: async (_input, init) => {
+          bodies.push(JSON.parse(String(init?.body)));
+          return new Response(responses.shift() ?? "", { status: 200 });
+        },
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Probe Gemini chat");
+    expect(result.stdout).toContain("apiKeySource: GEMINI_API_KEY");
+    expect(result.stdout).toContain("apiKeyRedacted: true");
+    expect(result.stdout).toContain("tool_call: current_time {}");
+    expect(result.stdout).toContain("tool_result: current_time");
+    expect(result.stdout).toContain("assistant: It is test time.");
+    expect(result.stdout).toContain("usage: input=10 output=5 total=15");
+    expect(result.stdout).not.toContain("test-gemini-key");
+    expect(bodies[0]).toMatchObject({
+      tools: [
+        {
+          functionDeclarations: expect.arrayContaining([
+            expect.objectContaining({ name: "read_file" }),
+            expect.objectContaining({ name: "current_time" }),
+          ]),
+        },
+      ],
+      toolConfig: { functionCallingConfig: { mode: "AUTO" } },
+    });
+  });
+
+  test("probe chat without a prompt tells non-interactive callers how to start chat", async () => {
+    const result = await Effect.runPromise(runProbeCli(["chat"], { env: { GEMINI_API_KEY: "test-gemini-key" } }));
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("Run `probe chat` for the prompt");
+    expect(result.stdout).not.toContain("test-gemini-key");
+  });
+
+  test("probe chat compacts read_file tool results for terminal output", async () => {
+    const responses = [
+      sse({
+        candidates: [
+          {
+            content: { role: "model", parts: [{ functionCall: { name: "read_file", args: { path: "README.md" } } }] },
+            finishReason: "STOP",
+          },
+        ],
+      }),
+      sse({
+        candidates: [{ content: { role: "model", parts: [{ text: "Read it." }] }, finishReason: "STOP" }],
+      }),
+    ];
+    const result = await Effect.runPromise(
+      runProbeCli(["chat", "--prompt", "read README"], {
+        env: { GEMINI_API_KEY: "test-gemini-key" },
+        fetch: async () => new Response(responses.shift() ?? "", { status: 200 }),
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("tool_call: read_file {\"path\":\"README.md\"}");
+    expect(result.stdout).toContain("tool_result: read_file {\"path\":\"README.md\",\"contentChars\":");
+    expect(result.stdout).toContain("\"preview\":\"# Probe");
+    expect(result.stdout.length).toBeLessThan(1600);
+  });
 });

@@ -58,7 +58,8 @@ Tracked files should stay minimal until the new architecture lands:
 - `packages/runtime/src/runtime/backend-assignment.ts` routes no-auth Apple FM
   assignments through live backend health and emits backend run events.
 - `packages/runtime/src/cli.ts` exposes the first Probe CLI commands for Omega
-  linking and account management.
+  linking, account management, and Gemini chat through local keys or the Omega
+  broker fallback.
 - `packages/runtime/src/fleet/telemetry.ts` reports auth/account health signals
   and requests Omega failover without locally iterating raw account tokens.
 - `packages/runtime/src/fleet/backend-capability.ts` reports Apple FM backend

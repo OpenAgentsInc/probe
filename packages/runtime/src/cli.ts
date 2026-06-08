@@ -2,6 +2,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { Effect, Schema as S } from "effect";
 import {
   AppleFmBackendError,
@@ -23,7 +24,15 @@ import {
   lookupBlueprintSignatures,
   planProbeToolMenu,
 } from "./blueprint";
-import { makeProbeLlmRequest } from "./llm";
+import {
+  defineProbeLlmTool,
+  makeProbeLlmMessage,
+  makeProbeLlmRequest,
+  probeLlmToolDefinitions,
+  type ProbeLlmMessage,
+  type ProbeLlmRequest,
+  type ProbeLlmTools,
+} from "./llm";
 import { PROBE_APPLE_FM_BACKEND_CAPABILITY } from "./runner/identity";
 import { makeOmegaAccountClient, type OmegaAccountClient } from "./omega/account-client";
 import { sanitizeProbePublicProjection } from "./contracts/provider-account";
@@ -86,6 +95,10 @@ function handleProbeCli(
       return yield* geminiComplete(parseOptions(rest.slice(1)), deps);
     }
 
+    if (namespace === "chat") {
+      return yield* geminiChatOnce(parseOptions(argv.slice(1)), deps);
+    }
+
     if (namespace === "apple-fm" && command === "status") {
       return yield* appleFmStatus(options, deps);
     }
@@ -127,6 +140,64 @@ function geminiComplete(
     options,
     deps,
     defaultPrompt: "Reply with a concise Probe Gemini completion.",
+  });
+}
+
+function geminiChatOnce(
+  options: Record<string, string | true>,
+  deps: ProbeCliDeps,
+): Effect.Effect<ProbeCliResult, ProbeCliError> {
+  return Effect.gen(function* () {
+    const prompt = stringOption(options, "prompt");
+
+    if (prompt === undefined) {
+      return {
+        exitCode: 1,
+        stdout: [
+          "Probe Gemini chat is interactive.",
+          "Run `probe chat` for the prompt, or `probe chat --prompt TEXT` for one turn.",
+        ].join("\n") + "\n",
+        stderr: "",
+      };
+    }
+
+    const model = stringOption(options, "model") ?? GEMINI_DEFAULT_MODEL_ID;
+    const client = yield* makeGeminiClient({
+      profileId: stringOption(options, "profile") ?? deps.env?.PROBE_BACKEND_PROFILE ?? GEMINI_API_PROFILE_ID,
+      explicitBaseUrl: stringOption(options, "base-url"),
+      env: deps.env,
+      fetch: deps.fetch,
+      now: deps.now,
+    }).pipe(Effect.mapError((error) => new ProbeCliError({ message: "reason" in error ? error.reason : String(error) })));
+    const tools = makeGeminiChatTools();
+    const request = makeGeminiChatRequest({
+      messages: [],
+      model,
+      prompt,
+      maxTokens: numberOption(options, "max-tokens") ?? 1024,
+      tools,
+    });
+    const result = yield* client.complete({ request, tools, maxModelRoundTrips: 8 }).pipe(
+      Effect.catch((error: GeminiClientError) => Effect.succeed(error)),
+    );
+
+    if (result instanceof GeminiClientError) {
+      return {
+        exitCode: 1,
+        stdout: formatGeminiFailure("Probe Gemini chat", result),
+        stderr: "",
+      };
+    }
+
+    return {
+      exitCode: 0,
+      stdout: formatGeminiChatTurn({
+        apiKeySource: client.apiKey.source,
+        includeHeader: true,
+        result,
+      }),
+      stderr: "",
+    };
   });
 }
 
@@ -471,6 +542,7 @@ function usage(): string {
     "  probe omega link [--base-url URL] [--runner-id ID] [--subject USER_OR_TEAM] [--kind local|shc|pylon|sandbox]",
     "  probe auth accounts [--base-url URL]",
     "  probe auth add chatgpt [--base-url URL]",
+    "  probe chat [--profile gemini-api] [--model gemini-2.5-flash] [--prompt TEXT]",
     "  probe backend gemini smoke [--profile gemini-api] [--model gemini-2.5-flash] [--prompt TEXT]",
     "  probe backend gemini complete [--profile gemini-api] [--model gemini-2.5-flash] [--prompt TEXT]",
     "  probe apple-fm status [--base-url URL] [--profile apple-fm-local]",
@@ -550,6 +622,43 @@ function formatGeminiCompletion(title: string, apiKeySource: string, completion:
     `usage: ${formatGeminiUsage(completion.receipt.usage)}`,
     `receipt: ${JSON.stringify(completion.receipt)}`,
   ].join("\n") + "\n";
+}
+
+function formatGeminiChatTurn(input: {
+  readonly apiKeySource: string;
+  readonly includeHeader?: boolean;
+  readonly result: GeminiCompleteResult;
+}): string {
+  const lines: string[] = [];
+
+  if (input.includeHeader === true) {
+    lines.push("Probe Gemini chat");
+    lines.push(`profile: ${input.result.profile.id}`);
+    lines.push(`kind: ${input.result.profile.kind}`);
+    lines.push(`model: ${input.result.finalRequest.model.model}`);
+    lines.push(`apiKeySource: ${input.apiKeySource}`);
+    lines.push("apiKeyRedacted: true");
+  }
+
+  for (const event of input.result.events) {
+    if (event.type === "tool-call") {
+      lines.push(`tool_call: ${event.name} ${safeJson(event.input)}`);
+    }
+
+    if (event.type === "tool-result") {
+      lines.push(`tool_result: ${event.name} ${formatToolResultValue(event.result)}`);
+    }
+
+    if (event.type === "tool-error") {
+      lines.push(`tool_error: ${event.name} ${event.message}`);
+    }
+  }
+
+  lines.push(`assistant: ${input.result.text}`);
+  lines.push(`roundTrips: ${input.result.roundTrips}`);
+  lines.push(`usage: ${formatGeminiUsage(input.result.receipt.usage)}`);
+
+  return `${lines.join("\n")}\n`;
 }
 
 function formatGeminiFailure(title: string, error: GeminiClientError): string {
@@ -685,6 +794,128 @@ function readWorkspaceFile(
   });
 }
 
+function makeGeminiChatTools(): ProbeLlmTools {
+  return {
+    read_file: defineProbeLlmTool({
+      name: "read_file",
+      description: "Read a UTF-8 text file under the current Probe workspace. Use this when the user asks about local code.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "A relative file path under the workspace.",
+          },
+        },
+        required: ["path"],
+      },
+      execute: readAnyWorkspaceFile,
+    }),
+    current_time: defineProbeLlmTool({
+      name: "current_time",
+      description: "Return the current local timestamp.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+      execute: () => Effect.succeed({ now: new Date().toISOString() }),
+    }),
+  };
+}
+
+function makeGeminiChatRequest(input: {
+  readonly messages: ReadonlyArray<ProbeLlmMessage>;
+  readonly model: string;
+  readonly prompt: string;
+  readonly maxTokens: number;
+  readonly tools: ProbeLlmTools;
+}): ProbeLlmRequest {
+  return makeProbeLlmRequest({
+    model: { provider: "google", model: input.model },
+    system:
+      "You are Probe, a concise coding agent. Use tools when they help inspect local code. " +
+      "When you use a tool, continue to a direct final answer after the tool result.",
+    messages: [...input.messages, makeProbeLlmMessage("user", input.prompt)],
+    tools: probeLlmToolDefinitions(input.tools),
+    toolChoice: { type: "auto" },
+    generation: { maxTokens: input.maxTokens, temperature: 0.2 },
+  });
+}
+
+function readAnyWorkspaceFile(
+  input: Readonly<Record<string, unknown>>,
+): Effect.Effect<{ readonly path: string; readonly content?: string; readonly error?: string }, never> {
+  return Effect.gen(function* () {
+    const path = typeof input.path === "string" ? input.path : "";
+    const workspace = resolveProbeWorkspaceRoot();
+    const absolutePath = resolve(workspace, path);
+    const relativePath = relative(workspace, absolutePath);
+
+    if (
+      path.length === 0 ||
+      path.includes("\0") ||
+      relativePath.startsWith("..") ||
+      relativePath === "" ||
+      relativePath.split(sep).includes("..") ||
+      relativePath.split(sep).includes(".git")
+    ) {
+      return {
+        path,
+        error: "path is outside the Probe workspace file scope",
+      };
+    }
+
+    const content = yield* Effect.tryPromise({
+      try: () => readFile(absolutePath, "utf8"),
+      catch: (error) => error,
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.succeed(`failed to read ${path}: ${String(error)}`),
+      ),
+    );
+
+    return {
+      path,
+      content: typeof content === "string" ? content.slice(0, 6000) : String(content),
+    };
+  });
+}
+
+function formatToolResultValue(value: { readonly type: string; readonly value: unknown }): string {
+  if (value.type === "text" || value.type === "error") {
+    return String(value.value);
+  }
+
+  if (isReadFileToolResult(value.value)) {
+    return safeJson({
+      path: value.value.path,
+      contentChars: value.value.content.length,
+      preview: value.value.content.slice(0, 500),
+    });
+  }
+
+  return safeJson(value.value);
+}
+
+function isReadFileToolResult(value: unknown): value is { readonly path: string; readonly content: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "path" in value &&
+    typeof value.path === "string" &&
+    "content" in value &&
+    typeof value.content === "string"
+  );
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function resolveProbeWorkspaceRoot(start = process.cwd()): string {
   let current = resolve(start);
 
@@ -704,7 +935,13 @@ function resolveProbeWorkspaceRoot(start = process.cwd()): string {
 }
 
 if (import.meta.main) {
-  const result = await Effect.runPromise(runProbeCli(Bun.argv.slice(2), { env: Bun.env }));
+  const argv = Bun.argv.slice(2);
+
+  if (argv[0] === "chat" && stringOption(parseOptions(argv.slice(1)), "prompt") === undefined) {
+    process.exit(await runGeminiInteractiveChat(argv.slice(1), { env: Bun.env }));
+  }
+
+  const result = await Effect.runPromise(runProbeCli(argv, { env: Bun.env }));
 
   if (result.stdout.length > 0) {
     process.stdout.write(result.stdout);
@@ -715,4 +952,72 @@ if (import.meta.main) {
   }
 
   process.exit(result.exitCode);
+}
+
+async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: ProbeCliDeps): Promise<number> {
+  const options = parseOptions(args);
+  const model = stringOption(options, "model") ?? GEMINI_DEFAULT_MODEL_ID;
+  const maxTokens = numberOption(options, "max-tokens") ?? 1024;
+  const tools = makeGeminiChatTools();
+  const clientResult = await Effect.runPromise(
+    makeGeminiClient({
+      profileId: stringOption(options, "profile") ?? deps.env?.PROBE_BACKEND_PROFILE ?? GEMINI_API_PROFILE_ID,
+      explicitBaseUrl: stringOption(options, "base-url"),
+      env: deps.env,
+      fetch: deps.fetch,
+      now: deps.now,
+    }).pipe(Effect.catch((error) => Effect.succeed(error))),
+  );
+
+  if (clientResult instanceof GeminiClientError || "_tag" in clientResult) {
+    const message = "reason" in clientResult ? clientResult.reason : String(clientResult);
+    process.stderr.write(`${message}\n`);
+    return 1;
+  }
+
+  process.stdout.write([
+    "Probe Gemini chat",
+    `profile: ${clientResult.profile.id}`,
+    `kind: ${clientResult.profile.kind}`,
+    `model: ${model}`,
+    `apiKeySource: ${clientResult.apiKey.source}`,
+    "apiKeyRedacted: true",
+    "tools: read_file,current_time",
+    "Type /exit to quit.",
+    "",
+  ].join("\n"));
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let messages: ReadonlyArray<ProbeLlmMessage> = [];
+
+  try {
+    for (;;) {
+      const prompt = (await rl.question("probe> ")).trim();
+
+      if (prompt.length === 0) {
+        continue;
+      }
+
+      if (prompt === "/exit" || prompt === "/quit") {
+        return 0;
+      }
+
+      const request = makeGeminiChatRequest({ messages, model, prompt, maxTokens, tools });
+      const result = await Effect.runPromise(
+        clientResult.complete({ request, tools, maxModelRoundTrips: 8 }).pipe(
+          Effect.catch((error: GeminiClientError) => Effect.succeed(error)),
+        ),
+      );
+
+      if (result instanceof GeminiClientError) {
+        process.stdout.write(formatGeminiFailure("Probe Gemini chat", result));
+        continue;
+      }
+
+      process.stdout.write(formatGeminiChatTurn({ apiKeySource: clientResult.apiKey.source, result }));
+      messages = [...result.finalRequest.messages, makeProbeLlmMessage("assistant", result.text)];
+    }
+  } finally {
+    rl.close();
+  }
 }

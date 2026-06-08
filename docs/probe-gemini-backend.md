@@ -52,6 +52,8 @@ comments, docs, browser-visible responses, or public receipts.
 Probe exposes a narrow direct Gemini CLI path:
 
 ```sh
+probe chat
+probe chat --prompt "Read README.md and summarize the project."
 probe backend gemini smoke --model gemini-2.5-flash
 probe backend gemini complete --model gemini-2.5-flash --prompt "Summarize this repository."
 ```
@@ -59,6 +61,17 @@ probe backend gemini complete --model gemini-2.5-flash --prompt "Summarize this 
 `PROBE_BACKEND_PROFILE=gemini-api` can select the profile when `--profile` is
 not passed. CLI output reports the API-key source label and
 `apiKeyRedacted: true`, but never prints the key or provider request headers.
+
+`probe chat` starts a local prompt loop backed by the same Gemini client and
+auth precedence. It defaults to `gemini-2.5-flash`, uses local Gemini API keys
+when present, and otherwise uses the Omega broker when `PROBE_OMEGA_BASE_URL`
+and `PROBE_OMEGA_BEARER_TOKEN` are set. Each turn prints native tool calls,
+tool results, the assistant response, round trips, and token usage. The initial
+starter tool menu includes:
+
+- `read_file`: reads a UTF-8 file under the current Probe workspace, capped to
+  a small text slice;
+- `current_time`: returns the current local timestamp.
 
 Runner assignments can select Gemini with:
 
