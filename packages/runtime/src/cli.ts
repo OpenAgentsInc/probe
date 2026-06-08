@@ -774,11 +774,24 @@ function renderMarkdown(text: string): string {
 }
 
 function formatInlineMarkdown(text: string): string {
-  return text
-    .replace(/\*\*(.+?)\*\*/g, `${ansi.bold}$1${ansi.reset}`)
-    .replace(/__(.+?)__/g, `${ansi.bold}$1${ansi.reset}`)
-    .replace(/`([^`]+)`/g, `${ansi.green}$1${ansi.reset}`)
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, `${ansi.blue}$1${ansi.reset}`);
+  const bold = (s: string) => `${ansi.bold}${s}${ansi.reset}`;
+  const dim = (s: string) => `${ansi.dim}${s}${ansi.reset}`;
+
+  const lines = text.split("\n").map((line) => {
+    let l = line;
+    l = l.replace(/^#{1,6}\s+/, "");
+    l = l.replace(/^>\s?/, `${ansi.yellow}> ${ansi.reset}`);
+    l = l.replace(/^[-*+]\s+/, `${ansi.cyan}• `);
+    l = l.replace(/\*\*(.+?)\*\*/g, (_, s) => bold(s));
+    l = l.replace(/__(.+?)__/g, (_, s) => bold(s));
+    l = l.replace(/`([^`]+)`/g, (_, s) => `${ansi.green}${s}${ansi.reset}`);
+    l = l.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) => `${t} ${ansi.blue}${u}${ansi.reset}`);
+    l = l.replace(/\*(.+?)\*/g, (_, s) => dim(s));
+    l = l.replace(/_(.+?)_/g, (_, s) => dim(s));
+    return l;
+  });
+
+  return lines.join("\n");
 }
 
 function makeCliColors(
