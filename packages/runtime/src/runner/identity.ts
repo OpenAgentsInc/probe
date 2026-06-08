@@ -1,8 +1,10 @@
 import { Effect, Schema as S } from "effect";
 import { PROBE_APPLE_FM_BACKEND_CAPABILITY } from "../backends/apple-fm/contract";
+import { PROBE_GEMINI_BACKEND_CAPABILITY } from "../backends/gemini/contract";
 import {
   assignmentRequiresProviderGrant,
   assignmentSelectsAppleFmBackend,
+  assignmentSelectsGeminiBackend,
   validateProbeAssignmentBlueprintScope,
   validateProbeAssignmentProjection,
   type ProbeRunAssignment,
@@ -19,6 +21,7 @@ import { type OmegaGrantResolver, type ProbeAuthGrantError } from "../omega/gran
 export const ProbeRunnerKind = S.Literals(["local", "shc", "pylon", "sandbox"]);
 export type ProbeRunnerKind = typeof ProbeRunnerKind.Type;
 export { PROBE_APPLE_FM_BACKEND_CAPABILITY } from "../backends/apple-fm/contract";
+export { PROBE_GEMINI_BACKEND_CAPABILITY } from "../backends/gemini/contract";
 
 export const ProbeRunnerIdentity = S.Struct({
   runnerId: S.String,
@@ -141,6 +144,10 @@ export function requiredRunnerCapabilitiesForAssignment(assignment: ProbeRunAssi
 
   if (assignmentSelectsAppleFmBackend(assignment)) {
     capabilities.push(PROBE_APPLE_FM_BACKEND_CAPABILITY);
+  }
+
+  if (assignmentSelectsGeminiBackend(assignment)) {
+    capabilities.push(PROBE_GEMINI_BACKEND_CAPABILITY);
   }
 
   return capabilities;

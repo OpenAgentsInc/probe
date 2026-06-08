@@ -33,6 +33,36 @@ Omega's Cloudflare Worker consumes the same basic-key shape through its
 `GEMINI_API_KEY` Worker secret. Do not place Gemini keys in `vars`, D1, issue
 comments, docs, browser-visible responses, or public receipts.
 
+## CLI And Assignment Selection
+
+Probe exposes a narrow direct Gemini CLI path:
+
+```sh
+probe backend gemini smoke --model gemini-2.5-flash
+probe backend gemini complete --model gemini-2.5-flash --prompt "Summarize this repository."
+```
+
+`PROBE_BACKEND_PROFILE=gemini-api` can select the profile when `--profile` is
+not passed. CLI output reports the API-key source label and
+`apiKeyRedacted: true`, but never prints the key or provider request headers.
+
+Runner assignments can select Gemini with:
+
+```json
+{
+  "backend": {
+    "kind": "gemini_api",
+    "backendProfileId": "gemini-api"
+  }
+}
+```
+
+Gemini assignments require the runner capability `probe.backend.gemini_api`.
+They do not require an Omega provider-account grant in this pass; the API key
+is resolved from the runner environment using the same precedence as local CLI
+calls. Apple FM remains the default backend profile for existing assignments
+that do not select Gemini.
+
 ## Request Lowering
 
 Gemini request lowering lives in

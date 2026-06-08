@@ -3,6 +3,7 @@ import { Effect } from "effect";
 import {
   APPLE_FM_DEFAULT_MODEL_ID,
   PROBE_APPLE_FM_BACKEND_CAPABILITY,
+  PROBE_GEMINI_BACKEND_CAPABILITY,
   runProbeBackendAssignment,
   type ProbeRunAssignment,
   type ProbeRunnerAssignmentProof,
@@ -16,6 +17,16 @@ const assignment = (): ProbeRunAssignment => ({
   backend: {
     kind: "apple_fm_bridge",
     profile: "apple-fm-local",
+  },
+});
+
+const geminiAssignment = (): ProbeRunAssignment => ({
+  assignmentId: "assignment_gemini_1",
+  runnerSessionId: "runner_session_1",
+  goal: "Summarize this local repo through Gemini.",
+  backend: {
+    kind: "gemini_api",
+    backendProfileId: "gemini-api",
   },
 });
 
@@ -135,5 +146,58 @@ describe("Probe backend assignment routing", () => {
       ],
     });
   });
-});
 
+  test("runs a Gemini assignment through the direct API backend", async () => {
+    const seenUrls: string[] = [];
+    const result = await Effect.runPromise(
+      runProbeBackendAssignment({
+        runner: runner(["probe.run", PROBE_GEMINI_BACKEND_CAPABILITY]),
+        proof: { ...proof(), assignmentId: "assignment_gemini_1" },
+        assignment: geminiAssignment(),
+        env: { GEMINI_API_KEY: "test-gemini-key" },
+        fetch: async (input, init) => {
+          seenUrls.push(String(input));
+          expect(new Headers(init?.headers).get("x-goog-api-key")).toBe("test-gemini-key");
+          const body = JSON.parse(String(init?.body));
+          expect(body.contents[0].parts[0].text).toBe("Summarize this local repo through Gemini.");
+
+          return new Response(
+            [
+              "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"gemini summary\"}]},\"finishReason\":\"STOP\"}]}",
+              "data: [DONE]",
+              "",
+            ].join("\n"),
+            { status: 200 },
+          );
+        },
+        now: new Date("2026-06-08T00:00:00.000Z"),
+      }),
+    );
+
+    expect(result.authRequired).toBe(false);
+    expect(result.backendKind).toBe("gemini_api");
+    expect(result.profileId).toBe("gemini-api");
+    expect(result.completion.text).toBe("gemini summary");
+    expect(result.events.map((event) => event.kind)).toEqual([
+      "probe_backend_run_started",
+      "probe_backend_run_finished",
+    ]);
+    expect(result.events[0].backendKind).toBe("gemini_api");
+    expect(JSON.stringify(result.events)).not.toContain("test-gemini-key");
+    expect(seenUrls[0]).toContain("/v1beta/models/gemini-2.5-flash:streamGenerateContent");
+  });
+
+  test("rejects Gemini assignment when runner lacks Gemini backend capability", async () => {
+    await expect(
+      Effect.runPromise(
+        runProbeBackendAssignment({
+          runner: runner(["probe.run", PROBE_APPLE_FM_BACKEND_CAPABILITY]),
+          proof: { ...proof(), assignmentId: "assignment_gemini_1" },
+          assignment: geminiAssignment(),
+          env: { GEMINI_API_KEY: "test-gemini-key" },
+          fetch: async () => Response.json({}),
+        }),
+      ),
+    ).rejects.toMatchObject({ _tag: "ProbeRunnerAuthorizationError" });
+  });
+});

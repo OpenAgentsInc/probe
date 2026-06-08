@@ -1,7 +1,15 @@
 import { Effect, Schema as S } from "effect";
 import { AppleFmBackendError, makeAppleFmClient, type AppleFmPlainTextCompletion } from "../backends/apple-fm/client";
 import { APPLE_FM_BACKEND_KIND } from "../backends/apple-fm/contract";
-import { requireAppleFmAssignmentBackend, type ProbeRunAssignment } from "../contracts/assignment";
+import { GeminiClientError, makeGeminiClient, type GeminiCompleteResult } from "../backends/gemini/client";
+import { GEMINI_BACKEND_KIND } from "../backends/gemini/contract";
+import {
+  assignmentSelectsGeminiBackend,
+  requireAppleFmAssignmentBackend,
+  requireGeminiAssignmentBackend,
+  selectedAssignmentBackendProfileId,
+  type ProbeRunAssignment,
+} from "../contracts/assignment";
 import { type AppleFmBackendAvailabilityReceipt, type AppleFmBackendFailureReceipt } from "../backends/apple-fm/receipts";
 import {
   authorizeRunnerForAssignment,
@@ -11,12 +19,13 @@ import {
 } from "../runner/identity";
 import { type ProbePublicProjectionUnsafe } from "../contracts/provider-account";
 import { type ProbeBackendRegistryError } from "../backends/registry";
+import { makeProbeLlmRequest } from "../llm";
 
 export const ProbeBackendRunEvent = S.Struct({
   kind: S.Literals(["probe_backend_run_started", "probe_backend_run_finished", "probe_backend_run_failed"]),
   assignmentId: S.String,
   runnerSessionId: S.String,
-  backendKind: S.Literal(APPLE_FM_BACKEND_KIND),
+  backendKind: S.Literals([APPLE_FM_BACKEND_KIND, GEMINI_BACKEND_KIND]),
   profileId: S.String,
   model: S.String,
   observedAt: S.String,
@@ -38,10 +47,10 @@ export interface ProbeBackendAssignmentRunInput {
 export interface ProbeBackendAssignmentRunResult {
   readonly assignmentId: string;
   readonly runnerSessionId: string;
-  readonly backendKind: typeof APPLE_FM_BACKEND_KIND;
+  readonly backendKind: typeof APPLE_FM_BACKEND_KIND | typeof GEMINI_BACKEND_KIND;
   readonly profileId: string;
   readonly authRequired: false;
-  readonly completion: AppleFmPlainTextCompletion;
+  readonly completion: AppleFmPlainTextCompletion | GeminiCompleteResult;
   readonly events: ReadonlyArray<ProbeBackendRunEvent>;
 }
 
@@ -61,6 +70,12 @@ export class ProbeBackendAssignmentError extends S.TaggedErrorClass<ProbeBackend
 ) {}
 
 export function runProbeBackendAssignment(
+  input: ProbeBackendAssignmentRunInput,
+): Effect.Effect<ProbeBackendAssignmentRunResult, ProbeBackendAssignmentRunError> {
+  return assignmentSelectsGeminiBackend(input.assignment) ? runGeminiBackendAssignment(input) : runAppleFmBackendAssignment(input);
+}
+
+function runAppleFmBackendAssignment(
   input: ProbeBackendAssignmentRunInput,
 ): Effect.Effect<ProbeBackendAssignmentRunResult, ProbeBackendAssignmentRunError> {
   return Effect.gen(function* () {
@@ -85,6 +100,7 @@ export function runProbeBackendAssignment(
     const started = backendEvent({
       kind: "probe_backend_run_started",
       assignment: input.assignment,
+      backendKind: APPLE_FM_BACKEND_KIND,
       profileId: client.profile.id,
       model: client.profile.model,
       observedAt,
@@ -95,6 +111,7 @@ export function runProbeBackendAssignment(
       const failed = backendEvent({
         kind: "probe_backend_run_failed",
         assignment: input.assignment,
+        backendKind: APPLE_FM_BACKEND_KIND,
         profileId: client.profile.id,
         model: client.profile.model,
         observedAt,
@@ -115,6 +132,7 @@ export function runProbeBackendAssignment(
         const failed = backendEvent({
           kind: "probe_backend_run_failed",
           assignment: input.assignment,
+          backendKind: APPLE_FM_BACKEND_KIND,
           profileId: client.profile.id,
           model: client.profile.model,
           observedAt,
@@ -131,6 +149,7 @@ export function runProbeBackendAssignment(
     const finished = backendEvent({
       kind: "probe_backend_run_finished",
       assignment: input.assignment,
+      backendKind: APPLE_FM_BACKEND_KIND,
       profileId: client.profile.id,
       model: completion.response.model ?? client.profile.model,
       observedAt,
@@ -149,19 +168,111 @@ export function runProbeBackendAssignment(
   });
 }
 
+function runGeminiBackendAssignment(
+  input: ProbeBackendAssignmentRunInput,
+): Effect.Effect<ProbeBackendAssignmentRunResult, ProbeBackendAssignmentRunError> {
+  return Effect.gen(function* () {
+    yield* authorizeRunnerForAssignment(input.runner, input.proof, input.assignment, input.now);
+    const backend = yield* requireGeminiAssignmentBackend(input.assignment).pipe(
+      Effect.mapError(
+        (error) =>
+          new ProbeBackendAssignmentError({
+            reason: error.reason,
+            events: [],
+          }),
+      ),
+    );
+    const client = yield* makeGeminiClient({
+      profileId: selectedAssignmentBackendProfileId(backend),
+      explicitBaseUrl: input.trustedBackendBaseUrl,
+      env: input.env,
+      fetch: input.fetch,
+      now: input.now,
+    }).pipe(
+      Effect.mapError(
+        (error) =>
+          new ProbeBackendAssignmentError({
+            reason: "reason" in error ? error.reason : String(error),
+            receipt: error instanceof GeminiClientError ? error.receipt : undefined,
+            events: [],
+          }),
+      ),
+    );
+    const observedAt = (input.now ?? new Date()).toISOString();
+    const started = backendEvent({
+      kind: "probe_backend_run_started",
+      assignment: input.assignment,
+      backendKind: GEMINI_BACKEND_KIND,
+      profileId: client.profile.id,
+      model: client.profile.model,
+      observedAt,
+    });
+
+    const completion = yield* client.complete({
+      request: makeProbeLlmRequest({
+        model: { provider: "google", model: client.profile.model },
+        prompt: input.assignment.goal,
+        generation: { maxTokens: 1024, temperature: 0 },
+      }),
+    }).pipe(
+      Effect.mapError((error) => {
+        const failed = backendEvent({
+          kind: "probe_backend_run_failed",
+          assignment: input.assignment,
+          backendKind: GEMINI_BACKEND_KIND,
+          profileId: client.profile.id,
+          model: client.profile.model,
+          observedAt,
+          receipt: error.receipt,
+        });
+
+        return new ProbeBackendAssignmentError({
+          reason: error.reason,
+          receipt: error.receipt,
+          events: [started, failed],
+        });
+      }),
+    );
+    const finished = backendEvent({
+      kind: "probe_backend_run_finished",
+      assignment: input.assignment,
+      backendKind: GEMINI_BACKEND_KIND,
+      profileId: client.profile.id,
+      model: client.profile.model,
+      observedAt,
+      receipt: completion.receipt,
+    });
+
+    return {
+      assignmentId: input.assignment.assignmentId,
+      runnerSessionId: input.assignment.runnerSessionId,
+      backendKind: GEMINI_BACKEND_KIND,
+      profileId: client.profile.id,
+      authRequired: false,
+      completion,
+      events: [started, finished],
+    };
+  });
+}
+
 function backendEvent(input: {
   readonly kind: ProbeBackendRunEvent["kind"];
   readonly assignment: ProbeRunAssignment;
+  readonly backendKind: typeof APPLE_FM_BACKEND_KIND | typeof GEMINI_BACKEND_KIND;
   readonly profileId: string;
   readonly model: string;
   readonly observedAt: string;
-  readonly receipt?: AppleFmBackendAvailabilityReceipt | AppleFmBackendFailureReceipt | AppleFmPlainTextCompletion["receipt"];
+  readonly receipt?:
+    | AppleFmBackendAvailabilityReceipt
+    | AppleFmBackendFailureReceipt
+    | AppleFmPlainTextCompletion["receipt"]
+    | GeminiCompleteResult["receipt"];
 }): ProbeBackendRunEvent {
   return {
     kind: input.kind,
     assignmentId: input.assignment.assignmentId,
     runnerSessionId: input.assignment.runnerSessionId,
-    backendKind: APPLE_FM_BACKEND_KIND,
+    backendKind: input.backendKind,
     profileId: input.profileId,
     model: input.model,
     observedAt: input.observedAt,
@@ -169,4 +280,3 @@ function backendEvent(input: {
     receipt: input.receipt,
   };
 }
-

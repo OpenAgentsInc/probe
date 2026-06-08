@@ -9,6 +9,7 @@ import {
   CHATGPT_CODEX_PROVIDER,
   decodeProbeRunAssignment,
   PROBE_APPLE_FM_BACKEND_CAPABILITY,
+  PROBE_GEMINI_BACKEND_CAPABILITY,
   requiredRunnerCapabilitiesForAssignment,
   makeStaticOmegaGrantResolver,
   makeStaticProbeSecretBroker,
@@ -36,6 +37,16 @@ const appleFmAssignment = (): ProbeRunAssignment => ({
   backend: {
     kind: "apple_fm_bridge",
     profile: "apple-fm-local",
+  },
+});
+
+const geminiAssignment = (): ProbeRunAssignment => ({
+  assignmentId: "assignment_1",
+  runnerSessionId: "runner_session_1",
+  goal: "Summarize through Gemini",
+  backend: {
+    kind: "gemini_api",
+    backendProfileId: "gemini-api",
   },
 });
 
@@ -170,6 +181,36 @@ describe("Probe runner identity gate", () => {
           }),
           proof(),
           appleFmAssignment(),
+        ),
+      ),
+    ).rejects.toMatchObject({ _tag: "ProbeRunnerAuthorizationError" });
+  });
+
+  test("Gemini assignments require Gemini backend capability but no Omega grant capability", async () => {
+    await Effect.runPromise(
+      authorizeRunnerForAssignment(
+        runner({
+          capabilities: ["probe.run", PROBE_GEMINI_BACKEND_CAPABILITY],
+        }),
+        proof(),
+        geminiAssignment(),
+      ),
+    );
+
+    expect(assignmentRequiresProviderGrant(geminiAssignment())).toBe(false);
+    expect(requiredRunnerCapabilitiesForAssignment(geminiAssignment())).toEqual([
+      "probe.run",
+      PROBE_GEMINI_BACKEND_CAPABILITY,
+    ]);
+
+    await expect(
+      Effect.runPromise(
+        authorizeRunnerForAssignment(
+          runner({
+            capabilities: ["probe.run", PROBE_APPLE_FM_BACKEND_CAPABILITY],
+          }),
+          proof(),
+          geminiAssignment(),
         ),
       ),
     ).rejects.toMatchObject({ _tag: "ProbeRunnerAuthorizationError" });

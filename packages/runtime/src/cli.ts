@@ -16,11 +16,14 @@ import {
 } from "./backends/apple-fm/blueprint-tools";
 import { makeAppleFmToolStreamProgramRunEvidence } from "./backends/apple-fm/program-run-evidence";
 import { makeAppleFmToolCallbackSession } from "./backends/apple-fm/tools";
+import { GeminiClientError, makeGeminiClient, type GeminiCompleteResult } from "./backends/gemini/client";
+import { GEMINI_API_PROFILE_ID, GEMINI_DEFAULT_MODEL_ID } from "./backends/gemini/contract";
 import {
   loadBlueprintSignatureRegistry,
   lookupBlueprintSignatures,
   planProbeToolMenu,
 } from "./blueprint";
+import { makeProbeLlmRequest } from "./llm";
 import { PROBE_APPLE_FM_BACKEND_CAPABILITY } from "./runner/identity";
 import { makeOmegaAccountClient, type OmegaAccountClient } from "./omega/account-client";
 import { sanitizeProbePublicProjection } from "./contracts/provider-account";
@@ -75,6 +78,14 @@ function handleProbeCli(
       return yield* addChatGptAccount(parseOptions(rest.slice(1)), deps);
     }
 
+    if (namespace === "backend" && command === "gemini" && rest[0] === "smoke") {
+      return yield* geminiSmoke(parseOptions(rest.slice(1)), deps);
+    }
+
+    if (namespace === "backend" && command === "gemini" && rest[0] === "complete") {
+      return yield* geminiComplete(parseOptions(rest.slice(1)), deps);
+    }
+
     if (namespace === "apple-fm" && command === "status") {
       return yield* appleFmStatus(options, deps);
     }
@@ -90,6 +101,70 @@ function handleProbeCli(
     return {
       exitCode: 1,
       stdout: usage(),
+      stderr: "",
+    };
+  });
+}
+
+function geminiSmoke(
+  options: Record<string, string | true>,
+  deps: ProbeCliDeps,
+): Effect.Effect<ProbeCliResult, ProbeCliError> {
+  return geminiCompletionCommand({
+    title: "Gemini smoke",
+    options,
+    deps,
+    defaultPrompt: "Reply with: probe gemini smoke ok.",
+  });
+}
+
+function geminiComplete(
+  options: Record<string, string | true>,
+  deps: ProbeCliDeps,
+): Effect.Effect<ProbeCliResult, ProbeCliError> {
+  return geminiCompletionCommand({
+    title: "Gemini completion",
+    options,
+    deps,
+    defaultPrompt: "Reply with a concise Probe Gemini completion.",
+  });
+}
+
+function geminiCompletionCommand(input: {
+  readonly title: string;
+  readonly options: Record<string, string | true>;
+  readonly deps: ProbeCliDeps;
+  readonly defaultPrompt: string;
+}): Effect.Effect<ProbeCliResult, ProbeCliError> {
+  return Effect.gen(function* () {
+    const model = stringOption(input.options, "model") ?? GEMINI_DEFAULT_MODEL_ID;
+    const prompt = stringOption(input.options, "prompt") ?? input.defaultPrompt;
+    const client = yield* makeGeminiClient({
+      profileId: stringOption(input.options, "profile") ?? input.deps.env?.PROBE_BACKEND_PROFILE ?? GEMINI_API_PROFILE_ID,
+      explicitBaseUrl: stringOption(input.options, "base-url"),
+      env: input.deps.env,
+      fetch: input.deps.fetch,
+      now: input.deps.now,
+    }).pipe(Effect.mapError((error) => new ProbeCliError({ message: "reason" in error ? error.reason : String(error) })));
+    const result = yield* client.complete({
+      request: makeProbeLlmRequest({
+        model: { provider: "google", model },
+        prompt,
+        generation: { maxTokens: numberOption(input.options, "max-tokens") ?? 256, temperature: 0 },
+      }),
+    }).pipe(Effect.catch((error: GeminiClientError) => Effect.succeed(error)));
+
+    if (result instanceof GeminiClientError) {
+      return {
+        exitCode: 1,
+        stdout: formatGeminiFailure(input.title, result),
+        stderr: "",
+      };
+    }
+
+    return {
+      exitCode: 0,
+      stdout: formatGeminiCompletion(input.title, client.apiKey.source, result),
       stderr: "",
     };
   });
@@ -372,6 +447,18 @@ function stringOption(options: Record<string, string | true>, key: string): stri
   return typeof value === "string" ? value : undefined;
 }
 
+function numberOption(options: Record<string, string | true>, key: string): number | undefined {
+  const value = stringOption(options, key);
+
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 function runnerKindOption(options: Record<string, string | true>, key: string): ProbeRunnerIdentity["kind"] | undefined {
   const value = stringOption(options, key);
 
@@ -384,6 +471,8 @@ function usage(): string {
     "  probe omega link [--base-url URL] [--runner-id ID] [--subject USER_OR_TEAM] [--kind local|shc|pylon|sandbox]",
     "  probe auth accounts [--base-url URL]",
     "  probe auth add chatgpt [--base-url URL]",
+    "  probe backend gemini smoke [--profile gemini-api] [--model gemini-2.5-flash] [--prompt TEXT]",
+    "  probe backend gemini complete [--profile gemini-api] [--model gemini-2.5-flash] [--prompt TEXT]",
     "  probe apple-fm status [--base-url URL] [--profile apple-fm-local]",
     "  probe apple-fm smoke [--base-url URL] [--profile apple-fm-local] [--prompt TEXT]",
     "  probe apple-fm tool-stream-demo [--base-url URL] [--path FILE] [--prompt TEXT]",
@@ -446,6 +535,57 @@ function formatAppleFmSmokeFailure(error: AppleFmBackendError): string {
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+function formatGeminiCompletion(title: string, apiKeySource: string, completion: GeminiCompleteResult): string {
+  return [
+    title,
+    `profile: ${completion.profile.id}`,
+    `kind: ${completion.profile.kind}`,
+    `model: ${completion.finalRequest.model.model}`,
+    `apiKeySource: ${apiKeySource}`,
+    "apiKeyRedacted: true",
+    `assistant: ${completion.text}`,
+    `roundTrips: ${completion.roundTrips}`,
+    `usage: ${formatGeminiUsage(completion.receipt.usage)}`,
+    `receipt: ${JSON.stringify(completion.receipt)}`,
+  ].join("\n") + "\n";
+}
+
+function formatGeminiFailure(title: string, error: GeminiClientError): string {
+  const lines = [
+    `${title} failed`,
+    `failureClass: ${error.failureClass}`,
+    `message: ${error.reason}`,
+  ];
+
+  if (error.receipt !== undefined) {
+    lines.push(`receipt: ${JSON.stringify(error.receipt)}`);
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+function formatGeminiUsage(usage: GeminiCompleteResult["receipt"]["usage"]): string {
+  if (usage === undefined) {
+    return "unreported";
+  }
+
+  const parts: string[] = [];
+
+  if (usage.inputTokens !== undefined) {
+    parts.push(`input=${usage.inputTokens}`);
+  }
+
+  if (usage.outputTokens !== undefined) {
+    parts.push(`output=${usage.outputTokens}`);
+  }
+
+  if (usage.totalTokens !== undefined) {
+    parts.push(`total=${usage.totalTokens}`);
+  }
+
+  return parts.length === 0 ? "unreported" : parts.join(" ");
 }
 
 function formatUsage(usage: AppleFmPlainTextCompletion["usage"]): string {

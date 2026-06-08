@@ -1,6 +1,11 @@
 import { Effect, Schema as S } from "effect";
 import { APPLE_FM_BACKEND_KIND, PROBE_APPLE_FM_BACKEND_CAPABILITY } from "../backends/apple-fm/contract";
 import {
+  GEMINI_API_PROFILE_ID,
+  GEMINI_BACKEND_KIND,
+  PROBE_GEMINI_BACKEND_CAPABILITY,
+} from "../backends/gemini/contract";
+import {
   BlueprintContractExportSeed,
   BlueprintProgramRegistryProjection,
   isBlueprintProjectionPrivateDataSafe,
@@ -27,10 +32,20 @@ export const ProbeRepositoryRef = S.Struct({
 });
 export type ProbeRepositoryRef = typeof ProbeRepositoryRef.Type;
 
-export const ProbeAssignmentBackend = S.Struct({
+export const ProbeAppleFmAssignmentBackend = S.Struct({
   kind: S.Literal(APPLE_FM_BACKEND_KIND),
   profile: S.optional(S.String),
 });
+export type ProbeAppleFmAssignmentBackend = typeof ProbeAppleFmAssignmentBackend.Type;
+
+export const ProbeGeminiAssignmentBackend = S.Struct({
+  kind: S.Literal(GEMINI_BACKEND_KIND),
+  profile: S.optional(S.String),
+  backendProfileId: S.optional(S.String),
+});
+export type ProbeGeminiAssignmentBackend = typeof ProbeGeminiAssignmentBackend.Type;
+
+export const ProbeAssignmentBackend = S.Union([ProbeAppleFmAssignmentBackend, ProbeGeminiAssignmentBackend]);
 export type ProbeAssignmentBackend = typeof ProbeAssignmentBackend.Type;
 
 export const ProbeBlueprintAssignmentScope = S.Struct({
@@ -211,8 +226,18 @@ export function assignmentRequiresProviderGrant(assignment: ProbeRunAssignment):
 
 export function assignmentSelectsAppleFmBackend(
   assignment: ProbeRunAssignment,
-): assignment is ProbeRunAssignment & { readonly backend: ProbeAssignmentBackend } {
+): assignment is ProbeRunAssignment & { readonly backend: ProbeAppleFmAssignmentBackend } {
   return assignment.backend?.kind === APPLE_FM_BACKEND_KIND;
+}
+
+export function assignmentSelectsGeminiBackend(
+  assignment: ProbeRunAssignment,
+): assignment is ProbeRunAssignment & { readonly backend: ProbeGeminiAssignmentBackend } {
+  return assignment.backend?.kind === GEMINI_BACKEND_KIND;
+}
+
+export function selectedAssignmentBackendProfileId(backend: ProbeAssignmentBackend): string | undefined {
+  return backend.kind === GEMINI_BACKEND_KIND ? backend.backendProfileId ?? backend.profile : backend.profile;
 }
 
 export function assignmentInlineBlueprintRegistrySource(
@@ -236,7 +261,11 @@ function validateBackendCapabilityRefs(assignment: ProbeRunAssignment): Effect.E
     return Effect.void;
   }
 
-  const allowedRefs = assignmentSelectsAppleFmBackend(assignment) ? [PROBE_APPLE_FM_BACKEND_CAPABILITY] : [];
+  const allowedRefs = assignmentSelectsAppleFmBackend(assignment)
+    ? [PROBE_APPLE_FM_BACKEND_CAPABILITY]
+    : assignmentSelectsGeminiBackend(assignment)
+      ? [PROBE_GEMINI_BACKEND_CAPABILITY]
+      : [];
   const mismatched = refs.filter((ref) => !allowedRefs.includes(ref));
 
   return mismatched.length === 0
@@ -290,10 +319,21 @@ function requireOptionalRefsInKnownSet(
 
 export function requireAppleFmAssignmentBackend(
   assignment: ProbeRunAssignment,
-): Effect.Effect<ProbeAssignmentBackend, ProbeAssignmentParseError> {
+): Effect.Effect<ProbeAppleFmAssignmentBackend, ProbeAssignmentParseError> {
   return assignmentSelectsAppleFmBackend(assignment)
     ? Effect.succeed(assignment.backend)
     : Effect.fail(new ProbeAssignmentParseError({ reason: "assignment is not selecting apple_fm_bridge" }));
+}
+
+export function requireGeminiAssignmentBackend(
+  assignment: ProbeRunAssignment,
+): Effect.Effect<ProbeGeminiAssignmentBackend, ProbeAssignmentParseError> {
+  return assignmentSelectsGeminiBackend(assignment)
+    ? Effect.succeed({
+        ...assignment.backend,
+        backendProfileId: assignment.backend.backendProfileId ?? assignment.backend.profile ?? GEMINI_API_PROFILE_ID,
+      })
+    : Effect.fail(new ProbeAssignmentParseError({ reason: "assignment is not selecting gemini_api" }));
 }
 
 export function requireAssignmentGrantRefs(
