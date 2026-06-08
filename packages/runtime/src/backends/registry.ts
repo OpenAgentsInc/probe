@@ -5,6 +5,12 @@ import {
   APPLE_FM_DEFAULT_MODEL_ID,
   APPLE_FM_LOCAL_PROFILE_ID,
 } from "./apple-fm/contract";
+import {
+  GEMINI_API_PROFILE_ID,
+  GEMINI_BACKEND_KIND,
+  GEMINI_DEFAULT_BASE_URL,
+  GEMINI_DEFAULT_MODEL_ID,
+} from "./gemini/contract";
 import { type ProbeBackendProfile, type ResolvedProbeBackendProfile, type ResolveProbeBackendProfileOptions } from "./backend-profile";
 
 export const APPLE_FM_LOCAL_PROFILE: ProbeBackendProfile = {
@@ -18,7 +24,18 @@ export const APPLE_FM_LOCAL_PROFILE: ProbeBackendProfile = {
   streamMode: "snapshot",
 };
 
-export const DEFAULT_BACKEND_PROFILES: ReadonlyArray<ProbeBackendProfile> = [APPLE_FM_LOCAL_PROFILE];
+export const GEMINI_API_PROFILE: ProbeBackendProfile = {
+  id: GEMINI_API_PROFILE_ID,
+  kind: GEMINI_BACKEND_KIND,
+  defaultBaseUrl: GEMINI_DEFAULT_BASE_URL,
+  model: GEMINI_DEFAULT_MODEL_ID,
+  attachMode: "direct_api",
+  auth: "api_key",
+  readinessPath: "",
+  streamMode: "sse",
+};
+
+export const DEFAULT_BACKEND_PROFILES: ReadonlyArray<ProbeBackendProfile> = [APPLE_FM_LOCAL_PROFILE, GEMINI_API_PROFILE];
 
 export class ProbeBackendRegistryError extends S.TaggedErrorClass<ProbeBackendRegistryError>()(
   "ProbeBackendRegistryError",
@@ -44,7 +61,10 @@ export function resolveBackendProfile(
 ): Effect.Effect<ResolvedProbeBackendProfile, ProbeBackendRegistryError> {
   return Effect.gen(function* () {
     const profile = yield* lookupBackendProfile(options.profileId ?? APPLE_FM_LOCAL_PROFILE_ID, profiles);
-    const resolvedBaseUrl = resolveAppleFmBaseUrl(profile.defaultBaseUrl, options);
+    const resolvedBaseUrl =
+      profile.kind === GEMINI_BACKEND_KIND
+        ? resolveGeminiBaseUrl(profile.defaultBaseUrl, options)
+        : resolveAppleFmBaseUrl(profile.defaultBaseUrl, options);
 
     return {
       ...profile,
@@ -58,6 +78,12 @@ export function resolveAppleFmBackendProfile(
   options: ResolveProbeBackendProfileOptions = {},
 ): Effect.Effect<ResolvedProbeBackendProfile, ProbeBackendRegistryError> {
   return resolveBackendProfile({ ...options, profileId: options.profileId ?? APPLE_FM_LOCAL_PROFILE_ID });
+}
+
+export function resolveGeminiBackendProfile(
+  options: ResolveProbeBackendProfileOptions = {},
+): Effect.Effect<ResolvedProbeBackendProfile, ProbeBackendRegistryError> {
+  return resolveBackendProfile({ ...options, profileId: options.profileId ?? GEMINI_API_PROFILE_ID });
 }
 
 function resolveAppleFmBaseUrl(
@@ -74,6 +100,21 @@ function resolveAppleFmBaseUrl(
 
   if (isNonEmptyString(options.env?.OPENAGENTS_APPLE_FM_BASE_URL)) {
     return { baseUrl: options.env.OPENAGENTS_APPLE_FM_BASE_URL, baseUrlSource: "OPENAGENTS_APPLE_FM_BASE_URL" };
+  }
+
+  return { baseUrl: defaultBaseUrl, baseUrlSource: "default" };
+}
+
+function resolveGeminiBaseUrl(
+  defaultBaseUrl: string,
+  options: ResolveProbeBackendProfileOptions,
+): Pick<ResolvedProbeBackendProfile, "baseUrl" | "baseUrlSource"> {
+  if (isNonEmptyString(options.explicitBaseUrl)) {
+    return { baseUrl: options.explicitBaseUrl, baseUrlSource: "explicit" };
+  }
+
+  if (isNonEmptyString(options.env?.PROBE_GEMINI_BASE_URL)) {
+    return { baseUrl: options.env.PROBE_GEMINI_BASE_URL, baseUrlSource: "PROBE_GEMINI_BASE_URL" };
   }
 
   return { baseUrl: defaultBaseUrl, baseUrlSource: "default" };

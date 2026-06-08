@@ -7,6 +7,8 @@ export * from "./backends/apple-fm/program-run-evidence";
 export * from "./backends/apple-fm/receipts";
 export * from "./backends/apple-fm/tools";
 export * from "./backends/backend-profile";
+export * from "./backends/gemini/auth";
+export * from "./backends/gemini/contract";
 export * from "./backends/registry";
 export * from "./benchmark/closeout-writer";
 export * from "./benchmark/candidate-execution";
