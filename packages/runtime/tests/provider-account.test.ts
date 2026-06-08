@@ -4,6 +4,7 @@ import {
   assertProbePublicProjection,
   canIssueProviderAccountGrant,
   CHATGPT_CODEX_PROVIDER,
+  GOOGLE_GEMINI_PROVIDER,
   sanitizeProbePublicProjection,
   validateProbePublicProjection,
   type PublicProviderAccount,
@@ -20,6 +21,8 @@ const connectedAccount = (overrides: Partial<PublicProviderAccount> = {}): Publi
   planType: "plus",
   ...overrides,
 });
+
+const fakeRawGeminiApiKey = () => ["AI", "zaSyDUMMYRAWGEMINIKEYMATERIAL123456789"].join("");
 
 describe("Probe/Omega provider account contract", () => {
   test("supports multiple explicitly connected ChatGPT/Codex accounts", () => {
@@ -46,6 +49,26 @@ describe("Probe/Omega provider account contract", () => {
     expect(canIssueProviderAccountGrant(connectedAccount({ secretRef: undefined }))).toBe(false);
   });
 
+  test("supports safe Google Gemini provider account projections", async () => {
+    const account: PublicProviderAccount = {
+      provider: GOOGLE_GEMINI_PROVIDER,
+      providerAccountRef: "provider-account_google_gemini_primary" as PublicProviderAccount["providerAccountRef"],
+      authMode: "manual_secret_ref",
+      status: "connected",
+      health: "healthy",
+      secretRef: "cloud-secret://openagents/google-gemini/primary" as PublicProviderAccount["secretRef"],
+      accountLabel: "Primary Gemini",
+      metadata: {
+        projectRef: "gcp-project.openagentsgemini",
+        allowedServices: ["generativelanguage.googleapis.com"],
+        defaultModel: "gemini-2.5-flash",
+      },
+    };
+
+    await expect(Effect.runPromise(validateProbePublicProjection(account))).resolves.toBeUndefined();
+    expect(canIssueProviderAccountGrant(account)).toBe(true);
+  });
+
   test("allows public secret refs but rejects raw credential material through Effect validation", async () => {
     await expect(Effect.runPromise(validateProbePublicProjection(connectedAccount()))).resolves.toBeUndefined();
 
@@ -53,6 +76,14 @@ describe("Probe/Omega provider account contract", () => {
       Effect.runPromise(
         validateProbePublicProjection({
           providerSecretRef: "sk-proj_123456789012345678901234567890",
+        }),
+      ),
+    ).rejects.toMatchObject({ _tag: "ProbePublicProjectionUnsafe" });
+
+    await expect(
+      Effect.runPromise(
+        validateProbePublicProjection({
+          providerSecretRef: fakeRawGeminiApiKey(),
         }),
       ),
     ).rejects.toMatchObject({ _tag: "ProbePublicProjectionUnsafe" });

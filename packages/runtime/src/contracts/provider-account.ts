@@ -1,6 +1,7 @@
 import { Effect, Schema as S } from "effect";
 
 export const CHATGPT_CODEX_PROVIDER = "chatgpt_codex" as const;
+export const GOOGLE_GEMINI_PROVIDER = "google_gemini" as const;
 
 export const ProviderAccountRef = S.String.pipe(S.brand("ProviderAccountRef"));
 export type ProviderAccountRef = typeof ProviderAccountRef.Type;
@@ -13,6 +14,12 @@ export type ProviderSecretRef = typeof ProviderSecretRef.Type;
 
 export const ChatGptCodexProvider = S.Literal(CHATGPT_CODEX_PROVIDER);
 export type ChatGptCodexProvider = typeof ChatGptCodexProvider.Type;
+
+export const GoogleGeminiProvider = S.Literal(GOOGLE_GEMINI_PROVIDER);
+export type GoogleGeminiProvider = typeof GoogleGeminiProvider.Type;
+
+export const ProbeProvider = S.Union([ChatGptCodexProvider, GoogleGeminiProvider]);
+export type ProbeProvider = typeof ProbeProvider.Type;
 
 export const ProviderAccountStatus = S.Literals([
   "pending",
@@ -42,7 +49,7 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | ReadonlyArray<JsonValue> | { readonly [key: string]: JsonValue };
 
 export const PublicProviderAccount = S.Struct({
-  provider: ChatGptCodexProvider,
+  provider: ProbeProvider,
   providerAccountRef: ProviderAccountRef,
   authMode: ProviderAuthMode,
   status: ProviderAccountStatus,
@@ -62,7 +69,7 @@ export const PublicProviderAccount = S.Struct({
 export type PublicProviderAccount = typeof PublicProviderAccount.Type;
 
 export const ProbeAuthGrantRequest = S.Struct({
-  provider: ChatGptCodexProvider,
+  provider: ProbeProvider,
   providerAccountRef: ProviderAccountRef,
   runnerSessionId: S.String,
   requestedAction: S.optional(S.String),
@@ -90,6 +97,7 @@ const PUBLIC_SECRET_REF_PREFIXES = [
 
 const SECRET_VALUE_PATTERNS: RegExp[] = [
   /\bsk-[A-Za-z0-9_-]{20,}\b/,
+  /\bAIza[A-Za-z0-9_-]{20,}\b/,
   /\bBearer\s+[A-Za-z0-9._-]{20,}\b/i,
   /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/,
   /"?(refresh|access|id)_token"?\s*[:=]/i,
@@ -141,7 +149,7 @@ export function containsSecretMaterial(value: unknown): boolean {
 
 export function canIssueProviderAccountGrant(account: PublicProviderAccount): boolean {
   return (
-    account.provider === CHATGPT_CODEX_PROVIDER &&
+    (account.provider === CHATGPT_CODEX_PROVIDER || account.provider === GOOGLE_GEMINI_PROVIDER) &&
     account.status === "connected" &&
     account.health === "healthy" &&
     typeof account.secretRef === "string" &&

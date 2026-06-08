@@ -2,6 +2,9 @@ import { Effect, Schema as S } from "effect";
 import {
   CHATGPT_CODEX_PROVIDER,
   ChatGptCodexProvider,
+  GOOGLE_GEMINI_PROVIDER,
+  GoogleGeminiProvider,
+  ProbeProvider,
   ProviderAccountRef,
   ProviderAuthGrantRef,
   ProviderSecretRef,
@@ -22,7 +25,7 @@ export const ProbeMaterializationTarget = S.Union([
 ]);
 export type ProbeMaterializationTarget = typeof ProbeMaterializationTarget.Type;
 
-export const ProbeAuthMaterializationPlan = S.Struct({
+export const ProbeChatGptAuthMaterializationPlan = S.Struct({
   kind: S.Literal("probe_chatgpt_auth"),
   provider: ChatGptCodexProvider,
   providerSecretRef: ProviderSecretRef,
@@ -30,6 +33,28 @@ export const ProbeAuthMaterializationPlan = S.Struct({
   homeIsolation: S.Literal("per_run"),
   scrubAfterCloseout: S.Boolean,
 });
+export type ProbeChatGptAuthMaterializationPlan = typeof ProbeChatGptAuthMaterializationPlan.Type;
+
+export const ProbeGeminiApiKeyMaterializationTarget = S.Struct({
+  kind: S.Literal("env"),
+  name: S.Literal("GOOGLE_GENERATIVE_AI_API_KEY"),
+});
+export type ProbeGeminiApiKeyMaterializationTarget = typeof ProbeGeminiApiKeyMaterializationTarget.Type;
+
+export const ProbeGeminiApiKeyMaterializationPlan = S.Struct({
+  kind: S.Literal("probe_gemini_api_key"),
+  provider: GoogleGeminiProvider,
+  providerSecretRef: ProviderSecretRef,
+  target: ProbeGeminiApiKeyMaterializationTarget,
+  homeIsolation: S.Literal("per_run"),
+  scrubAfterCloseout: S.Boolean,
+});
+export type ProbeGeminiApiKeyMaterializationPlan = typeof ProbeGeminiApiKeyMaterializationPlan.Type;
+
+export const ProbeAuthMaterializationPlan = S.Union([
+  ProbeChatGptAuthMaterializationPlan,
+  ProbeGeminiApiKeyMaterializationPlan,
+]);
 export type ProbeAuthMaterializationPlan = typeof ProbeAuthMaterializationPlan.Type;
 
 export const OmegaResolvedAuthGrantStatus = S.Literals(["issued", "used", "expired", "revoked", "failed"]);
@@ -37,7 +62,7 @@ export type OmegaResolvedAuthGrantStatus = typeof OmegaResolvedAuthGrantStatus.T
 
 export const OmegaResolvedAuthGrant = S.Struct({
   grantRef: ProviderAuthGrantRef,
-  provider: ChatGptCodexProvider,
+  provider: ProbeProvider,
   providerAccountRef: ProviderAccountRef,
   providerSecretRef: ProviderSecretRef,
   requestedAction: S.optional(S.String),
@@ -104,7 +129,7 @@ export function resolveOmegaAuthGrant(
       Effect.mapError((error) => new ProbeAuthGrantResolveError({ reason: error.reason })),
     );
 
-    const endpoint = new URL("/api/provider-accounts/chatgpt-codex/grants/resolve", options.baseUrl);
+    const endpoint = new URL(providerGrantResolvePath(assignmentWithGrant.provider), options.baseUrl);
     const fetchImpl = options.fetch ?? fetch;
 
     const response = yield* Effect.tryPromise({
@@ -158,6 +183,8 @@ export function validateResolvedAuthGrantForAssignment(
       Effect.mapError((error) => new ProbeAuthGrantResolveError({ reason: error.reason })),
     );
 
+    yield* validateProbePublicProjection(payload, "grant");
+
     const grant = yield* S.decodeUnknownEffect(OmegaResolvedAuthGrant)(payload).pipe(
       Effect.mapError(
         (error) =>
@@ -167,13 +194,11 @@ export function validateResolvedAuthGrantForAssignment(
       ),
     );
 
-    yield* validateProbePublicProjection(grant, "grant");
-
-    if (grant.provider !== CHATGPT_CODEX_PROVIDER) {
+    if (grant.provider !== assignmentWithGrant.provider) {
       return yield* Effect.fail(
         new ProbeAuthGrantMismatch({
           field: "provider",
-          expected: CHATGPT_CODEX_PROVIDER,
+          expected: assignmentWithGrant.provider,
           actual: grant.provider,
         }),
       );
@@ -231,6 +256,22 @@ export function validateResolvedAuthGrantForAssignment(
       );
     }
 
+    if (grant.materialization.provider !== grant.provider) {
+      return yield* Effect.fail(
+        new ProbeAuthGrantMismatch({
+          field: "materialization.provider",
+          expected: grant.provider,
+          actual: grant.materialization.provider,
+        }),
+      );
+    }
+
     return grant;
   });
+}
+
+function providerGrantResolvePath(provider: ProbeProvider): string {
+  return provider === GOOGLE_GEMINI_PROVIDER
+    ? "/api/provider-accounts/google-gemini/grants/resolve"
+    : "/api/provider-accounts/chatgpt-codex/grants/resolve";
 }

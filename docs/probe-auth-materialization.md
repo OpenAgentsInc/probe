@@ -24,11 +24,12 @@ It supports:
 - scrub-on-closeout
 - Effect bracket cleanup for failing runs
 
-Future Gemini provider-account materialization is designed in
-`docs/probe-omega-google-gemini-provider-account-design.md`. That path should
-materialize Omega-managed Gemini keys into `GOOGLE_GENERATIVE_AI_API_KEY` only
-after grant resolution; local BYO `GOOGLE_GENERATIVE_AI_API_KEY` /
-`GEMINI_API_KEY` support remains separate.
+Gemini provider-account materialization follows
+`docs/probe-omega-google-gemini-provider-account-design.md`. Probe accepts
+Omega-managed `google_gemini` grants with materialization kind
+`probe_gemini_api_key` and materializes them into
+`GOOGLE_GENERATIVE_AI_API_KEY` only after grant resolution. Local BYO
+`GOOGLE_GENERATIVE_AI_API_KEY` / `GEMINI_API_KEY` support remains separate.
 
 ## Safety Rules
 
@@ -44,6 +45,7 @@ after grant resolution; local BYO `GOOGLE_GENERATIVE_AI_API_KEY` /
 
 - fake ChatGPT auth materialized into a per-run file
 - env materialization
+- managed Gemini API-key env materialization
 - no-provider smoke checks
 - scrub after closeout
 - secret-ref mismatch rejection

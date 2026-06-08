@@ -15,7 +15,7 @@ import {
   type BlueprintProjectionUnsafe,
 } from "../blueprint/contracts";
 import {
-  ChatGptCodexProvider,
+  ProbeProvider,
   ProviderAccountRef,
   ProviderAuthGrantRef,
   ProbePublicProjectionUnsafe,
@@ -72,7 +72,7 @@ export const ProbeRunAssignment = S.Struct({
   runtime: S.optional(S.String),
   backend: S.optional(ProbeAssignmentBackend),
   blueprint: S.optional(ProbeBlueprintAssignmentScope),
-  provider: S.optional(ChatGptCodexProvider),
+  provider: S.optional(ProbeProvider),
   providerAccountRef: S.optional(ProviderAccountRef),
   authGrantRef: S.optional(ProviderAuthGrantRef),
   leaseRef: S.optional(S.String),

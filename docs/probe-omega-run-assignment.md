@@ -48,9 +48,25 @@ perspective:
 ```
 
 That path resolves a local runner API key from `GOOGLE_GENERATIVE_AI_API_KEY`
-or `GEMINI_API_KEY` and requires `probe.backend.gemini_api`. The later
-Omega-managed `google_gemini` provider-account grant path is designed in
-`docs/probe-omega-google-gemini-provider-account-design.md`.
+or `GEMINI_API_KEY` and requires `probe.backend.gemini_api`.
+
+Omega-managed Gemini key assignments can additionally carry:
+
+```json
+{
+  "provider": "google_gemini",
+  "providerAccountRef": "provider-account_google_gemini_primary",
+  "authGrantRef": "provider-auth-grant_google_gemini_1",
+  "backend": {
+    "kind": "gemini_api",
+    "backendProfileId": "gemini-api"
+  }
+}
+```
+
+That managed path requires `omega.grant.resolve` in addition to
+`probe.backend.gemini_api`, and Probe materializes the resolved key into
+`GOOGLE_GENERATIVE_AI_API_KEY`.
 
 ## Blueprint Scope
 

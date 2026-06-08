@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
 import {
   CHATGPT_CODEX_PROVIDER,
+  GOOGLE_GEMINI_PROVIDER,
   materializeProbeAuthGrant,
   runNoProviderAuthSmoke,
   scrubProbeMaterializedAuth,
@@ -52,10 +53,38 @@ const envGrant = (): OmegaResolvedAuthGrant => ({
   },
 });
 
+const geminiGrant = (): OmegaResolvedAuthGrant => ({
+  grantRef: "provider-auth-grant_google_gemini_1" as OmegaResolvedAuthGrant["grantRef"],
+  provider: GOOGLE_GEMINI_PROVIDER,
+  providerAccountRef: "provider-account_google_gemini_primary" as OmegaResolvedAuthGrant["providerAccountRef"],
+  providerSecretRef: "cloud-secret://openagents/google-gemini/primary" as OmegaResolvedAuthGrant["providerSecretRef"],
+  runnerSessionId: "runner_session_1",
+  requestedAction: "gemini-backend-run",
+  expiresAt: "2099-01-01T00:00:00.000Z",
+  status: "used",
+  materialization: {
+    kind: "probe_gemini_api_key",
+    provider: GOOGLE_GEMINI_PROVIDER,
+    providerSecretRef: "cloud-secret://openagents/google-gemini/primary" as OmegaResolvedAuthGrant["providerSecretRef"],
+    target: {
+      kind: "env",
+      name: "GOOGLE_GENERATIVE_AI_API_KEY",
+    },
+    homeIsolation: "per_run",
+    scrubAfterCloseout: true,
+  },
+});
+
 const secret = {
   providerSecretRef: "codex-auth://provider-account_primary",
   authContent,
   contentType: "application/json",
+};
+
+const geminiSecret = {
+  providerSecretRef: "cloud-secret://openagents/google-gemini/primary",
+  authContent: "brokered-gemini-key-content",
+  contentType: "text/plain",
 };
 
 const tempRunHome = () => mkdtemp(join(tmpdir(), "probe-run-"));
@@ -94,6 +123,47 @@ describe("Probe auth materializer", () => {
     const scrubbed = await Effect.runPromise(scrubProbeMaterializedAuth(materialized));
 
     expect(JSON.stringify(scrubbed)).not.toContain("fake-refresh-token");
+  });
+
+  test("materializes Gemini managed API keys into the Google Generative AI env var", async () => {
+    const runHome = await tempRunHome();
+    const materialized = await Effect.runPromise(
+      materializeProbeAuthGrant({ grant: geminiGrant(), secret: geminiSecret, runHome }),
+    );
+
+    expect(materialized.env.GOOGLE_GENERATIVE_AI_API_KEY).toBe(geminiSecret.authContent);
+    expect(materialized.receipt).toMatchObject({
+      provider: GOOGLE_GEMINI_PROVIDER,
+      targetKind: "env",
+      envName: "GOOGLE_GENERATIVE_AI_API_KEY",
+      contentRedacted: true,
+    });
+    expect(JSON.stringify(materialized.receipt)).not.toContain(geminiSecret.authContent);
+
+    const scrubbed = await Effect.runPromise(scrubProbeMaterializedAuth(materialized));
+    expect(scrubbed).toMatchObject({
+      provider: GOOGLE_GEMINI_PROVIDER,
+      targetKind: "env",
+      envName: "GOOGLE_GENERATIVE_AI_API_KEY",
+      contentRedacted: true,
+    });
+    expect(JSON.stringify(scrubbed)).not.toContain(geminiSecret.authContent);
+  });
+
+  test("scrubs Gemini env materialization when user code fails", async () => {
+    const runHome = await tempRunHome();
+    let sawMaterializedEnv = false;
+
+    await expect(
+      Effect.runPromise(
+        withProbeAuthMaterialization({ grant: geminiGrant(), secret: geminiSecret, runHome }, (materialized) => {
+          sawMaterializedEnv = materialized.env.GOOGLE_GENERATIVE_AI_API_KEY === geminiSecret.authContent;
+          return Effect.fail(new Error("simulated gemini run failure"));
+        }),
+      ),
+    ).rejects.toThrow("simulated gemini run failure");
+
+    expect(sawMaterializedEnv).toBe(true);
   });
 
   test("rejects brokered secrets that do not match the grant ref", async () => {

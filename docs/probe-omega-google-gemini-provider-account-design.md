@@ -2,8 +2,8 @@
 
 Date: 2026-06-08
 
-Status: design for follow-up implementation. Local Gemini env-key support is
-already the active runtime path.
+Status: Probe-side provider schema, grant validation, and env materialization
+implemented. Omega provider-account storage/grant issuance remains a follow-up.
 
 ## Goal
 
@@ -203,7 +203,7 @@ copy the raw Cloudflare `GEMINI_API_KEY` value into D1.
 Implementation should be split:
 
 1. Probe provider schema and materializer support for `google_gemini`:
-   OpenAgentsInc/probe#199.
+   OpenAgentsInc/probe#199 (implemented).
 2. Omega provider-account storage, operator surface, and grant resolution for
    Gemini basic API keys: OpenAgentsInc/autopilot-omega#526.
 3. End-to-end managed Gemini assignment smoke from Omega grant resolution to

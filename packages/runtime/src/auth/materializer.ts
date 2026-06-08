@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { Effect, Schema as S } from "effect";
-import { validateProbePublicProjection, type JsonValue, type ProviderSecretRef } from "../contracts/provider-account";
+import { ProbeProvider, validateProbePublicProjection, type JsonValue, type ProviderSecretRef } from "../contracts/provider-account";
 import { type OmegaResolvedAuthGrant } from "../omega/grant-client";
 
 export const ProbeBrokeredAuthSecret = S.Struct({
@@ -13,7 +13,7 @@ export type ProbeBrokeredAuthSecret = typeof ProbeBrokeredAuthSecret.Type;
 
 export const ProbeAuthMaterializedReceipt = S.Struct({
   kind: S.Literal("probe_auth_materialized"),
-  provider: S.Literal("chatgpt_codex"),
+  provider: ProbeProvider,
   providerSecretRef: S.String,
   targetKind: S.Literals(["env", "file"]),
   envName: S.optional(S.String),
@@ -25,7 +25,7 @@ export type ProbeAuthMaterializedReceipt = typeof ProbeAuthMaterializedReceipt.T
 
 export const ProbeAuthScrubbedReceipt = S.Struct({
   kind: S.Literal("probe_auth_scrubbed"),
-  provider: S.Literal("chatgpt_codex"),
+  provider: ProbeProvider,
   providerSecretRef: S.String,
   targetKind: S.Literals(["env", "file"]),
   envName: S.optional(S.String),
@@ -84,7 +84,7 @@ export function materializeProbeAuthGrant(
         },
         receipt: {
           kind: "probe_auth_materialized",
-          provider: "chatgpt_codex",
+          provider: input.grant.provider,
           providerSecretRef: input.grant.providerSecretRef,
           targetKind: "env",
           envName: target.name,
@@ -118,7 +118,7 @@ export function materializeProbeAuthGrant(
       relativePath: target.relativePath,
       receipt: {
         kind: "probe_auth_materialized",
-        provider: "chatgpt_codex",
+        provider: input.grant.provider,
         providerSecretRef: input.grant.providerSecretRef,
         targetKind: "file",
         relativePath: target.relativePath,
@@ -146,7 +146,7 @@ export function scrubProbeMaterializedAuth(
 
     const receipt: ProbeAuthScrubbedReceipt = {
       kind: "probe_auth_scrubbed",
-      provider: "chatgpt_codex",
+      provider: materialized.receipt.provider,
       providerSecretRef: materialized.providerSecretRef,
       targetKind: materialized.materializedPath === undefined ? "env" : "file",
       envName: Object.keys(materialized.env)[0],
