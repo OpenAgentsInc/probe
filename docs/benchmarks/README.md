@@ -32,7 +32,15 @@ architecture and execution plans. They are not public benchmark claims.
    learning serves Coding on Autopilot, accepted outcomes, route scorecards,
    public proof, Pylon provider work, and Psionic model training.
 
-5. `2026-06-08-artanis-gepa-benchmark-pylon-focus.md`
+5. `canaries/20260608151057/`
+   First tracked live Probe GEPA Terminal-Bench 2 canary evidence bundle. It
+   records an unpaid Omega Pylon assignment lifecycle through offer, accept,
+   progress, artifact/proof submission, operator accepted-work closeout, a
+   schema-backed Probe closeout bundle, and a Psionic import request. It is
+   initial retained evidence only, not a public benchmark score, paid work, or
+   production promotion.
+
+6. `2026-06-08-artanis-gepa-benchmark-pylon-focus.md`
    Artanis refocus audit. It compares the current Artanis mission, public
    Forum readback, posting runbook, and proof trail against the Probe
    benchmark docs, then defines how Artanis should become the public overseer
@@ -40,25 +48,25 @@ architecture and execution plans. They are not public benchmark claims.
    leaving execution, scoring, payment, training, and promotion authority in
    the owning systems.
 
-6. `2026-06-08-probe-continual-benchmark-learning-apparatus.md`
+7. `2026-06-08-probe-continual-benchmark-learning-apparatus.md`
    End-state plan for Probe's continual improvement loop. It defines how Probe,
    public benchmark-cloud, Psionic, Pylon, and Omega should turn
    benchmark failures into prompt, Blueprint, tool-menu, loop-policy, and LoRA
    candidates with explicit promotion gates.
 
-7. `2026-06-08-pylon-gepa-coding-agent-benchmark-run.md`
+8. `2026-06-08-pylon-gepa-coding-agent-benchmark-run.md`
    First executable optimizer plan. It narrows the initial benchmark-climbing
    work to a GEPA-only text-candidate campaign, using Pylon as the parallel
    rollout engine across retained Terminal-Bench failures, validation splits,
    and frozen holdout tasks.
 
-8. `../probe-benchmark-contracts.md`
+9. `../probe-benchmark-contracts.md`
    Implementation note for the first Probe runtime contract slice from issue
    #182. It records the benchmark assignment, run, closeout, decision trace,
    candidate, evidence-only promotion decision schemas, and normalized
    closeout bundle writer now exported by the Bun/Effect runtime package.
 
-9. `../probe-retained-terminal-bench-fixtures.md`
+10. `../probe-retained-terminal-bench-fixtures.md`
    Implementation note for the retained Terminal-Bench fixture package from
    issue #184. It records the public-ref-only failure-family fixtures that
    Probe and GEPA Stage 0/1 can load without hidden task material or private
@@ -94,9 +102,11 @@ architecture and execution plans. They are not public benchmark claims.
   provide distributed training capacity for Psionic/Qwen/LoRA work, but GEPA
   itself is distributed benchmark-driven optimization over text artifacts, not
   distributed neural-network training.
-- The 2026-06-08 Omega #502 smoke proves a live Pylon assignment lease through
-  accept, progress, artifact/proof refs, and accepted-work closeout. Future
-  Probe GEPA batches should reuse that lifecycle.
+- The 2026-06-08 Omega #502 smoke proved the generic live Pylon assignment
+  lease path. The tracked canary in `canaries/20260608151057/` is the first
+  Probe GEPA Terminal-Bench 2 unpaid smoke evidence using that lifecycle, with
+  public-safe assignment, progress, artifact, proof, closeout, route scorecard,
+  and Psionic import refs.
 - Omega should remain the release gate and projection surface for public and
   private benchmark evidence.
 - Artanis should be the public-safe overseer and campaign narrator for Probe
