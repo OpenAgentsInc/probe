@@ -13,11 +13,20 @@ import {
 } from "../../llm";
 import { dispatchProbeLlmTool } from "../../llm/tool-runtime";
 import { type ProbeLlmTools } from "../../llm/tool";
+import {
+  GeminiBackendFailureReceipt,
+  makeGeminiFailureReceipt,
+  makeGeminiToolCallReceipt,
+  makeGeminiTranscriptReceipt,
+  type GeminiBackendToolCallReceipt,
+  type GeminiBackendTranscriptReceipt,
+} from "./receipts";
 
 export interface GeminiClientOptions extends ResolveProbeBackendProfileOptions {
   readonly apiKey?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly fetch?: typeof fetch;
+  readonly now?: Date;
 }
 
 export interface GeminiClient {
@@ -41,12 +50,15 @@ export interface GeminiCompleteResult {
   readonly text: string;
   readonly finalRequest: ProbeLlmRequest;
   readonly roundTrips: number;
+  readonly receipt: GeminiBackendTranscriptReceipt;
+  readonly toolReceipts: ReadonlyArray<GeminiBackendToolCallReceipt>;
 }
 
 export class GeminiClientError extends S.TaggedErrorClass<GeminiClientError>()("GeminiClientError", {
   reason: S.String,
   failureClass: S.String,
   statusCode: S.optional(S.Number),
+  receipt: S.optional(GeminiBackendFailureReceipt),
 }) {}
 
 export function makeGeminiClient(
@@ -64,6 +76,7 @@ export function makeGeminiClient(
       ),
     );
     const fetchImpl = options.fetch ?? fetch;
+    const now = () => (options.now ?? new Date()).toISOString();
 
     return {
       profile,
@@ -71,7 +84,7 @@ export function makeGeminiClient(
         source: apiKey.source,
         redacted: true as const,
       },
-      complete: (input) => completeGemini({ profile, apiKey, fetchImpl, input }),
+      complete: (input) => completeGemini({ profile, apiKey, fetchImpl, input, now }),
     };
   });
 }
@@ -81,11 +94,13 @@ function completeGemini(input: {
   readonly apiKey: ResolvedGeminiApiKey;
   readonly fetchImpl: typeof fetch;
   readonly input: GeminiCompleteInput;
+  readonly now: () => string;
 }): Effect.Effect<GeminiCompleteResult, GeminiClientError> {
   return Effect.gen(function* () {
     const maxModelRoundTrips = input.input.maxModelRoundTrips ?? 8;
     let request = input.input.request;
     let events: ProbeLlmEvent[] = [];
+    let toolReceipts: GeminiBackendToolCallReceipt[] = [];
     let roundTrips = 0;
 
     while (roundTrips < maxModelRoundTrips) {
@@ -101,6 +116,14 @@ function completeGemini(input: {
           text: collectText(events),
           finalRequest: request,
           roundTrips,
+          receipt: makeGeminiTranscriptReceipt({
+            profileId: input.profile.id,
+            model: request.model.model,
+            roundTrips,
+            usage: [...events].reverse().find((event) => event.type === "finish")?.usage,
+            observedAt: input.now(),
+          }),
+          toolReceipts,
         };
       }
 
@@ -109,6 +132,17 @@ function completeGemini(input: {
       for (const call of toolCalls) {
         const dispatched = yield* dispatchProbeLlmTool(input.input.tools ?? {}, call);
         events = [...events, ...dispatched.events];
+        toolReceipts = [
+          ...toolReceipts,
+          makeGeminiToolCallReceipt({
+            profileId: input.profile.id,
+            model: request.model.model,
+            toolCallId: call.id,
+            toolName: call.name,
+            status: dispatched.result.type === "error" ? "error" : "success",
+            observedAt: input.now(),
+          }),
+        ];
         toolResultParts.push(makeProbeLlmToolResult({ id: call.id, name: call.name, result: dispatched.result }));
       }
 
@@ -135,6 +169,14 @@ function completeGemini(input: {
       new GeminiClientError({
         reason: "Gemini tool-call round-trip limit reached",
         failureClass: "round_trip_limit",
+        receipt: makeGeminiFailureReceipt({
+          profileId: input.profile.id,
+          model: request.model.model,
+          baseUrl: input.profile.baseUrl,
+          failureClass: "round_trip_limit",
+          message: "Gemini tool-call round-trip limit reached",
+          observedAt: input.now(),
+        }),
       }),
     );
   });
@@ -162,6 +204,13 @@ function callGemini(
         new GeminiClientError({
           reason: `Gemini request failed: ${String(error)}`,
           failureClass: "request_failed",
+          receipt: makeGeminiFailureReceipt({
+            profileId: profile.id,
+            model: request.model.model,
+            baseUrl: profile.baseUrl,
+            failureClass: "request_failed",
+            message: `Gemini request failed: ${String(error)}`,
+          }),
         }),
     });
     const rawText = yield* Effect.tryPromise({
@@ -170,6 +219,13 @@ function callGemini(
         new GeminiClientError({
           reason: `Gemini response could not be read: ${String(error)}`,
           failureClass: "malformed_response",
+          receipt: makeGeminiFailureReceipt({
+            profileId: profile.id,
+            model: request.model.model,
+            baseUrl: profile.baseUrl,
+            failureClass: "malformed_response",
+            message: `Gemini response could not be read: ${String(error)}`,
+          }),
         }),
     });
 
@@ -179,6 +235,13 @@ function callGemini(
           reason: `Gemini returned HTTP ${response.status}`,
           failureClass: `http_${response.status}`,
           statusCode: response.status,
+          receipt: makeGeminiFailureReceipt({
+            profileId: profile.id,
+            model: request.model.model,
+            baseUrl: profile.baseUrl,
+            failureClass: `http_${response.status}`,
+            message: `Gemini returned HTTP ${response.status}`,
+          }),
         }),
       );
     }
@@ -189,6 +252,13 @@ function callGemini(
           new GeminiClientError({
             reason: error.reason,
             failureClass: error.failureClass,
+            receipt: makeGeminiFailureReceipt({
+              profileId: profile.id,
+              model: request.model.model,
+              baseUrl: profile.baseUrl,
+              failureClass: error.failureClass,
+              message: error.reason,
+            }),
           }),
       ),
     );

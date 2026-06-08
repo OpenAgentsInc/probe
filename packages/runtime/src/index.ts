@@ -11,6 +11,7 @@ export * from "./backends/gemini/auth";
 export * from "./backends/gemini/client";
 export * from "./backends/gemini/contract";
 export * from "./backends/gemini/protocol";
+export * from "./backends/gemini/receipts";
 export * from "./backends/gemini/tool-schema";
 export * from "./backends/registry";
 export * from "./benchmark/closeout-writer";

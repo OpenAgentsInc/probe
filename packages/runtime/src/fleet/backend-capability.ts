@@ -2,6 +2,16 @@ import { Effect, Schema as S } from "effect";
 import { makeAppleFmClient } from "../backends/apple-fm/client";
 import { APPLE_FM_BACKEND_KIND } from "../backends/apple-fm/contract";
 import { redactUrl } from "../backends/apple-fm/receipts";
+import { resolveGeminiApiKey } from "../backends/gemini/auth";
+import {
+  GEMINI_API_PROFILE_ID,
+  GEMINI_BACKEND_KIND,
+  GEMINI_DEFAULT_BASE_URL,
+  GEMINI_DEFAULT_MODEL_ID,
+  PROBE_GEMINI_BACKEND_CAPABILITY,
+} from "../backends/gemini/contract";
+import { makeGeminiAvailabilityReceipt } from "../backends/gemini/receipts";
+import { resolveGeminiBackendProfile } from "../backends/registry";
 import {
   BlueprintProgramRegistryProjection,
   validateBlueprintRegistryProjection,
@@ -78,6 +88,38 @@ export const ProbeBackendCapabilityReport = S.Struct({
   contentRedacted: S.Literal(true),
 });
 export type ProbeBackendCapabilityReport = typeof ProbeBackendCapabilityReport.Type;
+
+export const ProbeGeminiBackendCapabilityReport = S.Struct({
+  kind: S.Literal("probe_backend_capability_report"),
+  runnerId: S.String,
+  runnerKind: S.Literals(["local", "shc", "pylon", "sandbox"]),
+  backendKind: S.Literal(GEMINI_BACKEND_KIND),
+  profileId: S.String,
+  model: S.String,
+  capability: S.Literal(PROBE_GEMINI_BACKEND_CAPABILITY),
+  advertisedCapabilities: S.Array(S.String),
+  available: S.Boolean,
+  status: S.Literals(["ready", "unavailable", "malformed"]),
+  baseUrl: S.String,
+  unavailableReason: S.optional(S.String),
+  message: S.optional(S.String),
+  requirements: S.Struct({
+    apiKey: S.Literal("required"),
+    liveHealth: S.Literal("not_required"),
+  }),
+  support: S.Struct({
+    sseStreaming: S.Boolean,
+    nativeToolCalls: S.Boolean,
+    toolCallbacks: S.Boolean,
+  }),
+  receipt: S.Unknown,
+  observedAt: S.String,
+  contentRedacted: S.Literal(true),
+});
+export type ProbeGeminiBackendCapabilityReport = typeof ProbeGeminiBackendCapabilityReport.Type;
+
+export const ProbeAnyBackendCapabilityReport = S.Union([ProbeBackendCapabilityReport, ProbeGeminiBackendCapabilityReport]);
+export type ProbeAnyBackendCapabilityReport = typeof ProbeAnyBackendCapabilityReport.Type;
 
 export interface ReportAppleFmBackendCapabilityInput {
   readonly runner: ProbeRunnerIdentity;
@@ -225,6 +267,136 @@ export function reportAppleFmBackendCapability(
           contentRedacted: true,
         },
         observedAt: (input.now ?? new Date()).toISOString(),
+        contentRedacted: true as const,
+      }),
+    ),
+  );
+}
+
+export interface ReportGeminiBackendCapabilityInput {
+  readonly runner: ProbeRunnerIdentity;
+  readonly trustedBackendBaseUrl?: string;
+  readonly apiKey?: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly now?: Date;
+}
+
+export function reportGeminiBackendCapability(
+  input: ReportGeminiBackendCapabilityInput,
+): Effect.Effect<ProbeGeminiBackendCapabilityReport, never> {
+  const observedAt = (input.now ?? new Date()).toISOString();
+
+  return resolveGeminiBackendProfile({
+    explicitBaseUrl: input.trustedBackendBaseUrl,
+    env: input.env,
+  }).pipe(
+    Effect.flatMap((profile) =>
+      resolveGeminiApiKey({ apiKey: input.apiKey, env: input.env, profileId: profile.id }).pipe(
+        Effect.map((apiKey) => ({
+          kind: "probe_backend_capability_report" as const,
+          runnerId: input.runner.runnerId,
+          runnerKind: input.runner.kind,
+          backendKind: GEMINI_BACKEND_KIND,
+          profileId: profile.id,
+          model: profile.model,
+          capability: PROBE_GEMINI_BACKEND_CAPABILITY,
+          advertisedCapabilities: [PROBE_GEMINI_BACKEND_CAPABILITY],
+          available: true,
+          status: "ready" as const,
+          baseUrl: redactUrl(profile.baseUrl),
+          requirements: {
+            apiKey: "required" as const,
+            liveHealth: "not_required" as const,
+          },
+          support: {
+            sseStreaming: true,
+            nativeToolCalls: true,
+            toolCallbacks: false,
+          },
+          receipt: makeGeminiAvailabilityReceipt({
+            profileId: profile.id,
+            model: profile.model,
+            baseUrl: profile.baseUrl,
+            ready: true,
+            apiKeySource: apiKey.source,
+            observedAt,
+          }),
+          observedAt,
+          contentRedacted: true as const,
+        })),
+        Effect.catch((error) =>
+          Effect.succeed({
+            kind: "probe_backend_capability_report" as const,
+            runnerId: input.runner.runnerId,
+            runnerKind: input.runner.kind,
+            backendKind: GEMINI_BACKEND_KIND,
+            profileId: profile.id,
+            model: profile.model,
+            capability: PROBE_GEMINI_BACKEND_CAPABILITY,
+            advertisedCapabilities: [],
+            available: false,
+            status: "unavailable" as const,
+            baseUrl: redactUrl(profile.baseUrl),
+            unavailableReason: "missing_credential",
+            message: error.reason,
+            requirements: {
+              apiKey: "required" as const,
+              liveHealth: "not_required" as const,
+            },
+            support: {
+              sseStreaming: true,
+              nativeToolCalls: true,
+              toolCallbacks: false,
+            },
+            receipt: makeGeminiAvailabilityReceipt({
+              profileId: profile.id,
+              model: profile.model,
+              baseUrl: profile.baseUrl,
+              ready: false,
+              unavailableReason: "missing_credential",
+              message: error.reason,
+              observedAt,
+            }),
+            observedAt,
+            contentRedacted: true as const,
+          }),
+        ),
+      ),
+    ),
+    Effect.catch(() =>
+      Effect.succeed({
+        kind: "probe_backend_capability_report" as const,
+        runnerId: input.runner.runnerId,
+        runnerKind: input.runner.kind,
+        backendKind: GEMINI_BACKEND_KIND,
+        profileId: GEMINI_API_PROFILE_ID,
+        model: GEMINI_DEFAULT_MODEL_ID,
+        capability: PROBE_GEMINI_BACKEND_CAPABILITY,
+        advertisedCapabilities: [],
+        available: false,
+        status: "malformed" as const,
+        baseUrl: redactUrl(GEMINI_DEFAULT_BASE_URL),
+        unavailableReason: "malformed_backend_profile",
+        message: "Gemini backend capability profile could not be resolved",
+        requirements: {
+          apiKey: "required" as const,
+          liveHealth: "not_required" as const,
+        },
+        support: {
+          sseStreaming: true,
+          nativeToolCalls: true,
+          toolCallbacks: false,
+        },
+        receipt: makeGeminiAvailabilityReceipt({
+          profileId: GEMINI_API_PROFILE_ID,
+          model: GEMINI_DEFAULT_MODEL_ID,
+          baseUrl: GEMINI_DEFAULT_BASE_URL,
+          ready: false,
+          unavailableReason: "malformed_backend_profile",
+          message: "Gemini backend capability profile could not be resolved",
+          observedAt,
+        }),
+        observedAt,
         contentRedacted: true as const,
       }),
     ),

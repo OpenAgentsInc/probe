@@ -74,3 +74,22 @@ Gemini and handles native function-call continuation:
 
 The loop uses Gemini native function declarations and responses. It does not
 reuse the Apple FM callback URL bridge.
+
+## Receipts And Capability Reporting
+
+Gemini receipts live in `packages/runtime/src/backends/gemini/receipts.ts`.
+They cover:
+
+- backend availability;
+- backend failures;
+- transcript summaries;
+- native tool-call summaries.
+
+Receipts store profile/model/source labels and normalized usage, but not raw
+Gemini request bodies, raw prompts, tool inputs, provider payloads, API keys, or
+request headers.
+
+`reportGeminiBackendCapability` advertises the `probe.backend.gemini_api`
+capability only when a Gemini API key can be resolved. Gemini direct API
+support reports SSE streaming and native tool calls; it does not report Apple FM
+callback support.
