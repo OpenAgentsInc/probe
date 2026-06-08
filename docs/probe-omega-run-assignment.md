@@ -35,6 +35,23 @@ That Apple FM path uses local attach configuration and live health. It does not
 use `providerAccountRef`, `authGrantRef`, ChatGPT account linking, or Omega
 grant resolution.
 
+The first Gemini backend selection path is also no-auth from Omega's
+perspective:
+
+```json
+{
+  "backend": {
+    "kind": "gemini_api",
+    "backendProfileId": "gemini-api"
+  }
+}
+```
+
+That path resolves a local runner API key from `GOOGLE_GENERATIVE_AI_API_KEY`
+or `GEMINI_API_KEY` and requires `probe.backend.gemini_api`. The later
+Omega-managed `google_gemini` provider-account grant path is designed in
+`docs/probe-omega-google-gemini-provider-account-design.md`.
+
 ## Blueprint Scope
 
 Omega or Pylon dispatch can attach a nested `blueprint` section to narrow the

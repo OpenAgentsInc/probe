@@ -63,6 +63,11 @@ is resolved from the runner environment using the same precedence as local CLI
 calls. Apple FM remains the default backend profile for existing assignments
 that do not select Gemini.
 
+The later Omega-managed provider-account path is designed in
+`docs/probe-omega-google-gemini-provider-account-design.md`. That path will add
+`google_gemini` grants and per-run env materialization without changing the
+local API-key behavior above.
+
 ## Request Lowering
 
 Gemini request lowering lives in

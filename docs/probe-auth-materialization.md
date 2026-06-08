@@ -24,6 +24,12 @@ It supports:
 - scrub-on-closeout
 - Effect bracket cleanup for failing runs
 
+Future Gemini provider-account materialization is designed in
+`docs/probe-omega-google-gemini-provider-account-design.md`. That path should
+materialize Omega-managed Gemini keys into `GOOGLE_GENERATIVE_AI_API_KEY` only
+after grant resolution; local BYO `GOOGLE_GENERATIVE_AI_API_KEY` /
+`GEMINI_API_KEY` support remains separate.
+
 ## Safety Rules
 
 - Materialization paths must be relative.
