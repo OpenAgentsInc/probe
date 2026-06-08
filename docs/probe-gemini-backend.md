@@ -93,3 +93,20 @@ request headers.
 capability only when a Gemini API key can be resolved. Gemini direct API
 support reports SSE streaming and native tool calls; it does not report Apple FM
 callback support.
+
+## Test Coverage
+
+Gemini fixture tests cover auth precedence, missing-key redaction, body
+lowering, native tool declarations, tool history, schema sanitation, SSE stream
+parsing, fake end-to-end tool continuation, and malformed provider output.
+
+Live Gemini smoke tests are skipped by default and must stay opt-in so normal
+runtime tests do not require network access or a provider key. To run them:
+
+```sh
+PROBE_GEMINI_LIVE_SMOKE=1 GOOGLE_GENERATIVE_AI_API_KEY=... bun test packages/runtime/tests/gemini-live-smoke.test.ts
+```
+
+`GEMINI_API_KEY` can be used instead of `GOOGLE_GENERATIVE_AI_API_KEY`. The
+live smoke path checks one plain `gemini-2.5-flash` prompt and one forced tiny
+native tool call, and assertions only inspect redacted receipt surfaces.
