@@ -10,20 +10,23 @@ the learning loop for the OpenAgents product: turn coding-agent work into
 accepted outcomes, preserve evidence, classify failures, improve the runtime,
 route better work to better providers, and pay contributors for useful work.
 
-The immediate commercial wedge is Coding on Autopilot. Codex is the first
-engine because it is strong today. Probe is the owned runtime path. Benchmark
-Cloud measures the loop. Psionic trains and evaluates model/runtime candidates.
-Pylon supplies distributed rollout and training capacity. Omega is the current
-release and projection authority for the product surface, even when older Omni
-docs use the Vortex name.
+The immediate commercial wedge is Coding on Autopilot. The first product
+strategy should be Blueprint-governed coding work: typed Program Signatures,
+tool-menu policy, verifier discipline, evidence closeout, and promotion gates.
+Codex can be one strong backend route when the task needs it, but it should not
+be treated as the necessary first engine or the organizing architecture. Probe
+is the owned runtime path. Benchmark Cloud measures the loop. Psionic trains
+and evaluates model/runtime candidates. Pylon supplies distributed rollout and
+training capacity. Omega is the current release and projection authority for
+the product surface, even when older Omni docs use the Vortex name.
 
 The continual learning plan only matters if it improves the buyer-facing loop:
 
 ```text
 mission goal
 -> coding workroom
--> Codex or Probe turn
--> Guidance/Blueprint decision
+-> Blueprint-governed Probe/workroom turn
+-> selected backend route, including Codex when useful
 -> diff, tests, preview, logs, receipts
 -> human review
 -> accepted or rejected outcome
@@ -84,21 +87,25 @@ tasks, retained Probe fixtures, and real Autopilot workrooms are useful because
 they measure the same operational shape: can the runtime produce correct,
 reviewable work with evidence?
 
-### Autopilot Is The Product, Probe Is The Owned Runtime
+### Autopilot Is The Product, Blueprint Is The First Architecture
 
 Episode 206 and the Coding on Autopilot spec frame Autopilot as the layer that
-removes manual babysitting from Codex. The user should define the mission and
-return to a mission briefing, not type `continue` every turn.
+removes manual babysitting from coding work. The user should define the
+mission and return to a mission briefing, not type `continue` every turn. The
+durable first architecture is Blueprint: explicit Program Signatures, source
+authority, tool-policy boundaries, acceptance criteria, receipts, and release
+gates.
 
 Episodes 218 and 219 frame Probe as the owned runtime direction: model
 agnostic, embeddable, able to use Codex, Psionic/local models, Apple/local
 models, and future backends. The benchmark learning loop should therefore
 serve two horizons:
 
-- near term: improve Autopilot's Codex workroom by improving Guidance,
-  Blueprint signatures, closeout discipline, account routing, and route
-  scorecards;
-- longer term: make Probe a runtime that can replace or supplement Codex while
+- near term: improve Blueprint-governed coding workrooms by improving Program
+  Signature selection, tool-menu projection, closeout discipline, acceptance
+  criteria, account/backend routing, and route scorecards;
+- longer term: make Probe the owned runtime surface that can use Codex,
+  Psionic/Qwen, Apple FM, local/swarm inference, or future backends while
   preserving the same product evidence contract.
 
 ### Guidance Becomes Blueprint, Blueprint Becomes A Marketable Capability
@@ -194,14 +201,16 @@ turn into candidate improvements.
 
 ### Probe Is Multi-Inference From Day One
 
-Episode 219 demos the important product thesis: Probe should combine Codex,
-Psionic/Qwen local or remote models, and Apple/local inference modes. Episode
-201 adds the Apple Silicon edge-compute thesis: some coding-agent work can move
-from cloud APIs to local devices over time.
+Episode 219 demos the important product thesis: Probe should combine multiple
+inference routes behind one Blueprint-governed runtime. Codex is one possible
+account-backed or Codex-style backend; Psionic/Qwen local or remote models,
+Apple/local inference modes, and Pylon/swarm compute should sit in the same
+surface. Episode 201 adds the Apple Silicon edge-compute thesis: some
+coding-agent work can move from cloud APIs to local devices over time.
 
 The benchmark loop should measure that migration honestly. It should compare:
 
-- Codex account-backed runs;
+- Blueprint-governed Probe runs using Codex when useful;
 - Probe using Codex-style backends;
 - Probe using Apple FM for bounded local tool use;
 - Probe using Qwen/Psionic models;
@@ -209,9 +218,11 @@ The benchmark loop should measure that migration honestly. It should compare:
 - mixed strategies where local models handle low-risk tool, summarization,
   routing, or verifier-support steps.
 
-The goal is not to pretend every local model can replace Codex immediately.
-The goal is route memory: know which work can move local, which must stay with
-frontier models, which can be split, and what each route costs.
+The goal is not to make Codex the default yardstick or to pretend every local
+model can replace a frontier backend immediately. The goal is route memory:
+know which work can run through local or swarm routes, which work benefits
+from Codex or another frontier backend, which work can be split, and what each
+route costs.
 
 ### OpenAgents Wants A Revenue-Sharing Capability Market
 
@@ -243,8 +254,8 @@ This is the buyer-facing Autopilot loop.
 ```text
 mission
 -> workroom
--> Codex/Probe turns
--> Guidance/Blueprint decisions
+-> Blueprint-governed Probe/workroom turns
+-> selected backend route
 -> artifacts
 -> briefing
 -> human review
@@ -271,7 +282,7 @@ This is the public OpenAgents Benchmark Cloud loop.
 ```text
 task
 -> runner assignment
--> Probe or Codex attempt
+-> Probe attempt with selected backend route
 -> verifier result
 -> failure classification
 -> retained fixture or live score
@@ -387,10 +398,10 @@ route_reason
 post_closeout_route_score
 ```
 
-Rejected routes are evidence. If a task used Codex instead of Probe, or SHC
-instead of public Pylon, or GCP instead of SHC, the record should say whether
-the blocker was privacy, trust, missing capability, weak benchmark evidence,
-quota, latency, cost, or policy.
+Rejected routes are evidence. If a task used Codex instead of a local Probe
+backend, or SHC instead of public Pylon, or GCP instead of SHC, the record
+should say whether the blocker was privacy, trust, missing capability, weak
+benchmark evidence, quota, latency, cost, or policy.
 
 ## How This Changes The Benchmark Roadmap
 
@@ -426,8 +437,8 @@ Blocked claims:
 - "Probe beats Terminal-Bench" from retained fixtures.
 - "Pylon training work is settled" without payment/reconciliation receipts.
 - "GEPA candidate is production" without release gates.
-- "Local models replaced Codex" without route scorecards and accepted-outcome
-  evidence.
+- "Codex is unnecessary" or "local models replaced frontier backends" without
+  route scorecards and accepted-outcome evidence.
 - "Apple FM was fine-tuned" without an exact supported fine-tuning path.
 - "OpenAgents Cloud is live" from a benchmark harness alone.
 
@@ -452,7 +463,7 @@ That proof connects the whole story:
 
 - Coding on Autopilot needs less babysitting.
 - Probe supplies the runtime contract.
-- Blueprint/Guidance decisions improve through measured evidence.
+- Blueprint-governed decisions improve through measured evidence.
 - Pylon supplies distributed work.
 - Psionic receives clean traces for later training.
 - Omega projects only what is safe to claim.
