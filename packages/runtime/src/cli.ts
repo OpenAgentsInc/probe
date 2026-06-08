@@ -4,6 +4,7 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Effect, Schema as S } from "effect";
+import { marked } from "marked";
 import {
   AppleFmBackendError,
   makeAppleFmClient,
@@ -746,6 +747,41 @@ const ansi = {
   gray: "\x1b[90m",
 } as const;
 
+function renderMarkdown(text: string): string {
+  const renderer = new (class extends marked.Renderer {
+    strong(t: string): string { return `${ansi.bold}${t}${ansi.reset}`; }
+    em(t: string): string { return `${ansi.dim}${t}${ansi.reset}`; }
+    codespan(t: string): string { return `${ansi.green}${t}${ansi.reset}`; }
+    del(t: string): string { return `${ansi.dim}${t}${ansi.reset}`; }
+    link(href: string, _title: string | null, t: string): string {
+      return `${t} ${ansi.blue}${href}${ansi.reset}`;
+    }
+    image(_href: string, _title: string | null, t: string): string {
+      return t;
+    }
+    heading(t: string): string { return `${ansi.bold}${t}${ansi.reset}\n`; }
+    paragraph(t: string): string { return `${t}\n`; }
+    listitem(t: string): string { return `  • ${t}\n`; }
+    blockquote(t: string): string { return `${ansi.yellow}> ${t}${ansi.reset}\n`; }
+    codes(t: string, _language?: string): string {
+      return `${ansi.gray}${t}${ansi.reset}\n`;
+    }
+    hr(): string { return `${ansi.gray}---${ansi.reset}\n`; }
+    br(): string { return "\n"; }
+    html(t: string): string { return t; }
+    text(t: string): string { return t; }
+  })();
+  return marked.parse(text, { renderer });
+}
+
+function formatInlineMarkdown(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, `${ansi.bold}$1${ansi.reset}`)
+    .replace(/__(.+?)__/g, `${ansi.bold}$1${ansi.reset}`)
+    .replace(/`([^`]+)`/g, `${ansi.green}$1${ansi.reset}`)
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, `${ansi.blue}$1${ansi.reset}`);
+}
+
 function makeCliColors(
   options: Record<string, string | true>,
   deps: ProbeCliDeps,
@@ -1290,7 +1326,7 @@ function makeGeminiInteractiveTurnStream(colors: ProbeCliColors): {
         }
 
         sawText = true;
-        process.stdout.write(event.text);
+        process.stdout.write(formatInlineMarkdown(event.text));
         return;
       }
 
@@ -1319,7 +1355,7 @@ function makeGeminiInteractiveTurnStream(colors: ProbeCliColors): {
       }
 
       if (!sawText && result.text.length > 0) {
-        process.stdout.write(`${cliLine(colors, "assistant", result.text, "assistant")}\n`);
+        process.stdout.write(`${cliLine(colors, "assistant", renderMarkdown(result.text).trimEnd(), "assistant")}\n`);
       }
 
       process.stdout.write(`${cliField(colors, "roundTrips", String(result.roundTrips), "muted")}  ${cliLine(colors, "usage", formatGeminiUsage(result.receipt.usage), "usage")}\n`);
