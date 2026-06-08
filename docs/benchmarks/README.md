@@ -20,13 +20,20 @@ architecture and execution plans. They are not public benchmark claims.
    learning serves Coding on Autopilot, accepted outcomes, route scorecards,
    public proof, Pylon provider work, and Psionic model training.
 
-3. `2026-06-08-probe-continual-benchmark-learning-apparatus.md`
+3. `2026-06-08-artanis-gepa-benchmark-pylon-focus.md`
+   Artanis refocus audit. It compares the current Artanis mission and proof
+   trail against the Probe benchmark docs, then defines how Artanis should
+   become the public overseer for Probe GEPA coding-agent benchmark campaigns
+   through Pylons while leaving execution, scoring, payment, training, and
+   promotion authority in the owning systems.
+
+4. `2026-06-08-probe-continual-benchmark-learning-apparatus.md`
    End-state plan for Probe's continual improvement loop. It defines how Probe,
    public OpenAgents Benchmark Cloud, Psionic, Pylon, and Omega should turn
    benchmark failures into prompt, Blueprint, tool-menu, loop-policy, and LoRA
    candidates with explicit promotion gates.
 
-4. `2026-06-08-pylon-gepa-coding-agent-benchmark-run.md`
+5. `2026-06-08-pylon-gepa-coding-agent-benchmark-run.md`
    First executable optimizer plan. It narrows the initial benchmark-climbing
    work to a GEPA-only text-candidate campaign, using Pylon as the parallel
    rollout engine across retained Terminal-Bench failures, validation splits,
@@ -58,6 +65,9 @@ architecture and execution plans. They are not public benchmark claims.
   worker capability envelopes and signed receipts.
 - Omega should remain the release gate and projection surface for public and
   private benchmark evidence.
+- Artanis should be the public-safe overseer and campaign narrator for Probe
+  benchmark learning, not the runtime, scorer, optimizer, payment authority,
+  or promotion authority.
 
 ## Public Claim Boundaries
 
