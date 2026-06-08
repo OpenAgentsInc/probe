@@ -123,6 +123,10 @@ Tracked files should stay minimal until the new architecture lands:
   closeout, candidate, promotion, and closeout bundle writer contracts.
 - `docs/probe-retained-terminal-bench-fixtures.md` records the public-ref-only
   retained Terminal-Bench fixture package for GEPA Stage 0/1.
+- `docs/2026-06-08-probe-gepa-live-network-system-audit.md` records the
+  current cross-repo Probe GEPA live-network system state after the SHC Harbor
+  smoke, Benchmark Cloud runner work, Psionic live import path, Omega route
+  scorecard/product evidence path, and Artanis projection updates.
 - `.gitignore` keeps local build/cache noise out of the repo.
 - Add a license file before publishing or distributing a new runtime artifact.
 
