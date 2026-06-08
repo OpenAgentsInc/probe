@@ -177,7 +177,7 @@ function geminiChatOnce(
       messages: [],
       model,
       prompt,
-      maxTokens: numberOption(options, "max-tokens") ?? 1024,
+      maxTokens: numberOption(options, "max-tokens") ?? 65536,
       tools,
     });
     const result = yield* client.complete({ request, tools }).pipe(
@@ -225,7 +225,7 @@ function geminiCompletionCommand(input: {
       request: makeProbeLlmRequest({
         model: { provider: "google", model },
         prompt,
-        generation: { maxTokens: numberOption(input.options, "max-tokens") ?? 256, temperature: 0 },
+        generation: { maxTokens: numberOption(input.options, "max-tokens") ?? 65536, temperature: 0 },
       }),
     }).pipe(Effect.catch((error: GeminiClientError) => Effect.succeed(error)));
 
@@ -1485,7 +1485,7 @@ if (import.meta.main) {
 async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: ProbeCliDeps): Promise<number> {
   const options = parseOptions(args);
   const model = stringOption(options, "model") ?? GEMINI_DEFAULT_MODEL_ID;
-  const maxTokens = numberOption(options, "max-tokens") ?? 1024;
+  const maxTokens = numberOption(options, "max-tokens") ?? 65536;
   const tools = makeGeminiChatTools(deps.env);
   const colors = makeCliColors(options, deps);
   const clientResult = await Effect.runPromise(
