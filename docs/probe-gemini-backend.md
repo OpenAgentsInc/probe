@@ -47,3 +47,14 @@ Tool schemas are sanitized in
 Gemini. This avoids request-time failures for common JSON Schema shapes that
 Gemini rejects, such as integer enums, dangling required fields, untyped arrays,
 and scalar schemas carrying object-only keys.
+
+## SSE Stream Parsing
+
+`parseGeminiSseStream` converts Gemini `streamGenerateContent?alt=sse` events
+into Probe LLM events. It preserves visible text, reasoning text, native
+function calls, finish reason, token usage, cached-token counts, and Gemini
+thought signatures as provider metadata.
+
+Gemini reports `candidatesTokenCount` as visible output and
+`thoughtsTokenCount` separately. Probe usage stores inclusive output tokens, so
+the parser sums those fields when both are available.
