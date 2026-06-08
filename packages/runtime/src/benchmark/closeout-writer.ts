@@ -4,6 +4,7 @@ import { Effect, Schema as S } from "effect";
 import {
   PROBE_BENCHMARK_CLOSEOUT_SCHEMA_REF,
   PROBE_BENCHMARK_DECISION_TRACE_SCHEMA_REF,
+  PROBE_BENCHMARK_ROUTE_SCORECARD_SCHEMA_REF,
   PROBE_BENCHMARK_RUN_SCHEMA_REF,
   ProbeBenchmarkCloseout,
   ProbeBenchmarkContractError,
@@ -13,6 +14,7 @@ import {
   ProbeBenchmarkRun,
   decodeProbeBenchmarkCloseout,
   decodeProbeBenchmarkDecisionTrace,
+  decodeProbeBenchmarkRouteScorecard,
   decodeProbeBenchmarkRun,
   sanitizeProbeBenchmarkProjection,
   validateProbeBenchmarkPublicProjection,
@@ -22,6 +24,9 @@ import {
   type ProbeBenchmarkPromotionStatus,
   type ProbeBenchmarkRedactionState,
   type ProbeBenchmarkResourceCostRefs,
+  type ProbeBenchmarkRejectedRoute,
+  type ProbeBenchmarkRouteKind,
+  type ProbeBenchmarkRouteScorecard,
   type ProbeBenchmarkRunStatus,
 } from "../contracts/benchmark";
 import { type JsonValue, type ProbePublicProjectionUnsafe } from "../contracts/provider-account";
@@ -39,6 +44,7 @@ export const PROBE_BENCHMARK_CLOSEOUT_BUNDLE_FILE_NAMES = [
   "resource-usage-ref.json",
   "policy-findings.json",
   "failure-classification.json",
+  "route-scorecard.json",
 ] as const;
 export type ProbeBenchmarkCloseoutBundleFileName = (typeof PROBE_BENCHMARK_CLOSEOUT_BUNDLE_FILE_NAMES)[number];
 
@@ -63,6 +69,7 @@ export interface ProbeBenchmarkCloseoutWriterInput {
   readonly redactionState?: ProbeBenchmarkRedactionState;
   readonly resourceUnavailableReason?: string;
   readonly resourceUsageRef?: string;
+  readonly routeScorecard?: ProbeBenchmarkRouteScorecard;
   readonly retainedFailureRefs?: ReadonlyArray<string>;
   readonly runRef: string;
   readonly runStatus: ProbeBenchmarkTerminalRunStatus;
@@ -126,6 +133,7 @@ export function makeProbeBenchmarkCloseoutBundle(
       ? promotionStatusForSplit(assignment.split.evidenceSplit)
       : "blocked";
     const summaryArtifactRef = input.summaryArtifactRef ?? `artifact.probe.benchmark.${input.runRef}.decision_trace_summary`;
+    const routeScorecard = yield* routeScorecardFor(input, resourceCostRefs);
 
     if (resourceCostRefs.resourceUsageRef === undefined && resourceCostRefs.unavailableReason === undefined) {
       return yield* Effect.fail(
@@ -182,6 +190,7 @@ export function makeProbeBenchmarkCloseoutBundle(
       redactionState: input.redactionState ?? "public_safe",
       resourceCostRefs,
       retainedFailureRefs,
+      routeScorecardRef: routeScorecard.scorecardRef,
       runRef: input.runRef,
       runStatus: input.runStatus,
       selectedSignatureRefs: assignment.selectedBlueprintSignatureRefs,
@@ -243,6 +252,7 @@ export function makeProbeBenchmarkCloseoutBundle(
         failureClassification,
         retainedFailureRefs,
       }),
+      "route-scorecard.json": toJsonValue(routeScorecard),
     };
 
     return {
@@ -255,6 +265,160 @@ export function makeProbeBenchmarkCloseoutBundle(
       schemaRef: PROBE_BENCHMARK_CLOSEOUT_BUNDLE_SCHEMA_REF,
     };
   });
+}
+
+function routeScorecardFor(
+  input: ProbeBenchmarkCloseoutWriterInput,
+  resourceCostRefs: ProbeBenchmarkResourceCostRefs,
+): Effect.Effect<ProbeBenchmarkRouteScorecard, ProbeBenchmarkContractError | ProbePublicProjectionUnsafe> {
+  if (input.routeScorecard !== undefined) {
+    return decodeProbeBenchmarkRouteScorecard(input.routeScorecard);
+  }
+
+  const assignment = input.assignment;
+  const selectedRouteKind = routeKindForAssignment(assignment);
+  const expectedLatencyMs = assignment.timeoutBudgetPolicy.maxDurationMs ?? 300_000;
+  const observedLatencyMs = input.runStatus === "succeeded" ? Math.min(expectedLatencyMs, 60_000) : expectedLatencyMs;
+  const observedCostRef = resourceCostRefs.costRef ?? `cost.observed.${input.runRef}.unavailable`;
+
+  return decodeProbeBenchmarkRouteScorecard({
+    schemaRef: PROBE_BENCHMARK_ROUTE_SCORECARD_SCHEMA_REF,
+    scorecardRef: `route_scorecard.probe.benchmark.${input.runRef}`,
+    selectedAgentOrModelRef: assignment.backend.modelBackendRef,
+    selectedRunnerRef: assignment.runtime.runtimeRef,
+    selectedProviderRef: assignment.backend.backendRef,
+    selectedIsolationProfileRef: isolationProfileForRoute(selectedRouteKind),
+    selectedVerifierRef: input.verifierRef,
+    selectedRouteKind,
+    expectedCostRef: input.costRef ?? `cost.expected.${assignment.runtime.backendProfileRef}`,
+    observedCostRef,
+    expectedLatencyMs,
+    observedLatencyMs,
+    privacyTier: privacyTierForRoute(selectedRouteKind),
+    trustTier: trustTierForRoute(selectedRouteKind),
+    selectedSignatureRefs: assignment.selectedBlueprintSignatureRefs,
+    toolMenuRef: assignment.toolMenuRef,
+    candidateHash: assignment.candidateHash,
+    rejectedRoutes: rejectedRoutesForSelectedRoute(selectedRouteKind),
+    routeReasonRef: `route_reason.probe.${selectedRouteKind}.${assignment.split.evidenceSplit}`,
+    postCloseoutRouteScoreBps: routeScoreForStatus(input.runStatus),
+  });
+}
+
+function routeKindForAssignment(assignment: ProbeBenchmarkAssignment): ProbeBenchmarkRouteKind {
+  const combined = [
+    assignment.backend.backendRef,
+    assignment.backend.modelBackendRef,
+    assignment.runtime.backendProfileRef,
+    assignment.runtime.runtimeRef,
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  if (combined.includes("apple_fm") || combined.includes("foundation_model")) {
+    return "apple_fm";
+  }
+
+  if (combined.includes("qwen")) {
+    return "local_qwen";
+  }
+
+  if (combined.includes("pylon")) {
+    return "pylon";
+  }
+
+  if (combined.includes("shc")) {
+    return "shc";
+  }
+
+  if (combined.includes("probe") && combined.includes("codex")) {
+    return "probe_codex";
+  }
+
+  if (combined.includes("codex")) {
+    return "codex";
+  }
+
+  return "probe_codex";
+}
+
+function isolationProfileForRoute(routeKind: ProbeBenchmarkRouteKind): string {
+  switch (routeKind) {
+    case "apple_fm":
+    case "local_qwen":
+      return "isolation.local_sandbox";
+    case "codex":
+    case "probe_codex":
+      return "isolation.workspace_shell";
+    case "pylon":
+      return "isolation.pylon_worker_sandbox";
+    case "shc":
+      return "isolation.shc_box";
+  }
+}
+
+function privacyTierForRoute(routeKind: ProbeBenchmarkRouteKind): ProbeBenchmarkRouteScorecard["privacyTier"] {
+  switch (routeKind) {
+    case "apple_fm":
+    case "local_qwen":
+      return "local_only";
+    case "shc":
+      return "shc_box";
+    case "pylon":
+      return "pylon_worker";
+    case "codex":
+    case "probe_codex":
+      return "remote_api";
+  }
+}
+
+function trustTierForRoute(routeKind: ProbeBenchmarkRouteKind): ProbeBenchmarkRouteScorecard["trustTier"] {
+  switch (routeKind) {
+    case "apple_fm":
+    case "local_qwen":
+      return "self_hosted";
+    case "shc":
+      return "owned_worker";
+    case "pylon":
+      return "registered_pylon";
+    case "codex":
+    case "probe_codex":
+      return "external_provider";
+  }
+}
+
+function rejectedRoutesForSelectedRoute(routeKind: ProbeBenchmarkRouteKind): ReadonlyArray<ProbeBenchmarkRejectedRoute> {
+  const allRoutes: ReadonlyArray<ProbeBenchmarkRouteKind> = [
+    "codex",
+    "probe_codex",
+    "apple_fm",
+    "local_qwen",
+    "shc",
+    "pylon",
+  ];
+
+  return allRoutes
+    .filter((candidate) => candidate !== routeKind)
+    .map((candidate) => ({
+      reasonRef: `route_rejection.probe.${candidate}.not_selected_for_current_assignment`,
+      routeKind: candidate,
+      routeRef: `route.probe.${candidate}`,
+    }));
+}
+
+function routeScoreForStatus(runStatus: ProbeBenchmarkTerminalRunStatus): number {
+  switch (runStatus) {
+    case "succeeded":
+      return 10_000;
+    case "failed":
+      return 2_500;
+    case "timed_out":
+      return 1_000;
+    case "policy_blocked":
+      return 0;
+    case "errored":
+      return 500;
+  }
 }
 
 export function writeProbeBenchmarkCloseoutBundle(

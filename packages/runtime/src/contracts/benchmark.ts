@@ -14,6 +14,7 @@ export const PROBE_PROMPT_CANDIDATE_SCHEMA_REF = "probe.prompt_candidate.v1" as 
 export const PROBE_BLUEPRINT_CANDIDATE_SCHEMA_REF = "probe.blueprint_candidate.v1" as const;
 export const PROBE_TOOL_MENU_CANDIDATE_SCHEMA_REF = "probe.tool_menu_candidate.v1" as const;
 export const PROBE_LOOP_POLICY_CANDIDATE_SCHEMA_REF = "probe.loop_policy_candidate.v1" as const;
+export const PROBE_BENCHMARK_ROUTE_SCORECARD_SCHEMA_REF = "probe.benchmark_route_scorecard.v1" as const;
 export const PROBE_BENCHMARK_PROMOTION_DECISION_SCHEMA_REF =
   "probe.benchmark_promotion_decision.v1" as const;
 
@@ -44,6 +45,27 @@ export const ProbeBenchmarkPromotionStatus = S.Literals([
   "rejected",
 ]);
 export type ProbeBenchmarkPromotionStatus = typeof ProbeBenchmarkPromotionStatus.Type;
+
+export const ProbeBenchmarkRouteKind = S.Literals([
+  "apple_fm",
+  "codex",
+  "local_qwen",
+  "probe_codex",
+  "pylon",
+  "shc",
+]);
+export type ProbeBenchmarkRouteKind = typeof ProbeBenchmarkRouteKind.Type;
+
+export const ProbeBenchmarkPrivacyTier = S.Literals(["local_only", "shc_box", "pylon_worker", "remote_api"]);
+export type ProbeBenchmarkPrivacyTier = typeof ProbeBenchmarkPrivacyTier.Type;
+
+export const ProbeBenchmarkTrustTier = S.Literals([
+  "self_hosted",
+  "owned_worker",
+  "registered_pylon",
+  "external_provider",
+]);
+export type ProbeBenchmarkTrustTier = typeof ProbeBenchmarkTrustTier.Type;
 
 export const ProbeBenchmarkFailureFamily = S.Literals([
   "none",
@@ -232,6 +254,37 @@ export const ProbeBenchmarkVerifierScorerRefs = S.Struct({
 });
 export type ProbeBenchmarkVerifierScorerRefs = typeof ProbeBenchmarkVerifierScorerRefs.Type;
 
+export const ProbeBenchmarkRejectedRoute = S.Struct({
+  reasonRef: S.String,
+  routeKind: ProbeBenchmarkRouteKind,
+  routeRef: S.String,
+});
+export type ProbeBenchmarkRejectedRoute = typeof ProbeBenchmarkRejectedRoute.Type;
+
+export const ProbeBenchmarkRouteScorecard = S.Struct({
+  candidateHash: S.String,
+  expectedCostRef: S.String,
+  expectedLatencyMs: S.Number,
+  observedCostRef: S.String,
+  observedLatencyMs: S.Number,
+  postCloseoutRouteScoreBps: S.Number,
+  privacyTier: ProbeBenchmarkPrivacyTier,
+  rejectedRoutes: S.Array(ProbeBenchmarkRejectedRoute),
+  routeReasonRef: S.String,
+  schemaRef: S.Literal(PROBE_BENCHMARK_ROUTE_SCORECARD_SCHEMA_REF),
+  scorecardRef: S.String,
+  selectedAgentOrModelRef: S.String,
+  selectedIsolationProfileRef: S.String,
+  selectedProviderRef: S.String,
+  selectedRouteKind: ProbeBenchmarkRouteKind,
+  selectedRunnerRef: S.String,
+  selectedSignatureRefs: S.Array(S.String),
+  selectedVerifierRef: S.String,
+  toolMenuRef: S.String,
+  trustTier: ProbeBenchmarkTrustTier,
+});
+export type ProbeBenchmarkRouteScorecard = typeof ProbeBenchmarkRouteScorecard.Type;
+
 export const ProbeBenchmarkResourceCostRefs = S.Struct({
   costRef: S.optional(S.String),
   resourceUsageRef: S.optional(S.String),
@@ -266,6 +319,7 @@ export const ProbeBenchmarkCloseout = S.Struct({
   redactionState: ProbeBenchmarkRedactionState,
   resourceCostRefs: ProbeBenchmarkResourceCostRefs,
   retainedFailureRefs: S.Array(S.String),
+  routeScorecardRef: S.optional(S.String),
   runRef: S.String,
   runStatus: ProbeBenchmarkRunStatus,
   schemaRef: S.Literal(PROBE_BENCHMARK_CLOSEOUT_SCHEMA_REF),
@@ -382,6 +436,17 @@ export function decodeProbeBenchmarkPromotionDecision(
   });
 }
 
+export function decodeProbeBenchmarkRouteScorecard(
+  value: unknown,
+): Effect.Effect<ProbeBenchmarkRouteScorecard, ProbeBenchmarkContractError | ProbePublicProjectionUnsafe> {
+  return Effect.gen(function* () {
+    yield* validateProbeBenchmarkPublicProjection(value, "benchmarkRouteScorecard");
+    const scorecard = yield* decodeBenchmarkSchema(ProbeBenchmarkRouteScorecard, value, "benchmarkRouteScorecard");
+    yield* validateProbeBenchmarkRouteScorecard(scorecard);
+    return scorecard;
+  });
+}
+
 export function validateProbeBenchmarkPublicProjection(
   value: unknown,
   path = "benchmark",
@@ -433,6 +498,47 @@ export function validateProbeBenchmarkCloseout(
 
     if (closeout.evidenceSplit === "retained" && closeout.runStatus !== "succeeded") {
       yield* requireNonEmptyRefs(closeout.retainedFailureRefs, "benchmarkCloseout.retainedFailureRefs");
+    }
+  });
+}
+
+export function validateProbeBenchmarkRouteScorecard(
+  scorecard: ProbeBenchmarkRouteScorecard,
+): Effect.Effect<void, ProbeBenchmarkContractError> {
+  return Effect.gen(function* () {
+    yield* requireNonEmptyRefs(scorecard.selectedSignatureRefs, "benchmarkRouteScorecard.selectedSignatureRefs");
+    yield* requireNonEmptyRefs([scorecard.selectedAgentOrModelRef], "benchmarkRouteScorecard.selectedAgentOrModelRef");
+    yield* requireNonEmptyRefs([scorecard.selectedRunnerRef], "benchmarkRouteScorecard.selectedRunnerRef");
+    yield* requireNonEmptyRefs([scorecard.selectedProviderRef], "benchmarkRouteScorecard.selectedProviderRef");
+    yield* requireNonEmptyRefs(
+      [scorecard.selectedIsolationProfileRef],
+      "benchmarkRouteScorecard.selectedIsolationProfileRef",
+    );
+    yield* requireNonEmptyRefs([scorecard.selectedVerifierRef], "benchmarkRouteScorecard.selectedVerifierRef");
+    yield* requireNonEmptyRefs([scorecard.toolMenuRef], "benchmarkRouteScorecard.toolMenuRef");
+    yield* requireNonEmptyRefs([scorecard.candidateHash], "benchmarkRouteScorecard.candidateHash");
+    yield* requireNonEmptyRefs([scorecard.routeReasonRef], "benchmarkRouteScorecard.routeReasonRef");
+
+    if (
+      scorecard.expectedLatencyMs < 0 ||
+      scorecard.observedLatencyMs < 0 ||
+      scorecard.postCloseoutRouteScoreBps < 0 ||
+      scorecard.postCloseoutRouteScoreBps > 10_000
+    ) {
+      return yield* Effect.fail(
+        new ProbeBenchmarkContractError({
+          path: "benchmarkRouteScorecard.postCloseoutRouteScoreBps",
+          reason: "route scorecard latency and score values must be bounded non-negative public measurements",
+        }),
+      );
+    }
+
+    for (const [index, rejectedRoute] of scorecard.rejectedRoutes.entries()) {
+      yield* requireNonEmptyRefs([rejectedRoute.routeRef], `benchmarkRouteScorecard.rejectedRoutes[${index}].routeRef`);
+      yield* requireNonEmptyRefs(
+        [rejectedRoute.reasonRef],
+        `benchmarkRouteScorecard.rejectedRoutes[${index}].reasonRef`,
+      );
     }
   });
 }
@@ -584,6 +690,10 @@ function unsafeBenchmarkStringReason(value: string): string | undefined {
 
   if (/\b(hidden[_ -]?verifier|benchmark[_ -]?secret|wallet[_ -]?mnemonic|payment[_ -]?preimage)\b/i.test(value)) {
     return "unsafe benchmark control material is not allowed in public benchmark records";
+  }
+
+  if (/\b(raw[_ -]?access[_ -]?token|access[_ -]?token|provider[_ -]?secret|bearer|sk-[a-z0-9])\b/i.test(value)) {
+    return "provider credential material is not allowed in public benchmark records";
   }
 
   return undefined;

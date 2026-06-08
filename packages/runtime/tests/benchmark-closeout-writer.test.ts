@@ -93,6 +93,10 @@ describe("Probe benchmark closeout writer", () => {
       );
       expect(closeoutFile.runStatus).toBe("succeeded");
       expect(closeoutFile.artifactManifestRefs).toEqual(["artifact_manifest.probe.configure_git_webserver.1"]);
+      expect(closeoutFile.routeScorecardRef).toBe("route_scorecard.probe.benchmark.probe_run.configure_git_webserver.1");
+      expect((bundle.files["route-scorecard.json"] as { readonly selectedRouteKind: string }).selectedRouteKind).toBe(
+        "apple_fm",
+      );
       expect(JSON.stringify(bundle.files)).not.toContain("raw");
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -163,6 +167,60 @@ describe("Probe benchmark closeout writer", () => {
     const policy = bundle.files["policy-findings.json"] as { readonly [key: string]: unknown };
 
     expect(JSON.stringify(policy)).toContain("blocked");
+  });
+
+  test("can include explicit route scorecards with rejected route evidence", async () => {
+    const assignment = await fakeAssignment();
+    const bundle = await Effect.runPromise(
+      makeProbeBenchmarkCloseoutBundle({
+        assignment,
+        resourceUsageRef: "resource_usage.probe.configure_git_webserver.pylon.1",
+        routeScorecard: {
+          schemaRef: "probe.benchmark_route_scorecard.v1",
+          scorecardRef: "route_scorecard.probe.configure_git_webserver.pylon.1",
+          selectedAgentOrModelRef: "model_backend.local_qwen.coder.v1",
+          selectedRunnerRef: "runner.probe.pylon_worker.v1",
+          selectedProviderRef: "pylon.public.shc_box_1",
+          selectedIsolationProfileRef: "isolation.pylon_worker_sandbox",
+          selectedVerifierRef: "verifier.terminal_bench.configure_git_webserver.v1",
+          selectedRouteKind: "pylon",
+          expectedCostRef: "cost.expected.pylon.unpaid_smoke",
+          observedCostRef: "cost.observed.pylon.unpaid_smoke",
+          expectedLatencyMs: 300000,
+          observedLatencyMs: 90000,
+          privacyTier: "pylon_worker",
+          trustTier: "registered_pylon",
+          selectedSignatureRefs: ["program_signature.probe.benchmark.service_readiness.v1"],
+          toolMenuRef: "tool_menu.probe.terminal_bench.service_readiness.v1",
+          candidateHash: assignment.candidateHash,
+          rejectedRoutes: [
+            {
+              reasonRef: "route_rejection.codex.remote_api_not_selected",
+              routeKind: "codex",
+              routeRef: "route.probe.codex",
+            },
+            {
+              reasonRef: "route_rejection.apple_fm.worker_capacity_missing",
+              routeKind: "apple_fm",
+              routeRef: "route.probe.apple_fm",
+            },
+          ],
+          routeReasonRef: "route_reason.pylon.distributed_metric_call",
+          postCloseoutRouteScoreBps: 8500,
+        },
+        runRef: "probe_run.configure_git_webserver.pylon.1",
+        runStatus: "succeeded",
+        scorerRef: "scorer.terminal_bench.binary.v1",
+        verifierRef: "verifier.terminal_bench.configure_git_webserver.v1",
+      }),
+    );
+    const scorecard = bundle.files["route-scorecard.json"] as {
+      readonly rejectedRoutes: ReadonlyArray<{ readonly routeKind: string }>;
+      readonly selectedRouteKind: string;
+    };
+
+    expect(scorecard.selectedRouteKind).toBe("pylon");
+    expect(scorecard.rejectedRoutes.map((route) => route.routeKind)).toEqual(["codex", "apple_fm"]);
   });
 
   test("rejects unsafe writer input before public-safe artifacts are emitted", async () => {

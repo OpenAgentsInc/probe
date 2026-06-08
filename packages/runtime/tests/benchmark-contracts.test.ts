@@ -5,6 +5,7 @@ import {
   PROBE_BENCHMARK_CLOSEOUT_SCHEMA_REF,
   PROBE_BENCHMARK_DECISION_TRACE_SCHEMA_REF,
   PROBE_BENCHMARK_PROMOTION_DECISION_SCHEMA_REF,
+  PROBE_BENCHMARK_ROUTE_SCORECARD_SCHEMA_REF,
   PROBE_BENCHMARK_RUN_SCHEMA_REF,
   PROBE_BLUEPRINT_CANDIDATE_SCHEMA_REF,
   PROBE_LOOP_POLICY_CANDIDATE_SCHEMA_REF,
@@ -15,6 +16,7 @@ import {
   decodeProbeBenchmarkCloseout,
   decodeProbeBenchmarkDecisionTrace,
   decodeProbeBenchmarkPromotionDecision,
+  decodeProbeBenchmarkRouteScorecard,
   decodeProbeBenchmarkRun,
   decodeProbeLoopPolicyCandidate,
   decodeProbePromptCandidate,
@@ -208,6 +210,36 @@ describe("Probe benchmark contracts", () => {
         runtimePromotionAllowed: false,
       }),
     );
+    const routeScorecard = await Effect.runPromise(
+      decodeProbeBenchmarkRouteScorecard({
+        schemaRef: PROBE_BENCHMARK_ROUTE_SCORECARD_SCHEMA_REF,
+        scorecardRef: "route_scorecard.configure_git_webserver.1",
+        selectedAgentOrModelRef: "model_backend.apple_fm.local_foundation_model",
+        selectedRunnerRef: "runtime.probe.v1",
+        selectedProviderRef: "probe.backend.apple_fm_bridge",
+        selectedIsolationProfileRef: "isolation.local_sandbox",
+        selectedVerifierRef: "verifier.terminal_bench.configure_git_webserver.v1",
+        selectedRouteKind: "apple_fm",
+        expectedCostRef: "cost.expected.apple_fm.local",
+        observedCostRef: "cost.observed.apple_fm.local",
+        expectedLatencyMs: 300000,
+        observedLatencyMs: 42000,
+        privacyTier: "local_only",
+        trustTier: "self_hosted",
+        selectedSignatureRefs: ["program_signature.probe.benchmark.service_readiness.v1"],
+        toolMenuRef: "tool_menu.probe.terminal_bench.service_readiness.v1",
+        candidateHash: "sha256:candidate-1",
+        rejectedRoutes: [
+          {
+            routeKind: "codex",
+            routeRef: "route.probe.codex",
+            reasonRef: "route_rejection.codex.remote_api_not_needed",
+          },
+        ],
+        routeReasonRef: "route_reason.apple_fm.local_private",
+        postCloseoutRouteScoreBps: 9000,
+      }),
+    );
 
     expect(parsedAssignment.schemaRef).toBe(PROBE_BENCHMARK_ASSIGNMENT_SCHEMA_REF);
     expect(parsedRun.status).toBe("succeeded");
@@ -218,6 +250,8 @@ describe("Probe benchmark contracts", () => {
     expect(loopPolicyCandidate.maxTurns).toBe(12);
     expect(promotionDecision.authorityBoundary).toBe("evidence_only");
     expect(promotionDecision.runtimePromotionAllowed).toBe(false);
+    expect(routeScorecard.selectedRouteKind).toBe("apple_fm");
+    expect(routeScorecard.rejectedRoutes[0]?.routeKind).toBe("codex");
   });
 
   test("rejects closeouts missing artifact or proof refs", async () => {
@@ -303,5 +337,66 @@ describe("Probe benchmark contracts", () => {
       expect(parsedAssignment.split.evidenceSplit).toBe(split);
       expect(parsedCloseout.evidenceSplit).toBe(split);
     }
+  });
+
+  test("rejects unsafe route scorecards and out-of-range route scores", async () => {
+    await expect(
+      Effect.runPromise(
+        decodeProbeBenchmarkRouteScorecard({
+          schemaRef: PROBE_BENCHMARK_ROUTE_SCORECARD_SCHEMA_REF,
+          scorecardRef: "route_scorecard.unsafe",
+          selectedAgentOrModelRef: "model_backend.apple_fm.local_foundation_model",
+          selectedRunnerRef: "runtime.probe.v1",
+          selectedProviderRef: "probe.backend.apple_fm_bridge",
+          selectedIsolationProfileRef: "isolation.local_sandbox",
+          selectedVerifierRef: "verifier.terminal_bench.configure_git_webserver.v1",
+          selectedRouteKind: "apple_fm",
+          expectedCostRef: "cost.expected.apple_fm.local",
+          observedCostRef: "cost.observed.apple_fm.local",
+          expectedLatencyMs: 300000,
+          observedLatencyMs: 42000,
+          privacyTier: "local_only",
+          trustTier: "self_hosted",
+          selectedSignatureRefs: ["program_signature.probe.benchmark.service_readiness.v1"],
+          toolMenuRef: "tool_menu.probe.terminal_bench.service_readiness.v1",
+          candidateHash: "sha256:candidate-1",
+          rejectedRoutes: [],
+          routeReasonRef: "route_reason.apple_fm.local_private",
+          postCloseoutRouteScoreBps: 10001,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      _tag: "ProbeBenchmarkContractError",
+      path: "benchmarkRouteScorecard.postCloseoutRouteScoreBps",
+    });
+
+    await expect(
+      Effect.runPromise(
+        decodeProbeBenchmarkRouteScorecard({
+          schemaRef: PROBE_BENCHMARK_ROUTE_SCORECARD_SCHEMA_REF,
+          scorecardRef: "route_scorecard.unsafe",
+          selectedAgentOrModelRef: "model_backend.apple_fm.local_foundation_model",
+          selectedRunnerRef: "runtime.probe.v1",
+          selectedProviderRef: "provider.secret.raw_access_token",
+          selectedIsolationProfileRef: "isolation.local_sandbox",
+          selectedVerifierRef: "verifier.terminal_bench.configure_git_webserver.v1",
+          selectedRouteKind: "apple_fm",
+          expectedCostRef: "cost.expected.apple_fm.local",
+          observedCostRef: "cost.observed.apple_fm.local",
+          expectedLatencyMs: 300000,
+          observedLatencyMs: 42000,
+          privacyTier: "local_only",
+          trustTier: "self_hosted",
+          selectedSignatureRefs: ["program_signature.probe.benchmark.service_readiness.v1"],
+          toolMenuRef: "tool_menu.probe.terminal_bench.service_readiness.v1",
+          candidateHash: "sha256:candidate-1",
+          rejectedRoutes: [],
+          routeReasonRef: "route_reason.apple_fm.local_private",
+          postCloseoutRouteScoreBps: 9000,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      _tag: "ProbeBenchmarkContractError",
+    });
   });
 });

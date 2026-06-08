@@ -17,6 +17,7 @@ package entry point.
 - `probe.blueprint_candidate.v1`
 - `probe.tool_menu_candidate.v1`
 - `probe.loop_policy_candidate.v1`
+- `probe.benchmark_route_scorecard.v1`
 - `probe.benchmark_promotion_decision.v1`
 
 The assignment schema carries the Benchmark Cloud run and task refs, dataset
@@ -29,7 +30,30 @@ The closeout schema carries the assignment and run refs, candidate hash,
 selected signatures, tool menu, backend route, verifier/scorer refs, artifact
 manifest refs, proof bundle refs, resource/cost refs, policy findings, failure
 classification, retained-failure refs, redaction state, run status, split, and
-promotion status.
+promotion status. It can also reference a route scorecard through
+`routeScorecardRef`.
+
+## Route Scorecards
+
+`probe.benchmark_route_scorecard.v1` explains which backend, runner, provider,
+isolation profile, verifier, signatures, tool menu, and candidate hash were
+used for a benchmark closeout. It also records expected/observed cost refs,
+expected/observed latency, privacy tier, trust tier, rejected routes, route
+reason, and post-closeout route score.
+
+Supported route kinds are:
+
+- `codex`
+- `probe_codex`
+- `apple_fm`
+- `local_qwen`
+- `shc`
+- `pylon`
+
+Rejected routes are preserved as evidence so later routing can explain why, for
+example, Codex was used instead of local Probe, SHC instead of Pylon, or a
+remote API instead of Apple FM. Route scorecards are public-safe refs only and
+can feed future route selection plus accepted-outcome analysis.
 
 ## Safety Boundary
 
@@ -56,15 +80,17 @@ validation, holdout, and live evidence representations.
 normalized closeout bundle. A bundle contains `probe-run-record.json`,
 `probe-closeout.json`, `decision-trace-summary.json`,
 `selected-signatures.json`, `tool-menu.json`, `candidate-ref.json`,
-`artifact-refs.json`, `resource-usage-ref.json`, `policy-findings.json`, and
-`failure-classification.json`. Successful, failed, timed-out, and
+`artifact-refs.json`, `resource-usage-ref.json`, `policy-findings.json`,
+`failure-classification.json`, and `route-scorecard.json`. Successful, failed,
+timed-out, and
 policy-blocked runs all write the same public-safe file set, with explicit
 retained-failure refs, timeout state, partial artifact refs, or policy findings
 where relevant.
 
 `packages/runtime/tests/benchmark-closeout-writer.test.ts` covers fake
 assignment bundle emission, directory writes, failure closeouts, timeout
-closeouts, policy-blocked closeouts, and unsafe writer input rejection.
+closeouts, policy-blocked closeouts, generated and explicit route scorecards,
+and unsafe writer input rejection.
 
 `packages/runtime/src/benchmark/candidate-execution.ts` adds the Probe-facing
 GEPA candidate execution adapter. It can run a retained fixture with either the
