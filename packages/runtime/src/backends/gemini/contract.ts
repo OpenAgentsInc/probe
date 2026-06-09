@@ -2,7 +2,7 @@ import { Schema as S } from "effect";
 
 export const GEMINI_BACKEND_KIND = "gemini_api" as const;
 export const GEMINI_API_PROFILE_ID = "gemini-api" as const;
-export const GEMINI_DEFAULT_MODEL_ID = "gemini-2.5-flash" as const;
+export const GEMINI_DEFAULT_MODEL_ID = "gemini-3-flash-preview" as const;
 export const GEMINI_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta" as const;
 export const PROBE_GEMINI_BACKEND_CAPABILITY = "probe.backend.gemini_api" as const;
 

@@ -825,6 +825,7 @@ const ansi = {
   blue: "\x1b[34m",
   red: "\x1b[31m",
   gray: "\x1b[90m",
+  eraseLine: "\x1b[K",
 } as const;
 
 function renderMarkdown(text: string): string {
@@ -1402,6 +1403,7 @@ function makeGeminiInteractiveTurnStream(colors: ProbeCliColors): {
 } {
   let textOpen = false;
   let sawText = false;
+  let lastToolCallLine = "";
 
   const closeText = () => {
     if (textOpen) {
@@ -1413,6 +1415,10 @@ function makeGeminiInteractiveTurnStream(colors: ProbeCliColors): {
   return {
     onEvent: (event) => {
       if (event.type === "text-delta") {
+        if (lastToolCallLine) {
+          process.stdout.write("\n");
+          lastToolCallLine = "";
+        }
         if (!textOpen) {
           process.stdout.write(`${cliLabel(colors, "assistant", "assistant")} `);
           textOpen = true;
@@ -1425,22 +1431,42 @@ function makeGeminiInteractiveTurnStream(colors: ProbeCliColors): {
 
       if (event.type === "tool-call") {
         closeText();
-        process.stdout.write(`${cliToolLine(colors, "tool_call", event.name, safeJson(event.input), "call")}\n`);
+        if (lastToolCallLine) {
+          process.stdout.write("\n");
+        }
+        lastToolCallLine = cliToolLine(colors, "tool_call", event.name, safeJson(event.input), "call");
+        process.stdout.write(lastToolCallLine);
         return;
       }
 
       if (event.type === "tool-result") {
         closeText();
-        process.stdout.write(`${cliToolLine(colors, "tool_result", event.name, formatToolResultValue(event.result), "result")}\n`);
+        const resultLine = cliToolLine(colors, "tool_result", event.name, formatToolResultValue(event.result), "result");
+        if (lastToolCallLine) {
+          process.stdout.write(`\r${ansi.eraseLine}${lastToolCallLine} ${ansi.gray}→${ansi.reset} ${resultLine}\n`);
+          lastToolCallLine = "";
+        } else {
+          process.stdout.write(`${resultLine}\n`);
+        }
         return;
       }
 
       if (event.type === "tool-error") {
         closeText();
-        process.stdout.write(`${cliToolLine(colors, "tool_error", event.name, event.message, "error")}\n`);
+        const errorLine = cliToolLine(colors, "tool_error", event.name, event.message, "error");
+        if (lastToolCallLine) {
+          process.stdout.write(`\r${ansi.eraseLine}${lastToolCallLine} ${ansi.gray}→${ansi.reset} ${errorLine}\n`);
+          lastToolCallLine = "";
+        } else {
+          process.stdout.write(`${errorLine}\n`);
+        }
       }
     },
     finish: (result) => {
+      if (lastToolCallLine) {
+        process.stdout.write("\n");
+        lastToolCallLine = "";
+      }
       closeText();
 
       if (result === undefined) {
