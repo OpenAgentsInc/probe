@@ -8,40 +8,42 @@ to 100% feature parity with opencode V2 (core) and V1 (opencode package) layers.
 
 ## Current Probe State
 
-Probe has exactly one file-writing tool: `write_file` at
-`packages/runtime/src/cli.ts:1073-1091` (definition) and `1197-1239` (handler).
+Probe now has three file-mutation tools: `write_file`, `edit_file`, and `apply_patch`.
 
-### Parameters
+Tool definitions are in `packages/runtime/src/cli.ts` (`makeGeminiChatTools`).
+Handler implementations live in `packages/runtime/src/file-mutation.ts`.
+Shared workspace path resolution lives in `packages/runtime/src/workspace.ts`.
+Permission/approval system lives in `packages/runtime/src/permission.ts`.
 
-| Param     | Type   | Required | Description                              |
-|-----------|--------|----------|------------------------------------------|
-| `path`    | string | yes      | A relative file path under the workspace |
-| `content` | string | yes      | The full file content to write           |
+### Tools Available
 
-### What it does today
+| Tool          | What it does                                          |
+|---------------|-------------------------------------------------------|
+| `write_file`  | Full-file overwrite with BOM preservation + locking   |
+| `edit_file`   | Partial replace via `oldString`/`newString`/`replaceAll?` with BOM, line-ending, stale-content guard, and locking |
+| `apply_patch` | Multi-operation patch (add/update/delete) across files |
 
-1. Resolve workspace root via `PROBE_WORKSPACE_ROOT` or `OPENAGENTS_WORKSPACE_ROOT`
-   env vars.
-2. Resolve the requested path against the workspace; reject if the path is empty,
-   contains null bytes, `..`-escapes the workspace, or enters `.git`.
-3. Create parent directories with `mkdir(dirname(resolved), { recursive: true })`.
-4. Write the full file content as UTF-8 via `writeFile(resolved, content, "utf8")`.
-5. Return `{ path, content: "written to ..." }` on success or `{ path, error }`
-   on failure.
+### What's implemented (P0 + P1)
 
-### What it does NOT do
+| Feature | Status |
+|---------|--------|
+| `edit_file` tool with exact replace | ✅ |
+| `apply_patch` tool (add/update/delete) | ✅ |
+| Permission/approval gating with diff preview | ✅ |
+| BOM detection and preservation | ✅ |
+| Line-ending normalization (CRLF/LF) | ✅ |
+| Stale-content guard (race detection) | ✅ |
+| Per-file locking via Semaphore | ✅ |
 
-- No `edit` tool (partial replace via oldString/newString).
-- No permission/approval gating.
-- No diff preview.
-- No BOM detection or preservation.
-- No line-ending normalization (CRLF/LF).
-- No stale-content guard (race detection).
-- No per-file locking / mutex for concurrent writes.
-- No LSP diagnostics after write.
-- No auto-format after write.
-- No event publishing for watchers.
-- No snapshot / undo metadata.
+### What's still missing (P2 + P3)
+
+- Revalidation after plan resolution (P2)
+- LSP diagnostics after write (P2, depends on LSP service)
+- Auto-format after write (P2, depends on format service)
+- Event publishing for watchers (P3)
+- Snapshot/undo metadata (P3)
+- Fuzzy correction strategies (P3)
+- Structured error and success types (P3)
 
 ---
 
@@ -142,118 +144,87 @@ Partial edit with all V2 features plus:
 
 The gap can be grouped into layers of increasing sophistication.
 
-### Layer 1: Add the `edit` Tool (Highest Value, Lowest Effort)
+### Layer 1: `edit` Tool (✅ Implemented)
 
-Probe has no way to do partial file edits. The model must read, edit in its
-context window, and write back the entire file. This is wasteful and error-prone.
+`edit_file` tool at `packages/runtime/src/file-mutation.ts:editAnyWorkspaceFile`.
+Registered in `cli.ts:makeGeminiChatTools`.
 
-**What to build:**
+Parameters: `path`, `oldString`, `newString`, `replaceAll?` (optional).
 
-A new tool (name: `edit` or `edit_file`) at `packages/runtime/src/tool/edit.ts`
-with parameters:
+Implementation (in `file-mutation.ts`):
+1. Resolves path via `resolveWorkspacePath` (from `workspace.ts`).
+2. Rejects empty `oldString`, identical strings, zero matches, or multiple
+   matches when `replaceAll !== true`.
+3. Reads file with BOM detection, normalizes line endings, matches/replaces
+   oldString, restores line endings, re-joins BOM, writes back.
+4. Wrapped in per-file lock; stale-content guard re-reads and compares bytes
+   before final write.
+5. Checks permission handler before proceeding.
 
-| Param        | Type    | Required | Description                           |
-|--------------|---------|----------|---------------------------------------|
-| `path`       | string  | yes      | Relative file path under workspace    |
-| `oldString`  | string  | yes      | Exact text to replace                 |
-| `newString`  | string  | yes      | Replacement text (must differ)        |
-| `replaceAll` | boolean | no       | Replace all exact occurrences (false) |
+### Layer 1b: `apply_patch` Tool (✅ Implemented)
 
-Implementation:
+`apply_patch` tool at `packages/runtime/src/file-mutation.ts:applyAnyWorkspaceFilePatch`.
+Registered in `cli.ts:makeGeminiChatTools`.
 
-1. Reuse `resolveWorkspacePath` from the existing `write_file` handler.
-2. Reject if `oldString` is empty (use `write_file` to create files).
-3. Reject if `oldString === newString`.
-4. Read the file from disk.
-5. Count occurrences of `oldString`; reject if 0 matches; reject if >1 and
-   `replaceAll !== true`.
-6. Perform the replacement.
-7. Write the result back (full file write, but only the modified content).
+Parameters: `patchText` containing structured operations
+(`+ADD <path>`, `+UPDATE <path>`, `+DELETE <path>`).
 
-That alone closes the biggest gap. Total new code: ~80-120 lines.
+Single permission approval for the entire patch upfront, then applies
+operations sequentially. Reports per-operation status.
 
-### Layer 1b: Add `apply_patch` Tool (Medium Value)
+### Layer 2: Permission / Approval Gating (✅ Implemented)
 
-A multi-operation patch tool that accepts a complete patch description with add,
-update, and delete operations. Useful when the model wants to make several
-changes to a file in one tool call. Can be built after the basic `edit` tool.
+Module: `packages/runtime/src/permission.ts`.
 
-### Layer 2: Permission / Approval Gating
+- `PermissionHandler` interface with `ask(request)` returning
+  `"allow" | "deny" | "always"`.
+- Module-level handler set via `setPermissionHandler()`.
+- Default is `always allow` (for non-interactive mode).
+- In interactive chat (`runGeminiInteractiveChat`), a
+  `makeInteractivePermissionHandler()` is installed that shows a diff preview
+  and prompts the user with `(y=yes, n=no, a=always)`.
+- All mutation tools (`write_file`, `edit_file`, `apply_patch`) check
+  permission before executing.
 
-Probe writes immediately with no user-in-the-loop. OpenCode requires explicit
-user approval for every mutation.
+### Layer 3: BOM Handling (✅ Implemented)
 
-**What to build:**
+Functions in `packages/runtime/src/file-mutation.ts`:
+- `splitBom(text)` — strips leading BOM bytes, returns `{ bom, text }`.
+- `hasUtf8Bom(content)` — checks Uint8Array for BOM signature.
+- `joinBom(text, bom)` — re-joins BOM if needed.
+- `readFileWithBom(content)` — decodes with BOM awareness.
 
-1. Define a permission/approval service. The tool handler yields a request that
-   the CLI presents to the user (`Allow/Deny/Always allow`) before continuing.
-2. For each write/edit, compute and display a unified diff so the user can see
-   what changed.
-3. Support a "save" / "always allow" pattern (OpenCode's `save: ["*"]`).
+`write_file`: reads existing file's BOM, preserves it on write.
+`edit_file`: reads existing BOM, splits before matching, re-joins after.
 
-**Interface sketch:**
+### Layer 4: Line-Ending Normalization (✅ Implemented)
 
-```typescript
-interface ApprovalContext {
-  ask(request: {
-    action: "edit";
-    file: string;
-    diff: string;
-  }): Effect.Effect<"allow" | "deny" | "always", never>
-}
-```
+Functions in `packages/runtime/src/file-mutation.ts`:
+- `normalizeLineEndings(text)` — strips `\r`.
+- `detectLineEnding(text)` — detects `\n` vs `\r\n`.
+- `convertToLineEnding(text, ending)` — converts to target line ending.
 
-### Layer 3: BOM Handling
+Applied in `editAnyWorkspaceFile`: content and old/new strings are normalized
+to `\n` for matching, then result is converted back to the file's detected
+line ending before writing.
 
-UTF-8 BOM is rare but real. If probe writes a file that previously had a BOM
-without preserving it, some tools and compilers break.
+### Layer 5: Stale-Content Guard (✅ Implemented)
 
-**What to build:**
+In `editAnyWorkspaceFile`:
+1. On read, captures the raw `Uint8Array` of the file content.
+2. Before write (under lock), re-reads the file and byte-compares.
+3. If bytes differ, fails with "File changed after read. Read it again before editing."
 
-1. Before writing, read the first 3 bytes of the existing file.
-2. If they match `0xEF 0xBB 0xBF`, the file has a BOM.
-3. When writing new content, strip any user-provided BOM, then prepend the BOM
-   if the original file had one (or if the user explicitly provided one).
-4. Do the same for the `edit` tool: split BOM before matching oldString,
-   rejoin after replacement.
+Also in `writeAnyWorkspaceFile`: re-reads the file for BOM detection before
+write, so the stale window is under lock.
 
-### Layer 4: Line-Ending Normalization
+### Layer 6: Per-File Locking (✅ Implemented)
 
-If the model sends `oldString` with `\n` but the file has `\r\n`, the match
-fails. OpenCode normalizes both sides to `\n`, matches, then converts the
-result back to the file's existing line ending before writing.
-
-**What to build in the `edit` tool:**
-
-1. Detect the file's line ending style: `file.includes("\r\n") ? "\r\n" : "\n"`.
-2. Normalize `oldString` and `newString` to `\n` (strip `\r`).
-3. Normalize the file content to `\n`.
-4. Match and replace.
-5. Convert the result back to the detected line ending.
-
-### Layer 5: Stale-Content Guard
-
-Between the time the model reads a file and calls `edit`, another actor might
-have changed it. Without a guard, probe silently overwrites the intermediate
-change.
-
-**What to build in the `edit` tool:**
-
-1. Before reading, record the file content's byte hash or the full byte array.
-2. Before writing, under a per-file lock, re-read the file and compare bytes.
-3. If they differ, fail with a clear error: "File changed since read. Read it
-   again before editing."
-
-### Layer 6: Per-File Locking / Mutex
-
-If the model issues two concurrent `write_file` or `edit` calls to the same
-file, they race.
-
-**What to build:**
-
-Wrap the critical section (read → replace → write) in a per-canonical-target
-mutex. OpenCode uses `KeyedMutex` (async mutex keyed by string). Probe already
-uses Effect; `Effect.lock` or a simple `Map<string, Semaphore>` works.
+In `packages/runtime/src/file-mutation.ts`:
+- `Map<string, Semaphore.Semaphore>` keyed by canonical absolute path.
+- `getFileLock(filePath)` returns or creates a `Semaphore.makeUnsafe(1)`.
+- Both `writeAnyWorkspaceFile` and `editAnyWorkspaceFile` wrap the critical
+  read-modify-write section in `lock.withLock(...)`.
 
 ### Layer 7: Revalidation After Plan Resolution
 
@@ -393,27 +364,26 @@ would let the model express multi-file changes in one turn.
 
 ## Priority Order
 
-| Priority | Layer | Effort | Value | Notes |
-|----------|-------|--------|-------|-------|
-| P0       | 1  — `edit` tool          | small  | high  | Closes the biggest functional gap |
-| P0       | 1b — `apply_patch` tool   | medium | med   | Useful for multi-file changes |
-| P1       | 2  — permission/approval  | medium | high  | Safety; no silent file mutations |
-| P1       | 3  — BOM handling         | small  | low   | Edge case but breaks tools when wrong |
-| P1       | 4  — line-ending norm     | small  | med   | Prevents false "oldString not found" |
-| P1       | 5  — stale-content guard  | small  | med   | Prevents silent overwrites |
-| P1       | 6  — per-file locking     | small  | med   | Prevents races |
-| P2       | 7  — revalidation         | small  | med   | Catches mid-flight path changes |
-| P2       | 8  — LSP diagnostics      | large  | high  | Great for model feedback but depends on LSP |
-| P2       | 9  — auto-format          | medium | med   | Depends on format service |
-| P3       | 10 — event publishing     | medium | low   | Depends on event system |
-| P3       | 11 — snapshot/undo        | medium | low   | Nice to have |
-| P3       | 12 — fuzzy correction     | large  | med   | Tolerates model errors |
-| P3       | 13 — structured errors   | small  | low   | Incremental polish |
-| P3       | 14 — structured success  | small  | low   | Incremental polish |
+| Priority | Layer | Effort | Value | Status |
+|----------|-------|--------|-------|--------|
+| P0       | 1  — `edit` tool          | small  | high  | ✅ |
+| P0       | 1b — `apply_patch` tool   | medium | med   | ✅ |
+| P1       | 2  — permission/approval  | medium | high  | ✅ |
+| P1       | 3  — BOM handling         | small  | low   | ✅ |
+| P1       | 4  — line-ending norm     | small  | med   | ✅ |
+| P1       | 5  — stale-content guard  | small  | med   | ✅ |
+| P1       | 6  — per-file locking     | small  | med   | ✅ |
+| P2       | 7  — revalidation         | small  | med   | ❌ |
+| P2       | 8  — LSP diagnostics      | large  | high  | ❌ (depends on LSP service) |
+| P2       | 9  — auto-format          | medium | med   | ❌ (depends on format service) |
+| P3       | 10 — event publishing     | medium | low   | ❌ (depends on event system) |
+| P3       | 11 — snapshot/undo        | medium | low   | ❌ |
+| P3       | 12 — fuzzy correction     | large  | med   | ❌ |
+| P3       | 13 — structured errors   | small  | low   | ❌ |
+| P3       | 14 — structured success  | small  | low   | ❌ |
 
-Total effort to reach full V2 parity (P0+P1): about 2-3 focused sessions.
-Total effort to reach full V1 parity (P0-P3): about 1-2 weeks depending on
-LSP/format service readiness.
+**P0+P1 completed.** Total effort was about 1 focused session.
+Remaining layers (P2+P3) need about 1-2 weeks depending on LSP/format service readiness.
 
 ---
 
@@ -422,39 +392,39 @@ LSP/format service readiness.
 The following checklist enumerates every specific change needed. Check off items
 as they are completed.
 
-### New Tool: `edit` (`packages/runtime/src/tool/edit.ts`)
+### New Tool: `edit` (`packages/runtime/src/file-mutation.ts:editAnyWorkspaceFile`)
 
-- [ ] Define tool parameters: `path`, `oldString`, `newString`, `replaceAll?`
-- [ ] Register in the tool list alongside `write_file`
-- [ ] Resolve path via existing `resolveWorkspacePath`
-- [ ] Reject empty `oldString` (use `write_file` instead)
-- [ ] Reject `oldString === newString`
-- [ ] Reject if `oldString` not found in file
-- [ ] Reject if multiple matches found and `replaceAll !== true`
-- [ ] Perform exact text replacement
-- [ ] Write result back to disk
-- [ ] Return structured result with replacement count
+- [x] Define tool parameters: `path`, `oldString`, `newString`, `replaceAll?`
+- [x] Register in the tool list alongside `write_file`
+- [x] Resolve path via existing `resolveWorkspacePath`
+- [x] Reject empty `oldString` (use `write_file` instead)
+- [x] Reject `oldString === newString`
+- [x] Reject if `oldString` not found in file
+- [x] Reject if multiple matches found and `replaceAll !== true`
+- [x] Perform exact text replacement
+- [x] Write result back to disk (with BOM + line endings + locking + stale-content guard)
+- [x] Return structured result with replacement count
 
-### New Tool: `apply_patch` (`packages/runtime/src/tool/apply-patch.ts`)
+### New Tool: `apply_patch` (`packages/runtime/src/file-mutation.ts:applyAnyWorkspaceFilePatch`)
 
-- [ ] Define patch format (add/update/delete operations)
-- [ ] Resolve all target plans up front
-- [ ] Single permission approval for all operations
-- [ ] Sequential uninterruptible application
-- [ ] Report partial application on failure
+- [x] Define patch format (add/update/delete operations)
+- [x] Resolve all target plans up front
+- [x] Single permission approval for all operations
+- [x] Sequential uninterruptible application
+- [x] Report partial application on failure
 
 ### Existing `write_file` Upgrades
 
-- [ ] Add BOM preservation (read existing BOM, preserve on write)
-- [ ] Add line-ending normalization (optional; `edit` needs it more)
-- [ ] Add per-file locking
-- [ ] Add revalidation before write
+- [x] Add BOM preservation (read existing BOM, preserve on write)
+- [ ] Add line-ending normalization (low value for write; defer)
+- [x] Add per-file locking
+- [ ] Add revalidation before write (P2)
 
 ### All Mutation Tools (shared infra)
 
-- [ ] Build permission/approval service with diff preview
-- [ ] Build `KeyedMutex` or semaphore per canonical target
-- [ ] Build stale-content guard (`writeIfUnchanged` pattern)
+- [x] Build permission/approval service with diff preview (`permission.ts`)
+- [x] Build semaphore per canonical target (`file-mutation.ts:getFileLock`)
+- [x] Build stale-content guard (`file-mutation.ts:editAnyWorkspaceFile`)
 - [ ] Add structured error types (`StaleContentError`, etc.)
 - [ ] Add structured success types
 - [ ] Build revalidation step (re-check path identity pre-write)
@@ -496,5 +466,9 @@ as they are completed.
 
 | File | Purpose |
 |------|---------|
-| `src/cli.ts` | Current `write_file` tool definition (line 1073) + handler (line 1197) + `resolveWorkspacePath` (line 1372) |
+| `src/cli.ts` | Tool registration in `makeGeminiChatTools` (write_file, edit_file, apply_patch, read_file, list_files, search_code, current_time); interactive chat with permission handler |
 | `src/llm/tool.ts` | `ProbeLlmTool` type + `defineProbeLlmTool` helper |
+| `src/llm/tool-runtime.ts` | `dispatchProbeLlmTool` — tool execution dispatch |
+| `src/file-mutation.ts` | All file mutation logic: `writeAnyWorkspaceFile` (BOM+locking), `editAnyWorkspaceFile` (partial replace with BOM+line endings+stale-content guard+locking), `applyAnyWorkspaceFilePatch`, BOM utils, line-ending utils, diff preview, per-file locking, stale-content guard |
+| `src/workspace.ts` | Workspace path resolution: `resolveProbeWorkspaceRoot`, `resolveProbeChatWorkspaceRoot`, `resolveWorkspacePath` |
+| `src/permission.ts` | Permission/approval system: `PermissionHandler`, `setPermissionHandler`, `makeInteractivePermissionHandler`, module-level default auto-allow |

@@ -4,6 +4,22 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Cause, Effect, Exit, Schema as S } from "effect";
+import {
+  applyAnyWorkspaceFilePatch,
+  editAnyWorkspaceFile,
+  writeAnyWorkspaceFile as writeAnyWorkspaceFileWithBom,
+} from "./file-mutation";
+import {
+  getPermissionHandler,
+  makeInteractivePermissionHandler,
+  resetPermissionHandler,
+  setPermissionHandler,
+} from "./permission";
+import {
+  resolveProbeChatWorkspaceRoot,
+  resolveProbeWorkspaceRoot,
+  resolveWorkspacePath,
+} from "./workspace";
 import { marked } from "marked";
 import {
   AppleFmBackendError,
@@ -1072,7 +1088,7 @@ function makeGeminiChatTools(env: Readonly<Record<string, string | undefined>> =
     }),
     write_file: defineProbeLlmTool({
       name: "write_file",
-      description: "Write a UTF-8 text file under the OpenAgents workspace. Creates parent directories if needed. Use this to create new files or overwrite existing ones.",
+      description: "Write a UTF-8 text file under the OpenAgents workspace. Creates parent directories if needed. Preserves UTF-8 BOM if present. Use this to create new files or overwrite existing ones.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1087,7 +1103,50 @@ function makeGeminiChatTools(env: Readonly<Record<string, string | undefined>> =
         },
         required: ["path", "content"],
       },
-      execute: (input) => writeAnyWorkspaceFile(input, env),
+      execute: (input) => writeAnyWorkspaceFileWithBom(input, env),
+    }),
+    edit_file: defineProbeLlmTool({
+      name: "edit_file",
+      description:
+        "Replace exact text in one file under the workspace. Handles BOM and line endings automatically. Use this instead of write_file when you want to change part of a file.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "A relative file path under the workspace.",
+          },
+          oldString: {
+            type: "string",
+            description: "The exact text to replace. Must match the file content exactly, including whitespace and indentation.",
+          },
+          newString: {
+            type: "string",
+            description: "The replacement text. Must differ from oldString.",
+          },
+          replaceAll: {
+            type: "boolean",
+            description: "Replace all exact occurrences of oldString. Set to true only when you are certain there are multiple identical blocks to change.",
+          },
+        },
+        required: ["path", "oldString", "newString"],
+      },
+      execute: (input) => editAnyWorkspaceFile(input, env),
+    }),
+    apply_patch: defineProbeLlmTool({
+      name: "apply_patch",
+      description: "Apply a structured patch with add, update, and delete operations across multiple files. Each operation starts with +ADD <path>, +UPDATE <path>, or +DELETE <path>. For +UPDATE, separate old and new content with ---.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          patchText: {
+            type: "string",
+            description: "The full patch text describing add, update, and delete operations.",
+          },
+        },
+        required: ["patchText"],
+      },
+      execute: (input) => applyAnyWorkspaceFilePatch(input, env),
     }),
     list_files: defineProbeLlmTool({
       name: "list_files",
@@ -1365,30 +1424,6 @@ function collectWorkspaceEntries(
   });
 }
 
-function resolveProbeChatWorkspaceRoot(env: Readonly<Record<string, string | undefined>> = {}): string {
-  return resolve(env.PROBE_WORKSPACE_ROOT ?? env.OPENAGENTS_WORKSPACE_ROOT ?? dirname(resolveProbeWorkspaceRoot()));
-}
-
-function resolveWorkspacePath(
-  workspace: string,
-  path: string,
-): { readonly absolutePath: string; readonly relativePath: string } | undefined {
-  const absolutePath = resolve(workspace, path);
-  const relativePath = relative(workspace, absolutePath) || ".";
-
-  if (
-    path.length === 0 ||
-    path.includes("\0") ||
-    relativePath.startsWith("..") ||
-    relativePath.split(sep).includes("..") ||
-    relativePath.split(sep).includes(".git")
-  ) {
-    return undefined;
-  }
-
-  return { absolutePath, relativePath };
-}
-
 function shouldSkipWorkspaceEntry(name: string): boolean {
   return name === ".git" || name === "node_modules" || name === ".next" || name === "dist" || name === "build";
 }
@@ -1564,24 +1599,6 @@ function safeJson(value: unknown): string {
   }
 }
 
-function resolveProbeWorkspaceRoot(start = process.cwd()): string {
-  let current = resolve(start);
-
-  for (;;) {
-    if (existsSync(resolve(current, "packages/runtime/src/cli.ts")) && existsSync(resolve(current, "README.md"))) {
-      return current;
-    }
-
-    const parent = dirname(current);
-
-    if (parent === current) {
-      return resolve(start);
-    }
-
-    current = parent;
-  }
-}
-
 if (import.meta.main) {
   const argv = Bun.argv.slice(2);
 
@@ -1606,6 +1623,7 @@ async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: Probe
   const options = parseOptions(args);
   const model = stringOption(options, "model") ?? GEMINI_DEFAULT_MODEL_ID;
   const maxTokens = numberOption(options, "max-tokens") ?? 65536;
+  setPermissionHandler(makeInteractivePermissionHandler());
   const tools = makeGeminiChatTools(deps.env);
   const colors = makeCliColors(options, deps);
   const clientResult = await Effect.runPromise(
