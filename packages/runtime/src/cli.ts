@@ -10,12 +10,6 @@ import {
   writeAnyWorkspaceFile as writeAnyWorkspaceFileWithBom,
 } from "./file-mutation";
 import {
-  getPermissionHandler,
-  makeInteractivePermissionHandler,
-  resetPermissionHandler,
-  setPermissionHandler,
-} from "./permission";
-import {
   resolveProbeChatWorkspaceRoot,
   resolveProbeWorkspaceRoot,
   resolveWorkspacePath,
@@ -1623,7 +1617,9 @@ async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: Probe
   const options = parseOptions(args);
   const model = stringOption(options, "model") ?? GEMINI_DEFAULT_MODEL_ID;
   const maxTokens = numberOption(options, "max-tokens") ?? 65536;
-  setPermissionHandler(makeInteractivePermissionHandler());
+  // TODO: wire a non-blocking permission prompt into the main chat loop
+  // instead of trying to read stdin from inside the tool fiber.
+  // For now the default handler always allows.
   const tools = makeGeminiChatTools(deps.env);
   const colors = makeCliColors(options, deps);
   const clientResult = await Effect.runPromise(
