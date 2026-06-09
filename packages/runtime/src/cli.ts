@@ -2,7 +2,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
-import { createInterface } from "node:readline/promises";
+import { createInterface, type Interface } from "node:readline/promises";
 import { Cause, Effect, Exit, Schema as S } from "effect";
 import {
   applyAnyWorkspaceFilePatch,
@@ -629,7 +629,7 @@ function formatAppleFmSmokeCompletion(completion: AppleFmPlainTextCompletion): s
     `profile: ${completion.profile.id}`,
     `kind: ${completion.profile.kind}`,
     `model: ${completion.response.model ?? completion.profile.model}`,
-    `assistant: ${completion.text}`,
+    `probe: ${completion.text}`,
     `usage: ${formatUsage(completion.usage)}`,
     `receipt: ${JSON.stringify(completion.receipt)}`,
   ].join("\n") + "\n";
@@ -662,7 +662,7 @@ function formatGeminiCompletion(
     cliField(colors, "model", completion.finalRequest.model.model),
     cliField(colors, "apiKeySource", apiKeySource),
     cliField(colors, "apiKeyRedacted", "true"),
-    cliLine(colors, "assistant", completion.text, "assistant"),
+    cliLine(colors, "probe", completion.text, "assistant"),
     cliField(colors, "roundTrips", String(completion.roundTrips), "muted"),
     cliLine(colors, "usage", formatGeminiUsage(completion.receipt.usage), "usage"),
     cliField(colors, "receipt", JSON.stringify(completion.receipt), "muted"),
@@ -701,7 +701,7 @@ function formatGeminiChatTurn(input: {
     }
   }
 
-  lines.push(cliLine(colors, "assistant", input.result.text, "assistant"));
+  lines.push(cliLine(colors, "probe", input.result.text, "assistant"));
   lines.push(cliField(colors, "roundTrips", String(input.result.roundTrips), "muted"));
   lines.push(cliLine(colors, "usage", formatGeminiUsage(input.result.receipt.usage), "usage"));
 
@@ -1450,7 +1450,7 @@ function makeGeminiInteractiveTurnStream(colors: ProbeCliColors): {
           lastToolCallLine = "";
         }
         if (!textOpen) {
-          process.stdout.write(`${cliLabel(colors, "assistant", "assistant")} `);
+          process.stdout.write(`${cliLabel(colors, "probe", "assistant")} `);
           textOpen = true;
         }
 
@@ -1504,7 +1504,7 @@ function makeGeminiInteractiveTurnStream(colors: ProbeCliColors): {
       }
 
       if (!sawText && result.text.length > 0) {
-        process.stdout.write(`${cliLine(colors, "assistant", renderMarkdown(result.text).trimEnd(), "assistant")}\n`);
+        process.stdout.write(`${cliLine(colors, "probe", renderMarkdown(result.text).trimEnd(), "assistant")}\n`);
       }
 
     },
@@ -1650,94 +1650,92 @@ async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: Probe
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   let messages: ReadonlyArray<ProbeLlmMessage> = [];
 
-  try {
-    for (;;) {
-      const prompt = (await rl.question(cliColor(colors, "prompt", "probe> "))).trim();
+  for (;;) {
+    const rawPrompt = await readMultiLineInput(rl, cliColor(colors, "prompt", "> "));
+    const prompt = rawPrompt.trim();
 
-      if (prompt.length === 0) {
-        continue;
-      }
+    if (prompt.length === 0) {
+      continue;
+    }
 
-      if (prompt === "/exit" || prompt === "/quit") {
-        return 0;
-      }
+    if (prompt === "/exit" || prompt === "/quit") {
+      rl.close();
+      return 0;
+    }
 
-      const request = makeGeminiChatRequest({ messages, model, prompt, maxTokens, tools });
-      const stream = makeGeminiInteractiveTurnStream(colors);
-      const fiber = Effect.runFork(
-        clientResult.complete({ request, tools, onEvent: stream.onEvent }).pipe(
-          Effect.catch((error: GeminiClientError) => Effect.succeed(error)),
-        ),
-      );
+    const request = makeGeminiChatRequest({ messages, model, prompt, maxTokens, tools });
+    const stream = makeGeminiInteractiveTurnStream(colors);
+    const fiber = Effect.runFork(
+      clientResult.complete({ request, tools, onEvent: stream.onEvent }).pipe(
+        Effect.catch((error: GeminiClientError) => Effect.succeed(error)),
+      ),
+    );
 
-      // Enable raw mode during streaming so we can detect Escape keypresses
-      const wasRaw = process.stdin.isRaw;
-      if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
-        process.stdin.setRawMode(true);
-      }
+    // Enable raw mode during streaming so we can detect Escape keypresses
+    const wasRaw = process.stdin.isRaw;
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+      process.stdin.setRawMode(true);
+    }
 
-      let escapeCount = 0;
-      let escapeTimer: ReturnType<typeof setTimeout> | undefined;
+    let escapeCount = 0;
+    let escapeTimer: ReturnType<typeof setTimeout> | undefined;
 
-      const onKeyData = (chunk: Buffer) => {
-        for (let i = 0; i < chunk.length; i++) {
-          if (chunk[i] === 0x1b) {
-            escapeCount++;
-            if (escapeCount === 1) {
-              process.stdout.write(`\n${cliColor(colors, "muted", "again to interrupt")}\n`);
-              escapeTimer = setTimeout(() => {
-                escapeCount = 0;
-              }, 5000);
-            } else if (escapeCount >= 2) {
-              clearTimeout(escapeTimer);
-              escapeTimer = undefined;
-              fiber.interruptUnsafe();
-            }
-          } else if (escapeCount === 1) {
-            escapeCount = 0;
+    const onKeyData = (chunk: Buffer) => {
+      for (let i = 0; i < chunk.length; i++) {
+        if (chunk[i] === 0x1b) {
+          escapeCount++;
+          if (escapeCount === 1) {
+            process.stdout.write(`\n${cliColor(colors, "muted", "again to interrupt")}\n`);
+            escapeTimer = setTimeout(() => {
+              escapeCount = 0;
+            }, 5000);
+          } else if (escapeCount >= 2) {
             clearTimeout(escapeTimer);
             escapeTimer = undefined;
+            fiber.interruptUnsafe();
           }
+        } else if (escapeCount === 1) {
+          escapeCount = 0;
+          clearTimeout(escapeTimer);
+          escapeTimer = undefined;
         }
-      };
+      }
+    };
 
-      process.stdin.on("data", onKeyData);
+    process.stdin.on("data", onKeyData);
 
-      const result = await new Promise<GeminiCompleteResult | GeminiClientError | undefined>((resolve) => {
-        fiber.addObserver((exit: Exit.Exit<GeminiCompleteResult | GeminiClientError, never>) => {
-          if (Exit.isSuccess(exit)) {
-            resolve(exit.value);
-          } else if (exit.cause.reasons.some(Cause.isInterruptReason)) {
-            resolve(undefined);
-          } else {
-            const fail = exit.cause.reasons.find(Cause.isFailReason);
-            resolve(fail?.error ?? undefined);
-          }
-        });
+    const result = await new Promise<GeminiCompleteResult | GeminiClientError | undefined>((resolve) => {
+      fiber.addObserver((exit: Exit.Exit<GeminiCompleteResult | GeminiClientError, never>) => {
+        if (Exit.isSuccess(exit)) {
+          resolve(exit.value);
+        } else if (exit.cause.reasons.some(Cause.isInterruptReason)) {
+          resolve(undefined);
+        } else {
+          const fail = exit.cause.reasons.find(Cause.isFailReason);
+          resolve(fail?.error ?? undefined);
+        }
       });
+    });
 
-      process.stdin.removeListener("data", onKeyData);
-      clearTimeout(escapeTimer);
-      if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
-        process.stdin.setRawMode(wasRaw ?? false);
-      }
-
-      if (result === undefined) {
-        process.stdout.write(`${cliColor(colors, "muted", "interrupted")}\n`);
-        continue;
-      }
-
-      if (result instanceof GeminiClientError) {
-        stream.finish();
-        process.stdout.write(formatGeminiFailure("Probe Gemini chat", result, colors));
-        continue;
-      }
-
-      stream.finish(result);
-      messages = [...result.finalRequest.messages, makeProbeLlmMessage("assistant", result.text)];
+    process.stdin.removeListener("data", onKeyData);
+    clearTimeout(escapeTimer);
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+      process.stdin.setRawMode(wasRaw ?? false);
     }
-  } finally {
-    rl.close();
+
+    if (result === undefined) {
+      process.stdout.write(`${cliColor(colors, "muted", "interrupted")}\n`);
+      continue;
+    }
+
+    if (result instanceof GeminiClientError) {
+      stream.finish();
+      process.stdout.write(formatGeminiFailure("Probe Gemini chat", result, colors));
+      continue;
+    }
+
+    stream.finish(result);
+    messages = [...result.finalRequest.messages, makeProbeLlmMessage("assistant", result.text)];
   }
 }
 
@@ -1766,9 +1764,10 @@ async function runGeminiTuiChat(input: {
     for (;;) {
       renderer.suspend();
       const rl = createInterface({ input: process.stdin, output: process.stdout });
-      const prompt = (await rl.question("probe> ")).trim();
+      const rawPrompt = await readMultiLineInput(rl, "> ");
       rl.close();
       renderer.resume();
+      const prompt = rawPrompt.trim();
 
       if (prompt.length === 0) {
         continue;
@@ -1952,4 +1951,24 @@ function renderToolResultInSession(
     const code = createCodeWithLineNumbers(renderer, jsonText, "plaintext");
     session.add(code);
   }
+}
+
+function readMultiLineInput(rl: Interface, prompt: string, debounceMs = 150): Promise<string> {
+  const lines: string[] = [];
+  process.stdout.write(prompt);
+
+  return new Promise<string>((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const onLine = (line: string) => {
+      lines.push(line);
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        rl.off("line", onLine);
+        resolve(lines.join("\n"));
+      }, debounceMs);
+    };
+
+    rl.on("line", onLine);
+  });
 }

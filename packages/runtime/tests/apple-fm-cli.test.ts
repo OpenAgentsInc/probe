@@ -112,7 +112,7 @@ describe("Probe CLI Apple FM commands", () => {
     );
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("assistant: probe apple fm smoke ok");
+    expect(result.stdout).toContain("probe: probe apple fm smoke ok");
     expect(result.stdout).toContain("usage: truth=estimated prompt=2 completion=5 total=7");
     expect(result.stdout).toContain("\"kind\":\"probe_backend_transcript\"");
     expect(seenPaths).toEqual(["GET /health", "POST /v1/chat/completions"]);

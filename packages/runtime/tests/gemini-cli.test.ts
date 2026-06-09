@@ -35,7 +35,7 @@ describe("Probe CLI Gemini backend commands", () => {
     expect(result.stdout).toContain("kind: gemini_api");
     expect(result.stdout).toContain("apiKeySource: GOOGLE_GENERATIVE_AI_API_KEY");
     expect(result.stdout).toContain("apiKeyRedacted: true");
-    expect(result.stdout).toContain("assistant: probe gemini smoke ok");
+    expect(result.stdout).toContain("probe: probe gemini smoke ok");
     expect(result.stdout).toContain("usage: input=2 output=5 total=7");
     expect(result.stdout).not.toContain("test-gemini-key");
     expect(seen.apiKey).toBe("test-gemini-key");
@@ -157,7 +157,7 @@ describe("Probe CLI Gemini backend commands", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("apiKeySource: PROBE_OMEGA_BEARER_TOKEN");
-    expect(result.stdout).toContain("assistant: omega ok");
+    expect(result.stdout).toContain("probe: omega ok");
     expect(result.stdout).not.toContain("oa_agent_test");
     expect(seen[0]?.authorization).toBe("Bearer oa_agent_test");
     expect(seen[0]?.apiKey).toBe("");
@@ -222,7 +222,7 @@ describe("Probe CLI Gemini backend commands", () => {
     expect(result.stdout).toContain("apiKeyRedacted: true");
     expect(result.stdout).toContain("tool_call: current_time {}");
     expect(result.stdout).toContain("tool_result: current_time");
-    expect(result.stdout).toContain("assistant: It is test time.");
+    expect(result.stdout).toContain("probe: It is test time.");
     expect(result.stdout).toContain("usage: input=10 output=5 total=15");
     expect(result.stdout).not.toContain("test-gemini-key");
     expect(bodies[0]).toMatchObject({
@@ -291,7 +291,7 @@ describe("Probe CLI Gemini backend commands", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("\x1b[1m\x1b[36mProbe Gemini chat\x1b[0m");
-    expect(result.stdout).toContain("\x1b[1m\x1b[32massistant:\x1b[0m colored");
+    expect(result.stdout).toContain("\x1b[1m\x1b[32mprobe:\x1b[0m colored");
     expect(result.stdout).toContain("\x1b[33musage:\x1b[0m");
     expect(result.stdout).not.toContain("test-gemini-key");
   });
@@ -324,6 +324,6 @@ describe("Probe CLI Gemini backend commands", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("tool_call: search_code");
     expect(result.stdout).toContain("tool_result: search_code Probe is being reset  in  README.md  (1 match)");
-    expect(result.stdout).toContain("assistant: Found it.");
+    expect(result.stdout).toContain("probe: Found it.");
   });
 });
