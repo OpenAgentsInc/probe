@@ -32,6 +32,7 @@ import {
 import { type JsonValue, type ProbePublicProjectionUnsafe } from "../contracts/provider-account";
 
 export const PROBE_BENCHMARK_CLOSEOUT_BUNDLE_SCHEMA_REF = "probe.benchmark_closeout_bundle.v1" as const;
+export const PROBE_GEPA_LIVE_RUNNER_GATE_SCHEMA_REF = "probe.gepa_live_runner_gate.v1" as const;
 
 export const PROBE_BENCHMARK_CLOSEOUT_BUNDLE_FILE_NAMES = [
   "probe-run-record.json",
@@ -98,6 +99,51 @@ export interface ProbeBenchmarkCloseoutBundleWriteResult {
     readonly fileName: ProbeBenchmarkCloseoutBundleFileName;
     readonly path: string;
   }>;
+}
+
+export interface ProbeGepaLiveRunnerGateInput {
+  readonly bundle: ProbeBenchmarkCloseoutBundle;
+  readonly candidateManifestAuthorityRefs: ReadonlyArray<string>;
+  readonly mode: "sandbox" | "live";
+  readonly productPromotionGateRefs?: ReadonlyArray<string>;
+  readonly publicScoreGateRefs?: ReadonlyArray<string>;
+  readonly payoutGateRefs?: ReadonlyArray<string>;
+  readonly runnerExecutionRefs: ReadonlyArray<string>;
+}
+
+export interface ProbeGepaLiveRunnerGateProjection {
+  readonly assignmentRef: string;
+  readonly blockerRefs: ReadonlyArray<string>;
+  readonly bundleRef: string;
+  readonly candidateHash: string;
+  readonly candidateManifestAuthorityRefs: ReadonlyArray<string>;
+  readonly closeoutRef: string;
+  readonly evidenceRefs: {
+    readonly artifactRefs: ReadonlyArray<string>;
+    readonly candidateRefs: ReadonlyArray<string>;
+    readonly failureRefs: ReadonlyArray<string>;
+    readonly proofRefs: ReadonlyArray<string>;
+    readonly resourceRefs: ReadonlyArray<string>;
+    readonly routeScorecardRefs: ReadonlyArray<string>;
+    readonly runRefs: ReadonlyArray<string>;
+    readonly selectedSignatureRefs: ReadonlyArray<string>;
+    readonly toolMenuRefs: ReadonlyArray<string>;
+    readonly verifierRefs: ReadonlyArray<string>;
+  };
+  readonly evidenceSplit: ProbeBenchmarkEvidenceSplit;
+  readonly mode: "sandbox" | "live";
+  readonly omegaImportAllowed: boolean;
+  readonly productPromotionAllowed: boolean;
+  readonly productPromotionGateRefs: ReadonlyArray<string>;
+  readonly publicScoreClaimAllowed: boolean;
+  readonly publicScoreGateRefs: ReadonlyArray<string>;
+  readonly payoutClaimAllowed: boolean;
+  readonly payoutGateRefs: ReadonlyArray<string>;
+  readonly runnerExecutionRefs: ReadonlyArray<string>;
+  readonly runnerGateReady: boolean;
+  readonly runRef: string;
+  readonly runStatus: ProbeBenchmarkTerminalRunStatus;
+  readonly schemaRef: typeof PROBE_GEPA_LIVE_RUNNER_GATE_SCHEMA_REF;
 }
 
 export class ProbeBenchmarkCloseoutWriterError extends S.TaggedErrorClass<ProbeBenchmarkCloseoutWriterError>()(
@@ -263,6 +309,95 @@ export function makeProbeBenchmarkCloseoutBundle(
       files,
       runRef: input.runRef,
       schemaRef: PROBE_BENCHMARK_CLOSEOUT_BUNDLE_SCHEMA_REF,
+    };
+  });
+}
+
+export function projectProbeGepaLiveRunnerGate(
+  input: ProbeGepaLiveRunnerGateInput,
+): Effect.Effect<
+  ProbeGepaLiveRunnerGateProjection,
+  ProbeBenchmarkCloseoutWriterError | ProbeBenchmarkContractError | ProbePublicProjectionUnsafe
+> {
+  return Effect.gen(function* () {
+    yield* validateProbeBenchmarkPublicProjection(input, "probeGepaLiveRunnerGateInput");
+
+    const files = input.bundle.files;
+    const run = yield* expectRecord(files["probe-run-record.json"], "probe-run-record.json");
+    const closeout = yield* expectRecord(files["probe-closeout.json"], "probe-closeout.json");
+    const artifacts = yield* expectRecord(files["artifact-refs.json"], "artifact-refs.json");
+    const resource = yield* expectRecord(files["resource-usage-ref.json"], "resource-usage-ref.json");
+    const failure = yield* expectRecord(files["failure-classification.json"], "failure-classification.json");
+    const scorecard = yield* expectRecord(files["route-scorecard.json"], "route-scorecard.json");
+    const signatures = yield* expectRecord(files["selected-signatures.json"], "selected-signatures.json");
+    const toolMenu = yield* expectRecord(files["tool-menu.json"], "tool-menu.json");
+    const candidate = yield* expectRecord(files["candidate-ref.json"], "candidate-ref.json");
+
+    const evidenceRefs = {
+      artifactRefs: refsFrom(artifacts.artifactManifestRefs, artifacts.partialArtifactRefs),
+      candidateRefs: refsFrom(
+        candidate.candidateComponentRefs,
+        Object.values(expectOptionalRecord(candidate.candidateRefs)),
+      ),
+      failureRefs: refsFrom(
+        getNestedString(failure, ["failureClassification", "classificationRef"]),
+        failure.retainedFailureRefs,
+      ),
+      proofRefs: refsFrom(artifacts.proofBundleRefs),
+      resourceRefs: refsFrom(resource.resourceUsageRef, resource.unavailableReason),
+      routeScorecardRefs: refsFrom(scorecard.scorecardRef, closeout.routeScorecardRef),
+      runRefs: refsFrom(input.bundle.runRef, run.runRef),
+      selectedSignatureRefs: refsFrom(signatures.selectedSignatureRefs, closeout.selectedSignatureRefs),
+      toolMenuRefs: refsFrom(toolMenu.toolMenuRef, closeout.toolMenuRef),
+      verifierRefs: refsFrom(getNestedString(closeout, ["verifierScorerRefs", "verifierRef"]), artifacts.verifierResultRefs),
+    };
+
+    const blockerRefs = [
+      ...missingRefBlockers(evidenceRefs.artifactRefs, "artifact"),
+      ...missingRefBlockers(evidenceRefs.candidateRefs, "candidate"),
+      ...missingRefBlockers(evidenceRefs.proofRefs, "proof"),
+      ...missingRefBlockers(evidenceRefs.resourceRefs, "resource"),
+      ...missingRefBlockers(evidenceRefs.routeScorecardRefs, "route_scorecard"),
+      ...missingRefBlockers(evidenceRefs.runRefs, "run"),
+      ...missingRefBlockers(evidenceRefs.selectedSignatureRefs, "selected_signature"),
+      ...missingRefBlockers(evidenceRefs.toolMenuRefs, "tool_menu"),
+      ...missingRefBlockers(evidenceRefs.verifierRefs, "verifier"),
+      ...missingRefBlockers(input.candidateManifestAuthorityRefs, "candidate_manifest_authority"),
+      ...missingRefBlockers(input.runnerExecutionRefs, "runner_execution"),
+    ];
+
+    const runStatus = yield* expectRunStatus(closeout.runStatus);
+    if (runStatus !== "succeeded") {
+      blockerRefs.push(...missingRefBlockers(evidenceRefs.failureRefs, "failure"));
+    }
+
+    const runnerGateReady = blockerRefs.length === 0;
+    const publicScoreGateRefs = [...(input.publicScoreGateRefs ?? [])];
+    const productPromotionGateRefs = [...(input.productPromotionGateRefs ?? [])];
+    const payoutGateRefs = [...(input.payoutGateRefs ?? [])];
+
+    return {
+      assignmentRef: yield* expectString(closeout.assignmentRef, "probe-closeout.json.assignmentRef"),
+      blockerRefs,
+      bundleRef: input.bundle.bundleRef,
+      candidateHash: input.bundle.candidateHash,
+      candidateManifestAuthorityRefs: [...input.candidateManifestAuthorityRefs],
+      closeoutRef: yield* expectString(closeout.closeoutRef, "probe-closeout.json.closeoutRef"),
+      evidenceRefs,
+      evidenceSplit: input.bundle.evidenceSplit,
+      mode: input.mode,
+      omegaImportAllowed: runnerGateReady,
+      productPromotionAllowed: runnerGateReady && productPromotionGateRefs.length > 0,
+      productPromotionGateRefs,
+      publicScoreClaimAllowed: runnerGateReady && publicScoreGateRefs.length > 0,
+      publicScoreGateRefs,
+      payoutClaimAllowed: runnerGateReady && payoutGateRefs.length > 0,
+      payoutGateRefs,
+      runnerExecutionRefs: [...input.runnerExecutionRefs],
+      runnerGateReady,
+      runRef: input.bundle.runRef,
+      runStatus,
+      schemaRef: PROBE_GEPA_LIVE_RUNNER_GATE_SCHEMA_REF,
     };
   });
 }
@@ -554,6 +689,105 @@ function decisionTraceSummary(trace: ProbeBenchmarkDecisionTrace): JsonValue {
     toolMenuRef: trace.toolMenuRef,
     traceRef: trace.traceRef,
   };
+}
+
+function expectRecord(
+  value: JsonValue,
+  path: string,
+): Effect.Effect<{ readonly [key: string]: JsonValue }, ProbeBenchmarkCloseoutWriterError> {
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    return Effect.succeed(value);
+  }
+
+  return Effect.fail(
+    new ProbeBenchmarkCloseoutWriterError({
+      path,
+      reason: "expected closeout bundle file to contain a JSON object",
+    }),
+  );
+}
+
+function expectOptionalRecord(value: JsonValue | undefined): { readonly [key: string]: JsonValue } {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+}
+
+function expectString(
+  value: JsonValue | undefined,
+  path: string,
+): Effect.Effect<string, ProbeBenchmarkCloseoutWriterError> {
+  if (typeof value === "string" && value.length > 0) {
+    return Effect.succeed(value);
+  }
+
+  return Effect.fail(
+    new ProbeBenchmarkCloseoutWriterError({
+      path,
+      reason: "expected non-empty string ref",
+    }),
+  );
+}
+
+function expectRunStatus(
+  value: JsonValue | undefined,
+): Effect.Effect<ProbeBenchmarkTerminalRunStatus, ProbeBenchmarkCloseoutWriterError> {
+  if (
+    value === "succeeded" ||
+    value === "failed" ||
+    value === "timed_out" ||
+    value === "policy_blocked" ||
+    value === "errored"
+  ) {
+    return Effect.succeed(value);
+  }
+
+  return Effect.fail(
+    new ProbeBenchmarkCloseoutWriterError({
+      path: "probe-closeout.json.runStatus",
+      reason: "expected terminal run status",
+    }),
+  );
+}
+
+function getNestedString(
+  record: { readonly [key: string]: JsonValue },
+  path: ReadonlyArray<string>,
+): string | undefined {
+  let current: JsonValue | undefined = record;
+
+  for (const part of path) {
+    if (typeof current !== "object" || current === null || Array.isArray(current)) {
+      return undefined;
+    }
+
+    current = current[part];
+  }
+
+  return typeof current === "string" && current.length > 0 ? current : undefined;
+}
+
+function refsFrom(...values: ReadonlyArray<JsonValue | undefined>): ReadonlyArray<string> {
+  const refs: string[] = [];
+
+  for (const value of values) {
+    if (typeof value === "string" && value.length > 0) {
+      refs.push(value);
+      continue;
+    }
+
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        if (typeof entry === "string" && entry.length > 0) {
+          refs.push(entry);
+        }
+      }
+    }
+  }
+
+  return [...new Set(refs)];
+}
+
+function missingRefBlockers(refs: ReadonlyArray<string>, refKind: string): ReadonlyArray<string> {
+  return refs.length === 0 ? [`blocker.probe.gepa_live_runner_gate.missing_${refKind}_ref`] : [];
 }
 
 function toJsonValue(value: unknown): JsonValue {

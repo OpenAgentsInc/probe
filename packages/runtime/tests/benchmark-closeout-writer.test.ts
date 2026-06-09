@@ -8,6 +8,7 @@ import {
   PROBE_BENCHMARK_CLOSEOUT_BUNDLE_FILE_NAMES,
   decodeProbeBenchmarkAssignment,
   makeProbeBenchmarkCloseoutBundle,
+  projectProbeGepaLiveRunnerGate,
   writeProbeBenchmarkCloseoutBundle,
 } from "../src";
 
@@ -223,6 +224,115 @@ describe("Probe benchmark closeout writer", () => {
     expect(scorecard.rejectedRoutes.map((route) => route.routeKind)).toEqual(["codex", "apple_fm"]);
   });
 
+  test("projects live GEPA runner evidence for Omega without score, promotion, or payout overclaim", async () => {
+    const assignment = await fakeAssignment();
+    const bundle = await Effect.runPromise(
+      makeProbeBenchmarkCloseoutBundle({
+        assignment,
+        artifactManifestRefs: ["artifact_manifest.probe.live.configure_git_webserver.1"],
+        candidateComponentRefs: ["candidate_component.probe.closeout_policy.sha256_1"],
+        proofBundleRefs: ["proof_bundle.probe.live.configure_git_webserver.1"],
+        resourceUsageRef: "resource_usage.probe.live.configure_git_webserver.1",
+        runRef: "probe_run.live.configure_git_webserver.1",
+        runStatus: "succeeded",
+        scorerRef: "scorer.terminal_bench.binary.v1",
+        verifierRef: "verifier.terminal_bench.configure_git_webserver.v1",
+        verifierResultRefs: ["verifier_result.terminal_bench.configure_git_webserver.1"],
+      }),
+    );
+    const gate = await Effect.runPromise(
+      projectProbeGepaLiveRunnerGate({
+        bundle,
+        candidateManifestAuthorityRefs: ["candidate_manifest_authority.psionic.gepa.stage_0.v1"],
+        mode: "live",
+        runnerExecutionRefs: ["runner_execution.probe.terminal_bench.live.1"],
+      }),
+    );
+
+    expect(gate.schemaRef).toBe("probe.gepa_live_runner_gate.v1");
+    expect(gate.runnerGateReady).toBe(true);
+    expect(gate.omegaImportAllowed).toBe(true);
+    expect(gate.evidenceRefs.artifactRefs).toEqual(["artifact_manifest.probe.live.configure_git_webserver.1"]);
+    expect(gate.evidenceRefs.proofRefs).toEqual(["proof_bundle.probe.live.configure_git_webserver.1"]);
+    expect(gate.evidenceRefs.resourceRefs).toEqual(["resource_usage.probe.live.configure_git_webserver.1"]);
+    expect(gate.evidenceRefs.verifierRefs).toEqual([
+      "verifier.terminal_bench.configure_git_webserver.v1",
+      "verifier_result.terminal_bench.configure_git_webserver.1",
+    ]);
+    expect(gate.evidenceRefs.routeScorecardRefs).toContain(
+      "route_scorecard.probe.benchmark.probe_run.live.configure_git_webserver.1",
+    );
+    expect(gate.evidenceRefs.selectedSignatureRefs).toEqual([
+      "program_signature.probe.benchmark.service_readiness.v1",
+    ]);
+    expect(gate.evidenceRefs.toolMenuRefs).toEqual(["tool_menu.probe.terminal_bench.service_readiness.v1"]);
+    expect(gate.publicScoreClaimAllowed).toBe(false);
+    expect(gate.productPromotionAllowed).toBe(false);
+    expect(gate.payoutClaimAllowed).toBe(false);
+  });
+
+  test("keeps timeout and policy-blocked closeouts importable only as failure evidence", async () => {
+    const assignment = await fakeAssignment();
+
+    for (const runStatus of ["timed_out", "policy_blocked"] as const) {
+      const bundle = await Effect.runPromise(
+        makeProbeBenchmarkCloseoutBundle({
+          assignment,
+          artifactManifestRefs: [`artifact_manifest.probe.${runStatus}.configure_git_webserver.1`],
+          proofBundleRefs: [`proof_bundle.probe.${runStatus}.configure_git_webserver.1`],
+          resourceUnavailableReason: `${runStatus}_before_resource_meter_flush`,
+          runRef: `probe_run.configure_git_webserver.${runStatus}.gate.1`,
+          runStatus,
+          scorerRef: "scorer.terminal_bench.binary.v1",
+          verifierRef: "verifier.terminal_bench.configure_git_webserver.v1",
+        }),
+      );
+      const gate = await Effect.runPromise(
+        projectProbeGepaLiveRunnerGate({
+          bundle,
+          candidateManifestAuthorityRefs: ["candidate_manifest_authority.psionic.gepa.stage_0.v1"],
+          mode: "sandbox",
+          runnerExecutionRefs: [`runner_execution.probe.terminal_bench.${runStatus}.1`],
+        }),
+      );
+
+      expect(gate.runnerGateReady).toBe(true);
+      expect(gate.omegaImportAllowed).toBe(true);
+      expect(gate.evidenceRefs.failureRefs[0]).toContain("failure_classification");
+      expect(gate.evidenceRefs.failureRefs[1]).toContain(runStatus === "timed_out" ? "timeout" : "policy_blocked");
+      expect(gate.publicScoreClaimAllowed).toBe(false);
+      expect(gate.productPromotionAllowed).toBe(false);
+      expect(gate.payoutClaimAllowed).toBe(false);
+    }
+  });
+
+  test("blocks Omega import when candidate-manifest authority or runner execution evidence is missing", async () => {
+    const assignment = await fakeAssignment();
+    const bundle = await Effect.runPromise(
+      makeProbeBenchmarkCloseoutBundle({
+        assignment,
+        resourceUsageRef: "resource_usage.probe.configure_git_webserver.1",
+        runRef: "probe_run.configure_git_webserver.missing_authority.1",
+        runStatus: "succeeded",
+        scorerRef: "scorer.terminal_bench.binary.v1",
+        verifierRef: "verifier.terminal_bench.configure_git_webserver.v1",
+      }),
+    );
+    const gate = await Effect.runPromise(
+      projectProbeGepaLiveRunnerGate({
+        bundle,
+        candidateManifestAuthorityRefs: [],
+        mode: "sandbox",
+        runnerExecutionRefs: [],
+      }),
+    );
+
+    expect(gate.runnerGateReady).toBe(false);
+    expect(gate.omegaImportAllowed).toBe(false);
+    expect(gate.blockerRefs).toContain("blocker.probe.gepa_live_runner_gate.missing_candidate_manifest_authority_ref");
+    expect(gate.blockerRefs).toContain("blocker.probe.gepa_live_runner_gate.missing_runner_execution_ref");
+  });
+
   test("rejects unsafe writer input before public-safe artifacts are emitted", async () => {
     const assignment = await fakeAssignment();
 
@@ -238,6 +348,33 @@ describe("Probe benchmark closeout writer", () => {
             rawLogs: "captured terminal transcript",
           },
           verifierRef: "verifier.terminal_bench.configure_git_webserver.v1",
+        }),
+      ),
+    ).rejects.toMatchObject({
+      _tag: "ProbeBenchmarkContractError",
+    });
+  });
+
+  test("rejects unsafe live runner gate refs before Omega import", async () => {
+    const assignment = await fakeAssignment();
+    const bundle = await Effect.runPromise(
+      makeProbeBenchmarkCloseoutBundle({
+        assignment,
+        resourceUsageRef: "resource_usage.probe.configure_git_webserver.1",
+        runRef: "probe_run.configure_git_webserver.unsafe_gate.1",
+        runStatus: "succeeded",
+        scorerRef: "scorer.terminal_bench.binary.v1",
+        verifierRef: "verifier.terminal_bench.configure_git_webserver.v1",
+      }),
+    );
+
+    await expect(
+      Effect.runPromise(
+        projectProbeGepaLiveRunnerGate({
+          bundle,
+          candidateManifestAuthorityRefs: ["candidate_manifest_authority.psionic.gepa.stage_0.v1"],
+          mode: "live",
+          runnerExecutionRefs: ["runner_execution.private_repo.git@github.com:OpenAgentsInc/hidden.git"],
         }),
       ),
     ).rejects.toMatchObject({

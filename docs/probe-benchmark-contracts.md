@@ -19,6 +19,7 @@ package entry point.
 - `probe.loop_policy_candidate.v1`
 - `probe.benchmark_route_scorecard.v1`
 - `probe.benchmark_promotion_decision.v1`
+- `probe.gepa_live_runner_gate.v1`
 
 The assignment schema carries the Benchmark Cloud run and task refs, dataset
 and split refs, public-safe task checksum or ref, Probe commit, backend and
@@ -68,6 +69,34 @@ validation, holdout, or live evidence exists, but they cannot promote runtime
 behavior or upgrade a public benchmark claim. External Omega/OpenAgents release
 gates remain the authority for publication and promotion.
 
+## GEPA Live Runner Gate
+
+`packages/runtime/src/benchmark/closeout-writer.ts` also exposes
+`projectProbeGepaLiveRunnerGate`. The projection consumes a normalized closeout
+bundle plus runner execution refs and candidate-manifest authority refs, then
+emits `probe.gepa_live_runner_gate.v1` for Omega import.
+
+The gate requires public-safe refs for:
+
+- run and closeout records
+- artifact manifests or partial artifacts
+- proof bundles
+- resource usage or a resource-unavailable reason
+- verifier and verifier-result refs
+- selected signature refs
+- tool-menu refs
+- route scorecard refs
+- candidate refs
+- failure-classification refs for non-successful runs
+- candidate-manifest authority refs
+- live or sandbox runner execution refs
+
+Successful, timed-out, failed, errored, and policy-blocked closeouts can all be
+importable as evidence when the refs above are present. That import does not
+grant public-score, product-promotion, or payout authority. The gate keeps
+`publicScoreClaimAllowed`, `productPromotionAllowed`, and `payoutClaimAllowed`
+false unless separate gate refs are supplied by the owning systems.
+
 ## Test Coverage
 
 `packages/runtime/tests/benchmark-contracts.test.ts` covers valid assignment,
@@ -90,7 +119,9 @@ where relevant.
 `packages/runtime/tests/benchmark-closeout-writer.test.ts` covers fake
 assignment bundle emission, directory writes, failure closeouts, timeout
 closeouts, policy-blocked closeouts, generated and explicit route scorecards,
-and unsafe writer input rejection.
+live GEPA runner-gate projection, timeout and policy-blocked import behavior,
+candidate-manifest authority blockers, route scorecard refs, and unsafe writer
+or runner-gate input rejection.
 
 `packages/runtime/src/benchmark/candidate-execution.ts` adds the Probe-facing
 GEPA candidate execution adapter. It can run a retained fixture with either the
