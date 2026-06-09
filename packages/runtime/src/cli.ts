@@ -48,7 +48,7 @@ import {
 import { PROBE_APPLE_FM_BACKEND_CAPABILITY } from "./runner/identity";
 import { makeOmegaAccountClient, type OmegaAccountClient } from "./omega/account-client";
 import { sanitizeProbePublicProjection } from "./contracts/provider-account";
-import { createProbeRenderer, createAssistantText, createDefaultSyntaxStyle, parseColor, TextRenderable, ScrollBoxRenderable } from "./opentui-renderer";
+import { createProbeRenderer, createAssistantText, createCodeWithLineNumbers, detectFiletype, createDefaultSyntaxStyle, parseColor, TextRenderable, BoxRenderable, ScrollBoxRenderable } from "./opentui-renderer";
 import { type ProbeRunnerIdentity } from "./runner/identity";
 import {
   bestEffortRecordProbeTokenUsageEvent,
@@ -582,7 +582,7 @@ function usage(): string {
     "  probe omega link [--base-url URL] [--runner-id ID] [--subject USER_OR_TEAM] [--kind local|shc|pylon|sandbox]",
     "  probe auth accounts [--base-url URL]",
     "  probe auth add chatgpt [--base-url URL]",
-    "  probe chat [--profile gemini-api] [--model gemini-3.5-flash] [--prompt TEXT] [--color always|never] [--no-color]",
+    "  probe chat [--profile gemini-api] [--model gemini-3.5-flash] [--prompt TEXT] [--color always|never] [--no-color] [--tui]",
     "  probe backend gemini smoke [--profile gemini-api] [--model gemini-3.5-flash] [--prompt TEXT]",
     "  probe backend gemini complete [--profile gemini-api] [--model gemini-3.5-flash] [--prompt TEXT]",
     "  probe apple-fm status [--base-url URL] [--profile apple-fm-local]",
@@ -1781,35 +1781,45 @@ async function runGeminiTuiChat(input: {
       const assistantMd = createAssistantText(renderer);
       session.add(assistantMd);
 
-      const textLabel = new TextRenderable(renderer, { content: "[tool_call]", fg: parseColor("#FF7B72") });
       const request = makeGeminiChatRequest({ messages, model, prompt, maxTokens, tools });
       const onEvent = (event: ProbeLlmEvent) => {
         if (event.type === "text-delta") {
           assistantMd.content = (assistantMd.content ?? "") + event.text;
         }
 
+        if (event.type === "reasoning-delta") {
+          const label = new TextRenderable(renderer, {
+            content: event.text,
+            fg: parseColor("#8B949E"),
+          });
+          session.add(label);
+        }
+
         if (event.type === "tool-call") {
           const label = new TextRenderable(renderer, {
-            content: `[${event.name}]`,
+            content: `[${event.name}]: ${safeJson(event.input)}`,
             fg: parseColor("#79C0FF"),
           });
           session.add(label);
         }
 
         if (event.type === "tool-result") {
-          const label = new TextRenderable(renderer, {
-            content: `[${event.name}]: ${formatToolResultValue(event.result)}`,
-            fg: parseColor("#8B949E"),
-          });
-          session.add(label);
+          renderToolResultInSession(session, renderer, event.name, event.result);
         }
 
         if (event.type === "tool-error") {
-          const label = new TextRenderable(renderer, {
+          const errorLabel = new BoxRenderable(renderer, {
+            border: true,
+            borderType: "single",
+            borderFg: parseColor("#FF7B72"),
+            width: "100%",
+          });
+          const errorText = new TextRenderable(renderer, {
             content: `[${event.name}]: ${event.message}`,
             fg: parseColor("#FF7B72"),
           });
-          session.add(label);
+          errorLabel.add(errorText);
+          session.add(errorLabel);
         }
       };
       const fiber = Effect.runFork(
@@ -1841,11 +1851,18 @@ async function runGeminiTuiChat(input: {
       }
 
       if (result instanceof GeminiClientError) {
-        const label = new TextRenderable(renderer, {
+        const errorLabel = new BoxRenderable(renderer, {
+          border: true,
+          borderType: "single",
+          borderFg: parseColor("#FF7B72"),
+          width: "100%",
+        });
+        const errorText = new TextRenderable(renderer, {
           content: `[error] ${result.reason}`,
           fg: parseColor("#FF7B72"),
         });
-        session.add(label);
+        errorLabel.add(errorText);
+        session.add(errorLabel);
         continue;
       }
 
@@ -1853,5 +1870,86 @@ async function runGeminiTuiChat(input: {
     }
   } finally {
     renderer.destroy();
+  }
+}
+
+function renderToolResultInSession(
+  session: ScrollBoxRenderable,
+  renderer: CliRenderer,
+  name: string,
+  result: { readonly type: string; readonly value: unknown },
+): void {
+  if (result.type === "error") {
+    const errorText = new TextRenderable(renderer, {
+      content: `[${name}]: ${String(result.value)}`,
+      fg: parseColor("#FF7B72"),
+    });
+    session.add(errorText);
+    return;
+  }
+
+  if (isReadFileToolResult(result.value)) {
+    const r = result.value;
+    const filetype = detectFiletype(r.path) ?? "plaintext";
+    const header = new TextRenderable(renderer, {
+      content: `[${name}]: ${r.path}  (${r.content.length} chars)`,
+      fg: parseColor("#8B949E"),
+    });
+    session.add(header);
+    const code = createCodeWithLineNumbers(renderer, r.content, filetype);
+    session.add(code);
+    return;
+  }
+
+  if (isListFilesToolResult(result.value)) {
+    const r = result.value;
+    const parts: Array<string> = [];
+    if (r.directories.length > 0) parts.push(`${r.directories.length} dirs`);
+    if (r.files.length > 0) parts.push(`${r.files.length} files`);
+    if (r.truncated) parts.push("truncated");
+    const summary = `${r.path}  ${parts.length > 0 ? parts.join(", ") : "empty"}`;
+    const header = new TextRenderable(renderer, {
+      content: `[${name}]: ${summary}`,
+      fg: parseColor("#8B949E"),
+    });
+    session.add(header);
+
+    const listing = [
+      ...r.directories.map((d) => `  ${d}/`),
+      ...r.files.map((f) => `  ${f}`),
+    ].join("\n");
+    if (listing.length > 0) {
+      const code = createCodeWithLineNumbers(renderer, listing, "plaintext");
+      session.add(code);
+    }
+    return;
+  }
+
+  if (isSearchCodeToolResult(result.value)) {
+    const r = result.value;
+    const label = `${r.matches.length} match${r.matches.length === 1 ? "" : "es"}`;
+    const header = new TextRenderable(renderer, {
+      content: `[${name}]: ${r.query}  in  ${r.path}  (${label}${r.truncated ? ", truncated" : ""})`,
+      fg: parseColor("#8B949E"),
+    });
+    session.add(header);
+    const matches = r.matches.join("\n");
+    if (matches.length > 0) {
+      const filetype = detectFiletype(r.path) ?? "plaintext";
+      const code = createCodeWithLineNumbers(renderer, matches, filetype);
+      session.add(code);
+    }
+    return;
+  }
+
+  const jsonText = safeJson(result.value);
+  const header = new TextRenderable(renderer, {
+    content: `[${name}]`,
+    fg: parseColor("#8B949E"),
+  });
+  session.add(header);
+  if (jsonText.length > 0 && jsonText !== "null" && jsonText !== "undefined") {
+    const code = createCodeWithLineNumbers(renderer, jsonText, "plaintext");
+    session.add(code);
   }
 }
