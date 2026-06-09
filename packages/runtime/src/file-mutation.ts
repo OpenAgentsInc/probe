@@ -125,7 +125,7 @@ export function writeAnyWorkspaceFile(
     }
 
     const lock = getFileLock(resolved.absolutePath);
-    return yield* lock.withLock(
+    const written = yield* lock.withPermit(
       Effect.gen(function* () {
         yield* Effect.tryPromise({
           try: () => mkdir(dirname(resolved.absolutePath), { recursive: true }),
@@ -156,11 +156,9 @@ export function writeAnyWorkspaceFile(
 
         return { path, content: `written to ${resolved.relativePath}` };
       }),
-    ).pipe(
-      Effect.catchAll((error) =>
-        Effect.succeed({ path, error: `failed to write ${path}: ${String(error)}` }),
-      ),
     );
+
+    return written;
   });
 }
 
@@ -202,7 +200,7 @@ export function editAnyWorkspaceFile(
     }
 
     const lock = getFileLock(resolved.absolutePath);
-    return yield* lock.withLock(
+    const edited = yield* lock.withPermit(
       Effect.gen(function* () {
         const rawContent: Uint8Array | null = yield* Effect.tryPromise({
           try: () => readFile(resolved.absolutePath),
@@ -266,14 +264,9 @@ export function editAnyWorkspaceFile(
           replacements: count,
         };
       }),
-    ).pipe(
-      Effect.catchAll((error) =>
-        Effect.succeed({
-          path,
-          error: String(error instanceof StaleContentError ? "File changed after read. Read it again before editing." : error),
-        }),
-      ),
     );
+
+    return edited;
   });
 }
 
