@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Effect, Semaphore } from "effect";
+import { createTwoFilesPatch } from "diff";
 import { getPermissionHandler } from "./permission";
 import { resolveProbeChatWorkspaceRoot, resolveWorkspacePath } from "./workspace";
 
@@ -51,22 +52,15 @@ export function convertToLineEnding(text: string, ending: "\n" | "\r\n"): string
 // ── Diff preview ──────────────────────────────────────────────────────────
 
 export function createDiffPreview(oldText: string, newText: string): string {
-  const oldLines = normalizeLineEndings(oldText).split("\n");
-  const newLines = normalizeLineEndings(newText).split("\n");
-  const lines: string[] = [];
-
-  lines.push(`--- old`);
-  lines.push(`+++ new`);
-  for (const line of oldLines.slice(0, 10)) {
-    lines.push(`-${line.length > 200 ? `${line.slice(0, 200)}...` : line}`);
-  }
-  if (oldLines.length > 10) lines.push("-...");
-  for (const line of newLines.slice(0, 10)) {
-    lines.push(`+${line.length > 200 ? `${line.slice(0, 200)}...` : line}`);
-  }
-  if (newLines.length > 10) lines.push("+...");
-
-  return lines.join("\n");
+  return createTwoFilesPatch(
+    "original",
+    "modified",
+    normalizeLineEndings(oldText),
+    normalizeLineEndings(newText),
+    "",
+    "",
+    { context: 3 },
+  );
 }
 
 // ── Per-file locking ──────────────────────────────────────────────────────

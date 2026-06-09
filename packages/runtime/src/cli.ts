@@ -28,7 +28,7 @@ import {
 } from "./backends/apple-fm/blueprint-tools";
 import { makeAppleFmToolStreamProgramRunEvidence } from "./backends/apple-fm/program-run-evidence";
 import { makeAppleFmToolCallbackSession } from "./backends/apple-fm/tools";
-import { GeminiClientError, makeGeminiClient, type GeminiCompleteResult } from "./backends/gemini/client";
+import { GeminiClientError, makeGeminiClient, type GeminiClient, type GeminiCompleteResult } from "./backends/gemini/client";
 import { GEMINI_API_PROFILE_ID, GEMINI_DEFAULT_MODEL_ID } from "./backends/gemini/contract";
 import {
   loadBlueprintSignatureRegistry,
@@ -48,6 +48,7 @@ import {
 import { PROBE_APPLE_FM_BACKEND_CAPABILITY } from "./runner/identity";
 import { makeOmegaAccountClient, type OmegaAccountClient } from "./omega/account-client";
 import { sanitizeProbePublicProjection } from "./contracts/provider-account";
+import { createProbeRenderer, createAssistantText, createDefaultSyntaxStyle, parseColor, TextRenderable, ScrollBoxRenderable } from "./opentui-renderer";
 import { type ProbeRunnerIdentity } from "./runner/identity";
 import {
   bestEffortRecordProbeTokenUsageEvent,
@@ -1597,7 +1598,10 @@ if (import.meta.main) {
   const argv = Bun.argv.slice(2);
 
   if (argv[0] === "chat" && stringOption(parseOptions(argv.slice(1)), "prompt") === undefined) {
-    process.exit(await runGeminiInteractiveChat(argv.slice(1), { colors: process.stdout.isTTY, env: Bun.env }));
+    const chatArgs = argv.slice(1);
+    const chatOptions = parseOptions(chatArgs);
+    const useTui = chatOptions.tui === true && process.stdout.isTTY;
+    process.exit(await runGeminiInteractiveChat(chatArgs, { colors: process.stdout.isTTY, env: Bun.env }, useTui));
   }
 
   const result = await Effect.runPromise(runProbeCli(argv, { colors: process.stdout.isTTY, env: Bun.env }));
@@ -1613,13 +1617,10 @@ if (import.meta.main) {
   process.exit(result.exitCode);
 }
 
-async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: ProbeCliDeps): Promise<number> {
+async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: ProbeCliDeps, useTui = false): Promise<number> {
   const options = parseOptions(args);
   const model = stringOption(options, "model") ?? GEMINI_DEFAULT_MODEL_ID;
   const maxTokens = numberOption(options, "max-tokens") ?? 65536;
-  // TODO: wire a non-blocking permission prompt into the main chat loop
-  // instead of trying to read stdin from inside the tool fiber.
-  // For now the default handler always allows.
   const tools = makeGeminiChatTools(deps.env);
   const colors = makeCliColors(options, deps);
   const clientResult = await Effect.runPromise(
@@ -1641,6 +1642,10 @@ async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: Probe
   process.stdout.write(
     `${cliField(colors, "profile", clientResult.profile.id)}  ${cliField(colors, "kind", clientResult.profile.kind)}  ${cliField(colors, "model", model)}  ${cliField(colors, "tools", "read_file,write_file,list_files,search_code,current_time", "tool")}\n`,
   );
+
+  if (useTui) {
+    return runGeminiTuiChat({ clientResult, colors, model, maxTokens, tools, deps, options });
+  }
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   let messages: ReadonlyArray<ProbeLlmMessage> = [];
@@ -1733,5 +1738,120 @@ async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: Probe
     }
   } finally {
     rl.close();
+  }
+}
+
+async function runGeminiTuiChat(input: {
+  readonly clientResult: GeminiClient;
+  readonly colors: ProbeCliColors;
+  readonly model: string;
+  readonly maxTokens: number;
+  readonly tools: ProbeLlmTools;
+  readonly deps: ProbeCliDeps;
+  readonly options: Record<string, string | true>;
+}): Promise<number> {
+  const { clientResult, model, maxTokens, tools } = input;
+  const renderer = await createProbeRenderer();
+  const session = new ScrollBoxRenderable(renderer, {
+    scrollY: true,
+    flexGrow: 1,
+    width: "100%",
+  });
+  renderer.root.add(session);
+  renderer.start();
+
+  try {
+    let messages: ReadonlyArray<ProbeLlmMessage> = [];
+
+    for (;;) {
+      renderer.suspend();
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const prompt = (await rl.question("probe> ")).trim();
+      rl.close();
+      renderer.resume();
+
+      if (prompt.length === 0) {
+        continue;
+      }
+
+      if (prompt === "/exit" || prompt === "/quit") {
+        return 0;
+      }
+
+      const assistantMd = createAssistantText(renderer);
+      session.add(assistantMd);
+
+      const textLabel = new TextRenderable(renderer, { content: "[tool_call]", fg: parseColor("#FF7B72") });
+      const request = makeGeminiChatRequest({ messages, model, prompt, maxTokens, tools });
+      const onEvent = (event: ProbeLlmEvent) => {
+        if (event.type === "text-delta") {
+          assistantMd.content = (assistantMd.content ?? "") + event.text;
+        }
+
+        if (event.type === "tool-call") {
+          const label = new TextRenderable(renderer, {
+            content: `[${event.name}]`,
+            fg: parseColor("#79C0FF"),
+          });
+          session.add(label);
+        }
+
+        if (event.type === "tool-result") {
+          const label = new TextRenderable(renderer, {
+            content: `[${event.name}]: ${formatToolResultValue(event.result)}`,
+            fg: parseColor("#8B949E"),
+          });
+          session.add(label);
+        }
+
+        if (event.type === "tool-error") {
+          const label = new TextRenderable(renderer, {
+            content: `[${event.name}]: ${event.message}`,
+            fg: parseColor("#FF7B72"),
+          });
+          session.add(label);
+        }
+      };
+      const fiber = Effect.runFork(
+        clientResult.complete({ request, tools, onEvent }).pipe(
+          Effect.catch((error: GeminiClientError) => Effect.succeed(error)),
+        ),
+      );
+
+      const result = await new Promise<GeminiCompleteResult | GeminiClientError | undefined>((resolve) => {
+        fiber.addObserver((exit: Exit.Exit<GeminiCompleteResult | GeminiClientError, never>) => {
+          if (Exit.isSuccess(exit)) {
+            resolve(exit.value);
+          } else if (exit.cause.reasons.some(Cause.isInterruptReason)) {
+            resolve(undefined);
+          } else {
+            const fail = exit.cause.reasons.find(Cause.isFailReason);
+            resolve(fail?.error ?? undefined);
+          }
+        });
+      });
+
+      if (result === undefined) {
+        const label = new TextRenderable(renderer, {
+          content: "[interrupted]",
+          fg: parseColor("#8B949E"),
+        });
+        session.add(label);
+        continue;
+      }
+
+      if (result instanceof GeminiClientError) {
+        const label = new TextRenderable(renderer, {
+          content: `[error] ${result.reason}`,
+          fg: parseColor("#FF7B72"),
+        });
+        session.add(label);
+        continue;
+      }
+
+      messages = [...result.finalRequest.messages, makeProbeLlmMessage("assistant", result.text)];
+    }
+  } finally {
+    renderer.destroy();
   }
 }
