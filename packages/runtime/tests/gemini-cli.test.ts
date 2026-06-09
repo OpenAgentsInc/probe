@@ -40,7 +40,7 @@ describe("Probe CLI Gemini backend commands", () => {
     expect(result.stdout).not.toContain("test-gemini-key");
     expect(seen.apiKey).toBe("test-gemini-key");
     expect(seen.url).toBe(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
     );
     expect(seen.body).toMatchObject({
       contents: [{ role: "user", parts: [{ text: "hello" }] }],
@@ -77,7 +77,7 @@ describe("Probe CLI Gemini backend commands", () => {
 
     expect(result.exitCode).toBe(0);
     expect(seen[0]?.url).toBe(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
     );
     expect(seen[1]?.url).toBe("https://omega.example/api/stats/token-usage/events");
     expect(seen[1]?.body).toMatchObject({
@@ -100,7 +100,7 @@ describe("Probe CLI Gemini backend commands", () => {
   test("probe backend gemini complete honors model option and PROBE_BACKEND_PROFILE", async () => {
     const urls: string[] = [];
     const result = await Effect.runPromise(
-      runProbeCli(["backend", "gemini", "complete", "--model", "gemini-2.5-flash", "--prompt", "complete"], {
+      runProbeCli(["backend", "gemini", "complete", "--model", "gemini-3.5-flash", "--prompt", "complete"], {
         env: { GEMINI_API_KEY: "test-gemini-key", PROBE_BACKEND_PROFILE: "gemini-api" },
         fetch: async (input) => {
           urls.push(String(input));
@@ -116,10 +116,10 @@ describe("Probe CLI Gemini backend commands", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Gemini completion");
-    expect(result.stdout).toContain("model: gemini-2.5-flash");
+    expect(result.stdout).toContain("model: gemini-3.5-flash");
     expect(result.stdout).toContain("apiKeySource: GEMINI_API_KEY");
     expect(result.stdout).not.toContain("test-gemini-key");
-    expect(urls[0]).toContain("/v1beta/models/gemini-2.5-flash:streamGenerateContent");
+    expect(urls[0]).toContain("/v1beta/models/gemini-3.5-flash:streamGenerateContent");
   });
 
   test("probe backend gemini smoke falls back to an authenticated Omega Gemini broker", async () => {
@@ -162,7 +162,7 @@ describe("Probe CLI Gemini backend commands", () => {
     expect(seen[0]?.authorization).toBe("Bearer oa_agent_test");
     expect(seen[0]?.apiKey).toBe("");
     expect(seen[0]?.url).toBe(
-      "https://openagents.com/api/provider-accounts/google-gemini/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+      "https://openagents.com/api/provider-accounts/google-gemini/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
     );
     expect(seen[1]?.authorization).toBe("Bearer oa_agent_test");
     expect(seen[1]?.url).toBe("https://openagents.com/api/stats/token-usage/events");

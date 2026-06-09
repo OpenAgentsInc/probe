@@ -73,7 +73,7 @@ Provider account public projections can reuse the existing ref-first shape:
   "metadata": {
     "projectRef": "gcp-project.openagentsgemini",
     "allowedServices": ["generativelanguage.googleapis.com"],
-    "defaultModel": "gemini-2.5-flash",
+    "defaultModel": "gemini-3.5-flash",
     "rotationRef": "rotation.google_gemini.primary.2026_06"
   }
 }

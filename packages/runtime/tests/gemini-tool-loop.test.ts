@@ -63,7 +63,7 @@ describe("Gemini native tool loop", () => {
     const result = await Effect.runPromise(
       client.complete({
         request: makeProbeLlmRequest({
-          model: { provider: "google", model: "gemini-2.5-flash" },
+          model: { provider: "google", model: "gemini-3.5-flash" },
           prompt: "Use lookup.",
           tools: [
             {
@@ -81,7 +81,7 @@ describe("Gemini native tool loop", () => {
     expect(result.text).toBe("The weather is sunny.");
     expect(result.roundTrips).toBe(2);
     expect(urls[0]).toBe(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
     );
     expect(result.events.map((event) => event.type)).toContain("tool-call");
     expect(result.events.map((event) => event.type)).toContain("tool-result");
@@ -141,7 +141,7 @@ describe("Gemini native tool loop", () => {
     const result = await Effect.runPromise(
       client.complete({
         request: makeProbeLlmRequest({
-          model: { provider: "google", model: "gemini-2.5-flash" },
+          model: { provider: "google", model: "gemini-3.5-flash" },
           prompt: "Use echo once.",
           tools: [
             {
@@ -190,7 +190,7 @@ describe("Gemini native tool loop", () => {
     const result = await Effect.runPromise(
       client.complete({
         request: makeProbeLlmRequest({
-          model: { provider: "google", model: "gemini-2.5-flash" },
+          model: { provider: "google", model: "gemini-3.5-flash" },
           prompt: "Use a missing tool.",
         }),
       }),
@@ -224,7 +224,7 @@ describe("Gemini native tool loop", () => {
       Effect.runPromise(
         client.complete({
           request: makeProbeLlmRequest({
-            model: { provider: "google", model: "gemini-2.5-flash" },
+            model: { provider: "google", model: "gemini-3.5-flash" },
             prompt: "Loop.",
           }),
           maxModelRoundTrips: 1,
@@ -265,7 +265,7 @@ describe("Gemini native tool loop", () => {
     const result = await Effect.runPromise(
       client.complete({
         request: makeProbeLlmRequest({
-          model: { provider: "google", model: "gemini-2.5-flash" },
+          model: { provider: "google", model: "gemini-3.5-flash" },
           prompt: "Stream.",
         }),
         onEvent: (event) => {

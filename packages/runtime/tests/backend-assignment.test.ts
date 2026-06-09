@@ -205,7 +205,7 @@ describe("Probe backend assignment routing", () => {
     ]);
     expect(result.events[0].backendKind).toBe("gemini_api");
     expect(JSON.stringify(result.events)).not.toContain("test-gemini-key");
-    expect(seenUrls[0]).toContain("/v1beta/models/gemini-2.5-flash:streamGenerateContent");
+    expect(seenUrls[0]).toContain("/v1beta/models/gemini-3.5-flash:streamGenerateContent");
   });
 
   test("rejects Gemini assignment when runner lacks Gemini backend capability", async () => {

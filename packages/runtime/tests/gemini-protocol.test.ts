@@ -25,14 +25,14 @@ describe("Gemini request lowering", () => {
   test("prepares Gemini target and plain prompt body", () => {
     const body = lowerProbeLlmRequestToGeminiBody(
       makeProbeLlmRequest({
-        model: { provider: "google", model: "gemini-2.5-flash" },
+        model: { provider: "google", model: "gemini-3.5-flash" },
         system: "You are concise.",
         prompt: "Say hello.",
         generation: { maxTokens: 20, temperature: 0 },
       }),
     );
 
-    expect(geminiEndpointPath("gemini-2.5-flash")).toBe("/models/gemini-2.5-flash:streamGenerateContent?alt=sse");
+    expect(geminiEndpointPath("gemini-3.5-flash")).toBe("/models/gemini-3.5-flash:streamGenerateContent?alt=sse");
     expect(body).toEqual({
       contents: [{ role: "user", parts: [{ text: "Say hello." }] }],
       systemInstruction: { parts: [{ text: "You are concise." }] },
@@ -43,7 +43,7 @@ describe("Gemini request lowering", () => {
   test("lowers chronological system updates as wrapped user text", () => {
     const body = lowerProbeLlmRequestToGeminiBody(
       makeProbeLlmRequest({
-        model: { provider: "google", model: "gemini-2.5-flash" },
+        model: { provider: "google", model: "gemini-3.5-flash" },
         messages: [
           makeProbeLlmMessage("user", "Before."),
           makeProbeLlmMessage("system", "Update."),
@@ -61,7 +61,7 @@ describe("Gemini request lowering", () => {
   test("prepares multimodal input and tool history", () => {
     const body = lowerProbeLlmRequestToGeminiBody(
       makeProbeLlmRequest({
-        model: { provider: "google", model: "gemini-2.5-flash" },
+        model: { provider: "google", model: "gemini-3.5-flash" },
         tools: [lookupTool],
         toolChoice: { type: "tool", name: "lookup" },
         messages: [
@@ -114,7 +114,7 @@ describe("Gemini request lowering", () => {
   test("omits tools when tool choice is none", () => {
     const body = lowerProbeLlmRequestToGeminiBody(
       makeProbeLlmRequest({
-        model: { provider: "google", model: "gemini-2.5-flash" },
+        model: { provider: "google", model: "gemini-3.5-flash" },
         prompt: "Say hello.",
         tools: [lookupTool],
         toolChoice: { type: "none" },
@@ -129,7 +129,7 @@ describe("Gemini request lowering", () => {
   test("passes Gemini thinking config through provider options", () => {
     const body = lowerProbeLlmRequestToGeminiBody(
       makeProbeLlmRequest({
-        model: { provider: "google", model: "gemini-2.5-flash" },
+        model: { provider: "google", model: "gemini-3.5-flash" },
         prompt: "Think briefly.",
         providerOptions: {
           gemini: {

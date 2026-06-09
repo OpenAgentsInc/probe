@@ -61,7 +61,7 @@ describe("Probe/Omega provider account contract", () => {
       metadata: {
         projectRef: "gcp-project.openagentsgemini",
         allowedServices: ["generativelanguage.googleapis.com"],
-        defaultModel: "gemini-2.5-flash",
+        defaultModel: "gemini-3.5-flash",
       },
     };
 

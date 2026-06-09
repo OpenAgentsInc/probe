@@ -56,7 +56,7 @@ That means there is no place today to say:
 - auth mode is `api_key`;
 - secret source is env or Omega materialization;
 - stream mode is SSE provider events rather than Apple FM snapshots;
-- model id is `gemini-2.5-flash`, `gemini-2.5-pro`, or another Gemini model.
+- model id is `gemini-3.5-flash`, `gemini-3.5-pro`, or another Gemini model.
 
 ### Apple FM Client
 
@@ -364,7 +364,7 @@ Register:
 - `ProbeBackendStreamMode`: add `sse`;
 - default base URL:
   `https://generativelanguage.googleapis.com/v1beta`;
-- default model: start with `gemini-2.5-flash` for speed and cost, while
+- default model: start with `gemini-3.5-flash` for speed and cost, while
   allowing explicit model override.
 
 Auth resolution should match Opencode:
@@ -410,7 +410,7 @@ Add fixture tests before live tests:
 Then add opt-in live smoke:
 
 - skipped unless `GOOGLE_GENERATIVE_AI_API_KEY` or `GEMINI_API_KEY` is set;
-- one plain prompt against `gemini-2.5-flash`;
+- one plain prompt against `gemini-3.5-flash`;
 - one forced tiny tool call;
 - redacted output only.
 
@@ -419,7 +419,7 @@ Then add opt-in live smoke:
 Expose a narrow path first:
 
 - `probe backend gemini smoke`
-- `probe backend gemini complete --model gemini-2.5-flash`
+- `probe backend gemini complete --model gemini-3.5-flash`
 - optional `PROBE_BACKEND_PROFILE=gemini-api`
 
 Then wire assignments:

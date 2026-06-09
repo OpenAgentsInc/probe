@@ -7,12 +7,12 @@ const liveSmokeEnabled = process.env.PROBE_GEMINI_LIVE_SMOKE === "1" && apiKey !
 const liveTest = liveSmokeEnabled ? test : test.skip;
 
 describe("Gemini live smoke", () => {
-  liveTest("completes a plain prompt through gemini-2.5-flash", async () => {
+  liveTest("completes a plain prompt through gemini-3.5-flash", async () => {
     const client = await Effect.runPromise(makeGeminiClient({ apiKey, env: process.env }));
     const result = await Effect.runPromise(
       client.complete({
         request: makeProbeLlmRequest({
-          model: { provider: "google", model: "gemini-2.5-flash" },
+          model: { provider: "google", model: "gemini-3.5-flash" },
           prompt: "Reply with exactly: probe-live-smoke-ok",
           generation: { maxTokens: 32, temperature: 0 },
         }),
@@ -40,7 +40,7 @@ describe("Gemini live smoke", () => {
     const result = await Effect.runPromise(
       client.complete({
         request: makeProbeLlmRequest({
-          model: { provider: "google", model: "gemini-2.5-flash" },
+          model: { provider: "google", model: "gemini-3.5-flash" },
           prompt: "Call echo with value exactly probe-live-smoke, then answer done.",
           tools: [
             {

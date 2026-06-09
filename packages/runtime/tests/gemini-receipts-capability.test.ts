@@ -26,7 +26,7 @@ describe("Gemini receipts and capability reporting", () => {
   test("availability receipts redact URL credentials and API keys", async () => {
     const receipt = makeGeminiAvailabilityReceipt({
       profileId: "gemini-api",
-      model: "gemini-2.5-flash",
+      model: "gemini-3.5-flash",
       baseUrl: "https://user:password@generativelanguage.googleapis.com/v1beta?key=secret",
       ready: true,
       apiKeySource: "GOOGLE_GENERATIVE_AI_API_KEY",
@@ -73,7 +73,7 @@ describe("Gemini receipts and capability reporting", () => {
     const result = await Effect.runPromise(
       client.complete({
         request: makeProbeLlmRequest({
-          model: { provider: "google", model: "gemini-2.5-flash" },
+          model: { provider: "google", model: "gemini-3.5-flash" },
           prompt: "Use lookup.",
         }),
         tools: {
@@ -98,7 +98,7 @@ describe("Gemini receipts and capability reporting", () => {
         kind: "probe_backend_tool_call",
         backendKind: "gemini_api",
         profileId: "gemini-api",
-        model: "gemini-2.5-flash",
+        model: "gemini-3.5-flash",
         toolCallId: "tool_0",
         toolName: "lookup",
         status: "success",
