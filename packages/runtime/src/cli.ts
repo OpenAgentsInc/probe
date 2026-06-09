@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { Effect, Schema as S } from "effect";
+import { Cause, Effect, Exit, Schema as S } from "effect";
 import { marked } from "marked";
 import {
   AppleFmBackendError,
@@ -1645,11 +1645,68 @@ async function runGeminiInteractiveChat(args: ReadonlyArray<string>, deps: Probe
 
       const request = makeGeminiChatRequest({ messages, model, prompt, maxTokens, tools });
       const stream = makeGeminiInteractiveTurnStream(colors);
-      const result = await Effect.runPromise(
+      const fiber = Effect.runFork(
         clientResult.complete({ request, tools, onEvent: stream.onEvent }).pipe(
           Effect.catch((error: GeminiClientError) => Effect.succeed(error)),
         ),
       );
+
+      // Enable raw mode during streaming so we can detect Escape keypresses
+      const wasRaw = process.stdin.isRaw;
+      if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+        process.stdin.setRawMode(true);
+      }
+
+      let escapeCount = 0;
+      let escapeTimer: ReturnType<typeof setTimeout> | undefined;
+
+      const onKeyData = (chunk: Buffer) => {
+        for (let i = 0; i < chunk.length; i++) {
+          if (chunk[i] === 0x1b) {
+            escapeCount++;
+            if (escapeCount === 1) {
+              process.stdout.write(`\n${cliColor(colors, "muted", "again to interrupt")}\n`);
+              escapeTimer = setTimeout(() => {
+                escapeCount = 0;
+              }, 5000);
+            } else if (escapeCount >= 2) {
+              clearTimeout(escapeTimer);
+              escapeTimer = undefined;
+              fiber.interruptUnsafe();
+            }
+          } else if (escapeCount === 1) {
+            escapeCount = 0;
+            clearTimeout(escapeTimer);
+            escapeTimer = undefined;
+          }
+        }
+      };
+
+      process.stdin.on("data", onKeyData);
+
+      const result = await new Promise<GeminiCompleteResult | GeminiClientError | undefined>((resolve) => {
+        fiber.addObserver((exit: Exit.Exit<GeminiCompleteResult | GeminiClientError, never>) => {
+          if (Exit.isSuccess(exit)) {
+            resolve(exit.value);
+          } else if (exit.cause.reasons.some(Cause.isInterruptReason)) {
+            resolve(undefined);
+          } else {
+            const fail = exit.cause.reasons.find(Cause.isFailReason);
+            resolve(fail?.error ?? undefined);
+          }
+        });
+      });
+
+      process.stdin.removeListener("data", onKeyData);
+      clearTimeout(escapeTimer);
+      if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+        process.stdin.setRawMode(wasRaw ?? false);
+      }
+
+      if (result === undefined) {
+        process.stdout.write(`${cliColor(colors, "muted", "interrupted")}\n`);
+        continue;
+      }
 
       if (result instanceof GeminiClientError) {
         stream.finish();
