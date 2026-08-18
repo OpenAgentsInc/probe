@@ -13,10 +13,11 @@ pub type JsonSchema = serde_json::Map<String, serde_json::Value>;
 pub struct GenerationOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    /// Raw JSON numbers so integral and fractional inputs re-encode exactly.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f64>,
+    pub temperature: Option<serde_json::Number>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f64>,
+    pub top_p: Option<serde_json::Number>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

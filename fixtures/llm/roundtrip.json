@@ -1,0 +1,96 @@
+{
+  "description": "Contract round-trip corpus: every value must decode and re-encode to exactly this JSON, in Rust (canonical) and the TS mirror. Ported from the archived llm-core.test.ts and extended to cover every variant with optionals present and absent.",
+  "events": [
+    { "type": "step-start", "index": 0 },
+    { "type": "text-delta", "id": "text-0", "text": "Hello" },
+    { "type": "text-delta", "id": "text-0", "text": "!", "providerMetadata": { "google": { "candidateIndex": 0 } } },
+    { "type": "reasoning-delta", "id": "reasoning-0", "text": "thinking", "providerMetadata": { "google": { "thoughtSignature": "sig_1" } } },
+    { "type": "tool-call", "id": "tool_0", "name": "lookup", "input": { "query": "weather" } },
+    { "type": "tool-call", "id": "tool_1", "name": "lookup", "input": { "query": "news" }, "providerExecuted": false, "providerMetadata": { "google": { "thoughtSignature": "sig_tool" } } },
+    { "type": "tool-result", "id": "tool_0", "name": "lookup", "result": { "type": "json", "value": { "ok": true } } },
+    { "type": "tool-result", "id": "tool_1", "name": "lookup", "result": { "type": "text", "value": "sunny" }, "providerExecuted": true },
+    { "type": "tool-error", "id": "tool_2", "name": "lookup", "message": "lookup unavailable" },
+    { "type": "tool-result", "id": "tool_2", "name": "lookup", "result": { "type": "error", "value": "lookup unavailable" } },
+    { "type": "provider-error", "message": "rate limited", "retryable": true },
+    { "type": "step-finish", "index": 0, "reason": "tool_calls" },
+    { "type": "step-finish", "index": 1, "reason": "stop", "usage": { "inputTokens": 5, "outputTokens": 2, "totalTokens": 7 } },
+    { "type": "finish", "reason": "stop", "usage": { "inputTokens": 5, "outputTokens": 2, "nonCachedInputTokens": 4, "cacheReadInputTokens": 1, "totalTokens": 7 } },
+    { "type": "finish", "reason": "length", "usage": { "inputTokens": 10, "outputTokens": 7, "reasoningTokens": 3, "totalTokens": 17 } },
+    { "type": "finish", "reason": "content_filter" },
+    { "type": "finish", "reason": "error" },
+    { "type": "finish", "reason": "unknown" }
+  ],
+  "messages": [
+    { "role": "system", "content": [ { "type": "text", "text": "You are concise." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Say hello.", "cache": { "type": "ephemeral", "ttlSeconds": 300 } } ] },
+    { "role": "user", "content": [ { "type": "media", "mediaType": "image/png", "data": "aGVsbG8=", "filename": "hello.png" } ] },
+    {
+      "id": "msg_1",
+      "role": "assistant",
+      "content": [
+        { "type": "reasoning", "text": "consider the weather" },
+        { "type": "text", "text": "Let me check." },
+        { "type": "tool-call", "id": "tool_0", "name": "lookup", "input": { "query": "weather" }, "providerMetadata": { "google": { "thoughtSignature": "sig_tool" } } }
+      ],
+      "metadata": { "round": 1 }
+    },
+    {
+      "role": "tool",
+      "content": [
+        { "type": "tool-result", "id": "tool_0", "name": "lookup", "result": { "type": "json", "value": { "answer": 42 } } },
+        { "type": "tool-result", "id": "tool_3", "name": "lookup", "result": { "type": "error", "value": "boom" }, "cache": { "type": "persistent" } }
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "id": "request_1",
+      "model": { "provider": "test-provider", "model": "test-model" },
+      "system": [ { "role": "system", "content": [ { "type": "text", "text": "You are concise." } ] } ],
+      "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Say hello." } ] } ],
+      "tools": [],
+      "generation": { "maxTokens": 16, "temperature": 0.0 }
+    },
+    {
+      "model": { "provider": "test-provider", "model": "test-model" },
+      "system": [],
+      "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Look it up." } ] } ],
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Lookup a value.",
+          "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }
+        }
+      ],
+      "toolChoice": { "type": "tool", "name": "lookup" },
+      "generation": { "maxTokens": 64, "topP": 0.9, "topK": 40, "stop": ["END"] },
+      "providerOptions": { "google": { "safety": "off" } }
+    },
+    {
+      "model": { "provider": "p", "model": "m" },
+      "system": [],
+      "messages": [],
+      "tools": [],
+      "toolChoice": { "type": "none" }
+    },
+    {
+      "model": { "provider": "p", "model": "m" },
+      "system": [],
+      "messages": [],
+      "tools": [],
+      "toolChoice": { "type": "auto" }
+    },
+    {
+      "model": { "provider": "p", "model": "m" },
+      "system": [],
+      "messages": [],
+      "tools": [],
+      "toolChoice": { "type": "required" }
+    }
+  ],
+  "usages": [
+    { "inputTokens": 5, "outputTokens": 2, "totalTokens": 7 },
+    { "outputTokens": 4 },
+    { "inputTokens": 10, "outputTokens": 7, "reasoningTokens": 3, "totalTokens": 17, "providerMetadata": { "google": { "trafficType": "ON_DEMAND" } } }
+  ]
+}

@@ -1,0 +1,77 @@
+{
+  "description": "Gemini SSE conformance corpus, ported from the archived gemini-stream-parser.test.ts. Staged here by Phase 1 (#206) and consumed by the probe-wire Gemini lowering in Phase 3 (#209). Each case feeds the raw `sse` text to the parser; `expectedTypes` pins the ordered event types, and each entry in `expectations` is a subset match against the event at `index` (full equality when `exact` is true). `expectedError` cases must fail with the given failure class and must not leak the raw payload into the error.",
+  "cases": [
+    {
+      "name": "text and usage",
+      "sse": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello\"}]}}]}\n\ndata: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"!\"}]},\"finishReason\":\"STOP\"}]}\n\ndata: {\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"totalTokenCount\":7,\"cachedContentTokenCount\":1}}\n\ndata: [DONE]\n\n",
+      "expectedTypes": ["step-start", "text-delta", "text-delta", "step-finish", "finish"],
+      "expectations": [
+        { "index": 1, "match": { "type": "text-delta", "text": "Hello" } },
+        {
+          "index": 4,
+          "match": {
+            "type": "finish",
+            "reason": "stop",
+            "usage": { "inputTokens": 5, "outputTokens": 2, "nonCachedInputTokens": 4, "cacheReadInputTokens": 1, "totalTokens": 7 }
+          }
+        }
+      ]
+    },
+    {
+      "name": "reasoning preserves thought signatures",
+      "sse": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"thinking\",\"thought\":true,\"thoughtSignature\":\"sig_1\"}]},\"finishReason\":\"STOP\"}]}\n\ndata: [DONE]\n\n",
+      "expectations": [
+        {
+          "index": 1,
+          "exact": true,
+          "match": {
+            "type": "reasoning-delta",
+            "id": "reasoning-0",
+            "text": "thinking",
+            "providerMetadata": { "google": { "thoughtSignature": "sig_1" } }
+          }
+        }
+      ]
+    },
+    {
+      "name": "function calls normalize to tool-call and finish tool_calls",
+      "sse": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"lookup\",\"args\":{\"query\":\"weather\"}},\"thoughtSignature\":\"sig_tool\"}]},\"finishReason\":\"STOP\"}]}\n\ndata: [DONE]\n\n",
+      "expectations": [
+        {
+          "index": 1,
+          "exact": true,
+          "match": {
+            "type": "tool-call",
+            "id": "tool_0",
+            "name": "lookup",
+            "input": { "query": "weather" },
+            "providerMetadata": { "google": { "thoughtSignature": "sig_tool" } }
+          }
+        },
+        { "index": -1, "match": { "type": "finish", "reason": "tool_calls" } }
+      ]
+    },
+    {
+      "name": "thoughts add to visible candidate tokens for inclusive output usage",
+      "sse": "data: {\"candidates\":[{\"finishReason\":\"MAX_TOKENS\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":4,\"thoughtsTokenCount\":3,\"totalTokenCount\":17}}\n\ndata: [DONE]\n\n",
+      "expectations": [
+        {
+          "index": -1,
+          "match": {
+            "type": "finish",
+            "reason": "length",
+            "usage": { "inputTokens": 10, "outputTokens": 7, "reasoningTokens": 3, "totalTokens": 17 }
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed payload fails without leaking the payload",
+      "sse": "data: {bad-json api-key-secret}\n\n",
+      "expectedError": {
+        "failureClass": "malformed_response",
+        "mustNotContain": ["api-key-secret"]
+      }
+    }
+  ]
+}

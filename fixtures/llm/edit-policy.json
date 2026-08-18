@@ -1,0 +1,61 @@
+{
+  "description": "Exact-match edit policy cases, salvaged from the archived file-mutation.ts semantics: match on LF-normalized text, restore the file's detected line ending and BOM, 0 matches errors, >1 without replaceAll demands more context. BOM is written as the escaped \\ufeff character in JSON strings.",
+  "cases": [
+    {
+      "name": "simple replacement",
+      "content": "alpha\nbeta\n",
+      "oldString": "beta",
+      "newString": "gamma",
+      "replaceAll": false,
+      "expected": { "output": "alpha\ngamma\n", "replacements": 1 }
+    },
+    {
+      "name": "crlf and bom preserved",
+      "content": "﻿alpha\r\nbeta\r\n",
+      "oldString": "beta",
+      "newString": "gamma",
+      "replaceAll": false,
+      "expected": { "output": "﻿alpha\r\ngamma\r\n", "replacements": 1 }
+    },
+    {
+      "name": "old string spans lines across ending styles",
+      "content": "one\r\ntwo\r\nthree\r\n",
+      "oldString": "one\ntwo",
+      "newString": "1\n2",
+      "replaceAll": false,
+      "expected": { "output": "1\r\n2\r\nthree\r\n", "replacements": 1 }
+    },
+    {
+      "name": "ambiguous without replaceAll",
+      "content": "x x",
+      "oldString": "x",
+      "newString": "y",
+      "replaceAll": false,
+      "error": "ambiguous_match"
+    },
+    {
+      "name": "replace all",
+      "content": "x x",
+      "oldString": "x",
+      "newString": "y",
+      "replaceAll": true,
+      "expected": { "output": "y y", "replacements": 2 }
+    },
+    {
+      "name": "no match",
+      "content": "abc",
+      "oldString": "zzz",
+      "newString": "y",
+      "replaceAll": false,
+      "error": "no_match"
+    },
+    {
+      "name": "empty old string",
+      "content": "abc",
+      "oldString": "",
+      "newString": "y",
+      "replaceAll": false,
+      "error": "empty_old_string"
+    }
+  ]
+}

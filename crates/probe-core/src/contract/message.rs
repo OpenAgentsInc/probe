@@ -20,8 +20,9 @@ pub enum CacheHintKind {
 pub struct CacheHint {
     #[serde(rename = "type")]
     pub kind: CacheHintKind,
+    /// Kept as a raw JSON number so integral values re-encode exactly.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ttl_seconds: Option<f64>,
+    pub ttl_seconds: Option<serde_json::Number>,
 }
 
 /// The three shapes a tool result can take. `error` is a first-class value —

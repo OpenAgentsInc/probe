@@ -1,0 +1,35 @@
+{
+  "description": "Usage normalization cases, ported from the archived llm-core.test.ts and the Gemini stream parser's usage expectations. `input` -> Usage::normalized() must equal `expected`; visibleOutputTokens is checked when present.",
+  "cases": [
+    {
+      "name": "reasoning clamped into output budget, total derived",
+      "input": { "inputTokens": 10, "outputTokens": 5, "reasoningTokens": 7, "cacheReadInputTokens": 3 },
+      "expected": { "inputTokens": 10, "outputTokens": 5, "reasoningTokens": 5, "cacheReadInputTokens": 3, "totalTokens": 15 },
+      "visibleOutputTokens": 0
+    },
+    {
+      "name": "unknown input side leaves total unknown",
+      "input": { "outputTokens": 4 },
+      "expected": { "outputTokens": 4 },
+      "visibleOutputTokens": 4
+    },
+    {
+      "name": "explicit total wins over derivation",
+      "input": { "inputTokens": 10, "outputTokens": 7, "reasoningTokens": 3, "totalTokens": 17 },
+      "expected": { "inputTokens": 10, "outputTokens": 7, "reasoningTokens": 3, "totalTokens": 17 },
+      "visibleOutputTokens": 4
+    },
+    {
+      "name": "gemini-style inclusive output: thoughts inside candidates",
+      "input": { "inputTokens": 5, "outputTokens": 2, "nonCachedInputTokens": 4, "cacheReadInputTokens": 1, "totalTokens": 7 },
+      "expected": { "inputTokens": 5, "outputTokens": 2, "nonCachedInputTokens": 4, "cacheReadInputTokens": 1, "totalTokens": 7 },
+      "visibleOutputTokens": 2
+    },
+    {
+      "name": "zero reasoning stays zero",
+      "input": { "inputTokens": 1, "outputTokens": 1, "reasoningTokens": 0 },
+      "expected": { "inputTokens": 1, "outputTokens": 1, "reasoningTokens": 0, "totalTokens": 2 },
+      "visibleOutputTokens": 1
+    }
+  ]
+}
