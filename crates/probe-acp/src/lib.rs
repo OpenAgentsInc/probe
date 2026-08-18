@@ -10,6 +10,7 @@
 //! permission options that never look like a bypass, and the
 //! refusal/cancelled stop-reason semantics.
 
+pub mod engine;
 pub mod jsonrpc;
 pub mod mapping;
 pub mod server;
