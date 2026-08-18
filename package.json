@@ -1,0 +1,21 @@
+{
+  "name": "probe",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.11",
+  "workspaces": {
+    "packages": ["packages/*"],
+    "catalog": {
+      "effect": "4.0.0-beta.70",
+      "typescript": "^6.0.3"
+    }
+  },
+  "scripts": {
+    "typecheck": "bun x tsc --build packages/host packages/probe",
+    "test": "bun test packages"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/probe-core",
+  "crates/probe-acp",
+  "crates/probe-wire",
+  "crates/probe-bin",
+  "crates/probe-wasm",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/OpenAgentsInc/probe"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
