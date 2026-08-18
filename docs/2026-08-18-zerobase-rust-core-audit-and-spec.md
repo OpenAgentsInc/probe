@@ -573,3 +573,220 @@ host boundary, JSPI constraint, gateway lock-in),
 (inference grant, placements, funnel inversion). ACP reference client:
 `sarah-computer-controller` `src/AcpAgent.ts`, `src/AgentCatalog.ts`,
 `src/AgentDispatch.ts`.
+
+---
+
+# Addendum (2026-08-18) — controller conformance and the free-agent loop
+
+Written after a source-level read of `sarah-computer-controller` (HEAD
+`e3e7413`). The owner's product intent, verbatim in substance: users of
+the Sarah interface at OpenAgents.com run the controller, authenticate
+with GitHub, get computer control that includes probe alongside the
+other coding agents — and because pairing binds the machine to their
+account, their delegations hit our API on our credits. **Effectively a
+free coding agent with free inference.** This addendum verifies the
+Part 4 architecture against the controller as it actually exists,
+records the exact conformance contract probe must meet, identifies the
+one deliberate contract amendment the loop needs, and amends the phase
+order where the reading changed it.
+
+## A1 — The product loop, end to end
+
+1. **GitHub is the identity; pairing is the auth.** The user signs into
+   Sarah with GitHub OAuth. The controller pairs device-style
+   (`src/Api.ts`): it POSTs to `{endpoint}/controller/pairings`, prints
+   a short code, the user approves that code in their
+   GitHub-authenticated browser session, and the controller claims a
+   **machine token** exactly once — stored 0600 under the controller's
+   config dir, never printed, journaled, or passed as an argument
+   (`src/Config.ts` `writeToken`). The machine never talks to GitHub;
+   GitHub identity lives server-side and the token binds machine →
+   account.
+2. **Delegation rides the existing channel.** Sarah's
+   `computer_agent.v1` sends an `agent` event; `src/AgentDispatch.ts`
+   gates it on the machine's tier (probe tier refuses delegation
+   outright; `curated` is the product path), resolves the agent id
+   against the catalog, and launches a bounded ACP job.
+3. **Inference is account credits, not user keys.** Probe's model calls
+   go to Sarah's provider proxy under a per-delegation inference grant
+   (Part 4 / the sarah-repo grant spec), metered against the account's
+   credit balance. "Free" is then a **pricing decision, not an
+   architecture decision**: OpenAgents grants credits to
+   GitHub-authenticated accounts, and the same grant/budget/receipt
+   machinery enforces whatever the subsidy is. Abuse controls are the
+   grant's budget (tokens/calls/wall-clock), the delegation bounds
+   below, and Sarah-side account admission — all already specified.
+4. **The differentiator the catalog makes visible.** Every other agent
+   in the catalog needs its own credential on the machine: the pinned
+   claude adapter's `authReady` sniffs for `ANTHROPIC_API_KEY` or
+   `~/.claude` credential files; operator entries check named env
+   opt-ins. **Probe needs no machine credential at all** — authority
+   arrives per-delegation with the work. Probe is the only agent whose
+   `auth_ready` can be honestly `true` on every freshly paired machine,
+   which is precisely what "a free coding agent for every Sarah user"
+   requires.
+
+## A2 — Verified conformance contract for `probe-acp`
+
+The controller is an ACP **client** built on the official
+`@agentclientprotocol/sdk` (`src/AcpAgent.ts`). Probe's server surface
+must satisfy, exactly:
+
+- **Protocol**: JSON-RPC over stdio, newline-delimited;
+  `protocolVersion` must equal **1** on initialize or the delegation is
+  marked `unavailable`. Advertise `loadSession: true` — the controller
+  resumes via `session/load` only when the agent declares it.
+- **Client capabilities are minimal and closed**: `fs: false`,
+  `terminal: false`, and only `session/request_permission` +
+  `session/update` are registered — any other agent→client method gets
+  method-not-found. All probe tools are in-process (Part 4 already says
+  this; the controller enforces it).
+- **Hard bounds, silently enforced**: default 240 s wall clock (request
+  may raise to 600 s max), 128 KiB streamed output per surface, and a
+  **4 MiB per-message cap where oversize JSON-RPC lines are dropped
+  whole** (`boundedLineStream`). A dropped message is invisible to the
+  sender, so probe must chunk `tool_call_update` content and cap
+  embedded output far below the ceiling — a message that grows past
+  4 MiB doesn't error, it vanishes.
+- **Session updates are the UI.** The controller's `renderUpdate` turns
+  `tool_call` / `tool_call_update` into structured frames the Sarah
+  delegation rail renders as collapsible tool cards. Probe must
+  populate `toolCallId`, `kind`, `title`, `rawInput.command` (or
+  `executable` + `args`), terminal `status` (`completed`/`failed`), and
+  text content blocks. `agent_thought_chunk` is dropped — never put
+  user-relevant information only in thoughts. `plan` entries render as
+  plan notes; emit them.
+- **Permission requests meet a tier-aware local policy**
+  (`permissionAllowed`): `shell` tier allows anything (one-shot);
+  `curated` allows the read-shaped kinds `read|search|fetch|think` plus
+  `execute` requests whose **every** `&&`/`||`/`;`/`|`/newline segment
+  heads with a program on the machine's `curatedExecute` allowlist
+  (git, gh, ls, cat, rg, node, npm, cargo, go, make, mix, …; `cd` only
+  as a chain prefix; interpreters and `sudo`/`ssh` excluded). Probe's
+  escalation must therefore: put the real command string in
+  `rawInput.command`; use the standard kind vocabulary; offer options
+  with standard kinds (`allow_once` preferred — the controller picks
+  the conservative one-shot and **refuses any option whose
+  id/name/kind matches /bypass/i**); and treat a rejection as a typed
+  refusal to route around honestly, not an error. Note the tier
+  comment's own stance: "delegated agents edit files through their own
+  in-process tools, not this shell surface" — in-workspace edits are
+  agent-side policy (disclosed via `tool_call` frames), matching the
+  pinned claude adapter's behavior; verify parity in Phase 4.
+- **Lifecycle**: `session/cancel` must interrupt promptly — on timeout
+  or cancel the controller notifies, waits 5 s, then settles; the
+  subprocess always gets SIGTERM with SIGKILL 3 s behind. Probe must
+  die fast and idempotently. `stopReason` semantics: `refusal` →
+  refused, `cancelled` → cancelled/timeout, anything else → completed.
+  stderr is drained and ignored; exiting before the prompt completes is
+  recorded as `failed`.
+- **Auth**: on `session/new` failing with code −32000 the controller
+  tries the first advertised auth method **once, non-interactively**.
+  Probe with a grant present advertises no auth methods and never hits
+  this path; probe with a missing/expired grant fails with a detail
+  string naming the grant, not an auth dance.
+- **Scrubbing is double-walled.** The controller scrubs everything it
+  emits (`scrubSecrets`), but probe self-scrubs too — the grant value
+  must be registered with both walls and must never appear in updates,
+  stderr, or tool output.
+
+## A3 — Distribution: the pinned-npm slot is the ship vehicle
+
+The catalog (`src/AgentCatalog.ts`) has three sources with deliberate
+precedence: operator config argv, **pinned npm dependency** (the claude
+adapter ships as `@agentclientprotocol/claude-agent-acp` in the
+controller's own `node_modules`, spawned as
+`[process.execPath, binPath]` — version-pinned, no PATH, no network),
+and the opt-in vendored registry (npx/uvx, or sha256-verified binary
+download, off by default).
+
+This resolves a sequencing question from Part 5 in favor of the wasm
+package. For probe to be the **default, zero-install** agent on every
+paired machine, it must occupy the same pinned-dependency slot:
+`@openagents/probe` as a direct controller dependency, spawned from
+`node_modules` under the controller's own Node. The wasm core with the
+async (non-JSPI) ABI is what makes that a **single platform-neutral
+pinned package** — no per-platform binary matrix, no registry download
+plumbing, no sha256 table to maintain. Consequences for the plan:
+
+- **Phase 6 (`probe-wasm` + npm) is promoted from polish to ship
+  vehicle.** The development loop still runs Phases 2–5 against the
+  native `probe-bin` via an operator config entry
+  (`agents: { probe: { argv: ["/path/to/probe-bin", "acp"] } }` — works
+  today with zero controller changes). But the *product* milestone —
+  probe in every Sarah user's catalog with `auth_ready: true` — lands
+  when the controller pins the npm package, exactly as it pins the
+  claude adapter.
+- The **native binary via the registry snapshot** (sha256-verified
+  binary distribution) becomes the later performance/footprint path,
+  behind the existing `--allow registry-agents` opt-in, not the
+  default.
+
+## A4 — The one contract amendment: grant delivery
+
+The controller's env rule is explicit and load-bearing
+(`src/Config.ts`): agent env passthrough is "a deliberate, recorded
+opt-in per agent — **never a server-supplied value**," and
+`agentEnvironment` builds the child env from the scrubbed controller
+environment plus those opt-ins only. The machine token itself never
+reaches an agent. As written, there is **no channel by which a
+per-delegation inference grant can reach probe** — and that is the one
+place the free-agent loop requires a deliberate amendment rather than
+mere conformance:
+
+- The delegation event (or a controller-side exchange using the machine
+  token) carries a **short-lived, delegation-scoped inference grant**;
+  `AgentDispatch` injects it into the child env (e.g.
+  `PROBE_INFERENCE_GRANT`, `PROBE_INFERENCE_URL`) at spawn, for the
+  first-party probe entry.
+- This does not repeal the rule — it narrows it: the rule exists so the
+  server cannot exfiltrate or plant *operator secrets*; a
+  Sarah-minted grant is not an operator secret but per-run authority,
+  generation-fenced, budgeted, useless beyond the delegation, and
+  journaled as part of the dispatch. The amendment should be recorded
+  in the controller repo with exactly that distinction, and the grant
+  value added to `scrubSecrets`.
+- Env-at-spawn is preferred over a run file (nothing touches disk;
+  `spawn` env is already per-launch). The materializer's
+  file-with-scrub pattern remains available if a transport ever needs a
+  file-shaped credential.
+
+Routing: the amendment lands in `sarah-computer-controller`; the grant
+mint/proxy lands in `sarah` per its grant spec; probe consumes both.
+None of it blocks Phases 1–4, which run grant-less against direct
+transports.
+
+## A5 — Verdict
+
+The Part 4 architecture survives contact with the controller's source
+unchanged in structure and sharpened in three particulars: the ACP
+conformance contract is now exact (A2) and becomes Phase 2's test
+fixture list; the wasm npm package is promoted to ship vehicle because
+the pinned-dependency catalog slot is how a default agent actually
+reaches every paired machine (A3); and the free-inference loop needs
+exactly one deliberate controller amendment — server-supplied,
+delegation-scoped grant env for the first-party agent — plus the
+Sarah-side grant mint, both already routed (A4). Everything else the
+product idea needs — GitHub-anchored pairing, tier policy, bounded
+delegation, the delegation rail, credit accounting shapes — already
+exists and was read working in the controller and Sarah sources cited
+above. The "free coding agent for every Sarah user" is, concretely: pin
+`@openagents/probe` beside the claude adapter, mint grants against
+account credits, and let `auth_ready: true` do the talking.
+
+Addendum evidence (`sarah-computer-controller`, HEAD `e3e7413`):
+`src/AcpAgent.ts` (SDK client, protocolVersion 1, limits
+240s/128KiB/4MiB, `boundedLineStream` whole-line drops,
+`readShapedPermissionKinds`, `defaultCuratedExecute`,
+`commandChainAllowed`, `selectPermissionOption` bypass refusal,
+`renderUpdate` tool frames, auth-required retry `-32000`);
+`src/AgentCatalog.ts` (three-source catalog, pinned claude adapter via
+`[process.execPath, binPath]`, `claudeAuthReady`, `agentEnvironment`,
+`acpAgentInventory` with `auth_ready`); `src/AgentDispatch.ts` (tier
+gate — probe tier refuses delegation, timeout cap 600s, terminal
+payload contract, `agent_not_available` refusals teaching Sarah the
+inventory); `src/Api.ts` (device-style pairing: pairing id + short code
++ poll secret → one-shot machine-token claim); `src/Config.ts` (machine
+owns tier/roots, token 0600 never printed, env passthrough "never a
+server-supplied value", `curatedExecute` owner opt-in, default endpoint
+`https://stage.openagents.com`).
