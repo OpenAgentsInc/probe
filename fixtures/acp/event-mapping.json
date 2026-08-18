@@ -1,0 +1,96 @@
+{
+  "description": "Neutral event -> ACP session/update mapping corpus (probe-acp mapping.rs). Each case maps `event` with the given `toolKinds` and `textBudget` to exactly `expectedUpdates`, in order. The shapes are what the sarah-computer-controller's renderUpdate reads: sessionUpdate discriminator, toolCallId/kind/title/rawInput, terminal status, text content blocks.",
+  "cases": [
+    {
+      "name": "text delta becomes an agent message chunk",
+      "event": { "type": "text-delta", "id": "text-0", "text": "Hello" },
+      "toolKinds": {},
+      "textBudget": 32768,
+      "expectedUpdates": [
+        { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Hello" } }
+      ]
+    },
+    {
+      "name": "oversize text chunks under the budget",
+      "event": { "type": "text-delta", "id": "text-0", "text": "aaaabbbbcccc" },
+      "toolKinds": {},
+      "textBudget": 4,
+      "expectedUpdates": [
+        { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "aaaa" } },
+        { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "bbbb" } },
+        { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "cccc" } }
+      ]
+    },
+    {
+      "name": "reasoning becomes a thought chunk (client drops it)",
+      "event": { "type": "reasoning-delta", "id": "reasoning-0", "text": "hmm" },
+      "toolKinds": {},
+      "textBudget": 32768,
+      "expectedUpdates": [
+        { "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "hmm" } }
+      ]
+    },
+    {
+      "name": "tool call surfaces kind, command title, and rawInput",
+      "event": { "type": "tool-call", "id": "t1", "name": "shell", "input": { "command": "git status" } },
+      "toolKinds": { "shell": "execute" },
+      "textBudget": 32768,
+      "expectedUpdates": [
+        {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "t1",
+          "kind": "execute",
+          "title": "git status",
+          "rawInput": { "command": "git status" },
+          "status": "in_progress"
+        }
+      ]
+    },
+    {
+      "name": "tool result completes with text content",
+      "event": { "type": "tool-result", "id": "t1", "name": "shell", "result": { "type": "text", "value": "clean" } },
+      "toolKinds": { "shell": "execute" },
+      "textBudget": 32768,
+      "expectedUpdates": [
+        {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "t1",
+          "status": "completed",
+          "kind": "execute",
+          "title": "shell",
+          "content": [ { "type": "content", "content": { "type": "text", "text": "clean" } } ]
+        }
+      ]
+    },
+    {
+      "name": "error result fails the tool call",
+      "event": { "type": "tool-result", "id": "t1", "name": "shell", "result": { "type": "error", "value": "permission denied: shell" } },
+      "toolKinds": { "shell": "execute" },
+      "textBudget": 32768,
+      "expectedUpdates": [
+        {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "t1",
+          "status": "failed",
+          "kind": "execute",
+          "title": "shell",
+          "content": [ { "type": "content", "content": { "type": "text", "text": "permission denied: shell" } } ]
+        }
+      ]
+    },
+    {
+      "name": "tool errors render through their paired result, not separately",
+      "event": { "type": "tool-error", "id": "t1", "name": "shell", "message": "boom" },
+      "toolKinds": { "shell": "execute" },
+      "textBudget": 32768,
+      "expectedUpdates": []
+    },
+    {
+      "name": "lifecycle events carry no updates",
+      "event": { "type": "finish", "reason": "stop" },
+      "toolKinds": {},
+      "textBudget": 32768,
+      "expectedUpdates": []
+    }
+  ]
+}
