@@ -320,8 +320,8 @@ probe/
     probe-wasm/              # wasm-bindgen surface over probe-core
   package.json               # Bun workspace (runtime-neutral published output)
   packages/
-    host/                    # @openagents/probe-host: Effect services (I/O)
-    probe/                   # @openagents/probe: npm package (wasm + host + types)
+    host/                    # @openagentsinc/probe-host: Effect services (I/O)
+    probe/                   # @openagentsinc/probe: npm package (wasm + host + types)
   docs/
 ```
 
@@ -703,7 +703,7 @@ download, off by default).
 This resolves a sequencing question from Part 5 in favor of the wasm
 package. For probe to be the **default, zero-install** agent on every
 paired machine, it must occupy the same pinned-dependency slot:
-`@openagents/probe` as a direct controller dependency, spawned from
+`@openagentsinc/probe` as a direct controller dependency, spawned from
 `node_modules` under the controller's own Node. The wasm core with the
 async (non-JSPI) ABI is what makes that a **single platform-neutral
 pinned package** — no per-platform binary matrix, no registry download
@@ -771,7 +771,7 @@ product idea needs — GitHub-anchored pairing, tier policy, bounded
 delegation, the delegation rail, credit accounting shapes — already
 exists and was read working in the controller and Sarah sources cited
 above. The "free coding agent for every Sarah user" is, concretely: pin
-`@openagents/probe` beside the claude adapter, mint grants against
+`@openagentsinc/probe` beside the claude adapter, mint grants against
 account credits, and let `auth_ready: true` do the talking.
 
 Addendum evidence (`sarah-computer-controller`, HEAD `e3e7413`):
