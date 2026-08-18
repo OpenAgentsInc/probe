@@ -8,4 +8,6 @@ repository.workspace = true
 [dependencies]
 probe-core = { path = "../probe-core" }
 probe-acp = { path = "../probe-acp" }
+probe-wire = { path = "../probe-wire" }
 serde_json.workspace = true
+ureq = { version = "3", features = ["json"] }
