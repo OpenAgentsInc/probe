@@ -1,9 +1,13 @@
 {
   "name": "@openagentsinc/probe",
   "version": "0.0.0",
-  "private": true,
   "type": "module",
+  "license": "MIT",
+  "description": "The OpenAgents coding agent: a platform-neutral wasm core speaking ACP v1, wrapped for Node and Bun.",
+  "repository": { "type": "git", "url": "https://github.com/OpenAgentsInc/probe.git" },
   "exports": { ".": "./src/index.ts" },
+  "bin": { "probe": "./bin/probe.mjs" },
+  "files": ["src", "bin", "wasm"],
   "dependencies": {
     "@openagentsinc/probe-host": "workspace:*"
   }
