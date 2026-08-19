@@ -3,8 +3,7 @@
 //! All protocol and agent logic lives in the sans-I/O Engine (probe-acp);
 //! this binary owns only threads, stdio, transports, and tool execution.
 
-mod tools;
-mod transport;
+use probe_bin::{tools, transport};
 
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +17,7 @@ use probe_core::contract::request::{ModelRef, Request};
 use probe_core::redact::SecretSet;
 use probe_core::turn::ToolInvocation;
 
-use transport::Transport;
+use probe_bin::transport::Transport;
 
 enum Input {
     Line(String),
