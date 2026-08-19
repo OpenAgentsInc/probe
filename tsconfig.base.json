@@ -6,12 +6,17 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "target": "es2022",
-    "lib": ["es2022"],
+    "lib": [
+      "es2022"
+    ],
     "composite": true,
     "declaration": true,
     "emitDeclarationOnly": true,
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": [
+      "node"
+    ]
   }
 }

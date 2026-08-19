@@ -5,6 +5,7 @@
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "@types/node": "^22"
   }
 }

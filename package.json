@@ -16,6 +16,7 @@
     "test": "bun test packages"
   },
   "devDependencies": {
+    "@types/node": "^26.2.0",
     "typescript": "catalog:"
   }
 }
